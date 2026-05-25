@@ -31,20 +31,26 @@ impl IdProvider for UuidProvider {
     }
 }
 
-#[cfg(test)]
+// The deterministic id fake is exposed to downstream crates' tests via the
+// `test-utils` feature, so any crate that consumes `IdProvider` tests against
+// the same fake instead of mirroring it.
+#[cfg(any(test, feature = "test-utils"))]
+pub use fakes::SequentialIdProvider;
+
+#[cfg(any(test, feature = "test-utils"))]
 mod fakes {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Deterministic but unique: `"{prefix}-0"`, `"{prefix}-1"`, ... Preserves
     /// the per-entity uniqueness invariant while being reproducible across runs.
-    pub(crate) struct SequentialIdProvider {
+    pub struct SequentialIdProvider {
         prefix: String,
         next: AtomicU64,
     }
 
     impl SequentialIdProvider {
-        pub(crate) fn new(prefix: &str) -> Self {
+        pub fn new(prefix: &str) -> Self {
             Self {
                 prefix: prefix.to_string(),
                 next: AtomicU64::new(0),
@@ -58,6 +64,11 @@ mod fakes {
             format!("{}-{}", self.prefix, n)
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn sequential_ids_are_deterministic_and_unique() {
