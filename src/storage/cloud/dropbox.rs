@@ -5,14 +5,12 @@
 //! path-based access -- no filename encoding needed unlike Google Drive.
 
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{info, warn};
 
+use super::oauth_session::OAuthSession;
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
-use crate::oauth::{self, OAuthConfig, OAuthTokens};
+use crate::oauth::{OAuthConfig, OAuthTokens};
 
 const API_BASE: &str = "https://api.dropboxapi.com/2";
 const CONTENT_BASE: &str = "https://content.dropboxapi.com/2";
@@ -22,9 +20,7 @@ pub struct DropboxCloudHome {
     client: reqwest::Client,
     /// Folder path in Dropbox, e.g. "/Apps/bae/my-library"
     folder_path: String,
-    tokens: Arc<RwLock<OAuthTokens>>,
-    key_service: KeyService,
-    clock: ClockRef,
+    session: OAuthSession,
 }
 
 impl DropboxCloudHome {
@@ -37,9 +33,7 @@ impl DropboxCloudHome {
         Self {
             client: reqwest::Client::new(),
             folder_path,
-            tokens: Arc::new(RwLock::new(tokens)),
-            key_service,
-            clock,
+            session: OAuthSession::new(tokens, key_service, clock, Self::oauth_config(), "Dropbox"),
         }
     }
 
@@ -62,79 +56,12 @@ impl DropboxCloudHome {
         format!("{}/{}", self.folder_path, key)
     }
 
-    /// Get the current access token, refreshing if expired.
-    async fn access_token(&self) -> Result<String, CloudHomeError> {
-        let tokens = self.tokens.read().await;
-        if let Some(expires_at) = tokens.expires_at {
-            if self.clock.now().timestamp() < expires_at - 60 {
-                return Ok(tokens.access_token.clone());
-            }
-        } else {
-            return Ok(tokens.access_token.clone());
-        }
-        drop(tokens);
-
-        self.refresh_tokens().await
-    }
-
-    /// Refresh the OAuth tokens and persist to keyring.
-    async fn refresh_tokens(&self) -> Result<String, CloudHomeError> {
-        let mut tokens = self.tokens.write().await;
-
-        // Double-check: another task may have refreshed while we waited for the write lock
-        if let Some(expires_at) = tokens.expires_at {
-            if self.clock.now().timestamp() < expires_at - 60 {
-                return Ok(tokens.access_token.clone());
-            }
-        }
-
-        let refresh_token = tokens.refresh_token.as_deref().ok_or_else(|| {
-            CloudHomeError::Storage(
-                "no refresh token available, re-authorization needed".to_string(),
-            )
-        })?;
-
-        let config = Self::oauth_config();
-        let new_tokens = oauth::refresh(&config, refresh_token, self.clock.as_ref())
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("OAuth refresh failed: {e}")))?;
-
-        // Persist to keyring
-        let json = serde_json::to_string(&new_tokens)
-            .map_err(|e| CloudHomeError::Storage(format!("serialize tokens: {e}")))?;
-        let creds = crate::keys::CloudHomeCredentials::OAuth { token_json: json };
-        if let Err(e) = self.key_service.set_cloud_home_credentials(&creds) {
-            warn!("Failed to persist refreshed OAuth tokens: {e}");
-        }
-
-        let access_token = new_tokens.access_token.clone();
-        *tokens = new_tokens;
-
-        info!("Refreshed Dropbox OAuth tokens");
-        Ok(access_token)
-    }
-
     /// Make an API call with automatic token refresh on 401.
     async fn api_call(
         &self,
         build_request: impl Fn(&str) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        let token = self.access_token().await?;
-        let resp = build_request(&token)
-            .send()
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("request failed: {e}")))?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            let new_token = self.refresh_tokens().await?;
-            let resp = build_request(&new_token)
-                .send()
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("retry request failed: {e}")))?;
-            Ok(resp)
-        } else {
-            Ok(resp)
-        }
+        self.session.api_call(build_request).await
     }
 
     /// Call `share_folder` and resolve the shared_folder_id, handling both
@@ -630,20 +557,20 @@ impl CloudHome for DropboxCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn full_path_joins_correctly() {
-        let home = DropboxCloudHome {
-            client: reqwest::Client::new(),
-            folder_path: "/Apps/bae/my-library".to_string(),
-            tokens: Arc::new(RwLock::new(OAuthTokens {
+        let home = DropboxCloudHome::new(
+            "/Apps/bae/my-library".to_string(),
+            OAuthTokens {
                 access_token: String::new(),
                 refresh_token: None,
                 expires_at: None,
-            })),
-            key_service: KeyService::new(true, "test".to_string()),
-            clock: Arc::new(crate::clock::SystemClock),
-        };
+            },
+            KeyService::new(true, "test".to_string()),
+            Arc::new(crate::clock::SystemClock),
+        );
 
         assert_eq!(
             home.full_path("changes/dev1/42.enc"),

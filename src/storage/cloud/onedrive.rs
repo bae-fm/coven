@@ -5,14 +5,12 @@
 //! sub-folder creation.
 
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{info, warn};
 
+use super::oauth_session::OAuthSession;
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
-use crate::oauth::{self, OAuthConfig, OAuthTokens};
+use crate::oauth::{OAuthConfig, OAuthTokens};
 
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 
@@ -21,9 +19,7 @@ pub struct OneDriveCloudHome {
     client: reqwest::Client,
     drive_id: String,
     folder_id: String,
-    tokens: Arc<RwLock<OAuthTokens>>,
-    key_service: KeyService,
-    clock: ClockRef,
+    session: OAuthSession,
 }
 
 impl OneDriveCloudHome {
@@ -38,9 +34,7 @@ impl OneDriveCloudHome {
             client: reqwest::Client::new(),
             drive_id,
             folder_id,
-            tokens: Arc::new(RwLock::new(tokens)),
-            key_service,
-            clock,
+            session: OAuthSession::new(tokens, key_service, clock, Self::oauth_config(), "OneDrive"),
         }
     }
 
@@ -87,79 +81,12 @@ impl OneDriveCloudHome {
         )
     }
 
-    /// Get the current access token, refreshing if expired.
-    async fn access_token(&self) -> Result<String, CloudHomeError> {
-        let tokens = self.tokens.read().await;
-        if let Some(expires_at) = tokens.expires_at {
-            if self.clock.now().timestamp() < expires_at - 60 {
-                return Ok(tokens.access_token.clone());
-            }
-        } else {
-            return Ok(tokens.access_token.clone());
-        }
-        drop(tokens);
-
-        self.refresh_tokens().await
-    }
-
-    /// Refresh the OAuth tokens and persist to keyring.
-    async fn refresh_tokens(&self) -> Result<String, CloudHomeError> {
-        let mut tokens = self.tokens.write().await;
-
-        // Double-check: another task may have refreshed while we waited for the write lock
-        if let Some(expires_at) = tokens.expires_at {
-            if self.clock.now().timestamp() < expires_at - 60 {
-                return Ok(tokens.access_token.clone());
-            }
-        }
-
-        let refresh_token = tokens.refresh_token.as_deref().ok_or_else(|| {
-            CloudHomeError::Storage(
-                "no refresh token available, re-authorization needed".to_string(),
-            )
-        })?;
-
-        let config = Self::oauth_config();
-        let new_tokens = oauth::refresh(&config, refresh_token, self.clock.as_ref())
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("OAuth refresh failed: {e}")))?;
-
-        // Persist to keyring
-        let json = serde_json::to_string(&new_tokens)
-            .map_err(|e| CloudHomeError::Storage(format!("serialize tokens: {e}")))?;
-        let creds = crate::keys::CloudHomeCredentials::OAuth { token_json: json };
-        if let Err(e) = self.key_service.set_cloud_home_credentials(&creds) {
-            warn!("Failed to persist refreshed OAuth tokens: {e}");
-        }
-
-        let access_token = new_tokens.access_token.clone();
-        *tokens = new_tokens;
-
-        info!("Refreshed OneDrive OAuth tokens");
-        Ok(access_token)
-    }
-
     /// Make an API call with automatic token refresh on 401.
     async fn api_call(
         &self,
         build_request: impl Fn(&str) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        let token = self.access_token().await?;
-        let resp = build_request(&token)
-            .send()
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("request failed: {e}")))?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            let new_token = self.refresh_tokens().await?;
-            let resp = build_request(&new_token)
-                .send()
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("retry request failed: {e}")))?;
-            Ok(resp)
-        } else {
-            Ok(resp)
-        }
+        self.session.api_call(build_request).await
     }
 }
 
@@ -448,21 +375,21 @@ impl CloudHome for OneDriveCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn item_path_url_encodes_key() {
-        let home = OneDriveCloudHome {
-            client: reqwest::Client::new(),
-            drive_id: "drive123".to_string(),
-            folder_id: "folder456".to_string(),
-            tokens: Arc::new(RwLock::new(OAuthTokens {
+        let home = OneDriveCloudHome::new(
+            "drive123".to_string(),
+            "folder456".to_string(),
+            OAuthTokens {
                 access_token: "test".to_string(),
                 refresh_token: None,
                 expires_at: None,
-            })),
-            key_service: KeyService::new(true, "test".to_string()),
-            clock: Arc::new(crate::clock::SystemClock),
-        };
+            },
+            KeyService::new(true, "test".to_string()),
+            Arc::new(crate::clock::SystemClock),
+        );
 
         // Keys with slashes are encoded to flat filenames
         assert_eq!(
@@ -473,18 +400,17 @@ mod tests {
 
     #[test]
     fn children_url_format() {
-        let home = OneDriveCloudHome {
-            client: reqwest::Client::new(),
-            drive_id: "drive123".to_string(),
-            folder_id: "folder456".to_string(),
-            tokens: Arc::new(RwLock::new(OAuthTokens {
+        let home = OneDriveCloudHome::new(
+            "drive123".to_string(),
+            "folder456".to_string(),
+            OAuthTokens {
                 access_token: "test".to_string(),
                 refresh_token: None,
                 expires_at: None,
-            })),
-            key_service: KeyService::new(true, "test".to_string()),
-            clock: Arc::new(crate::clock::SystemClock),
-        };
+            },
+            KeyService::new(true, "test".to_string()),
+            Arc::new(crate::clock::SystemClock),
+        );
 
         assert_eq!(
             home.children_url(),

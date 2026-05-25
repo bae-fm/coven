@@ -4,14 +4,12 @@
 //! Files are stored flat in a single folder -- path separators are encoded as `__`.
 
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{info, warn};
 
+use super::oauth_session::OAuthSession;
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
-use crate::oauth::{self, OAuthConfig, OAuthTokens};
+use crate::oauth::{OAuthConfig, OAuthTokens};
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
@@ -20,9 +18,7 @@ const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
 pub struct GoogleDriveCloudHome {
     client: reqwest::Client,
     folder_id: String,
-    tokens: Arc<RwLock<OAuthTokens>>,
-    key_service: KeyService,
-    clock: ClockRef,
+    session: OAuthSession,
 }
 
 impl GoogleDriveCloudHome {
@@ -35,9 +31,13 @@ impl GoogleDriveCloudHome {
         Self {
             client: reqwest::Client::new(),
             folder_id,
-            tokens: Arc::new(RwLock::new(tokens)),
-            key_service,
-            clock,
+            session: OAuthSession::new(
+                tokens,
+                key_service,
+                clock,
+                Self::oauth_config(),
+                "Google Drive",
+            ),
         }
     }
 
@@ -72,82 +72,12 @@ impl GoogleDriveCloudHome {
         prefix.replace('/', "__")
     }
 
-    /// Get the current access token, refreshing if expired.
-    async fn access_token(&self) -> Result<String, CloudHomeError> {
-        let tokens = self.tokens.read().await;
-        if let Some(expires_at) = tokens.expires_at {
-            if self.clock.now().timestamp() < expires_at - 60 {
-                return Ok(tokens.access_token.clone());
-            }
-        } else {
-            // No expiry info, assume it's valid
-            return Ok(tokens.access_token.clone());
-        }
-        drop(tokens);
-
-        // Token is expired or about to expire, refresh it
-        self.refresh_tokens().await
-    }
-
-    /// Refresh the OAuth tokens and persist to keyring.
-    async fn refresh_tokens(&self) -> Result<String, CloudHomeError> {
-        let mut tokens = self.tokens.write().await;
-
-        // Double-check: another task may have refreshed while we waited for the write lock
-        if let Some(expires_at) = tokens.expires_at {
-            if self.clock.now().timestamp() < expires_at - 60 {
-                return Ok(tokens.access_token.clone());
-            }
-        }
-
-        let refresh_token = tokens.refresh_token.as_deref().ok_or_else(|| {
-            CloudHomeError::Storage(
-                "no refresh token available, re-authorization needed".to_string(),
-            )
-        })?;
-
-        let config = Self::oauth_config();
-        let new_tokens = oauth::refresh(&config, refresh_token, self.clock.as_ref())
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("OAuth refresh failed: {e}")))?;
-
-        // Persist to keyring
-        let json = serde_json::to_string(&new_tokens)
-            .map_err(|e| CloudHomeError::Storage(format!("serialize tokens: {e}")))?;
-        let creds = crate::keys::CloudHomeCredentials::OAuth { token_json: json };
-        if let Err(e) = self.key_service.set_cloud_home_credentials(&creds) {
-            warn!("Failed to persist refreshed OAuth tokens: {e}");
-        }
-
-        let access_token = new_tokens.access_token.clone();
-        *tokens = new_tokens;
-
-        info!("Refreshed Google Drive OAuth tokens");
-        Ok(access_token)
-    }
-
     /// Make an API call with automatic token refresh on 401.
     async fn api_call(
         &self,
         build_request: impl Fn(&str) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        let token = self.access_token().await?;
-        let resp = build_request(&token)
-            .send()
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("request failed: {e}")))?;
-
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            // Token expired, try refreshing once
-            let new_token = self.refresh_tokens().await?;
-            let resp = build_request(&new_token)
-                .send()
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("retry request failed: {e}")))?;
-            Ok(resp)
-        } else {
-            Ok(resp)
-        }
+        self.session.api_call(build_request).await
     }
 
     /// Find a file's Google Drive ID by name within our folder.

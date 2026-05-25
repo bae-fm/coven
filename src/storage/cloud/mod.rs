@@ -9,6 +9,7 @@ pub mod cloudkit;
 pub mod dropbox;
 pub mod google_drive;
 pub mod http;
+pub mod oauth_session;
 pub mod onedrive;
 pub mod s3;
 pub mod setup;
