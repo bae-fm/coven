@@ -495,8 +495,10 @@ impl KeyService {
             std::env::set_var(self.signing_key_env_var(), &sk_hex);
             std::env::set_var(self.public_key_env_var(), &pk_hex);
         } else {
-            keyring_core::Entry::new(keyring_service(), "bae_user_signing_key")?.set_password(&sk_hex)?;
-            keyring_core::Entry::new(keyring_service(), "bae_user_public_key")?.set_password(&pk_hex)?;
+            keyring_core::Entry::new(keyring_service(), "bae_user_signing_key")?
+                .set_password(&sk_hex)?;
+            keyring_core::Entry::new(keyring_service(), "bae_user_public_key")?
+                .set_password(&pk_hex)?;
         }
 
         info!("Generated and saved new user Ed25519 keypair");
@@ -541,8 +543,10 @@ impl KeyService {
             std::env::set_var(self.signing_key_env_var(), &sk_hex);
             std::env::set_var(self.public_key_env_var(), &pk_hex);
         } else {
-            keyring_core::Entry::new(keyring_service(), "bae_user_signing_key")?.set_password(&sk_hex)?;
-            keyring_core::Entry::new(keyring_service(), "bae_user_public_key")?.set_password(&pk_hex)?;
+            keyring_core::Entry::new(keyring_service(), "bae_user_signing_key")?
+                .set_password(&sk_hex)?;
+            keyring_core::Entry::new(keyring_service(), "bae_user_public_key")?
+                .set_password(&pk_hex)?;
         }
 
         info!("Imported user Ed25519 keypair");

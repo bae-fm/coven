@@ -165,7 +165,6 @@ impl MockSyncStorage {
             .unwrap()
             .insert(device_id.to_string(), seq);
     }
-
 }
 
 #[async_trait]

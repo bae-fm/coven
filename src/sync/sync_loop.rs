@@ -157,7 +157,8 @@ impl SyncLoopHandle {
                                     None
                                 };
                                 let data_changed = result.changesets_applied > 0;
-                                let row_changes = if data_changed && !result.row_changes.is_empty() {
+                                let row_changes = if data_changed && !result.row_changes.is_empty()
+                                {
                                     Some(result.row_changes)
                                 } else {
                                     None

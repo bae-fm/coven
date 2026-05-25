@@ -97,9 +97,7 @@ pub fn walk(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, String> {
                 _ => continue,
             };
 
-            let columns = (0..ncol)
-                .map(|c| extract_col(iter, c, change_op))
-                .collect();
+            let columns = (0..ncol).map(|c| extract_col(iter, c, change_op)).collect();
 
             changes.push(RowChange {
                 table: table_name,

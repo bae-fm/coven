@@ -91,23 +91,22 @@ pub async unsafe fn pull_changes(
     // Load the current membership chain (if any) to validate changeset
     // authorship. A solo library has no chain, so this stays None and the
     // validation below is skipped.
-    let membership_chain: Option<MembershipChain> =
-        match storage.list_membership_entries().await {
-            Ok(entries) if !entries.is_empty() => {
-                match super::membership_ops::download_chain(storage, &entries).await {
-                    Ok(chain) => Some(chain),
-                    Err(e) => {
-                        warn!("failed to load membership chain for validation: {e}");
-                        None
-                    }
+    let membership_chain: Option<MembershipChain> = match storage.list_membership_entries().await {
+        Ok(entries) if !entries.is_empty() => {
+            match super::membership_ops::download_chain(storage, &entries).await {
+                Ok(chain) => Some(chain),
+                Err(e) => {
+                    warn!("failed to load membership chain for validation: {e}");
+                    None
                 }
             }
-            Ok(_) => None,
-            Err(e) => {
-                warn!("failed to list membership entries for validation: {e}");
-                None
-            }
-        };
+        }
+        Ok(_) => None,
+        Err(e) => {
+            warn!("failed to list membership entries for validation: {e}");
+            None
+        }
+    };
 
     let mut updated_cursors = cursors.clone();
     let mut result = PullResult {

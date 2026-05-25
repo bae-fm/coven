@@ -158,8 +158,10 @@ fn fk_violation_is_reported_then_resolved_on_retry() {
         );
         let child_cs = capture(
             src,
-            &["INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-               VALUES ('t1', 'n1', 'green', '0000000002000-0000-s', '2026-01-01')"],
+            &[
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+               VALUES ('t1', 'n1', 'green', '0000000002000-0000-s', '2026-01-01')",
+            ],
         )
         .expect("child cs");
 
@@ -167,8 +169,10 @@ fn fk_violation_is_reported_then_resolved_on_retry() {
         create_synced_schema(parent_src);
         let parent_cs = capture(
             parent_src,
-            &["INSERT INTO notes (id, title, body, _updated_at, created_at) \
-               VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')"],
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
+            ],
         )
         .expect("parent cs");
 

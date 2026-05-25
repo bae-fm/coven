@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use tracing::info;
 
+use crate::blob::BlobPlan;
 use crate::config::{CloudProvider, Config, ConfigError};
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::join_code::InviteCode;
 use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
-use crate::blob::BlobPlan;
 use crate::library_dir::LibraryDir;
 use crate::oauth::OAuthError;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
@@ -297,8 +297,15 @@ async fn bootstrap_and_save(
     on_status("Applying recent changes...");
     let cursors = bootstrap_result.cursors;
 
-    let changesets_applied =
-        open_db_and_pull(&db_path, bucket_dyn, device_id, &cursors, library_dir, blob_plan).await?;
+    let changesets_applied = open_db_and_pull(
+        &db_path,
+        bucket_dyn,
+        device_id,
+        &cursors,
+        library_dir,
+        blob_plan,
+    )
+    .await?;
 
     if changesets_applied > 0 {
         info!("Applied {changesets_applied} changesets since snapshot");
@@ -348,14 +355,13 @@ pub(crate) async fn open_db_and_pull(
         }
 
         let result =
-            match pull_changes(db, storage, device_id, cursors, library_dir, blob_plan).await
-            {
-            Ok((_updated_cursors, pull_result)) => Ok(pull_result.changesets_applied),
-            Err(e) => {
-                libsqlite3_sys::sqlite3_close(db);
-                Err(JoinError::Pull(e))
-            }
-        };
+            match pull_changes(db, storage, device_id, cursors, library_dir, blob_plan).await {
+                Ok((_updated_cursors, pull_result)) => Ok(pull_result.changesets_applied),
+                Err(e) => {
+                    libsqlite3_sys::sqlite3_close(db);
+                    Err(JoinError::Pull(e))
+                }
+            };
 
         if result.is_ok() {
             libsqlite3_sys::sqlite3_close(db);

@@ -34,7 +34,13 @@ impl OneDriveCloudHome {
             client: reqwest::Client::new(),
             drive_id,
             folder_id,
-            session: OAuthSession::new(tokens, key_service, clock, Self::oauth_config(), "OneDrive"),
+            session: OAuthSession::new(
+                tokens,
+                key_service,
+                clock,
+                Self::oauth_config(),
+                "OneDrive",
+            ),
         }
     }
 

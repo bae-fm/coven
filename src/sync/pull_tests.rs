@@ -65,8 +65,10 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
         create_synced_schema(db1);
         let cs = capture_bytes(
             db1,
-            &["INSERT INTO notes (id, title, body, _updated_at, created_at) \
-               VALUES ('n1', 'First', NULL, '0000000001000-0000-dev1', '2026-01-01')"],
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('n1', 'First', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            ],
         );
         storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
@@ -74,16 +76,10 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
         let db2 = open_memory_db();
         create_synced_schema(db2);
         let (_tmp, ld) = temp_library_dir();
-        let (updated, result) = pull_changes(
-            db2,
-            &storage,
-            "dev2",
-            &HashMap::new(),
-            &ld,
-            &NoopBlobPlan,
-        )
-        .await
-        .expect("pull");
+        let (updated, result) =
+            pull_changes(db2, &storage, "dev2", &HashMap::new(), &ld, &NoopBlobPlan)
+                .await
+                .expect("pull");
 
         assert_eq!(result.changesets_applied, 1);
         assert_eq!(updated.get("dev1"), Some(&1));
@@ -111,8 +107,10 @@ async fn pull_skips_changeset_from_newer_schema() {
         create_synced_schema(db1);
         let cs = capture_bytes(
             db1,
-            &["INSERT INTO notes (id, title, body, _updated_at, created_at) \
-               VALUES ('n1', 'Future', NULL, '0000000001000-0000-dev1', '2026-01-01')"],
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('n1', 'Future', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            ],
         );
         storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION + 1);
 
@@ -184,16 +182,10 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         let db2 = open_memory_db();
         create_synced_schema(db2);
         let (_t, ld) = temp_library_dir();
-        let (_updated, result) = pull_changes(
-            db2,
-            &storage,
-            "dev2",
-            &HashMap::new(),
-            &ld,
-            &dst_plan,
-        )
-        .await
-        .expect("pull");
+        let (_updated, result) =
+            pull_changes(db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan)
+                .await
+                .expect("pull");
 
         assert_eq!(result.changesets_applied, 1);
         assert!(!result.asset_downloads_failed);
@@ -228,8 +220,10 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
         create_synced_schema(db1);
         let cs = capture_bytes(
             db1,
-            &["INSERT INTO notes (id, title, body, _updated_at, created_at) \
-               VALUES ('n1', 'Forged', NULL, '0000000001000-0000-dev1', '2026-01-01')"],
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('n1', 'Forged', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            ],
         );
         storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 

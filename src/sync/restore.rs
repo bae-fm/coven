@@ -396,8 +396,15 @@ async fn bootstrap_and_save(
     on_status("Applying recent changes...");
     let cursors = bootstrap_result.cursors;
 
-    let changesets_applied =
-        open_db_and_pull(&db_path, bucket_dyn, device_id, &cursors, library_dir, blob_plan).await?;
+    let changesets_applied = open_db_and_pull(
+        &db_path,
+        bucket_dyn,
+        device_id,
+        &cursors,
+        library_dir,
+        blob_plan,
+    )
+    .await?;
 
     if changesets_applied > 0 {
         info!("Applied {changesets_applied} changesets since snapshot");
