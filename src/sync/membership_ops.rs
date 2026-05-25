@@ -203,38 +203,26 @@ pub async fn remove_member(
 }
 
 /// Apply the effects of a member removal: update keyring, config, and encryption service.
+/// Rotate the in-use encryption key: persist it to the keyring and swap the live
+/// encryption service. Returns the new key's fingerprint for the host to record
+/// in its own config — coven never writes the host's config.
 pub fn apply_key_rotation(
     new_key: [u8; 32],
     key_service: &KeyService,
     encryption_lock: &std::sync::RwLock<EncryptionService>,
-    config: &crate::config::Config,
-) -> Result<(), MembershipOpsError> {
-    // Persist the new encryption key to keyring
+) -> Result<String, MembershipOpsError> {
     let new_key_hex = hex::encode(new_key);
     key_service
         .set_encryption_key(&new_key_hex)
         .map_err(|e| MembershipOpsError(format!("Failed to persist new encryption key: {e}")))?;
 
-    // Update the shared encryption service
     {
         let mut enc = encryption_lock.write().unwrap();
         *enc = EncryptionService::from_key(new_key);
     }
 
-    // Compute and return the new fingerprint for config update
-    let new_fingerprint = {
-        let enc = encryption_lock.read().unwrap();
-        enc.fingerprint()
-    };
-
-    // Update config with new fingerprint
-    let mut config = config.clone();
-    config.encryption_key_fingerprint = Some(new_fingerprint);
-    if let Err(e) = config.save_to_config_yaml() {
-        warn!("Failed to save config after key rotation: {e}");
-    }
-
-    Ok(())
+    let new_fingerprint = encryption_lock.read().unwrap().fingerprint();
+    Ok(new_fingerprint)
 }
 
 /// Download and build a membership chain from the storage.

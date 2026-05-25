@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::clock::ClockRef;
@@ -20,12 +20,17 @@ use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_loop::SyncLoopHandle;
 
+/// Supplies the host's current config on demand. coven reads it fresh each call
+/// — never snapshotting or writing it — so a host with reactive config sees
+/// changes without rebuilding the manager.
+pub type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
+
 /// High-level sync manager.
 ///
 /// Always has a valid EncryptionService — if no encryption key exists,
 /// don't create a SyncManager at all.
 pub struct SyncManager {
-    config: RwLock<Config>,
+    config_provider: ConfigProvider,
     key_service: KeyService,
     encryption_service: EncryptionService,
     db: Arc<dyn SyncDb>,
@@ -56,7 +61,7 @@ pub struct SyncStatus {
 
 impl SyncManager {
     pub fn new(
-        config: Config,
+        config_provider: ConfigProvider,
         key_service: KeyService,
         encryption_service: EncryptionService,
         db: Arc<dyn SyncDb>,
@@ -65,7 +70,7 @@ impl SyncManager {
         observer: Option<Arc<dyn BlobUploadObserver>>,
     ) -> Self {
         Self {
-            config: RwLock::new(config),
+            config_provider,
             key_service,
             encryption_service,
             db,
@@ -96,7 +101,7 @@ impl SyncManager {
     /// Initialize cloud home and sync loop from current config.
     /// Called at startup (if already configured) and after connecting a provider.
     pub async fn start_sync(&self) {
-        let config = self.config.read().unwrap().clone();
+        let config = (self.config_provider)();
 
         // Create cloud home
         let cloud_home: Option<Arc<dyn CloudHome>> = match crate::storage::cloud::create_cloud_home(
@@ -181,7 +186,7 @@ impl SyncManager {
     }
 
     pub fn generate_restore_code(&self) -> Result<String, String> {
-        let config = self.config.read().unwrap().clone();
+        let config = (self.config_provider)();
         crate::storage::cloud::setup::generate_restore_code(&config, &self.key_service)
             .map_err(|e| e.to_string())
     }
@@ -191,7 +196,7 @@ impl SyncManager {
     // =========================================================================
 
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, String> {
-        let config = self.config.read().unwrap().clone();
+        let config = (self.config_provider)();
         if !config.sync_enabled(&self.key_service) {
             return Ok(Vec::new());
         }
@@ -246,7 +251,7 @@ impl SyncManager {
             .map_err(|_| "Encryption key wrong length".to_string())?;
 
         let (library_id, library_name) = {
-            let config = self.config.read().unwrap();
+            let config = (self.config_provider)();
             (config.library_id.clone(), config.library_name.clone())
         };
 
@@ -270,7 +275,7 @@ impl SyncManager {
         Ok(crate::join_code::encode(&invite_code))
     }
 
-    pub async fn remove_member(&self, public_key_hex: &str) -> Result<(), String> {
+    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, String> {
         let sync_loop = self
             .sync_loop_handle
             .read()
@@ -291,24 +296,15 @@ impl SyncManager {
         .await
         .map_err(|e| e.0)?;
 
-        // Record that an encryption key is stored and persist the rotated key.
-        let config = {
-            let mut config = self.config.write().unwrap();
-            config.encryption_key_stored = true;
-            if let Err(e) = config.save() {
-                warn!("Failed to persist config after key rotation: {e}");
-            }
-            config.clone()
-        };
-
-        crate::sync::membership_ops::apply_key_rotation(
+        // Rotate the in-use key; the host records the returned fingerprint and
+        // that a key is stored in its own config.
+        let fingerprint = crate::sync::membership_ops::apply_key_rotation(
             new_key,
             &self.key_service,
             sync_loop.encryption(),
-            &config,
         )
         .map_err(|e| e.0)?;
 
-        Ok(())
+        Ok(fingerprint)
     }
 }
