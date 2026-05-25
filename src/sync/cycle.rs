@@ -286,7 +286,6 @@ pub async unsafe fn run_single_sync_cycle(
                 &timestamp,
                 "background sync",
                 user_keypair,
-                None,
                 library_dir,
                 blob_plan,
             )

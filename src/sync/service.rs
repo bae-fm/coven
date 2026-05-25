@@ -1,6 +1,6 @@
 /// Full sync orchestrator: push local changes, pull remote changes.
 ///
-/// Follows the protocol from the architecture doc:
+/// Protocol:
 /// 1. Grab changeset from the current session.
 /// 2. End the session (so incoming applies don't contaminate outgoing).
 /// 3. Push our changeset to S3 (handled by push module, stubbed here).
@@ -20,7 +20,6 @@ use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 
 use super::envelope::{self, sign_envelope, ChangesetEnvelope};
-use super::membership::MembershipChain;
 use super::pull::{self, PullResult};
 use super::push::{OutgoingChangeset, SCHEMA_VERSION};
 use super::session::SyncSession;
@@ -75,7 +74,6 @@ impl SyncService {
         timestamp: &str,
         message: &str,
         keypair: &UserKeypair,
-        membership_chain: Option<&MembershipChain>,
         library_dir: &LibraryDir,
         blob_plan: &dyn BlobPlan,
     ) -> Result<SyncResult, SyncCycleError> {
@@ -133,7 +131,6 @@ impl SyncService {
             storage,
             &self.device_id,
             cursors,
-            membership_chain,
             library_dir,
             blob_plan,
         )

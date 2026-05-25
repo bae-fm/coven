@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::clock::ClockRef;
@@ -295,7 +295,9 @@ impl SyncManager {
         let config = {
             let mut config = self.config.write().unwrap();
             config.encryption_key_stored = true;
-            let _ = config.save();
+            if let Err(e) = config.save() {
+                warn!("Failed to persist config after key rotation: {e}");
+            }
             config.clone()
         };
 

@@ -2,7 +2,6 @@
 //!
 //! Contains the OAuth sign-in flows for Google Drive, Dropbox, and OneDrive,
 //! as well as managed service signup/login, disconnect, and account display logic.
-//! These were extracted from bae-bridge so the business logic is shared.
 
 use tracing::{info, warn};
 
@@ -324,9 +323,13 @@ pub fn cloud_account_display_for(config: &Config, key_service: &KeyService) -> O
             .map(|b| format!("s3://{b}")),
         CloudProvider::CloudKit => Some("iCloud".to_string()),
         CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive => {
-            match key_service.get_cloud_home_credentials().ok().flatten() {
-                Some(CloudHomeCredentials::OAuth { .. }) => Some("Connected".to_string()),
-                _ => None,
+            match key_service.get_cloud_home_credentials() {
+                Ok(Some(CloudHomeCredentials::OAuth { .. })) => Some("Connected".to_string()),
+                Ok(_) => None,
+                Err(e) => {
+                    warn!("reading cloud home credentials for account display: {e}");
+                    None
+                }
             }
         }
     }

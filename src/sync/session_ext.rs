@@ -171,7 +171,7 @@ impl ConflictContext {
 }
 
 /// Extract a text string from a sqlite3_value, or None if NULL.
-unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
+pub(crate) unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
     let vtype = ffi::sqlite3_value_type(val);
     if vtype == ffi::SQLITE_NULL as c_int {
         return None;

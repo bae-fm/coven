@@ -62,8 +62,6 @@ pub struct Config {
     /// Whether this library's CloudKit zone is shared (joiner) vs owned (creator).
     pub cloud_home_cloudkit_is_shared: bool,
     pub cloud_home_http_url: Option<String>,
-    /// Base URL for share links (e.g. "https://listen.example.com").
-    pub share_base_url: Option<String>,
 }
 
 impl Config {
@@ -72,7 +70,12 @@ impl Config {
     pub fn sync_enabled(&self, key_service: &crate::keys::KeyService) -> bool {
         use crate::keys::CloudHomeCredentials;
 
-        let creds = key_service.get_cloud_home_credentials().ok().flatten();
+        let creds = key_service
+            .get_cloud_home_credentials()
+            .unwrap_or_else(|e| {
+                tracing::warn!("reading cloud home credentials for sync_enabled: {e}");
+                None
+            });
         let has_s3 = matches!(creds, Some(CloudHomeCredentials::S3 { .. }));
         let has_oauth = matches!(creds, Some(CloudHomeCredentials::OAuth { .. }));
 
@@ -128,7 +131,6 @@ impl Config {
             cloud_home_onedrive_folder_id: None,
             cloud_home_cloudkit_is_shared: false,
             cloud_home_http_url: None,
-            share_base_url: None,
         }
     }
 
@@ -181,8 +183,6 @@ pub struct ConfigYaml {
     pub cloud_home_cloudkit_is_shared: bool,
     #[serde(default)]
     pub cloud_home_http_url: Option<String>,
-    #[serde(default)]
-    pub share_base_url: Option<String>,
 }
 
 impl ConfigYaml {
@@ -207,7 +207,6 @@ impl ConfigYaml {
             cloud_home_onedrive_folder_id: self.cloud_home_onedrive_folder_id,
             cloud_home_cloudkit_is_shared: self.cloud_home_cloudkit_is_shared,
             cloud_home_http_url: self.cloud_home_http_url,
-            share_base_url: self.share_base_url,
         }
     }
 }
@@ -231,7 +230,6 @@ impl From<&Config> for ConfigYaml {
             cloud_home_onedrive_folder_id: config.cloud_home_onedrive_folder_id.clone(),
             cloud_home_cloudkit_is_shared: config.cloud_home_cloudkit_is_shared,
             cloud_home_http_url: config.cloud_home_http_url.clone(),
-            share_base_url: config.share_base_url.clone(),
         }
     }
 }

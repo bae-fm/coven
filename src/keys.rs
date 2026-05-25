@@ -2,7 +2,7 @@ use ed25519_dalek::{Signer, Verifier};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 // Size constants matching libsodium conventions. Exported so callers (sync modules,
 // envelope.rs, etc.) can use them for array sizes and length checks.
@@ -186,6 +186,28 @@ fn keyring_service() -> &'static str {
     KEYRING_SERVICE.get().map(String::as_str).unwrap_or("coven")
 }
 
+/// Read a keyring password by account name, distinguishing "not set" (returns
+/// `None` silently) from a genuine keyring failure (returns `None` but logs it).
+/// An empty stored value is treated as not set.
+fn read_keyring(account: &str) -> Option<String> {
+    let entry = match keyring_core::Entry::new(keyring_service(), account) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("keyring entry '{account}' unavailable: {e}");
+            return None;
+        }
+    };
+    match entry.get_password() {
+        Ok(p) if !p.is_empty() => Some(p),
+        Ok(_) => None,
+        Err(keyring_core::Error::NoEntry) => None,
+        Err(e) => {
+            warn!("keyring read '{account}' failed: {e}");
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct KeyService {
     dev_mode: bool,
@@ -219,10 +241,7 @@ impl KeyService {
                 .ok()
                 .filter(|k| !k.is_empty())
         } else {
-            keyring_core::Entry::new(keyring_service(), &self.account("encryption_master_key"))
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty())
+            read_keyring(&self.account("encryption_master_key"))
         }
     }
 
@@ -277,10 +296,7 @@ impl KeyService {
                 })
         } else {
             let account = self.account(&format!("s3_access_key:{}", profile_id));
-            keyring_core::Entry::new(keyring_service(), &account)
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty())
+            read_keyring(&account)
         }
     }
 
@@ -316,10 +332,7 @@ impl KeyService {
                 })
         } else {
             let account = self.account(&format!("s3_secret_key:{}", profile_id));
-            keyring_core::Entry::new(keyring_service(), &account)
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty())
+            read_keyring(&account)
         }
     }
 
@@ -378,10 +391,7 @@ impl KeyService {
                 .filter(|k| !k.is_empty())
         } else {
             let account = self.account("cloud_home_credentials");
-            keyring_core::Entry::new(keyring_service(), &account)
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty())
+            read_keyring(&account)
         };
 
         match json {
@@ -428,145 +438,6 @@ impl KeyService {
         match keyring_core::Entry::new(keyring_service(), &account)?.delete_credential() {
             Ok(()) => {
                 info!("Cloud home credentials deleted from keyring");
-                Ok(())
-            }
-            Err(keyring_core::Error::NoEntry) => Ok(()),
-            Err(e) => Err(KeyError::Keyring(e)),
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Server password (library-scoped)
-    // -------------------------------------------------------------------------
-
-    /// Read the server password. Returns None if not set.
-    ///
-    /// Dev mode: reads `BAE_SERVER_PASSWORD` env var.
-    /// Prod mode: reads from OS keyring.
-    pub fn get_server_password(&self) -> Option<String> {
-        if self.dev_mode {
-            std::env::var("BAE_SERVER_PASSWORD")
-                .ok()
-                .filter(|k| !k.is_empty())
-        } else {
-            let account = self.account("server_password");
-            keyring_core::Entry::new(keyring_service(), &account)
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty())
-        }
-    }
-
-    /// Save the server password to the OS keyring.
-    ///
-    /// Dev mode: sets the env var.
-    /// Prod mode: writes to OS keyring.
-    pub fn set_server_password(&self, password: &str) -> Result<(), KeyError> {
-        if self.dev_mode {
-            std::env::set_var("BAE_SERVER_PASSWORD", password);
-            return Ok(());
-        }
-
-        let account = self.account("server_password");
-        keyring_core::Entry::new(keyring_service(), &account)?.set_password(password)?;
-
-        info!("Server password saved to keyring");
-        Ok(())
-    }
-
-    /// Delete the server password from the OS keyring.
-    ///
-    /// Dev mode: removes env var.
-    /// Prod mode: deletes from OS keyring. Silently ignores missing entries.
-    pub fn delete_server_password(&self) -> Result<(), KeyError> {
-        if self.dev_mode {
-            std::env::remove_var("BAE_SERVER_PASSWORD");
-            return Ok(());
-        }
-
-        let account = self.account("server_password");
-        match keyring_core::Entry::new(keyring_service(), &account)?.delete_credential() {
-            Ok(()) => {
-                info!("Server password deleted from keyring");
-                Ok(())
-            }
-            Err(keyring_core::Error::NoEntry) => Ok(()),
-            Err(e) => Err(KeyError::Keyring(e)),
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Followed library encryption keys (library-scoped, per followed library)
-    // -------------------------------------------------------------------------
-
-    /// Read the encryption key for a followed library. Returns None if not set.
-    /// The key is stored base64-encoded in the keyring and returned as raw bytes.
-    ///
-    /// Dev mode: reads `BAE_FOLLOWED_{followed_id}_KEY` env var (base64).
-    /// Prod mode: reads from OS keyring.
-    pub fn get_followed_encryption_key(&self, followed_id: &str) -> Option<Vec<u8>> {
-        let b64 = if self.dev_mode {
-            std::env::var(format!("BAE_FOLLOWED_{}_KEY", followed_id))
-                .ok()
-                .filter(|k| !k.is_empty())
-        } else {
-            let account = self.account(&format!("followed_key:{}", followed_id));
-            keyring_core::Entry::new(keyring_service(), &account)
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty())
-        };
-
-        b64.and_then(|s| {
-            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-            use base64::Engine;
-            URL_SAFE_NO_PAD.decode(&s).ok()
-        })
-    }
-
-    /// Save the encryption key for a followed library.
-    /// The key is stored as base64url in the keyring.
-    ///
-    /// Dev mode: sets the env var.
-    /// Prod mode: writes to OS keyring.
-    pub fn set_followed_encryption_key(
-        &self,
-        followed_id: &str,
-        key: &[u8],
-    ) -> Result<(), KeyError> {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        use base64::Engine;
-        let b64 = URL_SAFE_NO_PAD.encode(key);
-
-        if self.dev_mode {
-            std::env::set_var(format!("BAE_FOLLOWED_{}_KEY", followed_id), &b64);
-            return Ok(());
-        }
-
-        let account = self.account(&format!("followed_key:{}", followed_id));
-        keyring_core::Entry::new(keyring_service(), &account)?.set_password(&b64)?;
-
-        info!("Saved encryption key for followed library {}", followed_id);
-        Ok(())
-    }
-
-    /// Delete the encryption key for a followed library.
-    ///
-    /// Dev mode: removes the env var.
-    /// Prod mode: deletes from OS keyring. Silently ignores missing entries.
-    pub fn delete_followed_encryption_key(&self, followed_id: &str) -> Result<(), KeyError> {
-        if self.dev_mode {
-            std::env::remove_var(format!("BAE_FOLLOWED_{}_KEY", followed_id));
-            return Ok(());
-        }
-
-        let account = self.account(&format!("followed_key:{}", followed_id));
-        match keyring_core::Entry::new(keyring_service(), &account)?.delete_credential() {
-            Ok(()) => {
-                info!(
-                    "Deleted encryption key for followed library {}",
-                    followed_id
-                );
                 Ok(())
             }
             Err(keyring_core::Error::NoEntry) => Ok(()),
@@ -628,10 +499,7 @@ impl KeyService {
                 .ok()
                 .filter(|k| !k.is_empty())
         } else {
-            keyring_core::Entry::new(keyring_service(), "bae_user_public_key")
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty())
+            read_keyring("bae_user_public_key")
         };
 
         let pk_hex = pk_hex?;
@@ -684,14 +552,8 @@ impl KeyService {
                 _ => return Ok(None),
             }
         } else {
-            let sk = keyring_core::Entry::new(keyring_service(), "bae_user_signing_key")
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty());
-            let pk = keyring_core::Entry::new(keyring_service(), "bae_user_public_key")
-                .ok()
-                .and_then(|e| e.get_password().ok())
-                .filter(|k| !k.is_empty());
+            let sk = read_keyring("bae_user_signing_key");
+            let pk = read_keyring("bae_user_public_key");
             match (sk, pk) {
                 (Some(s), Some(p)) => (s, p),
                 _ => return Ok(None),

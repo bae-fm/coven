@@ -72,7 +72,6 @@ pub unsafe fn row_exists(db: *mut ffi::sqlite3, sql: &str) -> bool {
     step == ffi::SQLITE_ROW as c_int
 }
 
-/// Create the full bae schema on a raw connection (synced tables + essential non-synced).
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a root table (`notes`), a
 /// child with a foreign key (`note_tags`, for FK-violation retry), and a

@@ -1,8 +1,7 @@
 //! Membership operations: get members, invite, and revoke.
 //!
 //! These are the high-level orchestration functions that download the membership
-//! chain from the storage, perform the operation, and upload the results. They
-//! were extracted from bae-bridge.
+//! chain from the storage, perform the operation, and upload the results.
 
 use tracing::{info, warn};
 

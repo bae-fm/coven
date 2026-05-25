@@ -12,8 +12,7 @@ pub use traits::BlobStore;
 /// Deterministic from the file_id alone. Used for both local storage
 /// (relative to the library dir) and cloud keys.
 pub fn storage_path(file_id: &str) -> String {
-    let hex = file_id.replace('-', "");
-    format!("storage/{}/{}/{}", &hex[..2], &hex[2..4], file_id)
+    crate::library_dir::LibraryDir::hashed_path("storage", file_id)
 }
 
 #[cfg(test)]

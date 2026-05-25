@@ -346,7 +346,7 @@ pub(crate) async fn open_db_and_pull(
         }
 
         let result =
-            match pull_changes(db, storage, device_id, cursors, None, library_dir, blob_plan).await
+            match pull_changes(db, storage, device_id, cursors, library_dir, blob_plan).await
             {
             Ok((_updated_cursors, pull_result)) => Ok(pull_result.changesets_applied),
             Err(e) => {

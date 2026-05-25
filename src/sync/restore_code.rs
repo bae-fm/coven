@@ -1,8 +1,7 @@
 //! Restore codes: single-string encoding of everything needed to restore a library from cloud.
 //!
 //! A restore code encodes the library ID, encryption key, cloud provider details, and
-//! credentials into a single base64url string prefixed with "bae:". This replaces the old
-//! flow of manually entering a UUID, hex key, provider selection, and provider-specific fields.
+//! credentials into a single base64url string prefixed with "bae:".
 //!
 //! The code contains secrets (encryption key, S3 credentials). OAuth tokens are NOT included
 //! because they expire -- the user re-authenticates on restore.

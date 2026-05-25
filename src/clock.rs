@@ -33,8 +33,8 @@ impl Clock for SystemClock {
 }
 
 // Test clock fakes are exposed to downstream crates' tests via the `test-utils`
-// feature (same pattern as the rest of bae-core's test helpers), so any crate
-// that consumes `Clock` tests against the same fakes instead of mirroring them.
+// feature, so any crate that consumes `Clock` tests against the same fakes
+// instead of mirroring them.
 #[cfg(any(test, feature = "test-utils"))]
 pub use fakes::{FixedClock, SteppingClock};
 

@@ -30,10 +30,17 @@ impl LibraryDir {
         self.path.join("images")
     }
 
+    /// Content-addressed relative path `{prefix}/{ab}/{cd}/{id}`, partitioning by
+    /// the first two byte-pairs of the dash-stripped id. The single home for the
+    /// partition scheme — shared by the local blob store and the cloud layout.
+    pub fn hashed_path(prefix: &str, id: &str) -> String {
+        let hex = id.replace('-', "");
+        format!("{prefix}/{}/{}/{id}", &hex[..2], &hex[2..4])
+    }
+
     /// Hash-based image path: `images/{ab}/{cd}/{id}`
     pub fn image_path(&self, id: &str) -> PathBuf {
-        let hex = id.replace('-', "");
-        self.images_dir().join(&hex[..2]).join(&hex[2..4]).join(id)
+        self.path.join(Self::hashed_path("images", id))
     }
 
     pub fn torrents_dir(&self) -> PathBuf {
@@ -42,11 +49,7 @@ impl LibraryDir {
 
     /// Hash-based torrent file path: `torrents/{ab}/{cd}/{id}`
     pub fn torrent_file_path(&self, torrent_id: &str) -> PathBuf {
-        let hex = torrent_id.replace('-', "");
-        self.torrents_dir()
-            .join(&hex[..2])
-            .join(&hex[2..4])
-            .join(torrent_id)
+        self.path.join(Self::hashed_path("torrents", torrent_id))
     }
 
     pub fn storage_dir(&self) -> PathBuf {
@@ -55,11 +58,7 @@ impl LibraryDir {
 
     /// Hash-based storage path: `storage/{ab}/{cd}/{file_id}`
     pub fn storage_file_path(&self, file_id: &str) -> PathBuf {
-        let hex = file_id.replace('-', "");
-        self.storage_dir()
-            .join(&hex[..2])
-            .join(&hex[2..4])
-            .join(file_id)
+        self.path.join(Self::hashed_path("storage", file_id))
     }
 
     pub fn pending_deletions_path(&self) -> PathBuf {

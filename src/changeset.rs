@@ -1,13 +1,15 @@
 //! Changeset walking: the single primitive for inspecting SQLite changesets.
 //!
 //! coven uses it internally (to find blobs a changeset references); the host
-//! uses it to map row-changes to its own domain events. This replaces the
-//! per-table walkers that previously duplicated the FFI iteration.
+//! uses it to map row-changes to its own domain events. It is the crate's only
+//! changeset iterator.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
 
 use libsqlite3_sys as ffi;
+
+use crate::sync::session_ext::value_to_string;
 
 /// The operation type for a changeset entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,20 +146,4 @@ unsafe fn extract_old_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) 
         return None;
     }
     value_to_string(val)
-}
-
-unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
-    let vtype = ffi::sqlite3_value_type(val);
-    if vtype == ffi::SQLITE_NULL as c_int {
-        return None;
-    }
-    let text = ffi::sqlite3_value_text(val);
-    if text.is_null() {
-        return None;
-    }
-    Some(
-        CStr::from_ptr(text as *const c_char)
-            .to_string_lossy()
-            .into_owned(),
-    )
 }

@@ -60,7 +60,6 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
             &storage,
             "dev2",
             &HashMap::new(),
-            None,
             &ld,
             &NoopBlobPlan,
         )
@@ -105,7 +104,6 @@ async fn pull_skips_changeset_from_newer_schema() {
             &storage,
             "dev2",
             &HashMap::new(),
-            None,
             &temp_library_dir().1,
             &NoopBlobPlan,
         )
@@ -172,7 +170,6 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
             &storage,
             "dev2",
             &HashMap::new(),
-            None,
             &ld,
             &dst_plan,
         )

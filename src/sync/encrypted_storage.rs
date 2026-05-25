@@ -62,17 +62,7 @@ impl EncryptedSyncStorage {
 
     /// Blob key: `{namespace}/{ab}/{cd}/{id}`.
     pub fn blob_key(namespace: &str, id: &str) -> String {
-        let hex = id.replace('-', "");
-        format!("{namespace}/{}/{}/{id}", &hex[..2], &hex[2..4])
-    }
-
-    /// List all blob keys under a namespace (e.g. for bulk download).
-    /// Returns keys like `{namespace}/ab/cd/{id}`.
-    pub async fn list_blob_keys(&self, namespace: &str) -> Result<Vec<String>, StorageError> {
-        self.home
-            .list(&format!("{namespace}/"))
-            .await
-            .map_err(StorageError::from)
+        crate::library_dir::LibraryDir::hashed_path(namespace, id)
     }
 }
 

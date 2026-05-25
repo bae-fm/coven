@@ -1,0 +1,52 @@
+name: rules review (matrix)
+
+# Thin caller for the shared per-rule matrix reviewer
+# (agent-instructions/.github/workflows/rules-review.yml). Manual dispatch.
+# `slugs` is the set of rules that apply to coven — the generic code rules
+# (the SwiftUI/app and bae-specific rules don't apply to a pure Rust library).
+#
+# Requires the CLAUDE_CODE_OAUTH_TOKEN secret on this repo (or the bae-fm org).
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+      checkout_ref:
+        description: "coven ref to check out (PR head SHA)"
+        required: true
+
+jobs:
+  review:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: hideselfview/agent-instructions/.github/workflows/rules-review.yml@main
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      checkout_ref: ${{ inputs.checkout_ref }}
+      project: coven
+      slugs: >-
+        ["compose-existing-primitives-before-adding-new-ones",
+        "dead-code-delete-or-cfg-restrict-never-allow-dead-code",
+        "dependency-injection",
+        "documentation-describes-current-state-transitions-go-in-plans",
+        "don-t-create-duplicate-types", "don-t-duplicate-existing-logic",
+        "enums", "every-bug-fix-starts-with-a-failing-test",
+        "look-up-the-latest-version-when-adding-a-new-dependency",
+        "many-fields-none-together-means-a-missing-type",
+        "never-fill-in-arguments-with-zero-valued-defaults",
+        "never-mask-errors-with-defaults",
+        "never-re-implement-production-logic-in-tests-mocks-or-previews",
+        "no-marketing-language-anywhere",
+        "no-transient-references-in-code-tests-or-notes",
+        "parameterize-near-duplicates-when-cheap",
+        "pub-sub-over-ref-registration",
+        "question-necessity-before-any-change",
+        "test-the-real-unit-not-a-reconstruction",
+        "use-the-project-s-logger-for-real-logs",
+        "write-today-s-shape-not-tomorrow-s", "yagni"]
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
