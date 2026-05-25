@@ -1,0 +1,60 @@
+#!/bin/bash
+# coven pre-commit: format, lint, and test before every commit.
+set -e
+
+TMPFILE=$(mktemp)
+cleanup() { rm -f "$TMPFILE"; }
+trap cleanup EXIT
+
+CHANGED_FILES=$(git --no-pager diff --cached --name-only)
+
+run_check() {
+    local name="$1"
+    shift
+    echo "Running $name..."
+    if "$@" > "$TMPFILE" 2>&1; then
+        return 0
+    else
+        echo ""
+        echo "❌ $name failed:"
+        cat "$TMPFILE"
+        return 1
+    fi
+}
+
+# Re-stage anything the formatter changed and fail, so the dev reviews the new
+# diff and re-runs `git commit`.
+restage_and_fail_if_changed() {
+    local tool_name="$1"
+    local diff
+    diff=$(git --no-pager diff --name-only)
+    [ -z "$diff" ] && return 0
+    local restaged=0
+    while IFS= read -r file; do
+        if echo "$CHANGED_FILES" | grep -qF "$file"; then
+            git add "$file"
+            restaged=1
+        fi
+    done <<< "$diff"
+    if [ "$restaged" -eq 1 ]; then
+        echo ""
+        echo "❌ $tool_name reformatted staged files. Changes have been re-staged."
+        echo "   Review the diff and commit again."
+        exit 1
+    fi
+}
+
+run_check "cargo fmt" cargo fmt --all || { echo "cargo fmt failed"; exit 1; }
+restage_and_fail_if_changed "cargo fmt"
+
+run_check "cargo clippy" cargo clippy --all-targets --all-features -- -D warnings || {
+    echo "Fix the warnings above and try again"
+    exit 1
+}
+
+run_check "cargo test" cargo test --all-features || {
+    echo "Tests failed"
+    exit 1
+}
+
+echo "✅ All checks passed"
