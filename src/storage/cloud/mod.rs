@@ -140,17 +140,17 @@ pub async fn create_cloud_home(
 ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
     use crate::config::CloudProvider;
 
-    match config.cloud_provider {
+    match config.cloud_home.provider {
         Some(CloudProvider::S3) | None => {
-            let bucket = config
-                .cloud_home_s3_bucket
-                .clone()
-                .ok_or_else(|| CloudHomeError::Storage("S3 bucket not configured".to_string()))?;
-            let region = config
-                .cloud_home_s3_region
-                .clone()
-                .ok_or_else(|| CloudHomeError::Storage("S3 region not configured".to_string()))?;
-            let endpoint = config.cloud_home_s3_endpoint.clone();
+            let bucket =
+                config.cloud_home.s3_bucket.clone().ok_or_else(|| {
+                    CloudHomeError::Storage("S3 bucket not configured".to_string())
+                })?;
+            let region =
+                config.cloud_home.s3_region.clone().ok_or_else(|| {
+                    CloudHomeError::Storage("S3 region not configured".to_string())
+                })?;
+            let endpoint = config.cloud_home.s3_endpoint.clone();
 
             let (access_key, secret_key) = match key_service
                 .get_cloud_home_credentials()
@@ -173,14 +173,15 @@ pub async fn create_cloud_home(
                 endpoint,
                 access_key,
                 secret_key,
-                config.cloud_home_s3_key_prefix.clone(),
+                config.cloud_home.s3_key_prefix.clone(),
             )
             .await?;
             Ok(Box::new(s3))
         }
         Some(CloudProvider::GoogleDrive) => {
             let folder_id = config
-                .cloud_home_google_drive_folder_id
+                .cloud_home
+                .google_drive_folder_id
                 .clone()
                 .ok_or_else(|| {
                     CloudHomeError::Storage("Google Drive folder ID not configured".to_string())
@@ -195,7 +196,8 @@ pub async fn create_cloud_home(
         }
         Some(CloudProvider::Dropbox) => {
             let folder_path = config
-                .cloud_home_dropbox_folder_path
+                .cloud_home
+                .dropbox_folder_path
                 .clone()
                 .ok_or_else(|| {
                     CloudHomeError::Storage("Dropbox folder path not configured".to_string())
@@ -209,11 +211,12 @@ pub async fn create_cloud_home(
             )))
         }
         Some(CloudProvider::OneDrive) => {
-            let drive_id = config.cloud_home_onedrive_drive_id.clone().ok_or_else(|| {
+            let drive_id = config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
                 CloudHomeError::Storage("OneDrive drive ID not configured".to_string())
             })?;
             let folder_id = config
-                .cloud_home_onedrive_folder_id
+                .cloud_home
+                .onedrive_folder_id
                 .clone()
                 .ok_or_else(|| {
                     CloudHomeError::Storage("OneDrive folder ID not configured".to_string())
@@ -228,7 +231,7 @@ pub async fn create_cloud_home(
             )))
         }
         Some(CloudProvider::HttpProxy) => {
-            let url = config.cloud_home_http_url.clone().ok_or_else(|| {
+            let url = config.cloud_home.http_url.clone().ok_or_else(|| {
                 CloudHomeError::Storage("HTTP proxy URL not configured".to_string())
             })?;
             let keypair = key_service

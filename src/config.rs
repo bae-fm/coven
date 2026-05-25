@@ -26,6 +26,37 @@ impl CloudProvider {
     }
 }
 
+/// The cloud home: which provider backs sync and its per-provider settings.
+/// One cohesive unit — connecting picks a provider and fills its fields;
+/// disconnecting resets the whole thing to default.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CloudHomeConfig {
+    /// Selected provider. None = not configured.
+    #[serde(default)]
+    pub provider: Option<CloudProvider>,
+    #[serde(default)]
+    pub s3_bucket: Option<String>,
+    #[serde(default)]
+    pub s3_region: Option<String>,
+    #[serde(default)]
+    pub s3_endpoint: Option<String>,
+    #[serde(default)]
+    pub s3_key_prefix: Option<String>,
+    #[serde(default)]
+    pub google_drive_folder_id: Option<String>,
+    #[serde(default)]
+    pub dropbox_folder_path: Option<String>,
+    #[serde(default)]
+    pub onedrive_drive_id: Option<String>,
+    #[serde(default)]
+    pub onedrive_folder_id: Option<String>,
+    /// Whether this library's CloudKit zone is shared (joiner) vs owned (creator).
+    #[serde(default)]
+    pub cloudkit_is_shared: bool,
+    #[serde(default)]
+    pub http_url: Option<String>,
+}
+
 /// Configuration errors.
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
@@ -49,19 +80,8 @@ pub struct Config {
     pub encryption_key_stored: bool,
     /// SHA-256 fingerprint of the encryption key (detects wrong key without decryption).
     pub encryption_key_fingerprint: Option<String>,
-    /// Selected cloud provider for the cloud home. None = not configured.
-    pub cloud_provider: Option<CloudProvider>,
-    pub cloud_home_s3_bucket: Option<String>,
-    pub cloud_home_s3_region: Option<String>,
-    pub cloud_home_s3_endpoint: Option<String>,
-    pub cloud_home_s3_key_prefix: Option<String>,
-    pub cloud_home_google_drive_folder_id: Option<String>,
-    pub cloud_home_dropbox_folder_path: Option<String>,
-    pub cloud_home_onedrive_drive_id: Option<String>,
-    pub cloud_home_onedrive_folder_id: Option<String>,
-    /// Whether this library's CloudKit zone is shared (joiner) vs owned (creator).
-    pub cloud_home_cloudkit_is_shared: bool,
-    pub cloud_home_http_url: Option<String>,
+    /// Cloud home provider + its settings.
+    pub cloud_home: CloudHomeConfig,
 }
 
 impl Config {
@@ -79,22 +99,15 @@ impl Config {
         let has_s3 = matches!(creds, Some(CloudHomeCredentials::S3 { .. }));
         let has_oauth = matches!(creds, Some(CloudHomeCredentials::OAuth { .. }));
 
-        match self.cloud_provider {
-            Some(CloudProvider::S3) => {
-                self.cloud_home_s3_bucket.is_some() && self.cloud_home_s3_region.is_some() && has_s3
-            }
-            Some(CloudProvider::GoogleDrive) => {
-                self.cloud_home_google_drive_folder_id.is_some() && has_oauth
-            }
-            Some(CloudProvider::Dropbox) => {
-                self.cloud_home_dropbox_folder_path.is_some() && has_oauth
-            }
+        let ch = &self.cloud_home;
+        match ch.provider {
+            Some(CloudProvider::S3) => ch.s3_bucket.is_some() && ch.s3_region.is_some() && has_s3,
+            Some(CloudProvider::GoogleDrive) => ch.google_drive_folder_id.is_some() && has_oauth,
+            Some(CloudProvider::Dropbox) => ch.dropbox_folder_path.is_some() && has_oauth,
             Some(CloudProvider::OneDrive) => {
-                self.cloud_home_onedrive_drive_id.is_some()
-                    && self.cloud_home_onedrive_folder_id.is_some()
-                    && has_oauth
+                ch.onedrive_drive_id.is_some() && ch.onedrive_folder_id.is_some() && has_oauth
             }
-            Some(CloudProvider::HttpProxy) => self.cloud_home_http_url.is_some(),
+            Some(CloudProvider::HttpProxy) => ch.http_url.is_some(),
             Some(CloudProvider::CloudKit) => true,
             None => false,
         }
@@ -120,17 +133,7 @@ impl Config {
             library_name,
             encryption_key_stored: false,
             encryption_key_fingerprint: None,
-            cloud_provider: None,
-            cloud_home_s3_bucket: None,
-            cloud_home_s3_region: None,
-            cloud_home_s3_endpoint: None,
-            cloud_home_s3_key_prefix: None,
-            cloud_home_google_drive_folder_id: None,
-            cloud_home_dropbox_folder_path: None,
-            cloud_home_onedrive_drive_id: None,
-            cloud_home_onedrive_folder_id: None,
-            cloud_home_cloudkit_is_shared: false,
-            cloud_home_http_url: None,
+            cloud_home: CloudHomeConfig::default(),
         }
     }
 
@@ -161,28 +164,8 @@ pub struct ConfigYaml {
     pub encryption_key_stored: bool,
     #[serde(default)]
     pub encryption_key_fingerprint: Option<String>,
-    #[serde(default)]
-    pub cloud_provider: Option<CloudProvider>,
-    #[serde(default)]
-    pub cloud_home_s3_bucket: Option<String>,
-    #[serde(default)]
-    pub cloud_home_s3_region: Option<String>,
-    #[serde(default)]
-    pub cloud_home_s3_endpoint: Option<String>,
-    #[serde(default)]
-    pub cloud_home_s3_key_prefix: Option<String>,
-    #[serde(default)]
-    pub cloud_home_google_drive_folder_id: Option<String>,
-    #[serde(default)]
-    pub cloud_home_dropbox_folder_path: Option<String>,
-    #[serde(default)]
-    pub cloud_home_onedrive_drive_id: Option<String>,
-    #[serde(default)]
-    pub cloud_home_onedrive_folder_id: Option<String>,
-    #[serde(default)]
-    pub cloud_home_cloudkit_is_shared: bool,
-    #[serde(default)]
-    pub cloud_home_http_url: Option<String>,
+    #[serde(default, flatten)]
+    pub cloud_home: CloudHomeConfig,
 }
 
 impl ConfigYaml {
@@ -196,17 +179,7 @@ impl ConfigYaml {
             library_name: self.library_name,
             encryption_key_stored: self.encryption_key_stored,
             encryption_key_fingerprint: self.encryption_key_fingerprint,
-            cloud_provider: self.cloud_provider,
-            cloud_home_s3_bucket: self.cloud_home_s3_bucket,
-            cloud_home_s3_region: self.cloud_home_s3_region,
-            cloud_home_s3_endpoint: self.cloud_home_s3_endpoint,
-            cloud_home_s3_key_prefix: self.cloud_home_s3_key_prefix,
-            cloud_home_google_drive_folder_id: self.cloud_home_google_drive_folder_id,
-            cloud_home_dropbox_folder_path: self.cloud_home_dropbox_folder_path,
-            cloud_home_onedrive_drive_id: self.cloud_home_onedrive_drive_id,
-            cloud_home_onedrive_folder_id: self.cloud_home_onedrive_folder_id,
-            cloud_home_cloudkit_is_shared: self.cloud_home_cloudkit_is_shared,
-            cloud_home_http_url: self.cloud_home_http_url,
+            cloud_home: self.cloud_home,
         }
     }
 }
@@ -219,17 +192,7 @@ impl From<&Config> for ConfigYaml {
             device_id: Some(config.device_id.clone()),
             encryption_key_stored: config.encryption_key_stored,
             encryption_key_fingerprint: config.encryption_key_fingerprint.clone(),
-            cloud_provider: config.cloud_provider.clone(),
-            cloud_home_s3_bucket: config.cloud_home_s3_bucket.clone(),
-            cloud_home_s3_region: config.cloud_home_s3_region.clone(),
-            cloud_home_s3_endpoint: config.cloud_home_s3_endpoint.clone(),
-            cloud_home_s3_key_prefix: config.cloud_home_s3_key_prefix.clone(),
-            cloud_home_google_drive_folder_id: config.cloud_home_google_drive_folder_id.clone(),
-            cloud_home_dropbox_folder_path: config.cloud_home_dropbox_folder_path.clone(),
-            cloud_home_onedrive_drive_id: config.cloud_home_onedrive_drive_id.clone(),
-            cloud_home_onedrive_folder_id: config.cloud_home_onedrive_folder_id.clone(),
-            cloud_home_cloudkit_is_shared: config.cloud_home_cloudkit_is_shared,
-            cloud_home_http_url: config.cloud_home_http_url.clone(),
+            cloud_home: config.cloud_home.clone(),
         }
     }
 }

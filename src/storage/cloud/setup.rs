@@ -250,10 +250,11 @@ pub async fn sign_in_onedrive(
 
 /// Get a display string for the current cloud account (bucket name, username, etc.)
 pub fn cloud_account_display_for(config: &Config, key_service: &KeyService) -> Option<String> {
-    match config.cloud_provider.as_ref()? {
-        CloudProvider::HttpProxy => config.cloud_home_http_url.clone(),
+    match config.cloud_home.provider.as_ref()? {
+        CloudProvider::HttpProxy => config.cloud_home.http_url.clone(),
         CloudProvider::S3 => config
-            .cloud_home_s3_bucket
+            .cloud_home
+            .s3_bucket
             .as_ref()
             .map(|b| format!("s3://{b}")),
         CloudProvider::CloudKit => Some("iCloud".to_string()),
@@ -280,7 +281,7 @@ pub fn generate_restore_code(
 
     use crate::sync::restore_code::{encode_restore_code, RestoreCode, RestoreProvider};
 
-    let cloud_provider = config.cloud_provider.as_ref().ok_or_else(|| {
+    let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
         SetupError("No cloud provider configured. Set up sync first.".to_string())
     })?;
 
@@ -310,18 +311,20 @@ pub fn generate_restore_code(
                 }
             };
             let bucket = config
-                .cloud_home_s3_bucket
+                .cloud_home
+                .s3_bucket
                 .clone()
                 .ok_or_else(|| SetupError("S3 bucket not configured".to_string()))?;
             let region = config
-                .cloud_home_s3_region
+                .cloud_home
+                .s3_region
                 .clone()
                 .ok_or_else(|| SetupError("S3 region not configured".to_string()))?;
             RestoreProvider::S3 {
                 bucket,
                 region,
-                endpoint: config.cloud_home_s3_endpoint.clone(),
-                key_prefix: config.cloud_home_s3_key_prefix.clone(),
+                endpoint: config.cloud_home.s3_endpoint.clone(),
+                key_prefix: config.cloud_home.s3_key_prefix.clone(),
                 access_key,
                 secret_key,
             }
@@ -329,23 +332,27 @@ pub fn generate_restore_code(
         CloudProvider::CloudKit => RestoreProvider::CloudKit,
         CloudProvider::GoogleDrive => RestoreProvider::GoogleDrive {
             folder_id: config
-                .cloud_home_google_drive_folder_id
+                .cloud_home
+                .google_drive_folder_id
                 .clone()
                 .ok_or_else(|| SetupError("Google Drive folder ID not configured".to_string()))?,
         },
         CloudProvider::Dropbox => RestoreProvider::Dropbox {
             folder_path: config
-                .cloud_home_dropbox_folder_path
+                .cloud_home
+                .dropbox_folder_path
                 .clone()
                 .ok_or_else(|| SetupError("Dropbox folder path not configured".to_string()))?,
         },
         CloudProvider::OneDrive => {
             let drive_id = config
-                .cloud_home_onedrive_drive_id
+                .cloud_home
+                .onedrive_drive_id
                 .clone()
                 .ok_or_else(|| SetupError("OneDrive drive ID not configured".to_string()))?;
             let folder_id = config
-                .cloud_home_onedrive_folder_id
+                .cloud_home
+                .onedrive_folder_id
                 .clone()
                 .ok_or_else(|| SetupError("OneDrive folder ID not configured".to_string()))?;
             RestoreProvider::OneDrive {
@@ -355,7 +362,8 @@ pub fn generate_restore_code(
         }
         CloudProvider::HttpProxy => RestoreProvider::HttpProxy {
             url: config
-                .cloud_home_http_url
+                .cloud_home
+                .http_url
                 .clone()
                 .ok_or_else(|| SetupError("HTTP proxy URL not configured".to_string()))?,
         },

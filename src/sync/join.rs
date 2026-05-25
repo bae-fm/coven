@@ -416,7 +416,7 @@ pub(crate) fn build_config(
     config.encryption_key_stored = true;
     config.encryption_key_fingerprint = Some(encryption.fingerprint());
 
-    config.cloud_provider = Some(match join_info {
+    config.cloud_home.provider = Some(match join_info {
         CloudHomeJoinInfo::S3 { .. } => CloudProvider::S3,
         CloudHomeJoinInfo::HttpProxy { .. } => CloudProvider::HttpProxy,
         CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
@@ -433,29 +433,29 @@ pub(crate) fn build_config(
             key_prefix,
             ..
         } => {
-            config.cloud_home_s3_bucket = Some(bucket.clone());
-            config.cloud_home_s3_region = Some(region.clone());
-            config.cloud_home_s3_endpoint = endpoint.clone();
-            config.cloud_home_s3_key_prefix = key_prefix.clone();
+            config.cloud_home.s3_bucket = Some(bucket.clone());
+            config.cloud_home.s3_region = Some(region.clone());
+            config.cloud_home.s3_endpoint = endpoint.clone();
+            config.cloud_home.s3_key_prefix = key_prefix.clone();
         }
         CloudHomeJoinInfo::HttpProxy { url } => {
-            config.cloud_home_http_url = Some(url.clone());
+            config.cloud_home.http_url = Some(url.clone());
         }
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
-            config.cloud_home_google_drive_folder_id = Some(folder_id.clone());
+            config.cloud_home.google_drive_folder_id = Some(folder_id.clone());
         }
         CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
-            config.cloud_home_dropbox_folder_path = Some(shared_folder_id.clone());
+            config.cloud_home.dropbox_folder_path = Some(shared_folder_id.clone());
         }
         CloudHomeJoinInfo::OneDrive {
             drive_id,
             folder_id,
         } => {
-            config.cloud_home_onedrive_drive_id = Some(drive_id.clone());
-            config.cloud_home_onedrive_folder_id = Some(folder_id.clone());
+            config.cloud_home.onedrive_drive_id = Some(drive_id.clone());
+            config.cloud_home.onedrive_folder_id = Some(folder_id.clone());
         }
         CloudHomeJoinInfo::CloudKit { .. } => {
-            config.cloud_home_cloudkit_is_shared = true;
+            config.cloud_home.cloudkit_is_shared = true;
         }
     }
 
