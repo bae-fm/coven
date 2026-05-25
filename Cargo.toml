@@ -1,0 +1,65 @@
+[package]
+name = "coven"
+version = "0.0.0-dev"
+edition = "2021"
+
+[lib]
+name = "coven"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+serde_urlencoded = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+thiserror = "1.0"
+async-trait = "0.1"
+axum = "0.7"
+open = "5.3"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+blake2 = "0.10"
+chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+crypto_box = { version = "0.9", features = ["seal"] }
+rand = "0.9"
+uuid = { version = "1.0", features = ["v4"] }
+dirs = "5.0"
+urlencoding = "2.1"
+keyring-core = "0.7"
+libsqlite3-sys = { version = "0.30.1", features = ["session", "bundled"] }
+sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls"] }
+aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
+aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rt-tokio", "sigv4a"] }
+aws-credential-types = "1.2"
+aws-smithy-http-client = { version = "1.1", default-features = false, features = ["rustls-ring"] }
+tracing = "0.1.41"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+apple-native-keyring-store = { version = "0.2", features = ["protected"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "0.5"
+
+[dev-dependencies]
+tempfile = "3.8"
+rusqlite = { version = "0.32.1", features = ["session", "bundled"] }
+tokio = { version = "1.0", features = ["test-util"] }
+serial_test = "3.4.0"
+
+[features]
+test-utils = []
+
+[lints.clippy]
+too_many_arguments = "allow"
+new_without_default = "allow"
+large_enum_variant = "allow"

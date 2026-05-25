@@ -1,0 +1,503 @@
+//! OneDrive `CloudHome` implementation.
+//!
+//! Uses the Microsoft Graph API. Files are stored flat in a single folder --
+//! path separators are encoded as `__` (same as Google Drive) to avoid
+//! sub-folder creation.
+
+use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{info, warn};
+
+use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::clock::ClockRef;
+use crate::keys::KeyService;
+use crate::oauth::{self, OAuthConfig, OAuthTokens};
+
+const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
+
+/// OneDrive cloud home backend.
+pub struct OneDriveCloudHome {
+    client: reqwest::Client,
+    drive_id: String,
+    folder_id: String,
+    tokens: Arc<RwLock<OAuthTokens>>,
+    key_service: KeyService,
+    clock: ClockRef,
+}
+
+impl OneDriveCloudHome {
+    pub fn new(
+        drive_id: String,
+        folder_id: String,
+        tokens: OAuthTokens,
+        key_service: KeyService,
+        clock: ClockRef,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            drive_id,
+            folder_id,
+            tokens: Arc::new(RwLock::new(tokens)),
+            key_service,
+            clock,
+        }
+    }
+
+    pub fn oauth_config() -> OAuthConfig {
+        let creds = crate::oauth::oauth_client_creds("onedrive");
+        OAuthConfig {
+            client_id: creds.client_id,
+            client_secret: creds.client_secret,
+            auth_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
+                .to_string(),
+            token_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/token".to_string(),
+            scopes: vec!["Files.ReadWrite".to_string(), "offline_access".to_string()],
+            redirect_port: 19284,
+            extra_auth_params: vec![],
+        }
+    }
+
+    /// Encode a CloudHome key to a flat OneDrive filename.
+    /// `changes/dev1/42.enc` -> `changes__dev1__42.enc`
+    fn encode_key(key: &str) -> String {
+        key.replace('/', "__")
+    }
+
+    /// Decode a flat filename back to a CloudHome key.
+    /// `changes__dev1__42.enc` -> `changes/dev1/42.enc`
+    fn decode_key(filename: &str) -> String {
+        filename.replace("__", "/")
+    }
+
+    /// Build the Graph API URL for a file by encoded name within the app folder.
+    fn item_path_url(&self, key: &str) -> String {
+        let encoded = Self::encode_key(key);
+        format!(
+            "{}/drives/{}/items/{}:/{}:",
+            GRAPH_API, self.drive_id, self.folder_id, encoded
+        )
+    }
+
+    /// Build the Graph API URL for the folder's children endpoint.
+    fn children_url(&self) -> String {
+        format!(
+            "{}/drives/{}/items/{}/children",
+            GRAPH_API, self.drive_id, self.folder_id
+        )
+    }
+
+    /// Get the current access token, refreshing if expired.
+    async fn access_token(&self) -> Result<String, CloudHomeError> {
+        let tokens = self.tokens.read().await;
+        if let Some(expires_at) = tokens.expires_at {
+            if self.clock.now().timestamp() < expires_at - 60 {
+                return Ok(tokens.access_token.clone());
+            }
+        } else {
+            return Ok(tokens.access_token.clone());
+        }
+        drop(tokens);
+
+        self.refresh_tokens().await
+    }
+
+    /// Refresh the OAuth tokens and persist to keyring.
+    async fn refresh_tokens(&self) -> Result<String, CloudHomeError> {
+        let mut tokens = self.tokens.write().await;
+
+        // Double-check: another task may have refreshed while we waited for the write lock
+        if let Some(expires_at) = tokens.expires_at {
+            if self.clock.now().timestamp() < expires_at - 60 {
+                return Ok(tokens.access_token.clone());
+            }
+        }
+
+        let refresh_token = tokens.refresh_token.as_deref().ok_or_else(|| {
+            CloudHomeError::Storage(
+                "no refresh token available, re-authorization needed".to_string(),
+            )
+        })?;
+
+        let config = Self::oauth_config();
+        let new_tokens = oauth::refresh(&config, refresh_token, self.clock.as_ref())
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("OAuth refresh failed: {e}")))?;
+
+        // Persist to keyring
+        let json = serde_json::to_string(&new_tokens)
+            .map_err(|e| CloudHomeError::Storage(format!("serialize tokens: {e}")))?;
+        let creds = crate::keys::CloudHomeCredentials::OAuth { token_json: json };
+        if let Err(e) = self.key_service.set_cloud_home_credentials(&creds) {
+            warn!("Failed to persist refreshed OAuth tokens: {e}");
+        }
+
+        let access_token = new_tokens.access_token.clone();
+        *tokens = new_tokens;
+
+        info!("Refreshed OneDrive OAuth tokens");
+        Ok(access_token)
+    }
+
+    /// Make an API call with automatic token refresh on 401.
+    async fn api_call(
+        &self,
+        build_request: impl Fn(&str) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, CloudHomeError> {
+        let token = self.access_token().await?;
+        let resp = build_request(&token)
+            .send()
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("request failed: {e}")))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let new_token = self.refresh_tokens().await?;
+            let resp = build_request(&new_token)
+                .send()
+                .await
+                .map_err(|e| CloudHomeError::Storage(format!("retry request failed: {e}")))?;
+            Ok(resp)
+        } else {
+            Ok(resp)
+        }
+    }
+}
+
+#[async_trait]
+impl CloudHome for OneDriveCloudHome {
+    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let url = format!("{}/content", self.item_path_url(key));
+
+        let resp = self
+            .api_call(|token| {
+                self.client
+                    .put(&url)
+                    .bearer_auth(token)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(data.clone())
+            })
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            return Err(CloudHomeError::Storage(format!(
+                "write {key} (HTTP {status}): {body}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        let url = format!("{}/content", self.item_path_url(key));
+
+        let resp = self
+            .api_call(|token| self.client.get(&url).bearer_auth(token))
+            .await?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(CloudHomeError::NotFound(key.to_string()));
+        }
+        if !status.is_success() {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            return Err(CloudHomeError::Storage(format!(
+                "read {key} (HTTP {status}): {body}"
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("read body for {key}: {e}")))?;
+
+        Ok(bytes.to_vec())
+    }
+
+    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
+        let url = format!("{}/content", self.item_path_url(key));
+        let range = format!("bytes={}-{}", start, end.saturating_sub(1));
+
+        let resp = self
+            .api_call(|token| {
+                self.client
+                    .get(&url)
+                    .bearer_auth(token)
+                    .header("Range", &range)
+            })
+            .await?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(CloudHomeError::NotFound(key.to_string()));
+        }
+        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            return Err(CloudHomeError::Storage(format!(
+                "read range {key} (HTTP {status}): {body}"
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("read range body for {key}: {e}")))?;
+
+        Ok(bytes.to_vec())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        // All files are stored flat with encoded names. Fetch all children
+        // and filter client-side after decoding.
+        let mut all_keys = Vec::new();
+        let initial_url = format!("{}?$select=name", self.children_url());
+        let mut next_url: Option<String> = Some(initial_url);
+        let encoded_prefix = Self::encode_key(prefix);
+
+        while let Some(url) = next_url.take() {
+            let resp = self
+                .api_call(|token| self.client.get(&url).bearer_auth(token))
+                .await?;
+
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| CloudHomeError::Storage(format!("read body: {e}")))?;
+
+            if !status.is_success() {
+                return Err(CloudHomeError::Storage(format!(
+                    "list {prefix} (HTTP {status}): {body}"
+                )));
+            }
+
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| CloudHomeError::Storage(format!("parse list: {e}")))?;
+
+            if let Some(items) = json["value"].as_array() {
+                for item in items {
+                    if let Some(name) = item["name"].as_str() {
+                        if name.starts_with(&encoded_prefix) {
+                            all_keys.push(Self::decode_key(name));
+                        }
+                    }
+                }
+            }
+
+            // @odata.nextLink is a full URL with all params included
+            next_url = json["@odata.nextLink"].as_str().map(|s| s.to_string());
+        }
+
+        Ok(all_keys)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+        let url = self.item_path_url(key);
+
+        let resp = self
+            .api_call(|token| self.client.delete(&url).bearer_auth(token))
+            .await?;
+
+        let status = resp.status();
+        // 204 No Content is success, 404 is OK (already deleted)
+        if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            return Err(CloudHomeError::Storage(format!(
+                "delete {key} (HTTP {status}): {body}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        let url = self.item_path_url(key);
+
+        let resp = self
+            .api_call(|token| self.client.get(&url).bearer_auth(token))
+            .await?;
+
+        match resp.status() {
+            s if s.is_success() => Ok(true),
+            reqwest::StatusCode::NOT_FOUND => Ok(false),
+            status => {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+                Err(CloudHomeError::Storage(format!(
+                    "exists {key} (HTTP {status}): {body}"
+                )))
+            }
+        }
+    }
+
+    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        let url = format!(
+            "{}/drives/{}/items/{}/invite",
+            GRAPH_API, self.drive_id, self.folder_id
+        );
+
+        let invite = serde_json::json!({
+            "recipients": [{"email": member_id}],
+            "roles": ["write"],
+            "requireSignIn": true,
+        });
+
+        let resp = self
+            .api_call(|token| self.client.post(&url).bearer_auth(token).json(&invite))
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            return Err(CloudHomeError::Storage(format!(
+                "grant access to {member_id} (HTTP {status}): {body}"
+            )));
+        }
+
+        Ok(CloudHomeJoinInfo::OneDrive {
+            drive_id: self.drive_id.clone(),
+            folder_id: self.folder_id.clone(),
+        })
+    }
+
+    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
+        // First, list permissions on the folder to find the one matching member_id
+        let perms_url = format!(
+            "{}/drives/{}/items/{}/permissions",
+            GRAPH_API, self.drive_id, self.folder_id
+        );
+
+        let resp = self
+            .api_call(|token| self.client.get(&perms_url).bearer_auth(token))
+            .await?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("read body: {e}")))?;
+
+        if !status.is_success() {
+            return Err(CloudHomeError::Storage(format!(
+                "list permissions (HTTP {status}): {body}"
+            )));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| CloudHomeError::Storage(format!("parse permissions: {e}")))?;
+
+        // Find the permission entry whose grantedTo or grantedToV2 email matches member_id
+        let permission_id = json["value"]
+            .as_array()
+            .and_then(|perms| {
+                perms.iter().find_map(|p| {
+                    let email = p["grantedToV2"]["user"]["email"]
+                        .as_str()
+                        .or_else(|| p["grantedTo"]["user"]["email"].as_str());
+                    if email.map(|e| e.eq_ignore_ascii_case(member_id)) == Some(true) {
+                        p["id"].as_str().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| {
+                CloudHomeError::Storage(format!("no permission found for {member_id}"))
+            })?;
+
+        // Delete the permission
+        let delete_url = format!("{}/{}", perms_url, permission_id);
+
+        let resp = self
+            .api_call(|token| self.client.delete(&delete_url).bearer_auth(token))
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            return Err(CloudHomeError::Storage(format!(
+                "revoke access for {member_id} (HTTP {status}): {body}"
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_path_url_encodes_key() {
+        let home = OneDriveCloudHome {
+            client: reqwest::Client::new(),
+            drive_id: "drive123".to_string(),
+            folder_id: "folder456".to_string(),
+            tokens: Arc::new(RwLock::new(OAuthTokens {
+                access_token: "test".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            })),
+            key_service: KeyService::new(true, "test".to_string()),
+            clock: Arc::new(crate::clock::SystemClock),
+        };
+
+        // Keys with slashes are encoded to flat filenames
+        assert_eq!(
+            home.item_path_url("changes/dev1/42.enc"),
+            "https://graph.microsoft.com/v1.0/drives/drive123/items/folder456:/changes__dev1__42.enc:"
+        );
+    }
+
+    #[test]
+    fn children_url_format() {
+        let home = OneDriveCloudHome {
+            client: reqwest::Client::new(),
+            drive_id: "drive123".to_string(),
+            folder_id: "folder456".to_string(),
+            tokens: Arc::new(RwLock::new(OAuthTokens {
+                access_token: "test".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            })),
+            key_service: KeyService::new(true, "test".to_string()),
+            clock: Arc::new(crate::clock::SystemClock),
+        };
+
+        assert_eq!(
+            home.children_url(),
+            "https://graph.microsoft.com/v1.0/drives/drive123/items/folder456/children"
+        );
+    }
+
+    #[test]
+    fn oauth_config_uses_consumers_endpoint() {
+        let config = OneDriveCloudHome::oauth_config();
+        assert!(config.auth_url.contains("/consumers/"));
+        assert!(config.token_url.contains("/consumers/"));
+        assert!(config.scopes.contains(&"Files.ReadWrite".to_string()));
+        assert!(config.scopes.contains(&"offline_access".to_string()));
+    }
+}

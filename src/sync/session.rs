@@ -1,0 +1,102 @@
+/// Production session management for sync.
+///
+/// `SyncSession` wraps the low-level FFI `Session` and attaches the
+/// synced tables. It provides a clean start/changeset/end lifecycle.
+use std::sync::OnceLock;
+
+use super::session_ext::{Changeset, Session};
+
+/// The tables that participate in changeset sync, declared once at startup by
+/// the host via [`set_synced_tables`].
+static SYNCED_TABLES: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Declare the tables that participate in changeset sync. Call once at startup,
+/// before any sync session is created.
+///
+/// Each table must have an `id` text primary key at column 0 and an
+/// `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). Tables not listed
+/// here are local-only and never synced.
+pub fn set_synced_tables(tables: &[&str]) {
+    let _ = SYNCED_TABLES.set(tables.iter().map(|t| t.to_string()).collect());
+}
+
+/// The configured synced tables, or empty if [`set_synced_tables`] was never called.
+pub fn synced_tables() -> &'static [String] {
+    SYNCED_TABLES.get().map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// A sync session that tracks changes to all synced tables on a single connection.
+///
+/// Lifecycle:
+/// 1. `SyncSession::start(db)` -- creates and attaches
+/// 2. App writes normally through the connection
+/// 3. `session.changeset()` -- grabs the binary diff (None if no changes)
+/// 4. Session is dropped (or explicitly ended by dropping)
+///
+/// The session must be dropped before applying incoming changesets to avoid
+/// contaminating the next outgoing changeset with other devices' changes.
+pub struct SyncSession {
+    session: Session,
+}
+
+impl SyncSession {
+    /// Create a new sync session on the given raw sqlite3 connection,
+    /// attaching all synced tables.
+    ///
+    /// # Safety
+    /// `db` must be a valid, open sqlite3 connection pointer. The session
+    /// must be dropped before the connection is closed.
+    pub unsafe fn start(db: *mut libsqlite3_sys::sqlite3) -> Result<Self, SyncError> {
+        let session = Session::new(db).map_err(SyncError::SessionCreate)?;
+
+        for table in synced_tables() {
+            session
+                .attach(Some(table.as_str()))
+                .map_err(|rc| SyncError::SessionAttach(table.clone(), rc))?;
+        }
+
+        Ok(SyncSession { session })
+    }
+
+    /// Grab the binary changeset of all changes since the session started.
+    /// Returns `None` if no changes were made (avoids pushing empty changesets).
+    pub fn changeset(&self) -> Result<Option<Changeset>, SyncError> {
+        let cs = self
+            .session
+            .changeset()
+            .map_err(SyncError::ChangesetExtract)?;
+
+        if cs.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(cs))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SyncError {
+    /// Failed to create a session (sqlite3 error code).
+    SessionCreate(i32),
+    /// Failed to attach a table (table name, sqlite3 error code).
+    SessionAttach(String, i32),
+    /// Failed to extract a changeset (sqlite3 error code).
+    ChangesetExtract(i32),
+    /// Failed to apply a changeset (sqlite3 error code).
+    ChangesetApply(i32),
+}
+
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncError::SessionCreate(rc) => write!(f, "session create failed (rc={rc})"),
+            SyncError::SessionAttach(table, rc) => {
+                write!(f, "session attach failed for {table} (rc={rc})")
+            }
+            SyncError::ChangesetExtract(rc) => write!(f, "changeset extract failed (rc={rc})"),
+            SyncError::ChangesetApply(rc) => write!(f, "changeset apply failed (rc={rc})"),
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
