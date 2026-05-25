@@ -8,13 +8,15 @@ use tracing::{info, warn};
 use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, KeyService};
 
-/// Google Drive OAuth sign-in: authorize, create/find folder, save tokens + config.
+/// Google Drive OAuth sign-in: authorize, find/create the library folder, save
+/// tokens to the keyring. Returns the folder id for the host to persist in its
+/// own config (coven never writes the host's config).
 pub async fn sign_in_google_drive(
     key_service: &KeyService,
-    app_config: &Config,
+    library_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
-) -> Result<(), SetupError> {
+) -> Result<String, SetupError> {
     let oauth_config = super::google_drive::GoogleDriveCloudHome::oauth_config();
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
@@ -23,7 +25,7 @@ pub async fn sign_in_google_drive(
     let client = reqwest::Client::new();
 
     // Create or find the folder
-    let folder_name = format!("bae - {}", app_config.library_name);
+    let folder_name = format!("bae - {library_name}");
 
     let search_query = format!(
         "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
@@ -99,25 +101,18 @@ pub async fn sign_in_google_drive(
         .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
         .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))?;
 
-    // Save config
-    let mut config = app_config.clone();
-    config.cloud_provider = Some(CloudProvider::GoogleDrive);
-    config.cloud_home_google_drive_folder_id = Some(folder_id);
-    config
-        .save()
-        .map_err(|e| SetupError(format!("Failed to save config: {e}")))?;
-
-    info!("Configured Google Drive cloud provider");
-    Ok(())
+    info!("Authorized Google Drive; folder ready");
+    Ok(folder_id)
 }
 
-/// Dropbox OAuth sign-in: authorize, create folder, save tokens + config.
+/// Dropbox OAuth sign-in: authorize, create the library folder, save tokens to
+/// the keyring. Returns the folder path for the host to persist in its config.
 pub async fn sign_in_dropbox(
     key_service: &KeyService,
-    app_config: &Config,
+    library_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
-) -> Result<(), SetupError> {
+) -> Result<String, SetupError> {
     let oauth_config = super::dropbox::DropboxCloudHome::oauth_config();
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
@@ -125,7 +120,7 @@ pub async fn sign_in_dropbox(
 
     let client = reqwest::Client::new();
 
-    let folder_path = format!("/Apps/bae/{}", app_config.library_name);
+    let folder_path = format!("/Apps/bae/{library_name}");
 
     // Create the folder (ignore error if it already exists)
     let create_body = serde_json::json!({
@@ -161,25 +156,18 @@ pub async fn sign_in_dropbox(
         .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
         .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))?;
 
-    // Save config
-    let mut config = app_config.clone();
-    config.cloud_provider = Some(CloudProvider::Dropbox);
-    config.cloud_home_dropbox_folder_path = Some(folder_path);
-    config
-        .save()
-        .map_err(|e| SetupError(format!("Failed to save config: {e}")))?;
-
-    info!("Configured Dropbox cloud provider");
-    Ok(())
+    info!("Authorized Dropbox; folder ready");
+    Ok(folder_path)
 }
 
-/// OneDrive OAuth sign-in: authorize, get drive, create folder, save tokens + config.
+/// OneDrive OAuth sign-in: authorize, resolve the default drive, create the app
+/// folder, save tokens to the keyring. Returns `(drive_id, folder_id)` for the
+/// host to persist in its config.
 pub async fn sign_in_onedrive(
     key_service: &KeyService,
-    app_config: &Config,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
-) -> Result<(), SetupError> {
+) -> Result<(String, String), SetupError> {
     let oauth_config = super::onedrive::OneDriveCloudHome::oauth_config();
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
@@ -256,61 +244,8 @@ pub async fn sign_in_onedrive(
         .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
         .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))?;
 
-    // Save config
-    let mut config = app_config.clone();
-    config.cloud_provider = Some(CloudProvider::OneDrive);
-    config.cloud_home_onedrive_drive_id = Some(drive_id);
-    config.cloud_home_onedrive_folder_id = Some(folder_id);
-    config
-        .save()
-        .map_err(|e| SetupError(format!("Failed to save config: {e}")))?;
-
-    info!("Configured OneDrive cloud provider");
-    Ok(())
-}
-
-/// Connect an HTTP proxy by URL (no signup/login -- auth is via Ed25519 keys).
-pub fn connect_http_proxy(url: &str, app_config: &Config) -> Result<(), SetupError> {
-    let mut config = app_config.clone();
-    config.cloud_provider = Some(CloudProvider::HttpProxy);
-    config.cloud_home_http_url = Some(url.to_string());
-    config
-        .save()
-        .map_err(|e| SetupError(format!("Config save error: {e}")))?;
-    Ok(())
-}
-
-/// Disconnect the current cloud provider, clearing all sync credentials and config.
-pub fn disconnect_cloud_provider(
-    key_service: &KeyService,
-    app_config: &Config,
-) -> Result<(), SetupError> {
-    let mut config = app_config.clone();
-
-    // Clear all cloud home config fields
-    config.cloud_provider = None;
-    config.cloud_home_s3_bucket = None;
-    config.cloud_home_s3_region = None;
-    config.cloud_home_s3_endpoint = None;
-    config.cloud_home_s3_key_prefix = None;
-    config.cloud_home_google_drive_folder_id = None;
-    config.cloud_home_dropbox_folder_path = None;
-    config.cloud_home_onedrive_drive_id = None;
-    config.cloud_home_onedrive_folder_id = None;
-    config.cloud_home_cloudkit_is_shared = false;
-    config.cloud_home_http_url = None;
-
-    config
-        .save()
-        .map_err(|e| SetupError(format!("Failed to save config: {e}")))?;
-
-    // Delete cloud home credentials from keyring (best-effort)
-    if let Err(e) = key_service.delete_cloud_home_credentials() {
-        warn!("Failed to delete cloud home credentials: {e}");
-    }
-
-    info!("Disconnected cloud provider");
-    Ok(())
+    info!("Authorized OneDrive; folder ready");
+    Ok((drive_id, folder_id))
 }
 
 /// Get a display string for the current cloud account (bucket name, username, etc.)
