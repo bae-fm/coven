@@ -199,7 +199,7 @@ pub async fn restore_from_cloud(
     app_dir: &Path,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
-    blob_plan: &dyn BlobPlan,
+    make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
     if library_id.is_empty() || encryption_key_hex.is_empty() {
@@ -233,6 +233,8 @@ pub async fn restore_from_cloud(
     let device_id = ids.new_id();
     let library_dir = LibraryDir::new(app_dir.join("libraries").join(library_id));
     std::fs::create_dir_all(&*library_dir)?;
+    // The host's blob plan is bound to the library dir we just created.
+    let blob_plan = make_blob_plan(&library_dir);
 
     let key_service = KeyService::new(dev_mode, library_id.to_string());
 
@@ -246,7 +248,7 @@ pub async fn restore_from_cloud(
         &join_info,
         library_name,
         &key_service,
-        blob_plan,
+        blob_plan.as_ref(),
         &on_status,
     )
     .await;
@@ -279,7 +281,7 @@ pub async fn restore_from_code(
     app_dir: &Path,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
-    blob_plan: &dyn BlobPlan,
+    make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -349,7 +351,7 @@ pub async fn restore_from_code(
         app_dir,
         clock,
         ids,
-        blob_plan,
+        make_blob_plan,
         on_status,
     )
     .await?;

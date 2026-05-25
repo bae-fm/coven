@@ -168,7 +168,7 @@ pub async fn join_from_invite_code(
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
-    blob_plan: &dyn BlobPlan,
+    make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
     let code = crate::join_code::decode(invite_code_str)
@@ -195,7 +195,7 @@ pub async fn join_from_invite_code(
         &global_ks,
         cloud_home,
         ids.as_ref(),
-        blob_plan,
+        make_blob_plan,
         &on_status,
     )
     .await?;
@@ -216,7 +216,7 @@ pub async fn join_library(
     key_service: &KeyService,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
-    blob_plan: &dyn BlobPlan,
+    make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
     // Step 1: Load user keypair (must already exist — the inviter wrapped the
@@ -241,6 +241,8 @@ pub async fn join_library(
     let device_id = ids.new_id();
     let library_dir = LibraryDir::new(bae_dir.join("libraries").join(&library_id));
     std::fs::create_dir_all(&*library_dir)?;
+    // The host's blob plan is bound to the library dir we just created.
+    let blob_plan = make_blob_plan(&library_dir);
 
     // All steps after directory creation are wrapped so we can clean up on failure.
     let new_key_service = KeyService::new(key_service.is_dev_mode(), library_id.clone());
@@ -255,7 +257,7 @@ pub async fn join_library(
         &code.join_info,
         &code.library_name,
         &new_key_service,
-        blob_plan,
+        blob_plan.as_ref(),
         &on_status,
     )
     .await;
