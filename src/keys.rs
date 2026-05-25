@@ -182,14 +182,17 @@ pub fn set_keyring_service(name: impl Into<String>) {
     let _ = KEYRING_SERVICE.set(name.into());
 }
 
-fn keyring_service() -> &'static str {
+/// The configured keyring service name (see [`set_keyring_service`]). Public so
+/// host apps store their own credentials under the same service.
+pub fn keyring_service() -> &'static str {
     KEYRING_SERVICE.get().map(String::as_str).unwrap_or("coven")
 }
 
 /// Read a keyring password by account name, distinguishing "not set" (returns
 /// `None` silently) from a genuine keyring failure (returns `None` but logs it).
-/// An empty stored value is treated as not set.
-fn read_keyring(account: &str) -> Option<String> {
+/// An empty stored value is treated as not set. Public so host apps read their
+/// own namespaced credentials with the same not-set/failure semantics.
+pub fn read_keyring(account: &str) -> Option<String> {
     let entry = match keyring_core::Entry::new(keyring_service(), account) {
         Ok(e) => e,
         Err(e) => {
@@ -224,6 +227,12 @@ impl KeyService {
 
     pub fn is_dev_mode(&self) -> bool {
         self.dev_mode
+    }
+
+    /// The library this key service is scoped to. Lets host apps namespace their
+    /// own keyring accounts the same way coven does.
+    pub fn library_id(&self) -> &str {
+        &self.library_id
     }
 
     /// Build a namespaced account name for keyring entries.
