@@ -19,17 +19,51 @@ pub struct ChangesetEnvelope {
     /// Hex-encoded Ed25519 public key of the author. None for unsigned changesets.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub author_pubkey: Option<String>,
-    /// Hex-encoded detached Ed25519 signature over the changeset bytes. None for unsigned.
+    /// Hex-encoded detached Ed25519 signature over the envelope metadata and
+    /// changeset bytes (see `signing_payload`). None for unsigned.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub signature: Option<String>,
+}
+
+/// The envelope fields the signature covers, in declaration order. Excludes
+/// `author_pubkey`/`signature` (the signature's own outputs); the changeset
+/// bytes are appended in [`signing_payload`].
+#[derive(Serialize)]
+struct SignedEnvelopeFields<'a> {
+    device_id: &'a str,
+    seq: u64,
+    schema_version: u32,
+    message: &'a str,
+    timestamp: &'a str,
+    changeset_size: usize,
+}
+
+/// Canonical bytes a changeset signature covers: the authorization-relevant
+/// envelope metadata followed by the changeset payload. Binding the metadata --
+/// not just the payload -- means a signed changeset can't be re-stamped with a
+/// forged timestamp or position to slip past pull-side membership validation.
+fn signing_payload(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> Vec<u8> {
+    let fields = SignedEnvelopeFields {
+        device_id: &env.device_id,
+        seq: env.seq,
+        schema_version: env.schema_version,
+        message: &env.message,
+        timestamp: &env.timestamp,
+        changeset_size: env.changeset_size,
+    };
+    let mut payload = serde_json::to_vec(&fields).expect("signed fields serialization cannot fail");
+    payload.push(0);
+    payload.extend_from_slice(changeset_bytes);
+    payload
 }
 
 /// Sign a changeset envelope with the user's Ed25519 keypair.
 ///
 /// Sets `author_pubkey` to the hex-encoded public key and `signature` to the
-/// hex-encoded detached signature over the raw changeset bytes.
+/// hex-encoded detached signature over the envelope metadata and changeset
+/// bytes (see `signing_payload`).
 pub fn sign_envelope(env: &mut ChangesetEnvelope, keypair: &UserKeypair, changeset_bytes: &[u8]) {
-    let sig = keypair.sign(changeset_bytes);
+    let sig = keypair.sign(&signing_payload(env, changeset_bytes));
     env.author_pubkey = Some(hex::encode(keypair.public_key));
     env.signature = Some(hex::encode(sig));
 }
@@ -66,7 +100,7 @@ pub fn verify_changeset_signature(env: &ChangesetEnvelope, changeset_bytes: &[u8
         return false;
     };
 
-    keys::verify_signature(&sig, changeset_bytes, &pk)
+    keys::verify_signature(&sig, &signing_payload(env, changeset_bytes), &pk)
 }
 
 /// Pack an envelope and changeset into the wire format.
@@ -251,6 +285,24 @@ mod tests {
 
         // Tampered changeset bytes fail verification.
         assert!(!verify_changeset_signature(&env, b"tampered payload"));
+
+        // The signature binds envelope metadata, not just the payload. Mutating
+        // an authorization-relevant field (timestamp) after signing must
+        // invalidate it -- otherwise a revoked member could backdate a signed
+        // changeset to a time they were still a member and slip past pull-side
+        // membership validation.
+        let mut backdated = env.clone();
+        backdated.timestamp = "2000-01-01T00:00:00Z".to_string();
+        assert!(!verify_changeset_signature(&backdated, changeset_bytes));
+
+        // The changeset's identity (device_id, seq) is bound too, so a signed
+        // changeset can't be replayed under a different position.
+        let mut moved = env.clone();
+        moved.seq += 1;
+        assert!(!verify_changeset_signature(&moved, changeset_bytes));
+        let mut rehomed = env.clone();
+        rehomed.device_id = "other-device".to_string();
+        assert!(!verify_changeset_signature(&rehomed, changeset_bytes));
 
         // Unsigned envelope passes verification.
         let unsigned_env = test_envelope();
