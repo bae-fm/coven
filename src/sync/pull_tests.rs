@@ -8,7 +8,11 @@ use std::collections::HashMap;
 use libsqlite3_sys as ffi;
 
 use crate::blob::BlobPlan;
+use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::sync::membership::{
+    sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
+};
 use crate::sync::pull::pull_changes;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::SyncSession;
@@ -33,6 +37,21 @@ fn temp_library_dir() -> (tempfile::TempDir, LibraryDir) {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = LibraryDir::new(tmp.path());
     (tmp, dir)
+}
+
+/// A signed founder (first) membership entry for `kp`.
+fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
+    let pk_hex = hex::encode(kp.public_key);
+    let mut entry = MembershipEntry {
+        action: MembershipAction::Add,
+        user_pubkey: pk_hex.clone(),
+        role: MemberRole::Owner,
+        timestamp: timestamp.to_string(),
+        author_pubkey: pk_hex,
+        signature: String::new(),
+    };
+    sign_membership_entry(&mut entry, kp);
+    entry
 }
 
 #[tokio::test]
@@ -180,6 +199,57 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         assert!(!result.asset_downloads_failed);
         let downloaded = std::fs::read(dst_photos.path().join("p1")).expect("downloaded photo");
         assert_eq!(downloaded, b"PHOTOBYTES");
+
+        ffi::sqlite3_close(db1);
+        ffi::sqlite3_close(db2);
+    }
+}
+
+#[tokio::test]
+async fn pull_rejects_unsigned_changeset_when_chain_exists() {
+    unsafe {
+        init_synced_tables();
+        let storage = MockSyncStorage::new();
+
+        // A membership chain exists, founded after the changeset's timestamp.
+        // `store_changeset` stamps changesets at 2026-02-10, so this unsigned
+        // changeset predates the chain -- the case the old grandfathering path
+        // admitted. Coven always signs its changesets, so an unsigned one here
+        // is forged; a chained library must reject it rather than apply it.
+        let founder = UserKeypair::generate();
+        let entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
+        let entry_bytes = serde_json::to_vec(&entry).expect("serialize founder");
+        storage
+            .put_membership_entry(&hex::encode(founder.public_key), 1, entry_bytes)
+            .await
+            .expect("put founder entry");
+
+        let db1 = open_memory_db();
+        create_synced_schema(db1);
+        let cs = capture_bytes(
+            db1,
+            &["INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('n1', 'Forged', NULL, '0000000001000-0000-dev1', '2026-01-01')"],
+        );
+        storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+        let db2 = open_memory_db();
+        create_synced_schema(db2);
+        let (updated, result) = pull_changes(
+            db2,
+            &storage,
+            "dev2",
+            &HashMap::new(),
+            &temp_library_dir().1,
+            &NoopBlobPlan,
+        )
+        .await
+        .expect("pull");
+
+        assert_eq!(result.changesets_applied, 0);
+        assert!(!row_exists(db2, "SELECT 1 FROM notes WHERE id = 'n1'"));
+        // The cursor still advances past the rejected seq so it isn't refetched.
+        assert_eq!(updated.get("dev1"), Some(&1));
 
         ffi::sqlite3_close(db1);
         ffi::sqlite3_close(db2);

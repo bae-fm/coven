@@ -198,35 +198,25 @@ pub async unsafe fn pull_changes(
                 continue;
             }
 
-            // Membership validation: if a chain exists, verify the author
-            // was a member at the time the changeset was created.
+            // Membership validation: in a chain-enabled library every changeset
+            // must be signed (its signature is verified above) by a member who
+            // was authorized at the signature-bound timestamp. Coven always
+            // signs at creation, so an unsigned or non-member changeset here is
+            // forged -- reject it.
             if let Some(chain) = membership_chain.as_ref() {
-                if let Some(ref pk) = env.author_pubkey {
-                    if !chain.is_member_at(pk, &env.timestamp) {
-                        warn!(
-                            device_id = %head.device_id,
-                            seq,
-                            author = %pk,
-                            "changeset author not a member at timestamp, skipping"
-                        );
-                        updated_cursors.insert(head.device_id.clone(), seq);
-                        continue;
-                    }
-                }
-
-                // Unsigned changesets in a chain-enabled library: skip them
-                // unless they predate the chain's first entry (grandfathered).
-                if env.author_pubkey.is_none() {
-                    let first_entry_ts = chain.entries().first().map(|e| e.timestamp.as_str());
-                    if first_entry_ts.is_some_and(|ts| env.timestamp.as_str() >= ts) {
-                        warn!(
-                            device_id = %head.device_id,
-                            seq,
-                            "unsigned changeset after membership chain created, skipping"
-                        );
-                        updated_cursors.insert(head.device_id.clone(), seq);
-                        continue;
-                    }
+                let authorized = env
+                    .author_pubkey
+                    .as_ref()
+                    .is_some_and(|pk| chain.is_member_at(pk, &env.timestamp));
+                if !authorized {
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        author = ?env.author_pubkey,
+                        "changeset not signed by a current member, skipping"
+                    );
+                    updated_cursors.insert(head.device_id.clone(), seq);
+                    continue;
                 }
             }
 
