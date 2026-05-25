@@ -44,6 +44,7 @@ pub struct SyncManager {
 }
 
 /// A member as returned by get_members.
+#[derive(Debug, Clone)]
 pub struct MemberInfo {
     pub pubkey: String,
     pub role: MemberRole,
@@ -51,6 +52,7 @@ pub struct MemberInfo {
 }
 
 /// Sync status snapshot.
+#[derive(Debug, Clone)]
 pub struct SyncStatus {
     pub configured: bool,
     pub syncing: bool,
