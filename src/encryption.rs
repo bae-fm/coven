@@ -25,17 +25,6 @@ pub fn generate_random_key() -> [u8; 32] {
     key
 }
 
-/// Compute fingerprint from a hex-encoded key string without creating an EncryptionService.
-/// Returns None if the key is invalid (bad hex or wrong length).
-pub fn compute_key_fingerprint(key_hex: &str) -> Option<String> {
-    let key_bytes = hex::decode(key_hex).ok()?;
-    if key_bytes.len() != 32 {
-        return None;
-    }
-    let hash = Sha256::digest(&key_bytes);
-    Some(hex::encode(&hash[..8]))
-}
-
 #[derive(Error, Debug)]
 pub enum EncryptionError {
     #[error("Encryption failed: {0}")]
@@ -830,23 +819,6 @@ mod tests {
         let service1 = EncryptionService::new_with_key(&[0u8; 32]);
         let service2 = EncryptionService::new_with_key(&[1u8; 32]);
         assert_ne!(service1.fingerprint(), service2.fingerprint());
-    }
-
-    #[test]
-    fn test_compute_key_fingerprint_matches_instance() {
-        let key_hex = hex::encode(test_key());
-        let service = create_test_service();
-        assert_eq!(
-            compute_key_fingerprint(&key_hex).unwrap(),
-            service.fingerprint()
-        );
-    }
-
-    #[test]
-    fn test_compute_key_fingerprint_invalid() {
-        assert!(compute_key_fingerprint("not-hex").is_none());
-        assert!(compute_key_fingerprint(&hex::encode([0u8; 16])).is_none()); // wrong length
-        assert!(compute_key_fingerprint("").is_none());
     }
 
     #[test]
