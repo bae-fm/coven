@@ -287,6 +287,7 @@ pub fn generate_restore_code(
 
     let encryption_key_hex = key_service
         .get_encryption_key()
+        .map_err(|e| SetupError(format!("Failed to read encryption key: {e}")))?
         .ok_or_else(|| SetupError("No encryption key found".to_string()))?;
 
     let keypair = key_service
@@ -401,6 +402,7 @@ pub async fn create_sync_storage(
         None => {
             let key = key_service
                 .get_encryption_key()
+                .map_err(|e| format!("Failed to read encryption key: {e}"))?
                 .ok_or("No encryption key found")?;
             crate::encryption::EncryptionService::new(&key)
                 .map_err(|e| format!("Failed to create encryption service: {e}"))?

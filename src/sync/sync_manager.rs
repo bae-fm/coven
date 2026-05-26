@@ -183,8 +183,11 @@ impl SyncManager {
     // Keys / codes
     // =========================================================================
 
-    pub fn get_user_pubkey(&self) -> Option<String> {
-        self.key_service.get_user_public_key().map(hex::encode)
+    pub fn get_user_pubkey(&self) -> Result<Option<String>, String> {
+        self.key_service
+            .get_user_public_key()
+            .map(|opt| opt.map(hex::encode))
+            .map_err(|e| format!("Failed to read user public key: {e}"))
     }
 
     pub fn generate_restore_code(&self) -> Result<String, String> {
@@ -212,7 +215,10 @@ impl SyncManager {
         .await
         .map_err(|e| format!("Failed to create storage client: {e}"))?;
 
-        let user_pubkey = self.key_service.get_user_public_key();
+        let user_pubkey = self
+            .key_service
+            .get_user_public_key()
+            .map_err(|e| format!("Failed to read user public key: {e}"))?;
         let members = crate::sync::membership_ops::get_members(
             &storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
@@ -245,6 +251,7 @@ impl SyncManager {
         let encryption_key_hex = self
             .key_service
             .get_encryption_key()
+            .map_err(|e| format!("Failed to read encryption key: {e}"))?
             .ok_or("Encryption key not configured")?;
 
         let key_bytes: [u8; 32] = hex::decode(&encryption_key_hex)

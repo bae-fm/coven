@@ -2,7 +2,7 @@ use ed25519_dalek::{Signer, Verifier};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 
 // Size constants matching libsodium conventions. Exported so callers (sync modules,
 // envelope.rs, etc.) can use them for array sizes and length checks.
@@ -190,25 +190,34 @@ pub fn keyring_service() -> &'static str {
     KEYRING_SERVICE.get().map(String::as_str).unwrap_or("coven")
 }
 
-/// Read a keyring password by account name, distinguishing "not set" (returns
-/// `None` silently) from a genuine keyring failure (returns `None` but logs it).
-/// An empty stored value is treated as not set. Public so host apps read their
-/// own namespaced credentials with the same not-set/failure semantics.
-pub fn read_keyring(account: &str) -> Option<String> {
-    let entry = match keyring_core::Entry::new(keyring_service(), account) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!("keyring entry '{account}' unavailable: {e}");
-            return None;
-        }
-    };
+/// Read a keyring password by account name, distinguishing "not set"
+/// (`Ok(None)`) from a backend failure (`Err`). An empty stored value is
+/// treated as not set. Public so host apps read their own namespaced
+/// credentials with the same not-set/failure semantics.
+///
+/// Silently collapsing backend errors into `None` would mask the corrupt-
+/// local-identity case (a missing key looks identical to a broken keyring),
+/// which is the worst failure mode for security-sensitive surfaces.
+pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
+    let entry = keyring_core::Entry::new(keyring_service(), account)?;
     match entry.get_password() {
-        Ok(p) if !p.is_empty() => Some(p),
-        Ok(_) => None,
-        Err(keyring_core::Error::NoEntry) => None,
-        Err(e) => {
-            warn!("keyring read '{account}' failed: {e}");
-            None
+        Ok(p) if p.is_empty() => Ok(None),
+        Ok(p) => Ok(Some(p)),
+        Err(keyring_core::Error::NoEntry) => Ok(None),
+        Err(e) => Err(KeyError::Keyring(e)),
+    }
+}
+
+/// Read an env var, distinguishing "not set" (`Ok(None)`) from non-utf8
+/// content (`Err`). An empty value is treated as not set. Mirrors
+/// [`read_keyring`]'s semantics for dev-mode reads.
+pub fn read_env(var: &str) -> Result<Option<String>, KeyError> {
+    match std::env::var(var) {
+        Ok(v) if v.is_empty() => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e @ std::env::VarError::NotUnicode(_)) => {
+            Err(KeyError::Crypto(format!("env var {var}: {e}")))
         }
     }
 }
@@ -242,28 +251,34 @@ impl KeyService {
         format!("{}:{}", base, self.library_id)
     }
 
-    /// Read the encryption master key. Returns None if not configured.
+    /// Read from the dev-mode env var or the keyring depending on this service's
+    /// mode. The shared dispatch every getter needs; surfaces backend / non-utf8
+    /// failures as `Err` rather than collapsing them into `Ok(None)`.
+    fn read(&self, env_var: &str, account: &str) -> Result<Option<String>, KeyError> {
+        if self.dev_mode {
+            read_env(env_var)
+        } else {
+            read_keyring(account)
+        }
+    }
+
+    /// Read the encryption master key. `Ok(None)` if not configured, `Err`
+    /// if the underlying read failed (keyring backend error or non-utf8 env).
     ///
     /// Dev mode: reads `BAE_ENCRYPTION_KEY` env var.
     /// Prod mode: reads from OS keyring (may trigger a system prompt on first access).
-    pub fn get_encryption_key(&self) -> Option<String> {
-        if self.dev_mode {
-            std::env::var("BAE_ENCRYPTION_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-        } else {
-            read_keyring(&self.account("encryption_master_key"))
-        }
+    pub fn get_encryption_key(&self) -> Result<Option<String>, KeyError> {
+        self.read("BAE_ENCRYPTION_KEY", &self.account("encryption_master_key"))
     }
 
     /// Get the encryption key, creating a new one if none exists.
     /// Errors in dev mode (use environment variables instead).
     pub fn get_or_create_encryption_key(&self) -> Result<String, KeyError> {
         if self.dev_mode {
-            return self.get_encryption_key().ok_or(KeyError::DevMode);
+            return self.get_encryption_key()?.ok_or(KeyError::DevMode);
         }
 
-        if let Some(key) = self.get_encryption_key() {
+        if let Some(key) = self.get_encryption_key()? {
             return Ok(key);
         }
 
@@ -288,105 +303,6 @@ impl KeyService {
     }
 
     // -------------------------------------------------------------------------
-    // Per-storage-profile S3 credentials
-    // -------------------------------------------------------------------------
-
-    /// Read the S3 access key for a storage profile. Returns None if not set.
-    ///
-    /// Dev mode: reads `BAE_S3_ACCESS_KEY_{profile_id}`, then falls back to `BAE_S3_ACCESS_KEY`.
-    /// Prod mode: reads from OS keyring.
-    pub fn get_profile_access_key(&self, profile_id: &str) -> Option<String> {
-        if self.dev_mode {
-            std::env::var(format!("BAE_S3_ACCESS_KEY_{}", profile_id))
-                .ok()
-                .filter(|k| !k.is_empty())
-                .or_else(|| {
-                    std::env::var("BAE_S3_ACCESS_KEY")
-                        .ok()
-                        .filter(|k| !k.is_empty())
-                })
-        } else {
-            let account = self.account(&format!("s3_access_key:{}", profile_id));
-            read_keyring(&account)
-        }
-    }
-
-    /// Save the S3 access key for a storage profile.
-    ///
-    /// Dev mode: sets the env var (so tests can round-trip without a real keyring).
-    /// Prod mode: writes to OS keyring.
-    pub fn set_profile_access_key(&self, profile_id: &str, value: &str) -> Result<(), KeyError> {
-        if self.dev_mode {
-            std::env::set_var(format!("BAE_S3_ACCESS_KEY_{}", profile_id), value);
-            return Ok(());
-        }
-
-        let account = self.account(&format!("s3_access_key:{}", profile_id));
-        keyring_core::Entry::new(keyring_service(), &account)?.set_password(value)?;
-        info!("S3 access key saved for profile {}", profile_id);
-        Ok(())
-    }
-
-    /// Read the S3 secret key for a storage profile. Returns None if not set.
-    ///
-    /// Dev mode: reads `BAE_S3_SECRET_KEY_{profile_id}`, then falls back to `BAE_S3_SECRET_KEY`.
-    /// Prod mode: reads from OS keyring.
-    pub fn get_profile_secret_key(&self, profile_id: &str) -> Option<String> {
-        if self.dev_mode {
-            std::env::var(format!("BAE_S3_SECRET_KEY_{}", profile_id))
-                .ok()
-                .filter(|k| !k.is_empty())
-                .or_else(|| {
-                    std::env::var("BAE_S3_SECRET_KEY")
-                        .ok()
-                        .filter(|k| !k.is_empty())
-                })
-        } else {
-            let account = self.account(&format!("s3_secret_key:{}", profile_id));
-            read_keyring(&account)
-        }
-    }
-
-    /// Save the S3 secret key for a storage profile.
-    ///
-    /// Dev mode: sets the env var (so tests can round-trip without a real keyring).
-    /// Prod mode: writes to OS keyring.
-    pub fn set_profile_secret_key(&self, profile_id: &str, value: &str) -> Result<(), KeyError> {
-        if self.dev_mode {
-            std::env::set_var(format!("BAE_S3_SECRET_KEY_{}", profile_id), value);
-            return Ok(());
-        }
-
-        let account = self.account(&format!("s3_secret_key:{}", profile_id));
-        keyring_core::Entry::new(keyring_service(), &account)?.set_password(value)?;
-        info!("S3 secret key saved for profile {}", profile_id);
-        Ok(())
-    }
-
-    /// Delete S3 credentials for a storage profile from the keyring.
-    ///
-    /// Dev mode: removes env vars.
-    /// Prod mode: deletes from OS keyring. Silently ignores missing entries.
-    pub fn delete_profile_credentials(&self, profile_id: &str) -> Result<(), KeyError> {
-        if self.dev_mode {
-            std::env::remove_var(format!("BAE_S3_ACCESS_KEY_{}", profile_id));
-            std::env::remove_var(format!("BAE_S3_SECRET_KEY_{}", profile_id));
-            return Ok(());
-        }
-
-        for key_type in ["s3_access_key", "s3_secret_key"] {
-            let account = self.account(&format!("{}:{}", key_type, profile_id));
-            match keyring_core::Entry::new(keyring_service(), &account)?.delete_credential() {
-                Ok(()) => info!("Deleted {} for profile {}", key_type, profile_id),
-                Err(keyring_core::Error::NoEntry) => {}
-                Err(e) => return Err(KeyError::Keyring(e)),
-            }
-        }
-
-        Ok(())
-    }
-
-    // -------------------------------------------------------------------------
     // Cloud home credentials (library-scoped, single entry)
     // -------------------------------------------------------------------------
 
@@ -396,14 +312,10 @@ impl KeyService {
     /// Dev mode: reads `BAE_CLOUD_HOME_CREDENTIALS` env var (JSON).
     /// Prod mode: reads from OS keyring.
     pub fn get_cloud_home_credentials(&self) -> Result<Option<CloudHomeCredentials>, KeyError> {
-        let json = if self.dev_mode {
-            std::env::var("BAE_CLOUD_HOME_CREDENTIALS")
-                .ok()
-                .filter(|k| !k.is_empty())
-        } else {
-            let account = self.account("cloud_home_credentials");
-            read_keyring(&account)
-        };
+        let json = self.read(
+            "BAE_CLOUD_HOME_CREDENTIALS",
+            &self.account("cloud_home_credentials"),
+        )?;
 
         match json {
             None => Ok(None),
@@ -459,16 +371,19 @@ impl KeyService {
     // -------------------------------------------------------------------------
     // Global user keypair (Ed25519 identity, NOT library-scoped)
     // -------------------------------------------------------------------------
+    //
+    // Only the 64-byte signing key is persisted. The public key (last 32 bytes
+    // of the Ed25519 keypair) is derived on load via `SigningKey::verifying_key`.
+    // Two-entry storage would make a torn-write or partial-restore look like a
+    // valid-but-mismatched keypair; this design makes that shape unrepresentable.
 
-    /// Dev-mode env var names, namespaced by library_id so parallel tests
+    /// Dev-mode env var name, namespaced by library_id so parallel tests
     /// don't stomp on each other's keypairs.
     fn signing_key_env_var(&self) -> String {
         format!("BAE_USER_SIGNING_KEY_{}", self.library_id)
     }
 
-    fn public_key_env_var(&self) -> String {
-        format!("BAE_USER_PUBLIC_KEY_{}", self.library_id)
-    }
+    const SIGNING_KEY_KEYRING_ACCOUNT: &'static str = "bae_user_signing_key";
 
     /// Load the user's Ed25519 keypair from the keyring. Returns an error if
     /// no keypair exists (unlike `get_or_create_user_keypair` which creates one).
@@ -488,106 +403,75 @@ impl KeyService {
         }
 
         let kp = UserKeypair::generate();
-        let sk_hex = hex::encode(kp.signing_key);
-        let pk_hex = hex::encode(kp.public_key);
-
-        if self.dev_mode {
-            std::env::set_var(self.signing_key_env_var(), &sk_hex);
-            std::env::set_var(self.public_key_env_var(), &pk_hex);
-        } else {
-            keyring_core::Entry::new(keyring_service(), "bae_user_signing_key")?
-                .set_password(&sk_hex)?;
-            keyring_core::Entry::new(keyring_service(), "bae_user_public_key")?
-                .set_password(&pk_hex)?;
-        }
-
+        self.write_signing_key(&kp.signing_key)?;
         info!("Generated and saved new user Ed25519 keypair");
         Ok(kp)
     }
 
-    /// Return just the user's Ed25519 public key, or None if no keypair exists.
-    pub fn get_user_public_key(&self) -> Option<[u8; SIGN_PUBLICKEYBYTES]> {
-        let pk_hex = if self.dev_mode {
-            std::env::var(self.public_key_env_var())
-                .ok()
-                .filter(|k| !k.is_empty())
-        } else {
-            read_keyring("bae_user_public_key")
-        };
-
-        let pk_hex = pk_hex?;
-        let pk_bytes = hex::decode(&pk_hex).ok()?;
-        pk_bytes.try_into().ok()
+    /// Return just the user's Ed25519 public key. `Ok(None)` if not stored,
+    /// `Err` if the stored signing key is corrupt. Derives from the signing
+    /// key — there is no separate public-key entry.
+    pub fn get_user_public_key(&self) -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
+        Ok(self.get_user_keypair_inner()?.map(|kp| kp.public_key))
     }
 
     /// Import an Ed25519 keypair from raw bytes (64 bytes: seed + public key).
     /// Overwrites any existing keypair. Used during restore to preserve the
     /// original device's membership identity.
     pub fn import_user_keypair(&self, signing_key_bytes: &[u8]) -> Result<(), KeyError> {
-        if signing_key_bytes.len() != 64 {
-            return Err(KeyError::Crypto(format!(
-                "Signing key must be 64 bytes, got {}",
-                signing_key_bytes.len()
-            )));
-        }
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] =
+            signing_key_bytes.try_into().map_err(|_| {
+                KeyError::Crypto(format!(
+                    "Signing key must be {SIGN_SECRETKEYBYTES} bytes, got {}",
+                    signing_key_bytes.len()
+                ))
+            })?;
+        // Validate it's a real keypair before storing, so a later load can't
+        // fail in a way the import path missed.
+        ed25519_dalek::SigningKey::from_keypair_bytes(&signing_key)
+            .map_err(|e| KeyError::Crypto(format!("Invalid keypair bytes: {e}")))?;
 
-        let sk =
-            ed25519_dalek::SigningKey::from_keypair_bytes(signing_key_bytes.try_into().unwrap())
-                .map_err(|e| KeyError::Crypto(format!("Invalid keypair bytes: {e}")))?;
-        let pk = sk.verifying_key();
-
-        let sk_hex = hex::encode(signing_key_bytes);
-        let pk_hex = hex::encode(pk.to_bytes());
-
-        if self.dev_mode {
-            std::env::set_var(self.signing_key_env_var(), &sk_hex);
-            std::env::set_var(self.public_key_env_var(), &pk_hex);
-        } else {
-            keyring_core::Entry::new(keyring_service(), "bae_user_signing_key")?
-                .set_password(&sk_hex)?;
-            keyring_core::Entry::new(keyring_service(), "bae_user_public_key")?
-                .set_password(&pk_hex)?;
-        }
-
+        self.write_signing_key(&signing_key)?;
         info!("Imported user Ed25519 keypair");
         Ok(())
     }
 
-    /// Internal: try to load an existing keypair from the keyring.
-    fn get_user_keypair_inner(&self) -> Result<Option<UserKeypair>, KeyError> {
-        let (sk_hex, pk_hex) = if self.dev_mode {
-            let sk = std::env::var(self.signing_key_env_var())
-                .ok()
-                .filter(|k| !k.is_empty());
-            let pk = std::env::var(self.public_key_env_var())
-                .ok()
-                .filter(|k| !k.is_empty());
-            match (sk, pk) {
-                (Some(s), Some(p)) => (s, p),
-                _ => return Ok(None),
-            }
+    /// Persist the 64-byte signing key. Shared by generate-and-store and
+    /// import. The public key is not persisted — it's derived at load.
+    fn write_signing_key(&self, signing_key: &[u8; SIGN_SECRETKEYBYTES]) -> Result<(), KeyError> {
+        let sk_hex = hex::encode(signing_key);
+        if self.dev_mode {
+            std::env::set_var(self.signing_key_env_var(), &sk_hex);
         } else {
-            let sk = read_keyring("bae_user_signing_key");
-            let pk = read_keyring("bae_user_public_key");
-            match (sk, pk) {
-                (Some(s), Some(p)) => (s, p),
-                _ => return Ok(None),
-            }
+            keyring_core::Entry::new(keyring_service(), Self::SIGNING_KEY_KEYRING_ACCOUNT)?
+                .set_password(&sk_hex)?;
+        }
+        Ok(())
+    }
+
+    /// Internal: try to load the user keypair. Reads only the signing key and
+    /// derives the public key from it.
+    fn get_user_keypair_inner(&self) -> Result<Option<UserKeypair>, KeyError> {
+        let sk_hex = self.read(
+            &self.signing_key_env_var(),
+            Self::SIGNING_KEY_KEYRING_ACCOUNT,
+        )?;
+        let Some(sk_hex) = sk_hex else {
+            return Ok(None);
         };
 
-        let sk_bytes: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
             .map_err(|e| KeyError::Crypto(format!("Invalid signing key hex: {e}")))?
             .try_into()
             .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
 
-        let pk_bytes: [u8; SIGN_PUBLICKEYBYTES] = hex::decode(&pk_hex)
-            .map_err(|e| KeyError::Crypto(format!("Invalid public key hex: {e}")))?
-            .try_into()
-            .map_err(|_| KeyError::Crypto("Public key wrong length".to_string()))?;
+        let sk = ed25519_dalek::SigningKey::from_keypair_bytes(&signing_key)
+            .map_err(|e| KeyError::Crypto(format!("Invalid signing key bytes: {e}")))?;
+        let public_key = sk.verifying_key().to_bytes();
 
         Ok(Some(UserKeypair {
-            signing_key: sk_bytes,
-            public_key: pk_bytes,
+            signing_key,
+            public_key,
         }))
     }
 }
@@ -724,16 +608,15 @@ mod tests {
     fn key_service_user_keypair() {
         let ks = KeyService::new(true, "test-keypair".to_string());
         std::env::remove_var(ks.signing_key_env_var());
-        std::env::remove_var(ks.public_key_env_var());
 
         // No keypair yet
-        assert!(ks.get_user_public_key().is_none());
+        assert!(ks.get_user_public_key().unwrap().is_none());
 
         // Generate and store
         let kp = ks.get_or_create_user_keypair().unwrap();
 
         // Should be retrievable now
-        let pk = ks.get_user_public_key().unwrap();
+        let pk = ks.get_user_public_key().unwrap().unwrap();
         assert_eq!(pk, kp.public_key);
 
         // Calling again returns the same keypair (idempotent)
@@ -743,7 +626,7 @@ mod tests {
 
         // Different library_id gets its own keypair (isolated in dev mode)
         let ks2 = KeyService::new(true, "other-library".to_string());
-        assert!(ks2.get_user_public_key().is_none());
+        assert!(ks2.get_user_public_key().unwrap().is_none());
 
         // Stored keypair can sign and verify
         let message = b"test message for signing";
@@ -771,6 +654,93 @@ mod tests {
 
         // Clean up
         std::env::remove_var(ks.signing_key_env_var());
-        std::env::remove_var(ks.public_key_env_var());
+    }
+
+    /// Corrupt hex in the stored signing key surfaces as `Err`, not `None`.
+    /// `get_user_public_key` derives the public key from the signing key, so
+    /// the decode error fires here too.
+    #[test]
+    fn key_service_user_public_key_corrupt_hex_is_err() {
+        let ks = KeyService::new(true, "test-pubkey-corrupt-hex".to_string());
+        std::env::set_var(ks.signing_key_env_var(), "not-hex-zzz");
+
+        assert!(
+            ks.get_user_public_key().is_err(),
+            "corrupt signing-key hex should be an Err"
+        );
+
+        std::env::remove_var(ks.signing_key_env_var());
+    }
+
+    /// Hex that decodes but to the wrong length is also `Err`.
+    #[test]
+    fn key_service_user_public_key_wrong_length_is_err() {
+        let ks = KeyService::new(true, "test-pubkey-wrong-length".to_string());
+        // 32 hex chars = 16 bytes; signing key needs 64 bytes.
+        std::env::set_var(ks.signing_key_env_var(), "0".repeat(32));
+
+        assert!(
+            ks.get_user_public_key().is_err(),
+            "wrong-length signing key should be an Err"
+        );
+
+        std::env::remove_var(ks.signing_key_env_var());
+    }
+
+    /// Signing-key bytes that decode to the right length but aren't a valid
+    /// Ed25519 keypair (seed + verifying key mismatch) surface as `Err`. The
+    /// public key is derived from the signing key, so this is the only check
+    /// needed — there's no separate public-key entry to disagree with it.
+    #[test]
+    fn key_service_user_keypair_invalid_bytes_is_err() {
+        let ks = KeyService::new(true, "test-keypair-invalid-bytes".to_string());
+        // 128 hex chars = 64 bytes — right length, but the last 32 don't match
+        // the verifying key derived from the first 32, so from_keypair_bytes
+        // rejects it.
+        std::env::set_var(ks.signing_key_env_var(), "0".repeat(128));
+
+        assert!(
+            ks.get_user_keypair().is_err(),
+            "signing-key bytes that aren't a valid Ed25519 keypair should be an Err"
+        );
+
+        std::env::remove_var(ks.signing_key_env_var());
+    }
+
+    /// A non-utf8 env var surfaces as `Err` from `read_env`, not silently as
+    /// `None`. `VarError::NotUnicode` is broken state, not "not configured."
+    #[test]
+    #[cfg(unix)]
+    fn read_env_non_utf8_is_err() {
+        use std::os::unix::ffi::OsStrExt;
+        let var = "COVEN_TEST_NOT_UTF8";
+        // 0xFF is invalid as the lead byte of any UTF-8 sequence.
+        let bytes = [0xFFu8];
+        std::env::set_var(var, std::ffi::OsStr::from_bytes(&bytes));
+
+        let result = read_env(var);
+        assert!(
+            result.is_err(),
+            "non-utf8 env content should be an Err, got {result:?}"
+        );
+
+        std::env::remove_var(var);
+    }
+
+    /// Malformed JSON in the cloud-home credentials surfaces as `Err`, not
+    /// `Ok(None)`. Stored bytes that can't be parsed are corruption, not
+    /// "no credentials configured."
+    #[test]
+    fn cloud_home_credentials_malformed_json_is_err() {
+        let ks = KeyService::new(true, "test-cloud-home-malformed".to_string());
+        std::env::set_var("BAE_CLOUD_HOME_CREDENTIALS", "{not valid json");
+
+        let result = ks.get_cloud_home_credentials();
+        assert!(
+            result.is_err(),
+            "malformed credentials JSON should be an Err, got {result:?}"
+        );
+
+        std::env::remove_var("BAE_CLOUD_HOME_CREDENTIALS");
     }
 }
