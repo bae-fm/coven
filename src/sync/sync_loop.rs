@@ -7,7 +7,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{info, warn};
+use tokio::sync::mpsc::error::TrySendError;
+use tracing::{debug, info, warn};
 
 use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::changeset::RowChange;
@@ -211,8 +212,17 @@ impl SyncLoopHandle {
     }
 
     /// Signal the sync loop to run a cycle immediately.
+    ///
+    /// `Full` means a trigger is already pending — our request collapses
+    /// into the existing one, which is exactly what the capacity-1 channel
+    /// is for. `Closed` means the loop is gone, so the trigger is moot.
     pub fn trigger(&self) {
-        let _ = self.trigger_tx.try_send(());
+        match self.trigger_tx.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => {}
+            Err(TrySendError::Closed(())) => {
+                debug!("Sync trigger channel closed, loop is not running");
+            }
+        }
     }
 
     /// Subscribe to sync loop status events.
