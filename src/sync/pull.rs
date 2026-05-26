@@ -12,7 +12,7 @@
 /// changesets applied in the same batch.
 use std::collections::HashMap;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::apply::apply_changeset_lww;
 use super::envelope::{self, verify_changeset_signature};
@@ -23,6 +23,28 @@ use super::storage::{DeviceHead, SyncStorage};
 use crate::blob::BlobPlan;
 use crate::changeset::RowChange;
 use crate::library_dir::LibraryDir;
+
+/// Cursor value meaning "we have applied no changesets from this device".
+/// Per the sync protocol, device sequence numbers start at 1 (the first
+/// changeset a device produces is `local_seq + 1` where `local_seq` is
+/// initially 0), so a cursor of 0 selects every changeset that device has
+/// ever produced. A missing entry in the `sync_cursors` table is equivalent
+/// to this initial value — the device is simply one we've never pulled from.
+const INITIAL_CURSOR: u64 = 0;
+
+/// Look up our applied seq for a remote device, returning the protocol's
+/// initial cursor (0) and logging when we encounter the device for the first
+/// time. The log line is the visible trace that distinguishes "never seen"
+/// from "seen and at seq 0" (which is impossible — device seqs start at 1).
+fn cursor_for_device(cursors: &HashMap<String, u64>, device_id: &str) -> u64 {
+    match cursors.get(device_id) {
+        Some(seq) => *seq,
+        None => {
+            debug!(%device_id, "no cursor for device, starting from initial");
+            INITIAL_CURSOR
+        }
+    }
+}
 
 /// Summary of a pull operation.
 #[derive(Debug)]
@@ -125,7 +147,7 @@ pub async unsafe fn pull_changes(
             continue;
         }
 
-        let local_seq = cursors.get(&head.device_id).copied().unwrap_or(0);
+        let local_seq = cursor_for_device(cursors, &head.device_id);
         if head.seq <= local_seq {
             continue;
         }
