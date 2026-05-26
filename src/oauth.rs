@@ -225,12 +225,14 @@ pub async fn authorize(
     // Spawn the server. The guard aborts the task on drop so future
     // cancellation (parent .await dropped) tears the listener down too.
     let server_guard = AbortOnDrop::new(tokio::spawn(async move {
-        axum::serve(listener, app)
+        if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
             })
             .await
-            .ok();
+        {
+            warn!("OAuth callback server exited with error: {e}");
+        }
     }));
 
     // Open the browser
