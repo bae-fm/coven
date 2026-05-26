@@ -106,20 +106,29 @@ impl CloudHome for CloudKitCloudHome {
 
             // Try chunked records
             let chunk_prefix = format!("{key}.part");
-            let mut chunk_keys = ops.list_records(&chunk_prefix)?;
+            let chunk_keys = ops.list_records(&chunk_prefix)?;
             if chunk_keys.is_empty() {
                 return Err(CloudHomeError::NotFound(key));
             }
 
-            // Sort by part number
-            chunk_keys.sort_by_key(|k| {
-                k.rsplit_once(".part")
-                    .and_then(|(_, n)| n.parse::<usize>().ok())
-                    .unwrap_or(0)
-            });
+            // Parse part numbers up front; a key without a valid `.part{N}` suffix
+            // would corrupt assembly order if treated as part 0.
+            let mut numbered: Vec<(usize, String)> = chunk_keys
+                .into_iter()
+                .map(|k| {
+                    let n = k
+                        .rsplit_once(".part")
+                        .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
+                        .ok_or_else(|| {
+                            CloudHomeError::Storage(format!("chunk key {k:?} missing .part suffix"))
+                        })?;
+                    Ok::<_, CloudHomeError>((n, k))
+                })
+                .collect::<Result<_, _>>()?;
+            numbered.sort_by_key(|(n, _)| *n);
 
             let mut result = Vec::new();
-            for chunk_key in &chunk_keys {
+            for (_, chunk_key) in &numbered {
                 let chunk = ops.read_record(chunk_key)?;
                 result.extend_from_slice(&chunk);
             }
