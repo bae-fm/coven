@@ -11,7 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, warn};
 
 /// OAuth provider configuration.
 #[derive(Clone, Debug)]
@@ -261,7 +261,20 @@ pub async fn authorize(
     // the same port can race the not-yet-released listener (no SO_REUSEADDR).
     if let Some(handle) = server_guard.take_handle() {
         handle.abort();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+        match tokio::time::timeout(std::time::Duration::from_millis(500), handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.is_cancelled() => {}
+            Ok(Err(e)) => {
+                warn!("OAuth callback server task panicked on shutdown: {e}");
+            }
+            Err(_) => {
+                warn!(
+                    "OAuth callback server did not exit within 500ms; \
+                     port {} may briefly remain in use",
+                    config.redirect_port
+                );
+            }
+        }
     }
 
     let code = result?;
