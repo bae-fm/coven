@@ -289,42 +289,29 @@ pub async fn bootstrap_from_snapshot(
     encryption: &EncryptionService,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
-    // Download encrypted snapshot.
-    let encrypted = storage.get_snapshot().await?;
+    // Download both the snapshot blob and its per-device cursor metadata
+    // before touching disk. `push_snapshot` writes the metadata immediately
+    // after the snapshot blob, so its absence here means the bucket is in
+    // a torn state (e.g., a previous push failed between the two uploads).
+    // We refuse to bootstrap from incomplete data, and we fetch metadata
+    // first so we don't leave a half-written DB on the target path.
+    let meta_json = storage
+        .get_snapshot_meta()
+        .await
+        .map_err(SnapshotError::Bucket)?;
+    let meta: SnapshotMeta = serde_json::from_slice(&meta_json)
+        .map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
+    let cursors = meta.cursors;
 
-    // Decrypt.
+    let encrypted = storage.get_snapshot().await?;
     let plaintext = encryption
         .decrypt(&encrypted)
         .map_err(|e| SnapshotError::Decryption(e.to_string()))?;
 
-    // Write to target path.
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(target_path, &plaintext)?;
-
-    // Read snapshot metadata for per-device cursors.
-    let cursors = match storage.get_snapshot_meta().await {
-        Ok(meta_json) => {
-            let meta: SnapshotMeta = serde_json::from_slice(&meta_json)
-                .map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
-            meta.cursors
-        }
-        Err(StorageError::NotFound(_)) => {
-            // Fallback for old snapshots without metadata.
-            let heads = storage.list_heads().await?;
-            let snapshot_seq = heads
-                .iter()
-                .filter_map(|h| h.snapshot_seq)
-                .max()
-                .unwrap_or(0);
-            heads
-                .iter()
-                .map(|h| (h.device_id.clone(), snapshot_seq.min(h.seq)))
-                .collect()
-        }
-        Err(e) => return Err(SnapshotError::Bucket(e)),
-    };
 
     info!(
         num_devices = cursors.len(),
@@ -1104,10 +1091,12 @@ mod tests {
         assert_eq!(remaining_c, vec![1, 2, 3]);
     }
 
-    /// When no `snapshot_meta.json.enc` exists (old snapshots), bootstrap
-    /// falls back to using max snapshot_seq from heads.
+    /// A snapshot blob without its accompanying `snapshot_meta.json.enc`
+    /// is a torn bucket state (e.g., a previous push failed between the
+    /// snapshot upload and the metadata upload). Bootstrap must refuse
+    /// rather than seed cursors from a heuristic on `heads`.
     #[tokio::test]
-    async fn bootstrap_without_metadata_falls_back() {
+    async fn bootstrap_fails_when_snapshot_meta_missing() {
         unsafe {
             let db = open_memory_db();
             create_synced_schema(db);
@@ -1124,29 +1113,26 @@ mod tests {
             let encrypted = create_snapshot(db, temp.path(), &enc).expect("snapshot");
             ffi::sqlite3_close(db);
 
-            // Put snapshot in storage WITHOUT metadata (simulating old behavior).
+            // Put snapshot in storage WITHOUT metadata (torn-bucket simulation).
             let storage = MockSyncStorage::new();
             storage.put_snapshot(encrypted).await.unwrap();
             storage
                 .put_head("dev-1", 20, Some(15), "2026-02-10T00:00:00Z")
                 .await
                 .unwrap();
-            storage
-                .put_head("dev-2", 10, None, "2026-02-10T00:00:00Z")
-                .await
-                .unwrap();
 
-            // Bootstrap -- no metadata, should fall back.
-            let target = temp.path().join("fallback.db");
-            let result = bootstrap_from_snapshot(&storage, &enc, &target)
+            let target = temp.path().join("torn.db");
+            let err = bootstrap_from_snapshot(&storage, &enc, &target)
                 .await
-                .expect("bootstrap");
-
-            // Fallback: max snapshot_seq is 15. Each device cursor is min(15, seq).
-            assert_eq!(result.cursors.get("dev-1"), Some(&15));
-            assert_eq!(result.cursors.get("dev-2"), Some(&10));
-            assert_eq!(result.cursors.len(), 2);
-            assert!(target.exists());
+                .expect_err("bootstrap must refuse torn bucket");
+            assert!(
+                matches!(err, SnapshotError::Bucket(StorageError::NotFound(_))),
+                "expected Bucket(NotFound), got {err:?}",
+            );
+            assert!(
+                !target.exists(),
+                "no DB should be written when metadata is missing",
+            );
         }
     }
 }
