@@ -250,7 +250,7 @@ mod tests {
         let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(5000));
 
         // Prime the local clock.
-        let _ = hlc.now();
+        hlc.now();
 
         // Remote is behind.
         let remote = Timestamp::new(1000, 10, "dev-remote".into());
@@ -267,7 +267,7 @@ mod tests {
         let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(3000));
 
         // Prime: millis=3000, counter=0.
-        let _ = hlc.now();
+        hlc.now();
 
         // Remote also at 3000 but with counter=5.
         let remote = Timestamp::new(3000, 5, "dev-remote".into());
