@@ -77,6 +77,16 @@ impl CloudHomeJoinInfo {
 /// All methods deal in raw bytes. No encryption or path layout logic.
 #[async_trait]
 pub trait CloudHome: Send + Sync {
+    /// Verify the backend is reachable with the configured credentials.
+    /// Setup flows call this *before* persisting credentials, so a typo or
+    /// missing bucket fails fast at setup time instead of via a delayed
+    /// reconnect banner. Default implementation issues a no-op list against
+    /// a sentinel prefix — backends override with cheaper provider-specific
+    /// auth checks (e.g. S3 HeadBucket) where available.
+    async fn probe(&self) -> Result<(), CloudHomeError> {
+        self.list("__bae_probe__").await.map(drop)
+    }
+
     /// Write bytes to a key, creating or overwriting.
     async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError>;
 

@@ -32,9 +32,18 @@ impl S3CloudHome {
     ) -> Result<Self, CloudHomeError> {
         let credentials = Credentials::new(&access_key, &secret_key, None, None, "bae-cloud-home");
 
+        // aws-config has default-features disabled, so the SDK won't auto-bundle
+        // an HTTP client. Plug in the rustls-ring smithy client explicitly.
+        let http_client = aws_smithy_http_client::Builder::new()
+            .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
+                aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
+            ))
+            .build_https();
+
         let mut builder = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(region.clone()))
-            .credentials_provider(credentials);
+            .credentials_provider(credentials)
+            .http_client(http_client);
 
         if let Some(ref ep) = endpoint {
             builder = builder.endpoint_url(ep.trim_end_matches('/'));
@@ -73,6 +82,43 @@ fn apply_prefix(prefix: Option<&str>, key: &str) -> String {
 
 #[async_trait]
 impl CloudHome for S3CloudHome {
+    /// HeadBucket — cheap auth + existence check, no listing cost.
+    async fn probe(&self) -> Result<(), CloudHomeError> {
+        use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+        use aws_sdk_s3::operation::head_bucket::HeadBucketError;
+
+        match self.client.head_bucket().bucket(&self.bucket).send().await {
+            Ok(_) => Ok(()),
+            Err(SdkError::ServiceError(svc)) => {
+                let status = svc.raw().status().as_u16();
+                let code: Option<String> = svc.err().code().map(str::to_string);
+                let bucket = self.bucket.clone();
+                match svc.into_err() {
+                    HeadBucketError::NotFound(_) => Err(CloudHomeError::Storage(format!(
+                        "bucket {bucket:?} does not exist"
+                    ))),
+                    other => {
+                        let is_auth = status == 403
+                            || matches!(
+                                code.as_deref(),
+                                Some("SignatureDoesNotMatch") | Some("InvalidAccessKeyId")
+                            );
+                        if is_auth {
+                            Err(CloudHomeError::Storage(format!(
+                                "S3 credentials rejected (status {status}, code {code:?})"
+                            )))
+                        } else {
+                            Err(CloudHomeError::Storage(format!(
+                                "S3 probe failed (status {status}, code {code:?}): {other}"
+                            )))
+                        }
+                    }
+                }
+            }
+            Err(e) => Err(CloudHomeError::Storage(format!("S3 probe failed: {e}"))),
+        }
+    }
+
     async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
         self.client
@@ -269,5 +315,137 @@ mod tests {
     fn full_key_strips_trailing_slash() {
         let key = apply_prefix(Some("libs/abc/"), "heads/dev1.json");
         assert_eq!(key, "libs/abc/heads/dev1.json");
+    }
+
+    // ── probe() against a real S3 endpoint ──────────────────────────────
+    //
+    // These tests require a minio (or any S3-compatible server) reachable at
+    // `BAE_TEST_S3_URL` (default http://localhost:19000) with credentials
+    // `BAE_TEST_S3_KEY` / `BAE_TEST_S3_SECRET` (default minioadmin / minioadmin).
+    // Marked `#[ignore]` so `cargo test` skips them; run with
+    // `cargo test -- --ignored` when an endpoint is available.
+
+    /// Read a test env var with a default fallback. `NotPresent` silently uses
+    /// the default (the intended path); `NotUnicode` panics so a misconfigured
+    /// env var fails loudly instead of silently substituting bytes-as-default.
+    fn test_env(name: &str, default: &str) -> String {
+        match std::env::var(name) {
+            Ok(s) => s,
+            Err(std::env::VarError::NotPresent) => default.to_string(),
+            Err(std::env::VarError::NotUnicode(raw)) => {
+                panic!("test env var {name} is non-utf8: {raw:?}");
+            }
+        }
+    }
+
+    struct TestCreds {
+        endpoint: String,
+        access_key: String,
+        secret_key: String,
+    }
+
+    fn test_creds() -> TestCreds {
+        TestCreds {
+            endpoint: test_env("BAE_TEST_S3_URL", "http://localhost:19000"),
+            access_key: test_env("BAE_TEST_S3_KEY", "baetest"),
+            secret_key: test_env("BAE_TEST_S3_SECRET", "baetestpass"),
+        }
+    }
+
+    /// Provision the bucket configured on `home`.
+    async fn provision_test_bucket(home: &S3CloudHome) {
+        home.client
+            .create_bucket()
+            .bucket(&home.bucket)
+            .send()
+            .await
+            .expect("create test bucket");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn probe_succeeds_against_existing_bucket() {
+        let creds = test_creds();
+        let bucket = format!("bae-probe-ok-{}", uuid::Uuid::new_v4());
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(creds.endpoint),
+            creds.access_key,
+            creds.secret_key,
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+        provision_test_bucket(&home).await;
+        home.probe().await.expect("probe should succeed");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn probe_fails_for_missing_bucket() {
+        let creds = test_creds();
+        let bucket = format!("bae-probe-missing-{}", uuid::Uuid::new_v4());
+        let home = S3CloudHome::new(
+            bucket.clone(),
+            "us-east-1".to_string(),
+            Some(creds.endpoint),
+            creds.access_key,
+            creds.secret_key,
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+        // Deliberately do NOT create the bucket.
+        let err = home
+            .probe()
+            .await
+            .expect_err("probe should fail for a missing bucket");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does not exist") || msg.contains("NoSuchBucket") || msg.contains("404"),
+            "expected missing-bucket error, got: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn probe_fails_for_bad_secret_key() {
+        let creds = test_creds();
+        let bucket = format!("bae-probe-badkey-{}", uuid::Uuid::new_v4());
+        // Provision the bucket with the good creds so the only difference is the bad secret.
+        let good = S3CloudHome::new(
+            bucket.clone(),
+            "us-east-1".to_string(),
+            Some(creds.endpoint.clone()),
+            creds.access_key.clone(),
+            creds.secret_key,
+            None,
+        )
+        .await
+        .expect("construct good S3CloudHome");
+        provision_test_bucket(&good).await;
+
+        let bad = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(creds.endpoint),
+            creds.access_key,
+            "wrong-secret".to_string(),
+            None,
+        )
+        .await
+        .expect("construct bad S3CloudHome");
+        let err = bad
+            .probe()
+            .await
+            .expect_err("probe should fail for bad credentials");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rejected")
+                || msg.contains("403")
+                || msg.contains("SignatureDoesNotMatch"),
+            "expected credentials error, got: {msg}",
+        );
     }
 }
