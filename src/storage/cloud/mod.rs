@@ -14,6 +14,9 @@ pub mod onedrive;
 pub mod s3;
 pub mod setup;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
