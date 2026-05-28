@@ -110,7 +110,7 @@ impl EncryptionService {
     }
 
     /// Encrypt data using chunked XChaCha20-Poly1305 format.
-    /// Returns: [base_nonce: 24 bytes][chunk_0][chunk_1]...
+    /// Returns: `[base_nonce: 24 bytes][chunk_0][chunk_1]...`
     /// Each chunk is independently encrypted, enabling random-access decryption.
     pub fn encrypt_chunked(&self, plaintext: &[u8]) -> Vec<u8> {
         let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&self.key));
