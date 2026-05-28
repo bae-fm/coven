@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">coven</title>
+  <desc id="desc">Linked encrypted storage nodes around a SQLite page.</desc>
+  <rect width="64" height="64" rx="14" fill="#f7f3ea"/>
+  <path d="M18 18h28v28H18z" fill="#ffffff" stroke="#20302f" stroke-width="2.5"/>
+  <path d="M24 26h16M24 32h16M24 38h10" stroke="#345f5d" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="14" cy="14" r="5" fill="#d56b45" stroke="#20302f" stroke-width="2"/>
+  <circle cx="50" cy="14" r="5" fill="#d6a13f" stroke="#20302f" stroke-width="2"/>
+  <circle cx="50" cy="50" r="5" fill="#6e8f7c" stroke="#20302f" stroke-width="2"/>
+  <circle cx="14" cy="50" r="5" fill="#8d6b9f" stroke="#20302f" stroke-width="2"/>
+  <path d="M18 18l-2.5-2.5M46 18l2.5-2.5M46 46l2.5 2.5M18 46l-2.5 2.5" stroke="#20302f" stroke-width="2" stroke-linecap="round"/>
+</svg>

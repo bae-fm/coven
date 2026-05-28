@@ -1,0 +1,16 @@
+{
+    "name": "coven-site",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vitepress dev",
+        "build": "node scripts/build.mjs",
+        "build:site": "vitepress build",
+        "rustdoc": "cargo doc --no-deps --all-features",
+        "preview": "vitepress preview"
+    },
+    "devDependencies": {
+        "vitepress": "^1.6.4"
+    }
+}
