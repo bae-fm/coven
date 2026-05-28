@@ -12,7 +12,7 @@ column. Membership is an append-only Ed25519-signed chain; the per-library
 symmetric key is wrapped to each member's X25519 key. Blobs referenced by rows
 sync as encrypted opaque files through a cloud outbox.
 
-The host owns its schema and domain; coven owns the sync substrate.
+The host owns its schema and domain; coven owns the sync layer.
 
 ## Integration
 

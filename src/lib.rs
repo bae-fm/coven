@@ -1,8 +1,8 @@
 //! coven — end-to-end encrypted, multi-writer, bring-your-own-storage SQLite
 //! sync, with an encrypted blob store and a cryptographic membership model.
 //!
-//! The host app owns its SQLite schema and domain. coven owns the sync
-//! substrate: changesets captured via the SQLite session extension, HLC-stamped
+//! The host app owns its SQLite schema and domain. coven owns the sync layer:
+//! changesets captured via the SQLite session extension, HLC-stamped
 //! and signed per author, encrypted and pushed/pulled through a pluggable
 //! `CloudHome`, conflict-resolved by row-level last-writer-wins on `_updated_at`.
 //! An append-only Ed25519-signed membership chain wraps the per-library
