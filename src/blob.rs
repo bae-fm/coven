@@ -44,9 +44,20 @@ pub trait BlobPlan: Send + Sync {
     fn blobs_to_pull(&self, changes: &[RowChange]) -> Vec<BlobRef>;
 }
 
-/// Notified after a blob upload completes, for host-specific bookkeeping
-/// (e.g. transitioning a record from "uploading" to "cloud-only").
+/// Notified about the lifecycle of a blob upload, for host-specific
+/// bookkeeping and UI (e.g. transitioning a record from "uploading" to
+/// "cloud-only", or surfacing a failure). `on_blob_upload_started` fires before
+/// each attempt — the host tracks the transient in-flight set in memory;
+/// `on_blob_uploaded` on success; `on_blob_upload_failed` when an attempt fails
+/// and the entry is left queued for retry.
 #[async_trait::async_trait]
 pub trait BlobUploadObserver: Send + Sync {
+    /// An upload attempt for this blob is starting now.
+    async fn on_blob_upload_started(&self, file_id: &str);
+
+    /// The blob was uploaded to the cloud successfully.
     async fn on_blob_uploaded(&self, file_id: &str);
+
+    /// An upload attempt failed; the entry remains queued for retry.
+    async fn on_blob_upload_failed(&self, file_id: &str, error: &str);
 }

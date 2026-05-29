@@ -12,6 +12,12 @@ use async_trait::async_trait;
 
 /// SQL that creates coven's bookkeeping tables. The host applies this alongside
 /// its own schema migration. Idempotent (`IF NOT EXISTS`).
+///
+/// `IF NOT EXISTS` only guarantees the *fresh-table* shape: a host whose
+/// `cloud_outbox` already exists from an earlier coven version will not gain
+/// columns added here (e.g. `attempt_count`, `last_error`, `last_attempt_at`).
+/// Such hosts must add the new columns through their own `ALTER TABLE`
+/// migration path.
 pub const MIGRATION_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS sync_cursors (
     device_id TEXT PRIMARY KEY,
@@ -31,6 +37,9 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     source_path TEXT,
     created_at TEXT NOT NULL,
     min_seq INTEGER,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_attempt_at TEXT,
     UNIQUE(operation, cloud_key)
 );
 ";
@@ -50,6 +59,14 @@ pub struct OutboxEntry {
     pub source_path: Option<String>,
     pub created_at: String,
     pub min_seq: Option<u64>,
+    /// How many times an upload of this entry has failed. `0` for a freshly
+    /// queued entry.
+    pub attempt_count: i64,
+    /// The error from the most recent failed attempt, if any.
+    pub last_error: Option<String>,
+    /// RFC 3339 timestamp of the most recent attempt, if any. Drives retry
+    /// backoff.
+    pub last_attempt_at: Option<String>,
 }
 
 /// Type of cloud blob operation.
@@ -96,6 +113,16 @@ pub trait SyncBookkeeping: Send + Sync {
 
     /// Remove a `cloud_outbox` entry by id.
     async fn remove_cloud_outbox_entry(&self, id: i64) -> Result<(), DbError>;
+
+    /// Record a failed upload attempt for an entry: increment its
+    /// `attempt_count` and set `last_error` and `last_attempt_at`. The entry
+    /// stays queued for retry.
+    async fn record_cloud_upload_failure(
+        &self,
+        id: i64,
+        error: &str,
+        attempted_at: &str,
+    ) -> Result<(), DbError>;
 }
 
 /// Access to the host's raw write connection, which the session extension

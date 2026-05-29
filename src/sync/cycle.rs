@@ -247,8 +247,15 @@ pub async unsafe fn run_single_sync_cycle(
 
     // Process outbox uploads (files must be in cloud before changeset references them)
     if let Some(ch) = cloud_home {
-        match super::outbox::process_uploads(db, ch, encryption, library_dir.as_ref(), observer)
-            .await
+        match super::outbox::process_uploads(
+            db,
+            ch,
+            encryption,
+            library_dir.as_ref(),
+            clock,
+            observer,
+        )
+        .await
         {
             Ok(n) if n > 0 => info!(count = n, "Processed outbox uploads"),
             Err(e) => warn!("Outbox upload processing error: {e}"),
