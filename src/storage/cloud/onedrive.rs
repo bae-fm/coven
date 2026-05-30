@@ -96,6 +96,34 @@ impl OneDriveCloudHome {
     }
 }
 
+/// `error.code` from a Microsoft Graph error body (e.g. `"quotaLimitReached"`,
+/// `"itemNotFound"`), or `None` if the body isn't Graph JSON. Non-JSON bodies
+/// are a common skip (proxy 500s, captive portals) — log at debug so the
+/// bail-out is visible without spamming a normal session.
+fn parse_onedrive_error_code(body: &str) -> Option<String> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("non-JSON OneDrive error body, skipping code extraction: {e}");
+            return None;
+        }
+    };
+    v.get("error")?.get("code")?.as_str().map(String::from)
+}
+
+/// Map a OneDrive write failure to a `CloudHomeError`. The `quotaLimitReached`
+/// code gets a message naming the provider and the recovery step; everything
+/// else keeps the raw HTTP status + body for debugging.
+fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> CloudHomeError {
+    if parse_onedrive_error_code(body).as_deref() == Some("quotaLimitReached") {
+        return CloudHomeError::Storage(
+            "Your OneDrive storage is full. Free up space at onedrive.live.com to keep syncing."
+                .to_string(),
+        );
+    }
+    CloudHomeError::Storage(format!("write {key} (HTTP {status}): {body}"))
+}
+
 #[async_trait]
 impl CloudHome for OneDriveCloudHome {
     async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
@@ -117,9 +145,7 @@ impl CloudHome for OneDriveCloudHome {
                 .text()
                 .await
                 .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-            return Err(CloudHomeError::Storage(format!(
-                "write {key} (HTTP {status}): {body}"
-            )));
+            return Err(classify_write_error(status, &body, key));
         }
 
         Ok(())
@@ -431,5 +457,41 @@ mod tests {
         assert!(config.token_url.contains("/consumers/"));
         assert!(config.scopes.contains(&"Files.ReadWrite".to_string()));
         assert!(config.scopes.contains(&"offline_access".to_string()));
+    }
+
+    #[test]
+    fn parse_onedrive_error_code_extracts_quota_limit_reached() {
+        let body = r#"{"error":{"code":"quotaLimitReached","message":"Insufficient Storage"}}"#;
+        assert_eq!(
+            parse_onedrive_error_code(body).as_deref(),
+            Some("quotaLimitReached"),
+        );
+    }
+
+    #[test]
+    fn parse_onedrive_error_code_returns_none_for_non_matching_body() {
+        assert!(parse_onedrive_error_code("<html>500</html>").is_none());
+        assert!(parse_onedrive_error_code("{}").is_none());
+        assert!(parse_onedrive_error_code(r#"{"error":"flat"}"#).is_none());
+    }
+
+    #[test]
+    fn classify_write_error_quota_message_names_provider_and_recovery() {
+        let body = r#"{"error":{"code":"quotaLimitReached"}}"#;
+        let err =
+            classify_write_error(reqwest::StatusCode::INSUFFICIENT_STORAGE, body, "changes/1");
+        let msg = err.to_string();
+        assert!(msg.contains("OneDrive storage is full"), "{msg}");
+        assert!(msg.contains("Free up space"), "{msg}");
+    }
+
+    #[test]
+    fn classify_write_error_keeps_raw_for_non_quota_errors() {
+        let body = r#"{"error":{"code":"itemNotFound","message":"..."}}"#;
+        let err = classify_write_error(reqwest::StatusCode::NOT_FOUND, body, "changes/dev1/1.enc");
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP 404"), "{msg}");
+        assert!(msg.contains("changes/dev1/1.enc"), "{msg}");
+        assert!(!msg.contains("storage is full"), "{msg}");
     }
 }
