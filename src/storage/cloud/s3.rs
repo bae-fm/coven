@@ -80,6 +80,64 @@ fn apply_prefix(prefix: Option<&str>, key: &str) -> String {
     }
 }
 
+/// Map a GetObject failure to a `CloudHomeError`, surfacing the S3 error code and
+/// message (e.g. `AccessDenied`, `PermanentRedirect`, `SignatureDoesNotMatch`)
+/// rather than the opaque "service error". `NoSuchKey` becomes `NotFound`;
+/// non-service failures (timeouts, connection errors) fall back to their own
+/// description. Generic over the response type so it serves both `read` and
+/// `read_range` without naming the smithy HTTP type.
+fn get_object_error<R>(
+    key: &str,
+    err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError, R>,
+) -> CloudHomeError {
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    match err.code() {
+        Some("NoSuchKey") => CloudHomeError::NotFound(key.to_string()),
+        Some(code) => CloudHomeError::Storage(match err.message() {
+            Some(msg) => format!("get {key}: S3 {code}: {msg}"),
+            None => format!("get {key}: S3 {code} (no message provided)"),
+        }),
+        // Not a service error (timeout / connection / dispatch) — its own
+        // Display carries the detail.
+        None => CloudHomeError::Storage(format!("get {key}: {err}")),
+    }
+}
+
+/// Map a PutObject failure to a `CloudHomeError`. The common failure modes
+/// each name the cause and the recovery the user can take:
+///
+/// - `AccessDenied` — bucket policy or IAM rejects writes. User fixes via
+///   sync settings.
+/// - `NoSuchBucket` — bucket was renamed/deleted out from under us.
+/// - `OverQuota` / `QuotaExceeded` — non-AWS S3 providers (Backblaze, MinIO)
+///   signal quota exhaustion through these codes.
+///
+/// Other service errors keep the raw code + message so they're debuggable;
+/// transport failures surface their own Display.
+fn put_object_error(
+    key: &str,
+    err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+) -> CloudHomeError {
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    match err.code() {
+        Some("AccessDenied") => CloudHomeError::Storage(
+            "Your S3 credentials don't have permission to write to this bucket. Check the access policy in sync settings."
+                .to_string(),
+        ),
+        Some("NoSuchBucket") => CloudHomeError::Storage(
+            "The S3 bucket no longer exists. Check the bucket name in sync settings.".to_string(),
+        ),
+        Some("OverQuota" | "QuotaExceeded") => CloudHomeError::Storage(
+            "Your S3 storage quota is exceeded. Free up space or expand the quota.".to_string(),
+        ),
+        Some(code) => CloudHomeError::Storage(match err.message() {
+            Some(msg) => format!("put {key}: S3 {code}: {msg}"),
+            None => format!("put {key}: S3 {code} (no message provided)"),
+        }),
+        None => CloudHomeError::Storage(format!("put {key}: {err}")),
+    }
+}
+
 #[async_trait]
 impl CloudHome for S3CloudHome {
     /// HeadBucket — cheap auth + existence check, no listing cost.
@@ -128,7 +186,7 @@ impl CloudHome for S3CloudHome {
             .body(data.into())
             .send()
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("put {key}: {e}")))?;
+            .map_err(|e| put_object_error(key, e))?;
         Ok(())
     }
 
@@ -141,14 +199,7 @@ impl CloudHome for S3CloudHome {
             .key(&full)
             .send()
             .await
-            .map_err(|e| {
-                let msg = format!("{e}");
-                if msg.contains("NoSuchKey") || msg.contains("not found") || msg.contains("404") {
-                    CloudHomeError::NotFound(key.to_string())
-                } else {
-                    CloudHomeError::Storage(format!("get {key}: {e}"))
-                }
-            })?;
+            .map_err(|e| get_object_error(key, e))?;
 
         let bytes = resp
             .body
@@ -172,14 +223,7 @@ impl CloudHome for S3CloudHome {
             .range(range)
             .send()
             .await
-            .map_err(|e| {
-                let msg = format!("{e}");
-                if msg.contains("NoSuchKey") || msg.contains("not found") || msg.contains("404") {
-                    CloudHomeError::NotFound(key.to_string())
-                } else {
-                    CloudHomeError::Storage(format!("get range {key}: {e}"))
-                }
-            })?;
+            .map_err(|e| get_object_error(key, e))?;
 
         let bytes = resp
             .body
