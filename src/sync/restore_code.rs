@@ -59,13 +59,17 @@ pub enum RestoreProvider {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreCodeError {
-    #[error("missing 'bae:' prefix")]
+    #[error("That doesn't look like a bae restore code — it should start with \"bae:\".")]
     MissingPrefix,
-    #[error("invalid base64url encoding")]
+    #[error(
+        "The restore code is incomplete or has a typo. Check that you copied the entire code."
+    )]
     InvalidBase64,
-    #[error("invalid restore code payload: {0}")]
+    #[error("The restore code is corrupted. Regenerate it on the source device. ({0})")]
     InvalidJson(String),
-    #[error("unsupported version: {0}")]
+    #[error(
+        "This restore code was made with a newer version of bae (v{0}). Update bae to use it."
+    )]
     UnsupportedVersion(u8),
 }
 
@@ -408,5 +412,26 @@ mod tests {
         assert!(!provider_needs_oauth(&RestoreProvider::HttpProxy {
             url: String::new(),
         }));
+    }
+
+    #[test]
+    fn display_messages_name_cause_and_recovery() {
+        let missing = RestoreCodeError::MissingPrefix.to_string();
+        assert!(missing.contains("bae:"), "{missing}");
+        assert!(missing.contains("bae restore code"), "{missing}");
+
+        let invalid_b64 = RestoreCodeError::InvalidBase64.to_string();
+        assert!(
+            invalid_b64.contains("incomplete") || invalid_b64.contains("typo"),
+            "{invalid_b64}",
+        );
+
+        let invalid_json = RestoreCodeError::InvalidJson("trailing comma".to_string()).to_string();
+        assert!(invalid_json.contains("Regenerate"), "{invalid_json}");
+        assert!(invalid_json.contains("trailing comma"), "{invalid_json}");
+
+        let bad_version = RestoreCodeError::UnsupportedVersion(99).to_string();
+        assert!(bad_version.contains("v99"), "{bad_version}");
+        assert!(bad_version.contains("Update bae"), "{bad_version}");
     }
 }
