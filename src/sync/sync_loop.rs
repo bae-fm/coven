@@ -131,6 +131,11 @@ impl SyncLoopHandle {
 
         let handle = std::thread::Builder::new()
             .name("coven-sync-loop".to_string())
+            // aws-sdk-s3's endpoint/auth resolution recurses deeply enough to
+            // blow the ~2 MiB default secondary-thread stack in debug builds
+            // (SIGBUS in resolve_endpoint). Give this thread a main-thread-sized
+            // stack so S3 sync doesn't overflow it.
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
