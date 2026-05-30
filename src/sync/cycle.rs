@@ -28,6 +28,10 @@ use super::storage::SyncStorage;
 pub struct SyncCycleResult {
     /// Number of remote changesets that were applied.
     pub changesets_applied: u64,
+    /// Changesets from a newer schema version that we couldn't apply. The
+    /// cursor advanced past them, so the count is per-cycle (transient) — it
+    /// surfaces once and clears once the user updates the client.
+    pub skipped_schema: u64,
     /// Number of other devices seen in the sync storage.
     pub other_device_count: usize,
     /// RFC 3339 timestamp of when this cycle completed.
@@ -487,6 +491,7 @@ pub async unsafe fn run_single_sync_cycle(
     SyncCycleOutcome::Ok(
         SyncCycleResult {
             changesets_applied: sync_result.pull.changesets_applied,
+            skipped_schema: sync_result.pull.skipped_schema,
             other_device_count,
             sync_time: now,
             asset_downloads_failed: sync_result.pull.asset_downloads_failed,

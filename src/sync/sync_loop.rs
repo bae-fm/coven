@@ -159,7 +159,15 @@ impl SyncLoopHandle {
                         {
                             Ok(result) => {
                                 consecutive_failures = 0;
-                                let error = if result.asset_downloads_failed {
+                                // Schema-skip takes priority — newer-version changesets are
+                                // permanently inapplicable until the user updates bae, while
+                                // asset download failures retry naturally on the next cycle.
+                                let error = if result.skipped_schema > 0 {
+                                    Some(format!(
+                                        "{} changes from a newer bae version were skipped. Update bae to apply them.",
+                                        result.skipped_schema,
+                                    ))
+                                } else if result.asset_downloads_failed {
                                     Some("Some files failed to download, will retry".to_string())
                                 } else {
                                     None

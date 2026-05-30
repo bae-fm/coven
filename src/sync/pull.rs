@@ -381,7 +381,7 @@ impl std::fmt::Display for PullError {
                 min_version,
             } => write!(
                 f,
-                "local schema version {local_version} is below the storage minimum {min_version}, upgrade required"
+                "Update bae to keep syncing — this library was upgraded by a newer device (schema v{min_version}; you have v{local_version})."
             ),
         }
     }

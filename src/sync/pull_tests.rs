@@ -373,3 +373,19 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
         ffi::sqlite3_close(db2);
     }
 }
+
+mod schema_version_too_old_display {
+    use crate::sync::pull::PullError;
+
+    #[test]
+    fn names_bae_and_versions_and_recovery() {
+        let err = PullError::SchemaVersionTooOld {
+            local_version: 3,
+            min_version: 5,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Update bae"), "missing recovery verb: {msg}");
+        assert!(msg.contains("v5"), "missing required version: {msg}");
+        assert!(msg.contains("v3"), "missing current version: {msg}");
+    }
+}
