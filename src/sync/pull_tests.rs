@@ -8,13 +8,18 @@ use std::collections::HashMap;
 use libsqlite3_sys as ffi;
 
 use crate::blob::BlobPlan;
+use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::sync::cycle;
+use crate::sync::encrypted_storage::EncryptedSyncStorage;
 use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
 };
 use crate::sync::pull::pull_changes;
 use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::service::SyncService;
 use crate::sync::session::SyncSession;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
@@ -191,6 +196,125 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         assert!(!result.asset_downloads_failed);
         let downloaded = std::fs::read(dst_photos.path().join("p1")).expect("downloaded photo");
         assert_eq!(downloaded, b"PHOTOBYTES");
+
+        ffi::sqlite3_close(db1);
+        ffi::sqlite3_close(db2);
+    }
+}
+
+/// Full encrypted blob round-trip through `EncryptedSyncStorage` over a shared
+/// `CloudHome`. Device A publishes a note plus its cover photo; the blob lands
+/// ciphertext at rest (asserted by reading the raw `CloudHome` bytes directly).
+/// Device B — a fresh DB with its own asset directory but the same library
+/// key — pulls, downloads the blob, decrypts it, and recovers the original
+/// bytes byte-for-byte.
+#[tokio::test]
+async fn encrypted_blob_round_trips_and_second_device_decrypts() {
+    unsafe {
+        init_synced_tables();
+
+        // One cloud and one library key, shared by both devices (device B holds
+        // the same key a joined device would). The storage owns the cloud; raw
+        // reads through `cloud_home()` prove the bytes land ciphertext.
+        let storage = EncryptedSyncStorage::new(
+            Box::new(InMemoryCloudHome::new()),
+            EncryptionService::new_with_key(&[7u8; 32]),
+        );
+
+        // Device A: a note and its cover photo, the file present locally.
+        let plaintext = b"COVER-ART-BYTES";
+        let src_photos = tempfile::tempdir().expect("src photos");
+        std::fs::write(src_photos.path().join("p1cover"), plaintext).expect("write photo");
+        let src_plan = PhotoBlobPlan {
+            dir: src_photos.path().to_path_buf(),
+        };
+
+        let db1 = open_memory_db();
+        create_synced_schema(db1);
+        // Start a session, write the changes, then drive sync() — it captures
+        // the changeset, uploads blobs, and builds the envelope. sync() does
+        // not put_changeset itself; the caller pushes the returned envelope
+        // via cycle::push_changeset.
+        let session = SyncSession::start(db1).expect("start session");
+        exec(
+            db1,
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        );
+        exec(
+            db1,
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+             VALUES ('p1cover', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+        );
+
+        let service = SyncService::new("dev1".to_string());
+        let keypair = UserKeypair::generate();
+        let (_t1, ld1) = temp_library_dir();
+        let result = service
+            .sync(
+                db1,
+                session,
+                0,
+                &HashMap::new(),
+                &storage,
+                "2026-01-01T00:00:00Z",
+                "",
+                &keypair,
+                &ld1,
+                &src_plan,
+            )
+            .await
+            .expect("sync");
+        let outgoing = result.outgoing.expect("outgoing changeset");
+        cycle::push_changeset(
+            &storage,
+            "dev1",
+            outgoing.seq,
+            outgoing.packed,
+            None,
+            "2026-01-01T00:00:00Z",
+        )
+        .await
+        .expect("push_changeset");
+
+        // At rest the cover photo is ciphertext, not the source bytes.
+        let blob_key = EncryptedSyncStorage::blob_key("photos", "p1cover");
+        let at_rest = storage
+            .cloud_home()
+            .read(&blob_key)
+            .await
+            .expect("blob present in cloud");
+        assert_ne!(
+            at_rest, plaintext,
+            "blob must be encrypted at rest in the cloud"
+        );
+
+        // Device B: a fresh DB and its own asset directory, same cloud + key.
+        let dst_photos = tempfile::tempdir().expect("dst photos");
+        let dst_plan = PhotoBlobPlan {
+            dir: dst_photos.path().to_path_buf(),
+        };
+        let db2 = open_memory_db();
+        create_synced_schema(db2);
+        let (_t, ld) = temp_library_dir();
+        let (updated, result) =
+            pull_changes(db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan)
+                .await
+                .expect("pull");
+
+        assert_eq!(result.changesets_applied, 1);
+        assert!(!result.asset_downloads_failed);
+        assert_eq!(updated.get("dev1"), Some(&1));
+        assert_eq!(
+            query_text(db2, "SELECT title FROM notes WHERE id = 'n1'"),
+            "WithPhoto"
+        );
+        let downloaded =
+            std::fs::read(dst_photos.path().join("p1cover")).expect("device B downloaded photo");
+        assert_eq!(
+            downloaded, plaintext,
+            "device B must recover the source bytes after decrypting with the shared key"
+        );
 
         ffi::sqlite3_close(db1);
         ffi::sqlite3_close(db2);
