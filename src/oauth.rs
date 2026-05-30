@@ -77,6 +77,11 @@ pub enum OAuthError {
     Denied(String),
     #[error("timeout waiting for authorization callback")]
     Timeout,
+    /// The refresh token is no longer accepted (revoked, expired, password
+    /// changed, …). Only a fresh OAuth authorization flow recovers — there
+    /// is no point retrying the refresh.
+    #[error("re-authorization required: {0}")]
+    Reauthorize(String),
 }
 
 struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
@@ -103,15 +108,63 @@ impl Drop for AbortOnDrop {
 }
 
 /// Token response from the OAuth provider (internal deserialization).
+///
+/// `access_token` is optional because error responses (`{"error": "invalid_grant", …}`)
+/// omit it — making it required forces parsing to fail before the typed
+/// error branch can classify the failure, surfacing every provider error as
+/// "parse response: missing field `access_token`".
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    #[serde(default)]
+    access_token: Option<String>,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
     error_description: Option<String>,
+}
+
+impl TokenResponse {
+    /// Convert a parsed response into typed `OAuthTokens`, classifying the
+    /// failure modes both exchange and refresh share: `invalid_grant` /
+    /// `unauthorized_client` (the refresh-token-no-longer-accepted family)
+    /// become `OAuthError::Reauthorize`; other provider errors become
+    /// `TokenExchange`; a missing `access_token` on a non-error response is
+    /// reported as a malformed success.
+    fn into_tokens(
+        self,
+        status: reqwest::StatusCode,
+        body: &str,
+        clock: &dyn crate::clock::Clock,
+    ) -> Result<OAuthTokens, OAuthError> {
+        if let Some(error) = self.error {
+            let detail = match self.error_description.as_deref() {
+                Some(d) => format!("{error}: {d}"),
+                None => error.clone(),
+            };
+            if matches!(error.as_str(), "invalid_grant" | "unauthorized_client") {
+                return Err(OAuthError::Reauthorize(detail));
+            }
+            return Err(OAuthError::TokenExchange(format!(
+                "provider error (HTTP {status}): {detail}"
+            )));
+        }
+
+        let access_token = self.access_token.ok_or_else(|| {
+            OAuthError::TokenExchange(format!(
+                "provider response missing access_token (HTTP {status}, body: {body})"
+            ))
+        })?;
+
+        let expires_at = self.expires_in.map(|secs| clock.now().timestamp() + secs);
+
+        Ok(OAuthTokens {
+            access_token,
+            refresh_token: self.refresh_token,
+            expires_at,
+        })
+    }
 }
 
 /// Generate a random PKCE code verifier (43-128 URL-safe characters).
@@ -326,22 +379,7 @@ pub async fn exchange_code(
     let token_resp: TokenResponse = serde_json::from_str(&body)
         .map_err(|e| OAuthError::TokenExchange(format!("parse response: {e} (body: {body})")))?;
 
-    if let Some(error) = token_resp.error {
-        let desc = token_resp.error_description.unwrap_or(error);
-        return Err(OAuthError::TokenExchange(format!(
-            "provider error (HTTP {status}): {desc}"
-        )));
-    }
-
-    let expires_at = token_resp
-        .expires_in
-        .map(|secs| clock.now().timestamp() + secs);
-
-    Ok(OAuthTokens {
-        access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
-        expires_at,
-    })
+    token_resp.into_tokens(status, &body, clock)
 }
 
 /// Refresh an expired access token using a refresh token.
@@ -378,28 +416,15 @@ pub async fn refresh(
 
     let token_resp: TokenResponse = serde_json::from_str(&body)
         .map_err(|e| OAuthError::TokenExchange(format!("parse response: {e} (body: {body})")))?;
-
-    if let Some(error) = token_resp.error {
-        let desc = token_resp.error_description.unwrap_or(error);
-        return Err(OAuthError::TokenExchange(format!(
-            "provider error (HTTP {status}): {desc}"
-        )));
+    let mut tokens = token_resp.into_tokens(status, &body, clock)?;
+    // Provider didn't return a new refresh token (common — many providers
+    // only rotate it on the initial exchange). Reuse the existing one so the
+    // session can refresh again next cycle.
+    if tokens.refresh_token.is_none() {
+        tracing::debug!("provider did not return a new refresh_token; reusing existing token");
+        tokens.refresh_token = Some(refresh_token.to_string());
     }
-
-    let expires_at = token_resp
-        .expires_in
-        .map(|secs| clock.now().timestamp() + secs);
-
-    // If the provider doesn't return a new refresh token, keep the old one
-    let new_refresh = token_resp
-        .refresh_token
-        .or_else(|| Some(refresh_token.to_string()));
-
-    Ok(OAuthTokens {
-        access_token: token_resp.access_token,
-        refresh_token: new_refresh,
-        expires_at,
-    })
+    Ok(tokens)
 }
 
 /// Run an OAuth authorization flow for the given cloud provider.
@@ -468,5 +493,93 @@ mod tests {
         assert_eq!(parsed.access_token, "at_123");
         assert_eq!(parsed.refresh_token, Some("rt_456".to_string()));
         assert_eq!(parsed.expires_at, Some(1700000000));
+    }
+
+    fn parse_token_response(body: &str) -> TokenResponse {
+        serde_json::from_str(body).expect("parse TokenResponse")
+    }
+
+    #[test]
+    fn into_tokens_classifies_invalid_grant_as_reauthorize() {
+        let body =
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked"}"#;
+        let result = parse_token_response(body).into_tokens(
+            reqwest::StatusCode::BAD_REQUEST,
+            body,
+            &crate::clock::SystemClock,
+        );
+        match result {
+            Err(OAuthError::Reauthorize(detail)) => {
+                assert!(
+                    detail.contains("expired or revoked"),
+                    "expected error_description in detail, got: {detail}",
+                );
+            }
+            other => panic!("expected Reauthorize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn into_tokens_classifies_unauthorized_client_as_reauthorize() {
+        let body =
+            r#"{"error":"unauthorized_client","error_description":"Client has been revoked"}"#;
+        let result = parse_token_response(body).into_tokens(
+            reqwest::StatusCode::BAD_REQUEST,
+            body,
+            &crate::clock::SystemClock,
+        );
+        assert!(
+            matches!(result, Err(OAuthError::Reauthorize(_))),
+            "expected Reauthorize, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn into_tokens_leaves_other_provider_errors_as_token_exchange() {
+        let body = r#"{"error":"invalid_request","error_description":"missing parameter"}"#;
+        let result = parse_token_response(body).into_tokens(
+            reqwest::StatusCode::BAD_REQUEST,
+            body,
+            &crate::clock::SystemClock,
+        );
+        match result {
+            Err(OAuthError::TokenExchange(msg)) => {
+                assert!(
+                    msg.contains("missing parameter"),
+                    "expected description in message, got: {msg}",
+                );
+            }
+            other => panic!("expected TokenExchange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn into_tokens_returns_tokens_on_success() {
+        let body = r#"{"access_token":"new_at","refresh_token":"new_rt","expires_in":3600}"#;
+        let tokens = parse_token_response(body)
+            .into_tokens(reqwest::StatusCode::OK, body, &crate::clock::SystemClock)
+            .expect("into_tokens");
+        assert_eq!(tokens.access_token, "new_at");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("new_rt"));
+        assert!(tokens.expires_at.is_some());
+    }
+
+    #[test]
+    fn into_tokens_errors_when_success_response_missing_access_token() {
+        let body = r#"{}"#;
+        let result = parse_token_response(body).into_tokens(
+            reqwest::StatusCode::OK,
+            body,
+            &crate::clock::SystemClock,
+        );
+        match result {
+            Err(OAuthError::TokenExchange(msg)) => {
+                assert!(
+                    msg.contains("missing access_token"),
+                    "expected access_token error, got: {msg}",
+                );
+            }
+            other => panic!("expected TokenExchange, got {other:?}"),
+        }
     }
 }

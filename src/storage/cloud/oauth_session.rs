@@ -67,14 +67,21 @@ impl OAuthSession {
         }
 
         let refresh_token = tokens.refresh_token.as_deref().ok_or_else(|| {
-            CloudHomeError::Storage(
-                "no refresh token available, re-authorization needed".to_string(),
-            )
+            CloudHomeError::Storage(format!(
+                "Your {} sign-in is missing a refresh token. Reconnect to keep syncing.",
+                self.provider_label,
+            ))
         })?;
 
         let new_tokens = oauth::refresh(&self.config, refresh_token, self.clock.as_ref())
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("OAuth refresh failed: {e}")))?;
+            .map_err(|e| match e {
+                oauth::OAuthError::Reauthorize(detail) => CloudHomeError::Storage(format!(
+                    "Your {} access was revoked or expired. Reconnect to keep syncing. ({detail})",
+                    self.provider_label,
+                )),
+                other => CloudHomeError::Storage(format!("OAuth refresh failed: {other}")),
+            })?;
 
         let json = serde_json::to_string(&new_tokens)
             .map_err(|e| CloudHomeError::Storage(format!("serialize tokens: {e}")))?;
