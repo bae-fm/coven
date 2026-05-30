@@ -157,6 +157,36 @@ impl DropboxCloudHome {
     }
 }
 
+/// `error_summary` field from a Dropbox API error body (the chained tag string,
+/// e.g. `"path/insufficient_space/..."`), or `None` if the body isn't Dropbox
+/// JSON. Non-JSON bodies are a common skip (proxy 500s, captive portals) — log
+/// at debug so the bail-out is visible without spamming a normal session.
+fn parse_dropbox_error_summary(body: &str) -> Option<String> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("non-JSON Dropbox error body, skipping summary extraction: {e}");
+            return None;
+        }
+    };
+    v.get("error_summary")?.as_str().map(String::from)
+}
+
+/// Map a Dropbox write failure to a `CloudHomeError`. The `insufficient_space`
+/// path error gets a message naming the provider and the recovery step;
+/// everything else keeps the raw HTTP status + body for debugging.
+fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> CloudHomeError {
+    if let Some(summary) = parse_dropbox_error_summary(body) {
+        if summary.starts_with("path/insufficient_space") {
+            return CloudHomeError::Storage(
+                "Your Dropbox storage is full. Free up space at dropbox.com to keep syncing."
+                    .to_string(),
+            );
+        }
+    }
+    CloudHomeError::Storage(format!("write {key} (HTTP {status}): {body}"))
+}
+
 #[async_trait]
 impl CloudHome for DropboxCloudHome {
     async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
@@ -186,9 +216,7 @@ impl CloudHome for DropboxCloudHome {
                 .text()
                 .await
                 .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-            return Err(CloudHomeError::Storage(format!(
-                "write {key} (HTTP {status}): {body}"
-            )));
+            return Err(classify_write_error(status, &body, key));
         }
 
         Ok(())
@@ -589,5 +617,41 @@ mod tests {
         assert_eq!(config.token_url, "https://api.dropboxapi.com/oauth2/token");
         assert!(config.client_secret.is_none());
         assert!(config.scopes.is_empty());
+    }
+
+    #[test]
+    fn parse_dropbox_error_summary_extracts_insufficient_space() {
+        let body = r#"{"error_summary":"path/insufficient_space/.tag","error":{".tag":"path","reason":{".tag":"insufficient_space"}}}"#;
+        assert_eq!(
+            parse_dropbox_error_summary(body).as_deref(),
+            Some("path/insufficient_space/.tag"),
+        );
+    }
+
+    #[test]
+    fn parse_dropbox_error_summary_returns_none_for_non_matching_body() {
+        assert!(parse_dropbox_error_summary("<html>500</html>").is_none());
+        assert!(parse_dropbox_error_summary("{}").is_none());
+        assert!(parse_dropbox_error_summary(r#"{"other":"field"}"#).is_none());
+    }
+
+    #[test]
+    fn classify_write_error_quota_message_names_provider_and_recovery() {
+        let body = r#"{"error_summary":"path/insufficient_space/..","error":{}}"#;
+        let err =
+            classify_write_error(reqwest::StatusCode::INSUFFICIENT_STORAGE, body, "changes/1");
+        let msg = err.to_string();
+        assert!(msg.contains("Dropbox storage is full"), "{msg}");
+        assert!(msg.contains("Free up space"), "{msg}");
+    }
+
+    #[test]
+    fn classify_write_error_keeps_raw_for_non_quota_errors() {
+        let body = r#"{"error_summary":"path/conflict/file","error":{}}"#;
+        let err = classify_write_error(reqwest::StatusCode::CONFLICT, body, "changes/dev1/1.enc");
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP 409"), "{msg}");
+        assert!(msg.contains("changes/dev1/1.enc"), "{msg}");
+        assert!(!msg.contains("storage is full"), "{msg}");
     }
 }
