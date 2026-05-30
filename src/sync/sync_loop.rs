@@ -152,11 +152,13 @@ impl SyncLoopHandle {
                     // Short delay to avoid racing with app startup
                     tokio::time::sleep(Duration::from_secs(3)).await;
 
+                    let mut consecutive_failures: u32 = 0;
                     loop {
                         match run_single_cycle(&inner, db.as_ref(), clock.as_ref(), &library_dir)
                             .await
                         {
                             Ok(result) => {
+                                consecutive_failures = 0;
                                 let error = if result.asset_downloads_failed {
                                     Some("Some files failed to download, will retry".to_string())
                                 } else {
@@ -181,6 +183,7 @@ impl SyncLoopHandle {
                                 let _ = event_tx.send(status);
                             }
                             Err(e) => {
+                                consecutive_failures = consecutive_failures.saturating_add(1);
                                 let status = SyncLoopStatus {
                                     configured: true,
                                     syncing: false,
@@ -194,8 +197,17 @@ impl SyncLoopHandle {
                             }
                         }
 
+                        let wait = Duration::from_secs(super::backoff::backoff_secs(
+                            consecutive_failures,
+                            300,
+                        ));
+                        if consecutive_failures > 0 {
+                            debug!(
+                                "Backing off {wait:?} after {consecutive_failures} consecutive failure(s)",
+                            );
+                        }
                         tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                            _ = tokio::time::sleep(wait) => {}
                             msg = trigger_rx.recv() => {
                                 if msg.is_none() {
                                     info!("Sync trigger channel closed, stopping sync loop");

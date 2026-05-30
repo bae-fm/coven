@@ -23,13 +23,8 @@ pub(super) fn backoff_window(attempt_count: i64) -> chrono::Duration {
     if attempt_count <= 0 {
         return chrono::Duration::zero();
     }
-    const BASE_SECS: i64 = 30;
-    const CAP_SECS: i64 = 3600;
-    let exp = (attempt_count - 1).min(20) as u32;
-    let secs = BASE_SECS
-        .saturating_mul(2i64.saturating_pow(exp))
-        .min(CAP_SECS);
-    chrono::Duration::seconds(secs)
+    let n = (attempt_count - 1) as u32;
+    chrono::Duration::seconds(super::backoff::backoff_secs(n, 3600) as i64)
 }
 
 /// Record a failed upload attempt and notify the observer. The entry is left
