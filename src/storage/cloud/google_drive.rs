@@ -127,6 +127,48 @@ impl GoogleDriveCloudHome {
     }
 }
 
+/// First `error.errors[].reason` in a Google API error body (the shape Drive,
+/// Sheets, and other googleapis.com endpoints share), or `None` if the body
+/// isn't that JSON (HTML error page, empty, malformed). Non-JSON bodies are a
+/// common skip (proxy 500s, captive portals) — log at debug so the bail-out
+/// is visible without spamming a normal session.
+fn parse_google_api_error_reason(body: &str) -> Option<String> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("non-JSON error body, skipping reason extraction: {e}");
+            return None;
+        }
+    };
+    v.get("error")?
+        .get("errors")?
+        .as_array()?
+        .first()?
+        .get("reason")?
+        .as_str()
+        .map(String::from)
+}
+
+/// Map a Drive write failure to a `CloudHomeError`. The `storageQuotaExceeded`
+/// reason gets a message naming the provider and the recovery step; everything
+/// else keeps the raw HTTP status + body so transient failures stay debuggable.
+fn classify_write_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    key: &str,
+    op: &str,
+) -> CloudHomeError {
+    if status == reqwest::StatusCode::FORBIDDEN
+        && parse_google_api_error_reason(body).as_deref() == Some("storageQuotaExceeded")
+    {
+        return CloudHomeError::Storage(
+            "Your Google Drive storage is full. Free up space at drive.google.com to keep syncing."
+                .to_string(),
+        );
+    }
+    CloudHomeError::Storage(format!("{op} {key} (HTTP {status}): {body}"))
+}
+
 #[async_trait]
 impl CloudHome for GoogleDriveCloudHome {
     async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
@@ -151,9 +193,7 @@ impl CloudHome for GoogleDriveCloudHome {
                     .text()
                     .await
                     .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-                return Err(CloudHomeError::Storage(format!(
-                    "update {key} (HTTP {status}): {body}"
-                )));
+                return Err(classify_write_error(status, &body, key, "update"));
             }
         } else {
             // Create new file (multipart: metadata + content)
@@ -199,9 +239,7 @@ impl CloudHome for GoogleDriveCloudHome {
                     .text()
                     .await
                     .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-                return Err(CloudHomeError::Storage(format!(
-                    "create {key} (HTTP {status}): {body}"
-                )));
+                return Err(classify_write_error(status, &body, key, "create"));
             }
         }
 
@@ -538,6 +576,55 @@ mod tests {
         assert_eq!(
             GoogleDriveCloudHome::encode_prefix("changes/dev1/"),
             "changes__dev1__"
+        );
+    }
+
+    #[test]
+    fn parse_google_api_error_reason_extracts_storage_quota() {
+        let body = r#"{"error":{"code":403,"message":"quota","errors":[{"domain":"usageLimits","reason":"storageQuotaExceeded","message":"full"}]}}"#;
+        assert_eq!(
+            parse_google_api_error_reason(body).as_deref(),
+            Some("storageQuotaExceeded"),
+        );
+    }
+
+    #[test]
+    fn parse_google_api_error_reason_returns_none_for_non_drive_body() {
+        assert!(parse_google_api_error_reason("<html>500</html>").is_none());
+        assert!(parse_google_api_error_reason("{}").is_none());
+        assert!(parse_google_api_error_reason(r#"{"error":"flat"}"#).is_none());
+    }
+
+    #[test]
+    fn classify_write_error_quota_message_names_provider_and_recovery() {
+        let body = r#"{"error":{"code":403,"errors":[{"reason":"storageQuotaExceeded"}]}}"#;
+        let err = classify_write_error(reqwest::StatusCode::FORBIDDEN, body, "k", "create");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Google Drive storage is full"),
+            "missing provider+state: {msg}",
+        );
+        assert!(
+            msg.contains("Free up space"),
+            "missing recovery step: {msg}"
+        );
+    }
+
+    #[test]
+    fn classify_write_error_keeps_raw_for_non_quota_errors() {
+        let body = r#"{"error":{"code":500,"message":"server error"}}"#;
+        let err = classify_write_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body,
+            "blobs/aa/bb/cc",
+            "create",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("HTTP 500"), "missing HTTP status: {msg}");
+        assert!(msg.contains("blobs/aa/bb/cc"), "missing key: {msg}");
+        assert!(
+            !msg.contains("storage is full"),
+            "should not match the quota message: {msg}",
         );
     }
 }
