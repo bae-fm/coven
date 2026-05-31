@@ -29,4 +29,6 @@ features:
       details: "Membership is an append-only Ed25519-signed chain. The library key is wrapped to each member's X25519 key."
     - title: Encrypted blob store
       details: 'Files referenced by rows move through a cloud outbox as encrypted opaque blobs.'
+    - title: Actionable errors
+      details: 'Drivers classify provider-specific signals — quota, revoked auth, missing bucket — into user-facing messages the host shows verbatim.'
 ---

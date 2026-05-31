@@ -221,3 +221,26 @@ impl coven::blob::BlobPlan for TodoBlobPlan {
 The synced todo row and the encrypted attachment move through the same sync
 cycle: row data as signed encrypted changesets, file data as encrypted opaque
 blobs.
+
+## Error display
+
+coven owns the user-facing error copy. The host forwards `Display` straight
+through and doesn't reword:
+
+- **`CloudHomeError::Storage(msg)`** from any cloud driver — provider-
+  specific signals (quota exceeded on Drive/Dropbox/OneDrive, S3
+  `AccessDenied` / `NoSuchBucket`, OAuth `Reauthorize` → "Reconnect to keep
+  syncing") are already classified into actionable sentences.
+- **`SyncLoopStatus::error`** — set when a cycle surfaces a user-facing
+  concern (hard schema-too-old, asset downloads failed, per-cycle schema
+  skips). The host shows it in a banner; `None` clears.
+- **`PullError::SchemaVersionTooOld`** — "Update bae to keep syncing — this
+  library was upgraded by a newer device (schema vN; you have vM)."
+- **`RestoreCodeError`** — names the cause and the next step per variant
+  (missing prefix, bad base64, malformed JSON, version mismatch).
+
+The todo app's bridge layer forwards each one with one line:
+
+```rust
+.map_err(|e| HostError::Banner(e.to_string()))?
+```

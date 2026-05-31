@@ -38,6 +38,17 @@ backed by storage the user or app already controls.
 5. Pull reads encrypted envelopes from storage and applies remote changes.
 6. Blob references enqueue encrypted blob movement through the cloud outbox.
 
+## Topics
+
+- [Example](/docs/example) — a shared-todos host wired end-to-end.
+- [Sync model](/docs/sync-model) — change capture, the cycle, schema
+  versioning, backoff.
+- [Storage](/docs/storage) — the `CloudHome` trait, errors, per-provider
+  classification.
+- [Blobs](/docs/blobs) — the blob plan, outbox, observer, layout.
+- [Membership](/docs/membership) — signed chain, library-key wrapping,
+  invite/join/restore.
+
 ## Status
 
 coven is pre-1.0 and extracted from
