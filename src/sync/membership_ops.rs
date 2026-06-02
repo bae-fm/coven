@@ -256,19 +256,19 @@ pub(crate) async fn download_chain(
 /// Write individual `auth/keys/{pubkey}` files for each current member.
 ///
 /// This materializes the membership chain into per-key files that the proxy
-/// can read without understanding the chain format. Keys are added/removed
-/// to match the chain's current members.
+/// can read without understanding the (encrypted) chain format. The file's
+/// *content* is the member's role wire string (`owner`/`member`/`follower`), so
+/// the proxy can gate writes by role: a Follower's signed requests authenticate
+/// but may only read. Keys are written for every current member (so a role
+/// change is reflected) and deleted for anyone no longer in the chain.
 pub async fn sync_authorized_keys(
     cloud_home: &dyn crate::storage::cloud::CloudHome,
     chain: &MembershipChain,
 ) -> Result<(), MembershipOpsError> {
     use std::collections::HashSet;
 
-    let current: HashSet<String> = chain
-        .current_members()
-        .into_iter()
-        .map(|(pk, _)| pk)
-        .collect();
+    let current = chain.current_members();
+    let current_keys: HashSet<&String> = current.iter().map(|(pk, _)| pk).collect();
 
     let existing = cloud_home
         .list("auth/keys/")
@@ -280,17 +280,20 @@ pub async fn sync_authorized_keys(
         .map(|s| s.to_string())
         .collect();
 
-    for pk in &current {
-        if !existing_keys.contains(pk) {
-            cloud_home
-                .write(&format!("auth/keys/{pk}"), vec![])
-                .await
-                .map_err(|e| MembershipOpsError(format!("write auth key: {e}")))?;
-        }
+    // Write (or overwrite) every current member's key file with its current
+    // role, so role changes (e.g. Member -> Follower) propagate to the proxy.
+    for (pk, role) in &current {
+        cloud_home
+            .write(
+                &format!("auth/keys/{pk}"),
+                role.as_str().as_bytes().to_vec(),
+            )
+            .await
+            .map_err(|e| MembershipOpsError(format!("write auth key: {e}")))?;
     }
 
     for pk in &existing_keys {
-        if !current.contains(pk) {
+        if !current_keys.contains(pk) {
             cloud_home
                 .delete(&format!("auth/keys/{pk}"))
                 .await
