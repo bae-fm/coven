@@ -24,6 +24,27 @@ pub enum MembershipAction {
 pub enum MemberRole {
     Owner,
     Member,
+    /// Read-only member: holds the library key and is registered in the chain,
+    /// but may not author catalog changesets (rejected on pull) and is gated to
+    /// reads at the proxy. Revocable like any member.
+    Follower,
+}
+
+impl MemberRole {
+    /// Stable lowercase wire string. Written into `auth/keys/{pubkey}` so the
+    /// proxy can role-gate writes without decrypting the membership chain.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemberRole::Owner => "owner",
+            MemberRole::Member => "member",
+            MemberRole::Follower => "follower",
+        }
+    }
+
+    /// Whether this role may author catalog changesets (write). Followers can't.
+    pub fn can_write(&self) -> bool {
+        matches!(self, MemberRole::Owner | MemberRole::Member)
+    }
 }
 
 /// A single membership entry in the chain.
@@ -203,6 +224,40 @@ impl MembershipChain {
         active.contains(&pubkey.to_string())
     }
 
+    /// The role a pubkey held at `timestamp`, or `None` if it was not an active
+    /// member then. Replays Add/Remove (with role changes) up to the timestamp.
+    pub fn role_at(&self, pubkey: &str, timestamp: &str) -> Option<MemberRole> {
+        let mut active: Vec<(String, MemberRole)> = Vec::new();
+
+        for entry in &self.entries {
+            if entry.timestamp.as_str() > timestamp {
+                break;
+            }
+            match entry.action {
+                MembershipAction::Add => {
+                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
+                    active.push((entry.user_pubkey.clone(), entry.role.clone()));
+                }
+                MembershipAction::Remove => {
+                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
+                }
+            }
+        }
+
+        active
+            .into_iter()
+            .find(|(pk, _)| pk == pubkey)
+            .map(|(_, role)| role)
+    }
+
+    /// Whether a pubkey was authorized to *author* catalog changesets at
+    /// `timestamp` — an active Owner or Member. Followers are read-only, so a
+    /// changeset they authored is rejected on pull.
+    pub fn can_write_at(&self, pubkey: &str, timestamp: &str) -> bool {
+        self.role_at(pubkey, timestamp)
+            .is_some_and(|role| role.can_write())
+    }
+
     /// Return current active members with their roles.
     pub fn current_members(&self) -> Vec<(String, MemberRole)> {
         let mut active: Vec<(String, MemberRole)> = Vec::new();
@@ -321,6 +376,107 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].0, pubkey_hex(&owner));
         assert_eq!(members[0].1, MemberRole::Owner);
+    }
+
+    #[test]
+    fn follower_role_is_read_only_and_revocable() {
+        let owner = gen_keypair();
+        let follower = gen_keypair();
+        let member = gen_keypair();
+
+        let mut chain = MembershipChain::new();
+        chain
+            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
+            .unwrap();
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &follower,
+                MemberRole::Follower,
+                "0000000002000-0000-dev1",
+            ))
+            .unwrap();
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &member,
+                MemberRole::Member,
+                "0000000003000-0000-dev1",
+            ))
+            .unwrap();
+        chain.validate().unwrap();
+
+        let now = "0000000009000-0000-dev1";
+        // Roles resolve correctly.
+        assert_eq!(
+            chain.role_at(&pubkey_hex(&owner), now),
+            Some(MemberRole::Owner)
+        );
+        assert_eq!(
+            chain.role_at(&pubkey_hex(&follower), now),
+            Some(MemberRole::Follower)
+        );
+        assert_eq!(
+            chain.role_at(&pubkey_hex(&member), now),
+            Some(MemberRole::Member)
+        );
+
+        // Owners and Members may author changesets; a Follower may not.
+        assert!(chain.can_write_at(&pubkey_hex(&owner), now));
+        assert!(chain.can_write_at(&pubkey_hex(&member), now));
+        assert!(!chain.can_write_at(&pubkey_hex(&follower), now));
+        // ...but the Follower is still a registered member (can read).
+        assert!(chain.is_member_at(&pubkey_hex(&follower), now));
+
+        // Revoking the follower drops them entirely: no role, not a member.
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Remove,
+                &follower,
+                MemberRole::Follower,
+                "0000000004000-0000-dev1",
+            ))
+            .unwrap();
+        assert_eq!(chain.role_at(&pubkey_hex(&follower), now), None);
+        assert!(!chain.is_member_at(&pubkey_hex(&follower), now));
+        assert!(!chain.can_write_at(&pubkey_hex(&follower), now));
+    }
+
+    #[test]
+    fn role_change_member_to_follower_revokes_write() {
+        let owner = gen_keypair();
+        let m = gen_keypair();
+
+        let mut chain = MembershipChain::new();
+        chain
+            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
+            .unwrap();
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &m,
+                MemberRole::Member,
+                "0000000002000-0000-dev1",
+            ))
+            .unwrap();
+        // Re-add with a lower role downgrades them.
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &m,
+                MemberRole::Follower,
+                "0000000003000-0000-dev1",
+            ))
+            .unwrap();
+
+        // Could write at t=2 (Member), cannot at t=3+ (downgraded to Follower).
+        assert!(chain.can_write_at(&pubkey_hex(&m), "0000000002500-0000-dev1"));
+        assert!(!chain.can_write_at(&pubkey_hex(&m), "0000000009000-0000-dev1"));
     }
 
     #[test]

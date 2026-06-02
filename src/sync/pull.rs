@@ -225,16 +225,21 @@ pub async unsafe fn pull_changes(
             // signs at creation, so an unsigned or non-member changeset here is
             // forged -- reject it.
             if let Some(chain) = membership_chain.as_ref() {
+                // The author must have been a *write-capable* member (Owner or
+                // Member) at the signature-bound timestamp. A Follower is a
+                // read-only member, so a changeset it authored is rejected here
+                // even though it is registered — the logical half of read-only
+                // enforcement (the proxy gates Follower writes too).
                 let authorized = env
                     .author_pubkey
                     .as_ref()
-                    .is_some_and(|pk| chain.is_member_at(pk, &env.timestamp));
+                    .is_some_and(|pk| chain.can_write_at(pk, &env.timestamp));
                 if !authorized {
                     warn!(
                         device_id = %head.device_id,
                         seq,
                         author = ?env.author_pubkey,
-                        "changeset not signed by a current member, skipping"
+                        "changeset not authored by a write-capable member, skipping"
                     );
                     updated_cursors.insert(head.device_id.clone(), seq);
                     continue;
