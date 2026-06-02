@@ -180,28 +180,33 @@ pub fn code_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash)
 }
 
-/// Open the user's browser, wait for the OAuth callback, and exchange the
-/// authorization code for tokens.
-///
-/// Flow:
-/// 1. Generate PKCE verifier + challenge
-/// 2. Open browser to `auth_url` with the required parameters
-/// 3. Spawn a one-shot HTTP server on `localhost:{redirect_port}`
-/// 4. Wait for the callback with the authorization code
-/// 5. Exchange the code for tokens at `token_url`
-pub async fn authorize(
+/// An authorization request the host drives itself: the URL to open and the
+/// PKCE verifier to feed back to [`exchange_code`]. For hosts that capture the
+/// redirect outside coven's localhost callback server — e.g. a mobile OS auth
+/// session (ASWebAuthenticationSession / Custom Tabs) redirecting to a custom
+/// URI scheme, where binding a localhost port and `open::that` don't apply.
+#[derive(Clone, Debug)]
+pub struct AuthorizeRequest {
+    pub auth_url: String,
+    pub verifier: String,
+}
+
+/// Build the authorization URL + PKCE verifier for `config`, redirecting to
+/// `redirect_uri`. The caller opens the URL, captures the `code` from the
+/// redirect itself, then calls [`exchange_code`] with the same `redirect_uri`
+/// and the returned verifier. [`authorize`] is this plus coven's localhost
+/// callback server for desktop.
+pub fn build_authorize_url(
     config: &OAuthConfig,
-    cancel: tokio::sync::watch::Receiver<bool>,
-    clock: &dyn crate::clock::Clock,
-) -> Result<OAuthTokens, OAuthError> {
+    redirect_uri: &str,
+) -> Result<AuthorizeRequest, OAuthError> {
     let verifier = generate_code_verifier();
     let challenge = code_challenge(&verifier);
-    let redirect_uri = format!("http://localhost:{}/callback", config.redirect_port);
 
     let mut auth_params = vec![
         ("response_type", "code".to_string()),
         ("client_id", config.client_id.clone()),
-        ("redirect_uri", redirect_uri.clone()),
+        ("redirect_uri", redirect_uri.to_string()),
         ("code_challenge", challenge),
         ("code_challenge_method", "S256".to_string()),
     ];
@@ -220,6 +225,26 @@ pub async fn authorize(
         serde_urlencoded::to_string(&auth_params)
             .map_err(|e| OAuthError::Server(format!("failed to encode params: {e}")))?
     );
+
+    Ok(AuthorizeRequest { auth_url, verifier })
+}
+
+/// Open the user's browser, wait for the OAuth callback, and exchange the
+/// authorization code for tokens.
+///
+/// Flow:
+/// 1. Generate PKCE verifier + challenge
+/// 2. Open browser to `auth_url` with the required parameters
+/// 3. Spawn a one-shot HTTP server on `localhost:{redirect_port}`
+/// 4. Wait for the callback with the authorization code
+/// 5. Exchange the code for tokens at `token_url`
+pub async fn authorize(
+    config: &OAuthConfig,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    clock: &dyn crate::clock::Clock,
+) -> Result<OAuthTokens, OAuthError> {
+    let redirect_uri = format!("http://localhost:{}/callback", config.redirect_port);
+    let AuthorizeRequest { auth_url, verifier } = build_authorize_url(config, &redirect_uri)?;
 
     // Channel to receive the authorization code from the callback handler
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
