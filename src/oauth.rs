@@ -452,28 +452,64 @@ pub async fn refresh(
     Ok(tokens)
 }
 
-/// Run an OAuth authorization flow for the given cloud provider.
+/// The OAuth config for a provider that uses OAuth, or an error for providers
+/// (S3, CloudKit) that don't.
+fn oauth_config_for_provider(
+    provider: crate::config::CloudProvider,
+) -> Result<OAuthConfig, OAuthError> {
+    use crate::config::CloudProvider;
+    use crate::storage::cloud::{dropbox, google_drive, onedrive};
+
+    match provider {
+        CloudProvider::GoogleDrive => Ok(google_drive::GoogleDriveCloudHome::oauth_config()),
+        CloudProvider::Dropbox => Ok(dropbox::DropboxCloudHome::oauth_config()),
+        CloudProvider::OneDrive => Ok(onedrive::OneDriveCloudHome::oauth_config()),
+        other => Err(OAuthError::Denied(format!("{other:?} does not use OAuth"))),
+    }
+}
+
+/// Run an OAuth authorization flow for the given cloud provider (desktop: opens
+/// a browser and captures the redirect on coven's localhost callback server).
 ///
-/// Returns tokens on success. Only Google Drive, Dropbox, and OneDrive
-/// support OAuth; other providers return an error.
+/// Returns tokens on success. Only Google Drive, Dropbox, and OneDrive support
+/// OAuth; other providers return an error.
 pub async fn authorize_provider(
     provider: crate::config::CloudProvider,
     cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
-    use crate::config::CloudProvider;
-    use crate::storage::cloud::{dropbox, google_drive, onedrive};
+    authorize(&oauth_config_for_provider(provider)?, cancel, clock).await
+}
 
-    let config = match provider {
-        CloudProvider::GoogleDrive => google_drive::GoogleDriveCloudHome::oauth_config(),
-        CloudProvider::Dropbox => dropbox::DropboxCloudHome::oauth_config(),
-        CloudProvider::OneDrive => onedrive::OneDriveCloudHome::oauth_config(),
-        other => {
-            return Err(OAuthError::Denied(format!("{other:?} does not use OAuth")));
-        }
-    };
+/// Build an OAuth authorization request for `provider` redirecting to
+/// `redirect_uri`, for hosts that capture the redirect themselves (a mobile OS
+/// auth session). Pair the returned verifier and the same `redirect_uri` with
+/// [`exchange_code_for_provider`].
+pub fn build_authorize_request_for_provider(
+    provider: crate::config::CloudProvider,
+    redirect_uri: &str,
+) -> Result<AuthorizeRequest, OAuthError> {
+    build_authorize_url(&oauth_config_for_provider(provider)?, redirect_uri)
+}
 
-    authorize(&config, cancel, clock).await
+/// Exchange an authorization `code` captured by the host for `provider`'s
+/// tokens. `redirect_uri` and `verifier` must match the originating
+/// [`build_authorize_request_for_provider`] call.
+pub async fn exchange_code_for_provider(
+    provider: crate::config::CloudProvider,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+    clock: &dyn crate::clock::Clock,
+) -> Result<OAuthTokens, OAuthError> {
+    exchange_code(
+        &oauth_config_for_provider(provider)?,
+        code,
+        verifier,
+        redirect_uri,
+        clock,
+    )
+    .await
 }
 
 #[cfg(test)]
