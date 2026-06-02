@@ -302,6 +302,29 @@ impl KeyService {
         Ok(())
     }
 
+    /// Delete the encryption master key from the OS keyring — e.g. when a
+    /// device leaves a library. Idempotent: a missing entry is not an error.
+    ///
+    /// Dev mode: removes the env var.
+    /// Prod mode: deletes from OS keyring. Silently ignores missing entries.
+    pub fn delete_encryption_key(&self) -> Result<(), KeyError> {
+        if self.dev_mode {
+            std::env::remove_var("BAE_ENCRYPTION_KEY");
+            return Ok(());
+        }
+
+        match keyring_core::Entry::new(keyring_service(), &self.account("encryption_master_key"))?
+            .delete_credential()
+        {
+            Ok(()) => {
+                info!("Encryption key deleted from keyring");
+                Ok(())
+            }
+            Err(keyring_core::Error::NoEntry) => Ok(()),
+            Err(e) => Err(KeyError::Keyring(e)),
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Cloud home credentials (library-scoped, single entry)
     // -------------------------------------------------------------------------
