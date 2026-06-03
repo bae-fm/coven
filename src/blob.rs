@@ -50,6 +50,12 @@ pub trait BlobPlan: Send + Sync {
 /// each attempt — the host tracks the transient in-flight set in memory;
 /// `on_blob_uploaded` on success; `on_blob_upload_failed` when an attempt fails
 /// and the entry is left queued for retry.
+///
+/// `should_skip_uploads` lets the host pause the upload pipeline without
+/// touching the queue contents. The sync cycle consults it before processing
+/// the outbox so a paused queue still accepts new entries but doesn't drain;
+/// in-flight uploads complete normally (process_uploads checks once at the top
+/// of each entry).
 #[async_trait::async_trait]
 pub trait BlobUploadObserver: Send + Sync {
     /// An upload attempt for this blob is starting now.
@@ -60,4 +66,11 @@ pub trait BlobUploadObserver: Send + Sync {
 
     /// An upload attempt failed; the entry remains queued for retry.
     async fn on_blob_upload_failed(&self, file_id: &str, error: &str);
+
+    /// If true, the sync cycle skips outbox upload processing this round and
+    /// `process_uploads` short-circuits before pulling the next queued entry.
+    /// The default is `false` so existing implementations don't need a stub.
+    fn should_skip_uploads(&self) -> bool {
+        false
+    }
 }

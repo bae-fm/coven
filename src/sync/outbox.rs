@@ -73,6 +73,14 @@ pub async fn process_uploads(
     let now = clock.now();
     let mut count = 0;
     for entry in uploads {
+        // Host-driven pause: short-circuit before pulling the next entry so a
+        // freshly paused queue stops draining without aborting an in-flight
+        // upload. Checked per entry so resume mid-cycle picks back up.
+        if let Some(obs) = observer {
+            if obs.should_skip_uploads() {
+                break;
+            }
+        }
         // Per-entry backoff: skip an entry still inside its retry window so a
         // poisoned entry isn't re-attempted every cycle.
         if let Some(last) = entry.last_attempt_at.as_deref() {
