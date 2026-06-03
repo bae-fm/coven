@@ -127,7 +127,7 @@ impl SyncService {
 
         // Step 4 + 5: pull incoming changesets (no session active).
         let (updated_cursors, pull_result) = pull::pull_changes(
-            db,
+            pull::SendDbPtr(db),
             storage,
             &self.device_id,
             cursors,

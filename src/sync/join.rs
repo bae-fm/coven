@@ -19,7 +19,7 @@ use crate::oauth::OAuthError;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
 use crate::sync::invite::{unwrap_library_key, InviteError};
-use crate::sync::pull::{pull_changes, PullError};
+use crate::sync::pull::{pull_changes, PullError, SendDbPtr};
 use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
 use crate::sync::storage::SyncStorage;
 
@@ -345,26 +345,34 @@ pub(crate) async fn open_db_and_pull(
     blob_plan: &dyn BlobPlan,
 ) -> Result<u64, JoinError> {
     unsafe {
-        let c_path = CString::new(db_path.to_str().unwrap()).unwrap();
-        let mut db: *mut libsqlite3_sys::sqlite3 = std::ptr::null_mut();
-        let rc = libsqlite3_sys::sqlite3_open(c_path.as_ptr(), &mut db);
-        if rc != libsqlite3_sys::SQLITE_OK {
-            return Err(JoinError::Database(
-                "Failed to open database for changeset application".to_string(),
-            ));
-        }
+        // Open in a tight scope so the raw `*mut sqlite3` is dropped before the
+        // pull await — only the Send wrapper crosses the await, which is what
+        // keeps this future Send. (A raw pointer left in an outer scope stays in
+        // the async state machine across the await even when its last use is
+        // before it.)
+        let db = {
+            let c_path = CString::new(db_path.to_str().unwrap()).unwrap();
+            let mut raw: *mut libsqlite3_sys::sqlite3 = std::ptr::null_mut();
+            let rc = libsqlite3_sys::sqlite3_open(c_path.as_ptr(), &mut raw);
+            if rc != libsqlite3_sys::SQLITE_OK {
+                return Err(JoinError::Database(
+                    "Failed to open database for changeset application".to_string(),
+                ));
+            }
+            SendDbPtr(raw)
+        };
 
         let result =
             match pull_changes(db, storage, device_id, cursors, library_dir, blob_plan).await {
                 Ok((_updated_cursors, pull_result)) => Ok(pull_result.changesets_applied),
                 Err(e) => {
-                    libsqlite3_sys::sqlite3_close(db);
+                    libsqlite3_sys::sqlite3_close(db.0);
                     Err(JoinError::Pull(e))
                 }
             };
 
         if result.is_ok() {
-            libsqlite3_sys::sqlite3_close(db);
+            libsqlite3_sys::sqlite3_close(db.0);
         }
 
         result

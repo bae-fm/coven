@@ -17,7 +17,7 @@ use crate::sync::encrypted_storage::EncryptedSyncStorage;
 use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
 };
-use crate::sync::pull::pull_changes;
+use crate::sync::pull::{pull_changes, SendDbPtr};
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::service::SyncService;
 use crate::sync::session::SyncSession;
@@ -81,10 +81,16 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
         let db2 = open_memory_db();
         create_synced_schema(db2);
         let (_tmp, ld) = temp_library_dir();
-        let (updated, result) =
-            pull_changes(db2, &storage, "dev2", &HashMap::new(), &ld, &NoopBlobPlan)
-                .await
-                .expect("pull");
+        let (updated, result) = pull_changes(
+            SendDbPtr(db2),
+            &storage,
+            "dev2",
+            &HashMap::new(),
+            &ld,
+            &NoopBlobPlan,
+        )
+        .await
+        .expect("pull");
 
         assert_eq!(result.changesets_applied, 1);
         assert_eq!(updated.get("dev1"), Some(&1));
@@ -122,7 +128,7 @@ async fn pull_skips_changeset_from_newer_schema() {
         let db2 = open_memory_db();
         create_synced_schema(db2);
         let (updated, result) = pull_changes(
-            db2,
+            SendDbPtr(db2),
             &storage,
             "dev2",
             &HashMap::new(),
@@ -187,10 +193,16 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         let db2 = open_memory_db();
         create_synced_schema(db2);
         let (_t, ld) = temp_library_dir();
-        let (_updated, result) =
-            pull_changes(db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan)
-                .await
-                .expect("pull");
+        let (_updated, result) = pull_changes(
+            SendDbPtr(db2),
+            &storage,
+            "dev2",
+            &HashMap::new(),
+            &ld,
+            &dst_plan,
+        )
+        .await
+        .expect("pull");
 
         assert_eq!(result.changesets_applied, 1);
         assert!(!result.asset_downloads_failed);
@@ -297,10 +309,16 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         let db2 = open_memory_db();
         create_synced_schema(db2);
         let (_t, ld) = temp_library_dir();
-        let (updated, result) =
-            pull_changes(db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan)
-                .await
-                .expect("pull");
+        let (updated, result) = pull_changes(
+            SendDbPtr(db2),
+            &storage,
+            "dev2",
+            &HashMap::new(),
+            &ld,
+            &dst_plan,
+        )
+        .await
+        .expect("pull");
 
         assert_eq!(result.changesets_applied, 1);
         assert!(!result.asset_downloads_failed);
@@ -354,7 +372,7 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
         let db2 = open_memory_db();
         create_synced_schema(db2);
         let (updated, result) = pull_changes(
-            db2,
+            SendDbPtr(db2),
             &storage,
             "dev2",
             &HashMap::new(),

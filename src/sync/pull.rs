@@ -24,6 +24,26 @@ use crate::blob::BlobPlan;
 use crate::changeset::RowChange;
 use crate::library_dir::LibraryDir;
 
+/// A raw sqlite connection pointer wrapped to be `Send`, so a pull future can
+/// run on a multi-thread runtime and migrate across worker threads between its
+/// network awaits. Mirrors the `unsafe impl Send for SyncLoopInner` pattern in
+/// `sync_loop`.
+///
+/// # Safety
+/// Sound because the bundled SQLite is serialized-mode (`SQLITE_THREADSAFE=1`,
+/// the libsqlite3-sys default — no override in this crate), so a connection may
+/// be used from any thread, and the pull protocol holds the connection
+/// exclusively (`pull_changes` requires no active session and no concurrent
+/// use). Access is therefore only ever sequential, from whichever worker polls
+/// the future at the time. Holders must uphold the same pointer-validity
+/// contract as the raw `*mut sqlite3` it wraps.
+#[derive(Clone, Copy)]
+pub struct SendDbPtr(pub *mut libsqlite3_sys::sqlite3);
+
+// SAFETY: see the type doc — serialized-mode SQLite plus exclusive, sequential
+// access make moving the connection pointer across worker threads sound.
+unsafe impl Send for SendDbPtr {}
+
 /// Cursor value meaning "we have applied no changesets from this device".
 /// Per the sync protocol, device sequence numbers start at 1 (the first
 /// changeset a device produces is `local_seq + 1` where `local_seq` is
@@ -83,9 +103,11 @@ struct DeferredChangeset {
 /// Returns the updated cursors map and a summary of what was applied.
 ///
 /// # Safety
-/// `db` must be a valid, open sqlite3 connection pointer.
+/// `db.0` must be a valid, open sqlite3 connection pointer. It is wrapped in
+/// [`SendDbPtr`] so this future is `Send` and can run on a multi-thread runtime
+/// (see that type's safety note).
 pub async unsafe fn pull_changes(
-    db: *mut libsqlite3_sys::sqlite3,
+    db: SendDbPtr,
     storage: &dyn SyncStorage,
     our_device_id: &str,
     cursors: &HashMap<String, u64>,
@@ -252,7 +274,7 @@ pub async unsafe fn pull_changes(
             }
 
             let cs = Changeset::from_bytes(&changeset_bytes);
-            let apply_result = apply_changeset_lww(db, &cs).map_err(PullError::Apply)?;
+            let apply_result = apply_changeset_lww(db.0, &cs).map_err(PullError::Apply)?;
 
             // Walk the applied changeset once: it drives blob downloads and is
             // surfaced to the host for domain-event mapping.
@@ -305,7 +327,7 @@ pub async unsafe fn pull_changes(
         );
 
         for d in &deferred {
-            let retry_result = apply_changeset_lww(db, &d.changeset).map_err(PullError::Apply)?;
+            let retry_result = apply_changeset_lww(db.0, &d.changeset).map_err(PullError::Apply)?;
 
             if retry_result.had_fk_violations {
                 warn!(
