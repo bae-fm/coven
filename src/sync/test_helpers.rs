@@ -125,6 +125,10 @@ pub struct MockSyncStorage {
     objects: Mutex<HashMap<String, Vec<u8>>>,
     /// Heads: device_id -> seq.
     heads: Mutex<HashMap<String, u64>>,
+    /// The single shared snapshot blob (`snapshot.db.enc`).
+    snapshot: Mutex<Option<Vec<u8>>>,
+    /// The snapshot's per-device cursor metadata (`snapshot_meta.json.enc`).
+    snapshot_meta: Mutex<Option<Vec<u8>>>,
     /// Minimum schema version marker (None = no minimum set).
     min_schema_version: Mutex<Option<u32>>,
 }
@@ -134,6 +138,8 @@ impl MockSyncStorage {
         MockSyncStorage {
             objects: Mutex::new(HashMap::new()),
             heads: Mutex::new(HashMap::new()),
+            snapshot: Mutex::new(None),
+            snapshot_meta: Mutex::new(None),
             min_schema_version: Mutex::new(None),
         }
     }
@@ -242,12 +248,17 @@ impl SyncStorage for MockSyncStorage {
             .ok_or(StorageError::NotFound(key))
     }
 
-    async fn put_snapshot(&self, _data: Vec<u8>) -> Result<(), StorageError> {
+    async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        *self.snapshot.lock().unwrap() = Some(data);
         Ok(())
     }
 
     async fn get_snapshot(&self) -> Result<Vec<u8>, StorageError> {
-        Err(StorageError::NotFound("snapshot.db.enc".into()))
+        self.snapshot
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(StorageError::NotFound("snapshot.db.enc".into()))
     }
 
     async fn delete_changeset(&self, _device_id: &str, _seq: u64) -> Result<(), StorageError> {
@@ -330,12 +341,17 @@ impl SyncStorage for MockSyncStorage {
         Ok(())
     }
 
-    async fn put_snapshot_meta(&self, _data: Vec<u8>) -> Result<(), StorageError> {
+    async fn put_snapshot_meta(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        *self.snapshot_meta.lock().unwrap() = Some(data);
         Ok(())
     }
 
     async fn get_snapshot_meta(&self) -> Result<Vec<u8>, StorageError> {
-        Err(StorageError::NotFound("snapshot_meta.json.enc".into()))
+        self.snapshot_meta
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(StorageError::NotFound("snapshot_meta.json.enc".into()))
     }
 }
 

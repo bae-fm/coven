@@ -120,6 +120,7 @@ pub async fn push_snapshot(
     storage: &dyn SyncStorage,
     encrypted_snapshot: Vec<u8>,
     device_id: &str,
+    applied_cursors: HashMap<String, u64>,
     current_seq: u64,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(), SnapshotError> {
@@ -129,11 +130,13 @@ pub async fn push_snapshot(
     // Upload snapshot (overwrites previous).
     storage.put_snapshot(encrypted_snapshot).await?;
 
-    // Read all heads and build per-device cursor map for snapshot metadata.
-    let heads = storage.list_heads().await?;
-    let mut cursors: HashMap<String, u64> =
-        heads.iter().map(|h| (h.device_id.clone(), h.seq)).collect();
-    // Ensure our own current_seq is included (our head hasn't been updated yet).
+    // The snapshot DB is a VACUUM of this device's live database, so its
+    // metadata must describe exactly what THIS device has applied — never
+    // other devices' published heads, which may be ahead of what we pulled.
+    // Claiming coverage we don't have lets GC delete un-snapshotted changesets
+    // that no future restore can recover.
+    let mut cursors = applied_cursors;
+    // Our own current_seq is included (our head hasn't been updated yet).
     cursors.insert(device_id.to_string(), current_seq);
 
     let meta = SnapshotMeta {
@@ -672,17 +675,16 @@ mod tests {
     #[tokio::test]
     async fn push_snapshot_uploads_and_updates_head() {
         let storage = MockSyncStorage::new();
-        // Simulate another device that already has a head.
-        storage
-            .put_head("dev-2", 15, None, "2026-02-10T00:00:00Z")
-            .await
-            .unwrap();
         let data = vec![1, 2, 3, 4, 5];
+
+        // The snapshotting device has applied dev-2 up to seq 15.
+        let applied = HashMap::from([("dev-2".to_string(), 15)]);
 
         push_snapshot(
             &storage,
             data.clone(),
             "dev-1",
+            applied,
             42,
             &crate::clock::SystemClock,
         )
@@ -698,7 +700,7 @@ mod tests {
         assert_eq!(dev1_head.seq, 42);
         assert_eq!(dev1_head.snapshot_seq, Some(42));
 
-        // Snapshot metadata should contain cursors for both devices.
+        // Snapshot metadata reflects the applied cursors plus our own seq.
         let meta_json = storage
             .get_stored_snapshot_meta()
             .expect("metadata should be written");
@@ -880,9 +882,16 @@ mod tests {
 
             // Create and push snapshot at seq 5.
             let encrypted = create_snapshot(db, temp.path(), &enc).expect("snapshot");
-            push_snapshot(&storage, encrypted, "dev-1", 5, &crate::clock::SystemClock)
-                .await
-                .expect("push");
+            push_snapshot(
+                &storage,
+                encrypted,
+                "dev-1",
+                HashMap::new(),
+                5,
+                &crate::clock::SystemClock,
+            )
+            .await
+            .expect("push");
 
             ffi::sqlite3_close(db);
 
@@ -1134,5 +1143,356 @@ mod tests {
                 "no DB should be written when metadata is missing",
             );
         }
+    }
+
+    // ---- snapshot cursor honesty (the overclaim bug) ----
+
+    /// Open a SQLite database file by path. Caller owns the returned handle.
+    unsafe fn open_db_at(path: &Path) -> *mut ffi::sqlite3 {
+        let c = CString::new(path.to_str().unwrap()).unwrap();
+        let mut p: *mut ffi::sqlite3 = std::ptr::null_mut();
+        let rc = ffi::sqlite3_open(c.as_ptr(), &mut p);
+        assert_eq!(rc, ffi::SQLITE_OK);
+        p
+    }
+
+    /// Produce a signed-free changeset's raw bytes by recording the SQL run
+    /// inside `body` against a fresh schema-only DB, and return those bytes.
+    /// This is what device M would push as a changeset blob.
+    unsafe fn changeset_bytes_for(body: impl FnOnce(*mut ffi::sqlite3)) -> Vec<u8> {
+        init_synced_tables();
+        let db = open_memory_db();
+        create_synced_schema(db);
+        let session = SyncSession::start(db).expect("session");
+        body(db);
+        let cs = session.changeset().unwrap().unwrap();
+        let bytes = cs.as_bytes().to_vec();
+        drop(session);
+        ffi::sqlite3_close(db);
+        bytes
+    }
+
+    /// The core regression: a device that snapshots a DB it has NOT fully
+    /// caught up to must record cursors describing what the snapshot DB
+    /// actually contains — never another device's published head. If it
+    /// overclaims, GC deletes the un-snapshotted changeset and no future
+    /// restore can ever recover it.
+    #[tokio::test]
+    async fn snapshot_meta_reflects_applied_not_published() {
+        unsafe {
+            let enc = test_encryption();
+            let temp = tempfile::tempdir().unwrap();
+            let storage = MockSyncStorage::new();
+
+            // Owner device M inserts a note and is at applied seq K = 1.
+            let k = 1u64;
+            let cs_insert = changeset_bytes_for(|db| {
+                exec(
+                    db,
+                    "INSERT INTO notes (id, title, _updated_at, created_at) \
+                     VALUES ('n1', 'Release Draft', '0000000001000-0000-M', '2026-01-01')",
+                );
+            });
+            storage.add_changeset("M", k, cs_insert.clone());
+
+            // M later pushes a "manage release" UPDATE as seq K+1 = 2, raising
+            // M's head to 2 — but this edit is NOT in any snapshot yet.
+            let cs_update = changeset_bytes_for(|db| {
+                exec(
+                    db,
+                    "INSERT INTO notes (id, title, _updated_at, created_at) \
+                     VALUES ('n1', 'Release Draft', '0000000001000-0000-M', '2026-01-01')",
+                );
+                exec(
+                    db,
+                    "UPDATE notes SET title = 'Release Managed', \
+                     _updated_at = '0000000002000-0000-M' WHERE id = 'n1'",
+                );
+            });
+            storage.add_changeset("M", k + 1, cs_update.clone());
+
+            // Device B is behind: it has applied M only up to K, and its DB
+            // lacks the K+1 edit. B builds a snapshot DB of its applied state.
+            let db_b = open_memory_db();
+            create_synced_schema(db_b);
+            let cs_insert_obj = crate::sync::session_ext::Changeset::from_bytes(&cs_insert);
+            crate::sync::apply::apply_changeset_lww(db_b, &cs_insert_obj).expect("apply insert");
+            let snapshot = create_snapshot(db_b, temp.path(), &enc).expect("snapshot");
+            ffi::sqlite3_close(db_b);
+
+            // B pushes the snapshot with ITS applied cursors {M: K}.
+            let applied = HashMap::from([("M".to_string(), k)]);
+            push_snapshot(
+                &storage,
+                snapshot,
+                "B",
+                applied,
+                0,
+                &crate::clock::SystemClock,
+            )
+            .await
+            .expect("push");
+
+            // The metadata must claim only K for M, not M's head K+1.
+            let meta_json = storage.get_stored_snapshot_meta().expect("meta");
+            let meta: SnapshotMeta = serde_json::from_slice(&meta_json).unwrap();
+            assert_eq!(
+                meta.cursors.get("M"),
+                Some(&k),
+                "snapshot meta must reflect applied seq K, not published head K+1"
+            );
+
+            // GC must NOT delete M's K+1 changeset (it is not in the snapshot).
+            garbage_collect(&storage).await.expect("gc");
+            storage
+                .get_changeset("M", k + 1)
+                .await
+                .expect("K+1 must survive GC");
+
+            // A fresh device C bootstraps from the snapshot and pulls M's
+            // changesets newer than its bootstrap cursor — it must end up
+            // with the "manage release" edit.
+            let target = temp.path().join("device_c.db");
+            let boot = bootstrap_from_snapshot(&storage, &enc, &target)
+                .await
+                .expect("bootstrap");
+            let c_cursor = *boot.cursors.get("M").unwrap_or(&0);
+
+            let db_c = open_db_at(&target);
+            for seq in storage.list_changesets("M").await.unwrap() {
+                if seq <= c_cursor {
+                    continue;
+                }
+                let bytes = storage.get_changeset("M", seq).await.unwrap();
+                let obj = crate::sync::session_ext::Changeset::from_bytes(&bytes);
+                crate::sync::apply::apply_changeset_lww(db_c, &obj).expect("apply pulled");
+            }
+
+            let title = query_text(db_c, "SELECT title FROM notes WHERE id = 'n1'");
+            assert_eq!(
+                title, "Release Managed",
+                "device C must receive the post-snapshot edit"
+            );
+            ffi::sqlite3_close(db_c);
+        }
+    }
+
+    /// End-to-end: owner inserts + snapshots, B bootstraps, owner pushes an
+    /// UPDATE, B pulls it, B snapshots (honest meta), C bootstraps + pulls and
+    /// also has the update. All through the real snapshot/GC/bootstrap funcs.
+    #[tokio::test]
+    async fn multi_device_managed_edit_reaches_restore() {
+        unsafe {
+            let enc = test_encryption();
+            let temp = tempfile::tempdir().unwrap();
+            let storage = MockSyncStorage::new();
+
+            // Owner inserts a note (seq 1) and snapshots its applied state.
+            let cs1 = changeset_bytes_for(|db| {
+                exec(
+                    db,
+                    "INSERT INTO notes (id, title, _updated_at, created_at) \
+                     VALUES ('n1', 'Draft', '0000000001000-0000-owner', '2026-01-01')",
+                );
+            });
+            storage.add_changeset("owner", 1, cs1.clone());
+
+            let db_owner = open_memory_db();
+            create_synced_schema(db_owner);
+            let cs1_obj = crate::sync::session_ext::Changeset::from_bytes(&cs1);
+            crate::sync::apply::apply_changeset_lww(db_owner, &cs1_obj).expect("apply cs1");
+            let snap1 = create_snapshot(db_owner, temp.path(), &enc).expect("snap1");
+            ffi::sqlite3_close(db_owner);
+
+            push_snapshot(
+                &storage,
+                snap1,
+                "owner",
+                HashMap::new(),
+                1,
+                &crate::clock::SystemClock,
+            )
+            .await
+            .expect("push snap1");
+
+            // Device B bootstraps and has the note.
+            let b_path = temp.path().join("b.db");
+            let b_boot = bootstrap_from_snapshot(&storage, &enc, &b_path)
+                .await
+                .expect("b bootstrap");
+            let db_b = open_db_at(&b_path);
+            assert_eq!(
+                query_text(db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+                "Draft"
+            );
+
+            // Owner pushes a row-UPDATE changeset (seq 2).
+            let cs2 = changeset_bytes_for(|db| {
+                exec(
+                    db,
+                    "INSERT INTO notes (id, title, _updated_at, created_at) \
+                     VALUES ('n1', 'Draft', '0000000001000-0000-owner', '2026-01-01')",
+                );
+                exec(
+                    db,
+                    "UPDATE notes SET title = 'Published', \
+                     _updated_at = '0000000002000-0000-owner' WHERE id = 'n1'",
+                );
+            });
+            storage.add_changeset("owner", 2, cs2.clone());
+
+            // B pulls the update (everything past its bootstrap cursor).
+            let mut b_cursors = b_boot.cursors.clone();
+            let b_owner_cursor = *b_cursors.get("owner").unwrap_or(&0);
+            for seq in storage.list_changesets("owner").await.unwrap() {
+                if seq <= b_owner_cursor {
+                    continue;
+                }
+                let bytes = storage.get_changeset("owner", seq).await.unwrap();
+                let obj = crate::sync::session_ext::Changeset::from_bytes(&bytes);
+                crate::sync::apply::apply_changeset_lww(db_b, &obj).expect("b apply");
+                b_cursors.insert("owner".to_string(), seq);
+            }
+            assert_eq!(
+                query_text(db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+                "Published"
+            );
+
+            // B snapshots its now-current state with honest cursors {owner: 2}.
+            let snap2 = create_snapshot(db_b, temp.path(), &enc).expect("snap2");
+            ffi::sqlite3_close(db_b);
+            push_snapshot(
+                &storage,
+                snap2,
+                "B",
+                b_cursors.clone(),
+                0,
+                &crate::clock::SystemClock,
+            )
+            .await
+            .expect("push snap2");
+
+            // Device C bootstraps + pulls and must also have the update.
+            let c_path = temp.path().join("c.db");
+            let c_boot = bootstrap_from_snapshot(&storage, &enc, &c_path)
+                .await
+                .expect("c bootstrap");
+            let db_c = open_db_at(&c_path);
+            let c_owner_cursor = *c_boot.cursors.get("owner").unwrap_or(&0);
+            for seq in storage.list_changesets("owner").await.unwrap() {
+                if seq <= c_owner_cursor {
+                    continue;
+                }
+                let bytes = storage.get_changeset("owner", seq).await.unwrap();
+                let obj = crate::sync::session_ext::Changeset::from_bytes(&bytes);
+                crate::sync::apply::apply_changeset_lww(db_c, &obj).expect("c apply");
+            }
+            assert_eq!(
+                query_text(db_c, "SELECT title FROM notes WHERE id = 'n1'"),
+                "Published",
+                "device C must receive the managed edit through B's snapshot + pull"
+            );
+            ffi::sqlite3_close(db_c);
+        }
+    }
+
+    /// GC deletes only seqs <= the snapshot's accurate cursor; a changeset
+    /// pushed after the snapshot (absent from the snapshot DB) survives.
+    #[tokio::test]
+    async fn gc_never_deletes_changeset_absent_from_snapshot() {
+        let storage = MockSyncStorage::new();
+        for seq in 1..=3 {
+            storage.add_changeset("M", seq, vec![seq as u8]);
+        }
+
+        // Snapshot honestly covers M only through seq 2.
+        let applied = HashMap::from([("M".to_string(), 2)]);
+        push_snapshot(
+            &storage,
+            vec![0u8; 4],
+            "M",
+            applied,
+            2,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push");
+
+        garbage_collect(&storage).await.expect("gc");
+
+        assert_eq!(storage.list_changesets("M").await.unwrap(), vec![3]);
+    }
+
+    /// After bootstrap, the returned cursors never exceed what the snapshot DB
+    /// actually contains — they equal the applied state the snapshot was taken
+    /// from.
+    #[tokio::test]
+    async fn bootstrap_cursors_match_snapshot_contents() {
+        unsafe {
+            let enc = test_encryption();
+            let temp = tempfile::tempdir().unwrap();
+            let storage = MockSyncStorage::new();
+
+            // Snapshot taken from a state where M is applied through seq 7.
+            let db = open_memory_db();
+            create_synced_schema(db);
+            exec(
+                db,
+                "INSERT INTO notes (id, title, _updated_at, created_at) \
+                 VALUES ('n1', 'A', '0000000001000-0000-M', '2026-01-01')",
+            );
+            let snap = create_snapshot(db, temp.path(), &enc).expect("snap");
+            ffi::sqlite3_close(db);
+
+            let applied = HashMap::from([("M".to_string(), 7)]);
+            push_snapshot(
+                &storage,
+                snap,
+                "self",
+                applied,
+                0,
+                &crate::clock::SystemClock,
+            )
+            .await
+            .expect("push");
+
+            let target = temp.path().join("boot.db");
+            let boot = bootstrap_from_snapshot(&storage, &enc, &target)
+                .await
+                .expect("bootstrap");
+
+            assert_eq!(boot.cursors.get("M"), Some(&7));
+        }
+    }
+
+    /// A device that snapshots while another device's head is ahead writes
+    /// cursors equal to its applied state, not the ahead head.
+    #[tokio::test]
+    async fn behind_device_snapshot_does_not_overclaim() {
+        let storage = MockSyncStorage::new();
+
+        // Device M's head is ahead at seq 9.
+        storage.add_changeset("M", 9, vec![9]);
+
+        // The snapshotting device B has only applied M through seq 4.
+        let applied = HashMap::from([("M".to_string(), 4)]);
+        push_snapshot(
+            &storage,
+            vec![0u8; 4],
+            "B",
+            applied,
+            0,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push");
+
+        let meta_json = storage.get_stored_snapshot_meta().expect("meta");
+        let meta: SnapshotMeta = serde_json::from_slice(&meta_json).unwrap();
+        assert_eq!(
+            meta.cursors.get("M"),
+            Some(&4),
+            "must record applied seq 4, not M's ahead head 9"
+        );
     }
 }

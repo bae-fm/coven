@@ -448,7 +448,12 @@ pub async unsafe fn run_single_sync_cycle(
         match snapshot_result {
             Ok(encrypted) => {
                 match super::snapshot::push_snapshot(
-                    storage, encrypted, device_id, local_seq, clock,
+                    storage,
+                    encrypted,
+                    device_id,
+                    sync_result.updated_cursors.clone(),
+                    local_seq,
+                    clock,
                 )
                 .await
                 {
