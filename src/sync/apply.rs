@@ -10,7 +10,7 @@
 use libsqlite3_sys as ffi;
 
 use super::conflict::{lww_conflict_handler, ConflictTracker, TableSchema};
-use super::session::SyncError;
+use super::session::{SyncError, SyncedTable};
 use super::session_ext::{apply_changeset_with_context, Changeset};
 
 /// Result of applying a changeset.
@@ -21,11 +21,9 @@ pub struct ApplyResult {
     pub had_fk_violations: bool,
 }
 
-/// Apply a changeset to the given database connection using LWW conflict
-/// resolution.
-///
-/// Builds schema info from the database to look up `_updated_at` column
-/// indices dynamically, so future migrations that add columns are safe.
+/// Apply a changeset over the process-global synced tables. The production entry
+/// point; tests that run against a different schema call
+/// [`apply_changeset_lww_for`] with their own table set.
 ///
 /// # Safety
 /// `db` must be a valid, open sqlite3 connection pointer.
@@ -33,8 +31,23 @@ pub unsafe fn apply_changeset_lww(
     db: *mut ffi::sqlite3,
     changeset: &Changeset,
 ) -> Result<ApplyResult, SyncError> {
-    let synced = super::session::synced_tables();
-    let table_refs: Vec<&str> = synced.iter().map(|t| t.name()).collect();
+    apply_changeset_lww_for(db, changeset, super::session::synced_tables())
+}
+
+/// Apply a changeset to the given database connection using LWW conflict
+/// resolution, resolving `_updated_at` indices over `tables`.
+///
+/// Builds schema info from the database to look up `_updated_at` column
+/// indices dynamically, so future migrations that add columns are safe.
+///
+/// # Safety
+/// `db` must be a valid, open sqlite3 connection pointer.
+pub unsafe fn apply_changeset_lww_for(
+    db: *mut ffi::sqlite3,
+    changeset: &Changeset,
+    tables: &[SyncedTable],
+) -> Result<ApplyResult, SyncError> {
+    let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
     let schema = TableSchema::from_db(db, &table_refs);
     let mut tracker = ConflictTracker::new();
 
