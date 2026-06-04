@@ -1,0 +1,45 @@
+name: deploy docs
+
+# Builds the VitePress site (with bundled rustdoc) and uploads it to the
+# Cloudflare Pages project `coven` on every push to main that touches the docs
+# or the documented source. Direct-upload deploy, so it does not depend on any
+# Cloudflare git integration. Requires repo secrets CLOUDFLARE_API_TOKEN
+# (Pages:Edit) and CLOUDFLARE_ACCOUNT_ID.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'src/**'
+  workflow_dispatch:
+
+# A new push supersedes any in-flight deploy: cancel the old build rather than
+# racing two uploads to the same project.
+concurrency:
+  group: deploy-docs
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+      - name: Build site (rustdoc + VitePress)
+        working-directory: site
+        run: npm run build
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy site/.vitepress/dist --project-name=coven --branch=main
