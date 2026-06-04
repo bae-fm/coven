@@ -19,6 +19,7 @@ use libsqlite3_sys as ffi;
 use crate::db::SyncDb;
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
 use crate::sync::session::synced_tables;
+use crate::sync::session_ext::quote_ident;
 
 /// coven's `_updated_at` register: a seeded [`Hlc`] shared between the host's
 /// write path (via [`RegisterClock::updated_at_stamper`]) and, once connected,
@@ -152,10 +153,9 @@ unsafe fn max_synced_updated_at_on(db: *mut ffi::sqlite3) -> Result<Option<Strin
     for synced in synced_tables() {
         let table = synced.name();
         // `table` comes from `set_synced_tables` (trusted host input) and cannot
-        // be bound as a parameter; quote it as an identifier (doubling any inner
-        // quote) so it interpolates safely.
-        let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-        let sql = format!("SELECT MAX(_updated_at) FROM {quoted}");
+        // be bound as a parameter; quote it as an identifier so it interpolates
+        // safely.
+        let sql = format!("SELECT MAX(_updated_at) FROM {}", quote_ident(table));
         let c_sql = CString::new(sql.as_str())
             .map_err(|e| format!("synced table name not representable as SQL: {table}: {e}"))?;
 

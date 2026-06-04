@@ -128,7 +128,12 @@ unsafe fn extract_col(
     }
 }
 
-unsafe fn extract_new_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
+/// The new value at `col` for the change at the iterator's current position
+/// (`None` if absent — e.g. an unchanged column in an update — or NULL).
+pub(crate) unsafe fn extract_new_value(
+    iter: *mut ffi::sqlite3_changeset_iter,
+    col: c_int,
+) -> Option<String> {
     let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
     let rc = ffi::sqlite3changeset_new(iter, col, &mut val);
     if rc != ffi::SQLITE_OK as c_int || val.is_null() {
@@ -137,7 +142,12 @@ unsafe fn extract_new_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) 
     value_to_string(val)
 }
 
-unsafe fn extract_old_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
+/// The old value at `col` for the change at the iterator's current position
+/// (`None` if absent — e.g. an unchanged column in an update — or NULL).
+pub(crate) unsafe fn extract_old_value(
+    iter: *mut ffi::sqlite3_changeset_iter,
+    col: c_int,
+) -> Option<String> {
     let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
     let rc = ffi::sqlite3changeset_old(iter, col, &mut val);
     if rc != ffi::SQLITE_OK as c_int || val.is_null() {

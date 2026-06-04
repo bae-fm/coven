@@ -170,6 +170,13 @@ impl ConflictContext {
     }
 }
 
+/// Quote an SQL identifier (table/column name), doubling any embedded quote, so
+/// a trusted-but-unbindable name interpolates safely. Identifiers cannot be
+/// passed as bound parameters; this is the safe interpolation path for them.
+pub(crate) fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
 /// Extract a text string from a sqlite3_value, or None if NULL.
 pub(crate) unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
     let vtype = ffi::sqlite3_value_type(val);

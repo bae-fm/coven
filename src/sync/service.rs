@@ -86,7 +86,7 @@ impl SyncService {
         // for the re-emit diff, and the next round's session starts after sync.
         drop(session);
 
-        // Step 2b: apply row-level sync gating. Cut gated-false rows (and their
+        // Apply row-level sync gating. Cut gated-false rows (and their
         // FK-descendants) so they stay local; re-emit a root's full subtree when
         // its gate flips false→true. Done before the blob scan so blob upload
         // sees the gated set, not the cut rows.

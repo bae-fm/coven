@@ -35,9 +35,12 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 
 use libsqlite3_sys as ffi;
+use tracing::{debug, warn};
+
+use crate::changeset::{extract_new_value, extract_old_value};
 
 use super::session::{synced_tables, SyncedTable};
-use super::session_ext::{value_to_string, Changeset, Session};
+use super::session_ext::{quote_ident, Changeset, Session};
 
 /// A changegroup: accumulates changes (by iterator position or whole changeset)
 /// and concatenates/dedups them into one output changeset.
@@ -127,11 +130,11 @@ impl Session {
             ffi::sqlite3session_diff(self.raw_ptr(), from.as_ptr(), table.as_ptr(), &mut errmsg);
         if rc != ffi::SQLITE_OK as c_int {
             let detail = if errmsg.is_null() {
-                String::new()
+                None
             } else {
                 let s = CStr::from_ptr(errmsg).to_string_lossy().into_owned();
                 ffi::sqlite3_free(errmsg as *mut c_void);
-                s
+                Some(s)
             };
             return Err(GateError::Diff(tbl.to_string(), rc, detail));
         }
@@ -206,7 +209,7 @@ impl Gates {
         // effectively ungated. (A child of an ungated parent inherits nothing.)
         let reaches_root: HashSet<String> = gate_map
             .keys()
-            .filter(|name| chain_reaches_root(&gate_map, name))
+            .filter(|name| chain_to_root_depth(&gate_map, name).is_some())
             .cloned()
             .collect();
         gate_map.retain(|name, tg| match tg {
@@ -223,40 +226,31 @@ impl Gates {
     /// the child before its parent row exists.
     fn gated_tables_parent_first(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.tables.keys().map(String::as_str).collect();
-        names.sort_by_key(|n| self.fk_depth(n));
+        // Every retained table reaches a root (children that don't were pruned),
+        // so the depth is always `Some`; a root sorts first at depth 0.
+        names.sort_by_key(|n| chain_to_root_depth(&self.tables, n).unwrap_or(0));
         names
-    }
-
-    /// FK-chain depth: a root is 0, a direct child 1, a grandchild 2, etc.
-    fn fk_depth(&self, name: &str) -> usize {
-        let mut depth = 0;
-        let mut cur = name;
-        let mut seen = HashSet::new();
-        while seen.insert(cur.to_string()) {
-            match self.tables.get(cur) {
-                Some(TableGate::Child { parent, .. }) => {
-                    depth += 1;
-                    cur = parent.as_str();
-                }
-                _ => break,
-            }
-        }
-        depth
     }
 }
 
-/// Walk `gate_map` from `name` up its FK chain; true iff it lands on a `Root`.
-fn chain_reaches_root(gate_map: &HashMap<String, TableGate>, name: &str) -> bool {
+/// Walk `gate_map` from `name` up its FK chain to its gated root: `Some(0)` for
+/// a root, `Some(n)` for an n-hop descendant of a root, `None` if the chain
+/// never reaches a gated root (the table is effectively ungated) or loops.
+fn chain_to_root_depth(gate_map: &HashMap<String, TableGate>, name: &str) -> Option<usize> {
+    let mut depth = 0;
     let mut cur = name;
     let mut seen = HashSet::new();
     loop {
         if !seen.insert(cur.to_string()) {
-            return false; // cycle, defensive
+            return None; // cycle, defensive
         }
         match gate_map.get(cur) {
-            Some(TableGate::Root { .. }) => return true,
-            Some(TableGate::Child { parent, .. }) => cur = parent.as_str(),
-            None => return false,
+            Some(TableGate::Root { .. }) => return Some(depth),
+            Some(TableGate::Child { parent, .. }) => {
+                depth += 1;
+                cur = parent.as_str();
+            }
+            None => return None,
         }
     }
 }
@@ -432,9 +426,12 @@ unsafe fn full_state_changeset(
         session.changeset().map_err(GateError::ChangesetExtract)
     })();
 
-    // Always detach, even on error.
+    // Always detach, even on error. A failed detach leaves the clone attached
+    // under `alias`, which would make next cycle's ATTACH collide — surface it.
     let detach = format!("DETACH DATABASE {alias}");
-    let _ = exec_sql(db, &detach);
+    if let Err(e) = exec_sql(db, &detach) {
+        warn!("gate: failed to detach the temporary clone db ({alias}): {e}");
+    }
 
     result
 }
@@ -455,9 +452,25 @@ unsafe fn effective_gate(
             None => match row.pk() {
                 Some(pk) => {
                     let col = nth_column_name(db, &row.table, *gate_col)?;
-                    Ok(query_truth(db, &row.table, &col, pk)?.unwrap_or(false))
+                    match query_truth(db, &row.table, &col, pk)? {
+                        Some(t) => Ok(t),
+                        None => {
+                            warn!(
+                                "gate: root {}.{pk} absent from live db while resolving an \
+                                 unchanged gate column; treating as not-shared",
+                                row.table
+                            );
+                            Ok(false)
+                        }
+                    }
                 }
-                None => Ok(false),
+                None => {
+                    debug!(
+                        "gate: root row in {} has no primary key; treating as not-shared",
+                        row.table
+                    );
+                    Ok(false)
+                }
             },
         },
         Some(TableGate::Child { fk_col, parent }) => {
@@ -467,12 +480,27 @@ unsafe fn effective_gate(
                     // FK unchanged in an UPDATE: read it from the live row.
                     Some(pk) => match lookup_fk_in_db(db, &row.table, *fk_col, pk)? {
                         Some(id) => id,
-                        None => return Ok(false),
+                        None => {
+                            warn!(
+                                "gate: child {}.{pk} has no FK target in live db; \
+                                 treating as not-shared",
+                                row.table
+                            );
+                            return Ok(false);
+                        }
                     },
-                    None => return Ok(false),
+                    None => {
+                        debug!(
+                            "gate: child row in {} has no primary key; treating as not-shared",
+                            row.table
+                        );
+                        return Ok(false);
+                    }
                 },
             };
-            Ok(gate_of_row(db, gates, parent, &parent_id)?.unwrap_or(false))
+            Ok(resolve_root(db, gates, parent, &parent_id)?
+                .map(|(_, truth)| truth)
+                .unwrap_or(false))
         }
     }
 }
@@ -499,63 +527,64 @@ unsafe fn gated_root_id(
                 None => match row.pk() {
                     Some(pk) => match lookup_fk_in_db(db, &row.table, *fk_col, pk)? {
                         Some(id) => id,
-                        None => return Ok(None),
+                        None => {
+                            warn!(
+                                "gate: child {}.{pk} has no FK target in live db during re-emit; \
+                                 skipping",
+                                row.table
+                            );
+                            return Ok(None);
+                        }
                     },
-                    None => return Ok(None),
+                    None => {
+                        debug!(
+                            "gate: child row in {} has no primary key during re-emit; skipping",
+                            row.table
+                        );
+                        return Ok(None);
+                    }
                 },
             };
-            root_id_of(db, gates, parent, &parent_id)
+            Ok(resolve_root(db, gates, parent, &parent_id)?
+                .filter(|(_, truth)| *truth)
+                .map(|(root_id, _)| root_id))
         }
     }
 }
 
-/// Resolve the gate truth of the row identified by (`table`, `id`) by reading
-/// the live db, walking up FK chains to the gated root. `None` if the row is
-/// missing or unresolved.
-unsafe fn gate_of_row(
+/// Walk the live-db FK chain from (`table`, `id`) up to its gated root,
+/// returning the root's id and its gate truth. `None` if the chain never
+/// reaches a gated root, or a row along it is missing from the live db (an
+/// anomaly the caller treats as not-shared).
+unsafe fn resolve_root(
     db: *mut ffi::sqlite3,
     gates: &Gates,
     table: &str,
     id: &str,
-) -> Result<Option<bool>, GateError> {
-    match gates.tables.get(table) {
-        Some(TableGate::Root { gate_col }) => {
-            let col = nth_column_name(db, table, *gate_col)?;
-            Ok(query_truth(db, table, &col, id)?)
-        }
-        Some(TableGate::Child { fk_col, parent }) => {
-            let col = nth_column_name(db, table, *fk_col)?;
-            match query_column_text(db, table, &col, id)? {
-                Some(parent_id) => gate_of_row(db, gates, parent, &parent_id),
-                None => Ok(None),
-            }
-        }
-        None => Ok(None),
-    }
-}
-
-/// Resolve the gated-root id for (`table`, `id`) by walking up FK chains.
-unsafe fn root_id_of(
-    db: *mut ffi::sqlite3,
-    gates: &Gates,
-    table: &str,
-    id: &str,
-) -> Result<Option<String>, GateError> {
+) -> Result<Option<(String, bool)>, GateError> {
     match gates.tables.get(table) {
         Some(TableGate::Root { gate_col }) => {
             let col = nth_column_name(db, table, *gate_col)?;
             match query_truth(db, table, &col, id)? {
-                Some(true) => Ok(Some(id.to_string())),
-                _ => Ok(None),
+                Some(truth) => Ok(Some((id.to_string(), truth))),
+                None => {
+                    warn!("gate: gated root {table}.{id} absent from live db; cannot resolve gate");
+                    Ok(None)
+                }
             }
         }
         Some(TableGate::Child { fk_col, parent }) => {
             let col = nth_column_name(db, table, *fk_col)?;
             match query_column_text(db, table, &col, id)? {
-                Some(parent_id) => root_id_of(db, gates, parent, &parent_id),
-                None => Ok(None),
+                Some(parent_id) => resolve_root(db, gates, parent, &parent_id),
+                None => {
+                    warn!("gate: {table}.{id} has no FK parent in live db; cannot resolve gate");
+                    Ok(None)
+                }
             }
         }
+        // A child whose parent is not itself gated/inheriting was pruned from the
+        // map, so this is unreachable for retained tables; treat as ungated.
         None => Ok(None),
     }
 }
@@ -590,8 +619,8 @@ impl ChangeRow {
         let mut new = Vec::with_capacity(ncol as usize);
         let mut old = Vec::with_capacity(ncol as usize);
         for c in 0..ncol {
-            new.push(read_new(iter, c));
-            old.push(read_old(iter, c));
+            new.push(extract_new_value(iter, c));
+            old.push(extract_old_value(iter, c));
         }
         ChangeRow {
             table,
@@ -647,24 +676,6 @@ impl ChangeRow {
             _ => self.new_truth(col).or_else(|| self.old_truth(col)),
         }
     }
-}
-
-unsafe fn read_new(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
-    let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
-    let rc = ffi::sqlite3changeset_new(iter, col, &mut val);
-    if rc != ffi::SQLITE_OK as c_int || val.is_null() {
-        return None;
-    }
-    value_to_string(val)
-}
-
-unsafe fn read_old(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
-    let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
-    let rc = ffi::sqlite3changeset_old(iter, col, &mut val);
-    if rc != ffi::SQLITE_OK as c_int || val.is_null() {
-        return None;
-    }
-    value_to_string(val)
 }
 
 /// SQLite boolean truth for a gate value read as text: a nonzero integer is
@@ -883,15 +894,10 @@ unsafe fn exec_sql(db: *mut ffi::sqlite3, sql: &str) -> Result<(), GateError> {
     Ok(())
 }
 
-/// Quote an SQL identifier, doubling any embedded quote.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
-}
-
 #[derive(Debug)]
 pub enum GateError {
     Ffi(&'static str, c_int),
-    Diff(String, c_int, String),
+    Diff(String, c_int, Option<String>),
     SessionCreate(i32),
     ChangesetExtract(i32),
     MissingGateColumn(String, String),
@@ -906,9 +912,10 @@ impl std::fmt::Display for GateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GateError::Ffi(func, rc) => write!(f, "{func} failed (rc={rc})"),
-            GateError::Diff(tbl, rc, msg) => {
-                write!(f, "session_diff failed for {tbl} (rc={rc}): {msg}")
-            }
+            GateError::Diff(tbl, rc, msg) => match msg {
+                Some(m) => write!(f, "session_diff failed for {tbl} (rc={rc}): {m}"),
+                None => write!(f, "session_diff failed for {tbl} (rc={rc})"),
+            },
             GateError::SessionCreate(rc) => write!(f, "session create failed (rc={rc})"),
             GateError::ChangesetExtract(rc) => write!(f, "changeset extract failed (rc={rc})"),
             GateError::MissingGateColumn(tbl, col) => {

@@ -4,6 +4,8 @@
 /// synced tables. It provides a clean start/changeset/end lifecycle.
 use std::sync::OnceLock;
 
+use tracing::warn;
+
 use super::session_ext::{Changeset, Session};
 
 /// A table that participates in changeset sync, declared once at startup by the
@@ -16,34 +18,41 @@ use super::session_ext::{Changeset, Session};
 /// flipping the gate true re-emits the whole now-visible subtree to peers. See
 /// [`super::gate`] for the gating mechanics.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncedTable {
-    name: String,
-    gate_column: Option<String>,
+pub enum SyncedTable {
+    /// Every row syncs unconditionally.
+    Plain { name: String },
+    /// A gated root: a row syncs iff its boolean `gate_column` is true, and the
+    /// gate flows down declared foreign keys to descendant rows.
+    GatedRoot { name: String, gate_column: String },
 }
 
 impl SyncedTable {
     /// An ungated synced table: every row syncs.
     pub fn new(name: impl Into<String>) -> Self {
-        SyncedTable {
-            name: name.into(),
-            gate_column: None,
-        }
+        SyncedTable::Plain { name: name.into() }
     }
 
     /// Make this a gated root: rows sync iff the boolean `column` is true.
-    pub fn gated_by(mut self, column: impl Into<String>) -> Self {
-        self.gate_column = Some(column.into());
-        self
+    pub fn gated_by(self, column: impl Into<String>) -> Self {
+        SyncedTable::GatedRoot {
+            name: self.name().to_string(),
+            gate_column: column.into(),
+        }
     }
 
     /// The table name.
     pub fn name(&self) -> &str {
-        &self.name
+        match self {
+            SyncedTable::Plain { name } | SyncedTable::GatedRoot { name, .. } => name,
+        }
     }
 
     /// The gate column name, if this table is a gated root.
     pub fn gate_column(&self) -> Option<&str> {
-        self.gate_column.as_deref()
+        match self {
+            SyncedTable::Plain { .. } => None,
+            SyncedTable::GatedRoot { gate_column, .. } => Some(gate_column),
+        }
     }
 }
 
@@ -69,7 +78,19 @@ static SYNCED_TABLES: OnceLock<Vec<SyncedTable>> = OnceLock::new();
 /// tables just yields empty changesets), so [`super::cycle::init_sync`] treats an
 /// empty set as a hard error and refuses to start sync.
 pub fn set_synced_tables(tables: &[SyncedTable]) {
-    let _ = SYNCED_TABLES.set(tables.to_vec());
+    if let Err(attempted) = SYNCED_TABLES.set(tables.to_vec()) {
+        // First call wins. A second call with the same set is a harmless
+        // re-init (e.g. repeated test setup); a second call with a *different*
+        // set is an integration bug — the live set is already in use and won't
+        // change, so surface it loudly.
+        let current = SYNCED_TABLES.get();
+        if current != Some(&attempted) {
+            warn!(
+                "set_synced_tables called again with a different table set; \
+                 the first declaration stays in effect (current={current:?}, ignored={attempted:?})"
+            );
+        }
+    }
 }
 
 /// The configured synced tables. Empty only when [`set_synced_tables`] was never
