@@ -3,8 +3,8 @@ layout: home
 
 hero:
     name: coven
-    text: End-to-end encrypted SQLite sync without a coordination server
-    tagline: 'Multi-writer sync for host-owned SQLite schemas, encrypted blobs, and cryptographic membership over bring-your-own storage.'
+    text: E2EE serverless sync
+    tagline: Build private multi-writer SQLite applications on storage you already have.
     image:
         src: /favicon.svg
         alt: coven
@@ -17,18 +17,16 @@ hero:
           link: /docs/example
 
 features:
-    - title: Host-owned schema
-      details: 'Your app owns its tables and domain. coven owns sync bookkeeping, change capture, encryption, membership, and storage movement.'
-    - title: SQLite session changesets
-      details: 'Synced rows are captured through the SQLite session extension and stamped with hybrid logical clock timestamps.'
-    - title: Multi-writer by construction
-      details: 'Authors sign their changesets; conflicts resolve at row level with last-writer-wins on `_updated_at`.'
-    - title: Bring-your-own storage
-      details: 'Sync runs through a pluggable CloudHome: S3, Google Drive, Dropbox, OneDrive, iCloud, or local storage.'
-    - title: Cryptographic membership
-      details: "Membership is an append-only Ed25519-signed chain. The library key is wrapped to each member's X25519 key."
-    - title: Encrypted blob store
-      details: 'Files referenced by rows move through a cloud outbox as encrypted opaque blobs.'
-    - title: Actionable errors
-      details: 'Drivers classify provider-specific signals — quota, revoked auth, missing bucket — into user-facing messages the host shows verbatim.'
+    - title: Keep your schema
+      details: 'coven syncs the tables you choose, and leaves your data model to you.'
+    - title: Write as usual
+      details: 'Your app writes to SQLite normally; coven captures and syncs changes underneath.'
+    - title: Files sync too
+      details: 'Images, audio, anything a row references travels with it, encrypted.'
+    - title: Edit anywhere
+      details: 'Concurrent writes from any device merge on their own. Works offline.'
+    - title: No backend
+      details: 'Runs on storage you already have: S3, Drive, Dropbox, OneDrive, iCloud, local.'
+    - title: Share and revoke
+      details: 'Invite people to a library, and remove them when they should lose access.'
 ---
