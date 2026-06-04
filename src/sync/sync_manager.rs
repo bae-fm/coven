@@ -16,6 +16,7 @@ use crate::db::SyncDb;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
 use crate::storage::cloud::CloudHome;
+use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_loop::SyncLoopHandle;
@@ -37,6 +38,11 @@ pub struct SyncManager {
     clock: ClockRef,
     blob_plan: Arc<dyn BlobPlan>,
     observer: Option<Arc<dyn BlobUploadObserver>>,
+
+    /// coven's `_updated_at` register. Built and seeded once at construction so
+    /// the host can stamp rows before `start_sync()`; the sync loop borrows this
+    /// instance rather than minting its own.
+    hlc: Arc<Hlc>,
 
     // Mutable sync state — updated when providers are connected/disconnected
     sync_loop_handle: RwLock<Option<Arc<SyncLoopHandle>>>,
@@ -62,7 +68,13 @@ pub struct SyncStatus {
 }
 
 impl SyncManager {
-    pub fn new(
+    /// Build the manager, seeding the `_updated_at` register from the persisted
+    /// high-water mark so it cannot regress across restarts.
+    ///
+    /// Construction reads `sync_state` (the seed); a read or parse error is
+    /// surfaced rather than swallowed — starting with an unseeded clock could
+    /// mint stamps behind existing rows and silently lose merges.
+    pub async fn new(
         config_provider: ConfigProvider,
         key_service: KeyService,
         encryption_service: EncryptionService,
@@ -70,8 +82,21 @@ impl SyncManager {
         clock: ClockRef,
         blob_plan: Arc<dyn BlobPlan>,
         observer: Option<Arc<dyn BlobUploadObserver>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let device_id = (config_provider)().device_id;
+        let hlc = Arc::new(Hlc::new(device_id));
+
+        if let Some(stored) = db
+            .get_sync_state(HIGHWATER_STATE_KEY)
+            .await
+            .map_err(|e| format!("Failed to read HLC high-water mark: {e}"))?
+        {
+            let high_water = Timestamp::parse(&stored)
+                .ok_or_else(|| format!("Corrupt HLC high-water mark in sync_state: {stored:?}"))?;
+            hlc.seed(&high_water);
+        }
+
+        Ok(Self {
             config_provider,
             key_service,
             encryption_service,
@@ -79,9 +104,19 @@ impl SyncManager {
             clock,
             blob_plan,
             observer,
+            hlc,
             sync_loop_handle: RwLock::new(None),
             cloud_home: RwLock::new(None),
-        }
+        })
+    }
+
+    /// Stamp a synced row's `_updated_at`. The host binds this opaque string
+    /// into every synced-row write; it must not parse or compare it as a
+    /// wall-clock time. Advancing the clock persists nothing here (the value is
+    /// in-memory until a sync cycle flushes the high-water mark), but the clock
+    /// is already seeded past existing rows, so the stamp never regresses.
+    pub fn stamp_updated_at(&self) -> String {
+        self.hlc.now().to_string()
     }
 
     pub fn encryption_service(&self) -> &EncryptionService {
@@ -133,6 +168,7 @@ impl SyncManager {
             self.db.as_ref(),
             self.clock.clone(),
             &self.encryption_service,
+            self.hlc.clone(),
         )
         .await;
 

@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use super::apply::apply_changeset_lww;
+use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
+use super::hlc::Timestamp;
 use super::membership::MembershipChain;
 use super::push::SCHEMA_VERSION;
 use super::session_ext::Changeset;
@@ -83,6 +85,11 @@ pub struct PullResult {
     /// Row changes from all applied changesets, for the host to map to domain
     /// events. Empty if nothing was applied.
     pub row_changes: Vec<RowChange>,
+    /// The greatest `_updated_at` among all applied rows, parsed as an HLC
+    /// [`Timestamp`]. The caller advances the HLC past this so a subsequent
+    /// local write sorts causally after everything just pulled. `None` if
+    /// nothing applied (or no applied row carried a parseable `_updated_at`).
+    pub max_applied_updated_at: Option<Timestamp>,
 }
 
 /// A changeset that had FK violations on first apply and needs retry.
@@ -152,6 +159,13 @@ pub async unsafe fn pull_changes(
         }
     };
 
+    // Per-table `_updated_at` column index, used to advance the HLC past every
+    // applied row's stamp. Built once from the live schema so column additions
+    // stay safe.
+    let synced = super::session::synced_tables();
+    let table_refs: Vec<&str> = synced.iter().map(String::as_str).collect();
+    let schema = TableSchema::from_db(db.0, &table_refs);
+
     let mut updated_cursors = cursors.clone();
     let mut result = PullResult {
         changesets_applied: 0,
@@ -160,6 +174,7 @@ pub async unsafe fn pull_changes(
         skipped_schema: 0,
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
+        max_applied_updated_at: None,
     };
     let mut deferred: Vec<DeferredChangeset> = Vec::new();
 
@@ -242,20 +257,25 @@ pub async unsafe fn pull_changes(
             }
 
             // Membership validation: in a chain-enabled library every changeset
-            // must be signed (its signature is verified above) by a member who
-            // was authorized at the signature-bound timestamp. Coven always
-            // signs at creation, so an unsigned or non-member changeset here is
-            // forged -- reject it.
+            // must be signed (its signature is verified above) by a current
+            // write-capable member. Coven always signs at creation, so an
+            // unsigned or non-member changeset here is forged -- reject it.
+            //
+            // The check is non-temporal: it asks whether the author is an Owner
+            // or Member *now*, not at some envelope-embedded timestamp. That
+            // timestamp is author-signed and so spoofable; revocation is
+            // enforced by the key rotation that `remove_member` performs (a
+            // removed member can no longer produce changesets the chain admits,
+            // because they lose the rotated library key and their auth key file).
             if let Some(chain) = membership_chain.as_ref() {
-                // The author must have been a *write-capable* member (Owner or
-                // Member) at the signature-bound timestamp. A Follower is a
-                // read-only member, so a changeset it authored is rejected here
-                // even though it is registered — the logical half of read-only
-                // enforcement (the proxy gates Follower writes too).
+                // A Follower is a read-only member, so a changeset it authored
+                // is rejected here even though it is registered — the logical
+                // half of read-only enforcement (the proxy gates Follower
+                // writes too).
                 let authorized = env
                     .author_pubkey
                     .as_ref()
-                    .is_some_and(|pk| chain.can_write_at(pk, &env.timestamp));
+                    .is_some_and(|pk| chain.can_write_now(pk));
                 if !authorized {
                     warn!(
                         device_id = %head.device_id,
@@ -297,6 +317,8 @@ pub async unsafe fn pull_changes(
                     changeset: Changeset::from_bytes(&changeset_bytes),
                 });
             }
+
+            advance_max_updated_at(&mut result.max_applied_updated_at, &changes, &schema);
 
             result.changesets_applied += 1;
             result.row_changes.extend(changes);
@@ -340,6 +362,32 @@ pub async unsafe fn pull_changes(
     }
 
     Ok((updated_cursors, result))
+}
+
+/// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
+/// as an HLC [`Timestamp`]. A row whose `_updated_at` fails to parse is logged
+/// and skipped — it must not panic the pull or silently default the clock.
+fn advance_max_updated_at(
+    max: &mut Option<Timestamp>,
+    changes: &[RowChange],
+    schema: &TableSchema,
+) {
+    for change in changes {
+        let idx = schema.get(&change.table).updated_at;
+        let Some(raw) = change.col(idx) else { continue };
+        match Timestamp::parse(raw) {
+            Some(ts) => {
+                if max.as_ref().is_none_or(|cur| ts > *cur) {
+                    *max = Some(ts);
+                }
+            }
+            None => warn!(
+                table = %change.table,
+                value = raw,
+                "applied row has an unparseable _updated_at, not advancing HLC past it"
+            ),
+        }
+    }
 }
 
 /// Download blobs a changeset references. Returns true if all succeeded.

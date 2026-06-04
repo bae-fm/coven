@@ -17,8 +17,8 @@ matches the two.
 pub struct MembershipEntry {
     pub action: MembershipAction,   // Add | Remove
     pub user_pubkey: String,         // member being added or removed
-    pub role: MemberRole,            // Owner | Member
-    pub timestamp: String,           // RFC 3339
+    pub role: MemberRole,            // Owner | Member | Follower
+    pub timestamp: String,           // HLC stamp (ordering/debuggability only)
     pub author_pubkey: String,       // who signed this change
     pub signature: String,           // Ed25519 over the rest
 }
@@ -42,20 +42,34 @@ member's key; the new member unwraps it locally on first sync.
 For each incoming changeset envelope, [`pull::pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes):
 
 1. Verifies the envelope's signature against the embedded `author_pubkey`.
-2. If a membership chain exists, checks that `author_pubkey` was an
-   authorized member at the envelope's timestamp.
-3. Rejects on either failure (`PullError::SignatureInvalid` /
-   `PullError::AuthorNotInChain`). The cursor still advances so a single
-   bad envelope doesn't permanently stall.
+2. If a membership chain exists, checks that `author_pubkey` is a *current*
+   write-capable member (Owner or Member). This is non-temporal: the check
+   asks who can write *now*, not at any envelope-embedded timestamp — that
+   timestamp is author-signed and therefore spoofable, so it cannot be load-
+   bearing for authorization.
+3. Skips the changeset on either failure (advancing the cursor so a single
+   bad envelope doesn't permanently stall).
 
 A library with no membership entries (solo, no chain established) accepts
 unsigned envelopes — the chain check only fires once the chain is non-empty.
 
+### Revocation is key rotation
+
+Removing a member does not rely on a temporal replay of the chain. When an
+owner removes a member, coven rotates the library's symmetric key and re-wraps
+it for the remaining members; the removed member loses both the new key and
+their `auth/keys/{pubkey}` file. They can no longer produce a changeset the
+chain admits, encrypt against the current key, or authenticate to the proxy.
+That key rotation — together with per-changeset signatures and the current-
+membership check above — is what enforces revocation.
+
 ## Roles
 
-[`MemberRole`](rustdoc:enum:coven::sync::membership::MemberRole) is `Owner`
-or `Member`. Owners can invite, remove, and rotate. Members can read and
-write but cannot mutate the chain. The high-level manager exposes
+[`MemberRole`](rustdoc:enum:coven::sync::membership::MemberRole) is `Owner`,
+`Member`, or `Follower`. Owners can invite, remove, and rotate. Members can
+read and write but cannot mutate the chain. Followers are read-only: they hold
+the library key but a changeset they author is rejected on pull, and the proxy
+gates their writes too. The high-level manager exposes
 [`get_members`](rustdoc:method:coven::sync::sync_manager::SyncManager::get_members)
 and
 [`invite_member`](rustdoc:method:coven::sync::sync_manager::SyncManager::invite_member)

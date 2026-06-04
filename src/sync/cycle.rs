@@ -19,7 +19,7 @@ use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
 
 use super::encrypted_storage::EncryptedSyncStorage;
-use super::hlc::{Hlc, Timestamp};
+use super::hlc::Hlc;
 use super::service::SyncService;
 use super::session::SyncSession;
 use super::storage::SyncStorage;
@@ -367,30 +367,27 @@ pub async unsafe fn run_single_sync_cycle(
         }
     }
 
-    // Update HLC with max remote timestamp
-    let max_remote_ts = sync_result
-        .pull
-        .remote_heads
-        .iter()
-        .filter(|h| h.device_id != device_id)
-        .filter_map(|h| h.last_sync.as_deref())
-        .filter_map(
-            |ts_str| match chrono::DateTime::parse_from_rfc3339(ts_str) {
-                Ok(dt) => Some(dt.timestamp_millis().max(0) as u64),
-                Err(e) => {
-                    warn!(
-                        timestamp = ts_str,
-                        "Failed to parse peer HLC timestamp: {e}"
-                    );
-                    None
-                }
-            },
-        )
-        .max();
+    // Advance the HLC past every applied row's `_updated_at`, so the next local
+    // stamp sorts causally after anything just pulled. The source is the max
+    // applied-row `_updated_at` (a real HLC stamp), not the envelope/head
+    // timestamp — only the row register drives last-writer-wins.
+    if let Some(max_applied) = &sync_result.pull.max_applied_updated_at {
+        hlc.update(max_applied);
+    }
 
-    if let Some(remote_millis) = max_remote_ts {
-        let remote_ts = Timestamp::new(remote_millis, 0, "remote".to_string());
-        hlc.update(&remote_ts);
+    // Flush the clock's high-water mark so a restart re-seeds past it. This
+    // captures both the merge above and any host stamps minted this cycle
+    // (e.g. the changeset envelope timestamp), since `high_water` reads the
+    // clock's current state. A persist error aborts the cycle rather than
+    // risking a backward jump after restart.
+    if let Err(e) = db
+        .set_sync_state(
+            crate::sync::hlc::HIGHWATER_STATE_KEY,
+            &hlc.high_water().to_string(),
+        )
+        .await
+    {
+        recover_session_on_err!(format!("Failed to persist HLC high-water mark: {e}"));
     }
 
     // Process outbox deletes (safe to delete after all devices have synced past the deletion)
@@ -517,6 +514,7 @@ pub async fn init_sync(
     raw_db_handle: &dyn RawDbHandle,
     clock: ClockRef,
     encryption: &EncryptionService,
+    hlc: std::sync::Arc<Hlc>,
 ) -> Option<SyncComponents> {
     // Integration guard. The host must register its synced tables (via
     // `session::set_synced_tables`) at startup. With an empty set, `SyncSession`
@@ -632,13 +630,11 @@ pub async fn init_sync(
         }
     };
 
-    let hlc = Hlc::new(config.device_id.clone());
-
     info!("Sync initialized (device: {})", config.device_id);
 
     Some(SyncComponents {
         storage: std::sync::Arc::new(storage),
-        hlc: std::sync::Arc::new(hlc),
+        hlc,
         device_id: config.device_id.clone(),
         encryption: encryption_lock,
         raw_db,

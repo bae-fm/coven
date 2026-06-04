@@ -198,64 +198,18 @@ impl MembershipChain {
         Ok(())
     }
 
-    /// Check if a pubkey was an active member at the given timestamp.
+    /// Whether a pubkey is *currently* authorized to author catalog changesets
+    /// — a current Owner or Member. Followers are read-only, so a changeset
+    /// they authored is rejected on pull.
     ///
-    /// Replays entries up to and including the given timestamp.
-    pub fn is_member_at(&self, pubkey: &str, timestamp: &str) -> bool {
-        let mut active: Vec<String> = Vec::new();
-
-        for entry in &self.entries {
-            if entry.timestamp.as_str() > timestamp {
-                break;
-            }
-
-            match entry.action {
-                MembershipAction::Add => {
-                    if !active.contains(&entry.user_pubkey) {
-                        active.push(entry.user_pubkey.clone());
-                    }
-                }
-                MembershipAction::Remove => {
-                    active.retain(|pk| pk != &entry.user_pubkey);
-                }
-            }
-        }
-
-        active.contains(&pubkey.to_string())
-    }
-
-    /// The role a pubkey held at `timestamp`, or `None` if it was not an active
-    /// member then. Replays Add/Remove (with role changes) up to the timestamp.
-    pub fn role_at(&self, pubkey: &str, timestamp: &str) -> Option<MemberRole> {
-        let mut active: Vec<(String, MemberRole)> = Vec::new();
-
-        for entry in &self.entries {
-            if entry.timestamp.as_str() > timestamp {
-                break;
-            }
-            match entry.action {
-                MembershipAction::Add => {
-                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
-                    active.push((entry.user_pubkey.clone(), entry.role.clone()));
-                }
-                MembershipAction::Remove => {
-                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
-                }
-            }
-        }
-
-        active
+    /// Non-temporal by design: pull asks this of the latest chain it has, not
+    /// of an author-supplied (spoofable) timestamp. Revocation is enforced by
+    /// the key rotation `remove_member` performs, not by replaying the chain at
+    /// a claimed instant.
+    pub fn can_write_now(&self, pubkey: &str) -> bool {
+        self.current_members()
             .into_iter()
-            .find(|(pk, _)| pk == pubkey)
-            .map(|(_, role)| role)
-    }
-
-    /// Whether a pubkey was authorized to *author* catalog changesets at
-    /// `timestamp` — an active Owner or Member. Followers are read-only, so a
-    /// changeset they authored is rejected on pull.
-    pub fn can_write_at(&self, pubkey: &str, timestamp: &str) -> bool {
-        self.role_at(pubkey, timestamp)
-            .is_some_and(|role| role.can_write())
+            .any(|(pk, role)| pk == pubkey && role.can_write())
     }
 
     /// Return current active members with their roles.
@@ -408,29 +362,18 @@ mod tests {
             .unwrap();
         chain.validate().unwrap();
 
-        let now = "0000000009000-0000-dev1";
-        // Roles resolve correctly.
-        assert_eq!(
-            chain.role_at(&pubkey_hex(&owner), now),
-            Some(MemberRole::Owner)
-        );
-        assert_eq!(
-            chain.role_at(&pubkey_hex(&follower), now),
-            Some(MemberRole::Follower)
-        );
-        assert_eq!(
-            chain.role_at(&pubkey_hex(&member), now),
-            Some(MemberRole::Member)
-        );
-
         // Owners and Members may author changesets; a Follower may not.
-        assert!(chain.can_write_at(&pubkey_hex(&owner), now));
-        assert!(chain.can_write_at(&pubkey_hex(&member), now));
-        assert!(!chain.can_write_at(&pubkey_hex(&follower), now));
+        assert!(chain.can_write_now(&pubkey_hex(&owner)));
+        assert!(chain.can_write_now(&pubkey_hex(&member)));
+        assert!(!chain.can_write_now(&pubkey_hex(&follower)));
         // ...but the Follower is still a registered member (can read).
-        assert!(chain.is_member_at(&pubkey_hex(&follower), now));
+        assert!(chain
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&follower)));
 
-        // Revoking the follower drops them entirely: no role, not a member.
+        // Revoking the follower drops them entirely: not a current member,
+        // cannot write.
         chain
             .add_entry(make_entry(
                 &owner,
@@ -440,9 +383,11 @@ mod tests {
                 "0000000004000-0000-dev1",
             ))
             .unwrap();
-        assert_eq!(chain.role_at(&pubkey_hex(&follower), now), None);
-        assert!(!chain.is_member_at(&pubkey_hex(&follower), now));
-        assert!(!chain.can_write_at(&pubkey_hex(&follower), now));
+        assert!(!chain
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&follower)));
+        assert!(!chain.can_write_now(&pubkey_hex(&follower)));
     }
 
     #[test]
@@ -463,7 +408,10 @@ mod tests {
                 "0000000002000-0000-dev1",
             ))
             .unwrap();
-        // Re-add with a lower role downgrades them.
+        // While a Member, they may author changesets.
+        assert!(chain.can_write_now(&pubkey_hex(&m)));
+
+        // Re-add with a lower role downgrades them; write is revoked.
         chain
             .add_entry(make_entry(
                 &owner,
@@ -473,10 +421,7 @@ mod tests {
                 "0000000003000-0000-dev1",
             ))
             .unwrap();
-
-        // Could write at t=2 (Member), cannot at t=3+ (downgraded to Follower).
-        assert!(chain.can_write_at(&pubkey_hex(&m), "0000000002500-0000-dev1"));
-        assert!(!chain.can_write_at(&pubkey_hex(&m), "0000000009000-0000-dev1"));
+        assert!(!chain.can_write_now(&pubkey_hex(&m)));
     }
 
     #[test]
@@ -543,41 +488,6 @@ mod tests {
         let members = chain.current_members();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].0, pubkey_hex(&owner));
-    }
-
-    #[test]
-    fn is_member_at_tracks_over_time() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-
-        let chain = MembershipChain::from_entries(vec![
-            founder_entry(&owner, "0000000001000-0000-dev1"),
-            make_entry(
-                &owner,
-                MembershipAction::Add,
-                &member,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ),
-            make_entry(
-                &owner,
-                MembershipAction::Remove,
-                &member,
-                MemberRole::Member,
-                "0000000004000-0000-dev1",
-            ),
-        ])
-        .unwrap();
-
-        // Owner is always a member.
-        assert!(chain.is_member_at(&pubkey_hex(&owner), "0000000001000-0000-dev1"));
-        assert!(chain.is_member_at(&pubkey_hex(&owner), "0000000005000-0000-dev1"));
-
-        // Member added at t=2000, removed at t=4000.
-        assert!(!chain.is_member_at(&pubkey_hex(&member), "0000000000500-0000-dev1"));
-        assert!(chain.is_member_at(&pubkey_hex(&member), "0000000002000-0000-dev1"));
-        assert!(chain.is_member_at(&pubkey_hex(&member), "0000000003000-0000-dev1"));
-        assert!(!chain.is_member_at(&pubkey_hex(&member), "0000000004000-0000-dev1"));
     }
 
     #[test]

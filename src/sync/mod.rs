@@ -5,6 +5,8 @@ pub mod cycle;
 pub mod encrypted_storage;
 pub mod envelope;
 pub mod hlc;
+#[cfg(test)]
+mod hlc_register_tests;
 pub mod invite;
 pub mod join;
 pub mod membership;

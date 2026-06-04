@@ -171,6 +171,18 @@ impl MockSyncStorage {
             .unwrap()
             .insert(device_id.to_string(), seq);
     }
+
+    /// Store a pre-packed envelope (already signed/packed by the caller) and
+    /// advance the device head. For tests that need a specific signature or
+    /// envelope timestamp `store_changeset`'s synthetic envelope can't express.
+    pub fn put_changeset_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
+        let key = format!("changes/{device_id}/{seq}");
+        self.objects.lock().unwrap().insert(key, packed);
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), seq);
+    }
 }
 
 #[async_trait]

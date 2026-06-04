@@ -10,7 +10,16 @@
 //!
 //! Integration contract for the host:
 //! - Every synced table has an `id` text primary key at column 0 and an
-//!   `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp).
+//!   `_updated_at TEXT NOT NULL` column. `_updated_at` is coven's last-writer-
+//!   wins register, an opaque Hybrid Logical Clock stamp the host obtains from
+//!   [`sync::sync_manager::SyncManager::stamp_updated_at`] and binds into every
+//!   synced-row write. The host must not parse or compare it as a wall-clock
+//!   time; coven advances the clock past pulled rows so a later local write
+//!   always sorts causally after them, which a wall clock cannot guarantee
+//!   under skew. Changeset envelopes and membership entries also carry an HLC
+//!   stamp for ordering/debuggability, but it is not authorization-load-
+//!   bearing — pull authorizes by signature and current write-capable
+//!   membership, and revocation is enforced by key rotation.
 //! - The host applies [`db::MIGRATION_SQL`] to create coven's bookkeeping tables
 //!   and implements [`db::SyncBookkeeping`] + [`db::RawDbHandle`].
 //! - The host registers the synced-table list at startup via

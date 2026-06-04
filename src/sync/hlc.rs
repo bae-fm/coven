@@ -1,12 +1,28 @@
 /// Hybrid Logical Clock (HLC) for causal ordering of writes across devices.
 ///
-/// Used as the `_updated_at` column value on all synced tables. Provides
-/// monotonically increasing timestamps that handle clock skew between devices.
+/// This clock is coven's `_updated_at` register: the host stamps every synced
+/// row's `_updated_at` with [`Hlc::now`] (via
+/// `SyncManager::stamp_updated_at`), and pull advances the clock past every
+/// applied row's `_updated_at` so a subsequent local write sorts causally
+/// after anything just pulled. Row-level last-writer-wins (`conflict.rs`)
+/// compares these strings lexicographically. Because the clock never mints a
+/// stamp behind a value it has already seen — even under wall-clock skew or a
+/// same-millisecond restart — a device that edits a row right after pulling a
+/// peer's edit always wins, which a plain wall clock cannot guarantee.
 ///
-/// Format: `{millis:013}-{counter:04}-{device_id}`
-/// Lexicographic string comparison gives correct causal ordering.
+/// `_updated_at` is opaque to the host: it binds the string coven hands it and
+/// never parses it. Format (coven-internal): `{millis:013}-{counter:04}-{device_id}`.
+///
+/// The in-memory monotonic state is seeded from a persisted high-water mark on
+/// construction ([`Hlc::seed`]) so it cannot regress across restarts; the
+/// caller persists [`Hlc::high_water`] whenever the clock advances.
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// `sync_state` key under which the clock's high-water mark is persisted, so it
+/// cannot regress across restarts (see [`Hlc::seed`]). Written whenever the
+/// clock advances (host stamp flushed at cycle end, and on apply-merge).
+pub const HIGHWATER_STATE_KEY: &str = "hlc_highwater";
 
 /// Maximum allowed clock skew from a remote timestamp (24 hours in ms).
 /// If an incoming timestamp is more than this far ahead of local wall time,
@@ -86,6 +102,31 @@ impl Hlc {
         }
     }
 
+    /// Seed the clock's monotonic state from a persisted high-water mark so it
+    /// cannot mint a stamp behind a value it minted (or saw) before a restart.
+    ///
+    /// Idempotent and monotonic: a seed below the current state is ignored, so
+    /// re-seeding can only push the clock forward. The seeded `device_id` is
+    /// irrelevant — only `millis`/`counter` gate future stamps.
+    pub fn seed(&self, high_water: &Timestamp) {
+        let mut state = self.state.lock().unwrap();
+        if high_water.millis > state.millis
+            || (high_water.millis == state.millis && high_water.counter > state.counter)
+        {
+            state.millis = high_water.millis;
+            state.counter = high_water.counter;
+        }
+    }
+
+    /// The clock's current high-water mark: a [`Timestamp`] at the latest
+    /// `millis`/`counter` this clock has reached. Persist this whenever the
+    /// clock advances (on stamp and on apply-merge) and feed it back to
+    /// [`Hlc::seed`] on the next construction.
+    pub fn high_water(&self) -> Timestamp {
+        let state = self.state.lock().unwrap();
+        Timestamp::new(state.millis, state.counter, self.device_id.clone())
+    }
+
     /// Generate a new timestamp. Guaranteed to be greater than any previous
     /// timestamp returned by this clock.
     pub fn now(&self) -> Timestamp {
@@ -140,7 +181,10 @@ impl Hlc {
     }
 
     #[cfg(test)]
-    fn with_wall_clock(device_id: String, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
+    pub(crate) fn with_wall_clock(
+        device_id: String,
+        clock: impl Fn() -> u64 + Send + Sync + 'static,
+    ) -> Self {
         Self {
             device_id,
             state: Mutex::new(HlcState {
