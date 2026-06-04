@@ -14,6 +14,11 @@ function rustdocHref(spec) {
         throw new Error(`Invalid rustdoc path: ${path}`)
     }
 
+    if (kind === 'mod') {
+        const modulePath = segments.length > 0 ? `${segments.join('/')}/` : ''
+        return `/rustdoc/${crate}/${modulePath}index.html`
+    }
+
     if (kind === 'method') {
         const method = segments.pop()
         const typeName = segments.pop()
@@ -21,6 +26,16 @@ function rustdocHref(spec) {
             throw new Error(`Invalid rustdoc method path: ${path}`)
         }
         return `/rustdoc/${crate}/${segments.join('/')}/struct.${typeName}.html#method.${method}`
+    }
+
+    if (kind === 'variant') {
+        const variant = segments.pop()
+        const enumName = segments.pop()
+        if (!variant || !enumName) {
+            throw new Error(`Invalid rustdoc variant path: ${path}`)
+        }
+        const modulePath = segments.length > 0 ? `${segments.join('/')}/` : ''
+        return `/rustdoc/${crate}/${modulePath}enum.${enumName}.html#variant.${variant}`
     }
 
     const item = segments.pop()
