@@ -1,8 +1,9 @@
 /// Hybrid Logical Clock (HLC) for causal ordering of writes across devices.
 ///
 /// This clock is coven's `_updated_at` register: the host stamps every synced
-/// row's `_updated_at` with [`Hlc::now`] (via
-/// `SyncManager::stamp_updated_at`), and pull advances the clock past every
+/// row's `_updated_at` with [`Hlc::now`] (via a
+/// [`crate::sync::register_clock::RegisterClock`] stamper), and pull advances the
+/// clock past every
 /// applied row's `_updated_at` so a subsequent local write sorts causally
 /// after anything just pulled. Row-level last-writer-wins (`conflict.rs`)
 /// compares these strings lexicographically. Because the clock never mints a
@@ -17,7 +18,7 @@
 /// it cannot regress across restarts. The seed floor is the max of two sources:
 /// the persisted high-water mark ([`Hlc::high_water`], flushed at cycle end) and
 /// the max `_updated_at` coven scans across its registered synced tables in
-/// [`crate::sync::sync_manager::SyncManager::new`]. The on-disk row scan is the
+/// [`crate::sync::register_clock::RegisterClock::open`]. The on-disk row scan is the
 /// authoritative floor — the high-water flush lags any local row stamp minted
 /// between cycles, so seeding from it alone could let the first post-restart
 /// stamp sort below the device's own un-flushed rows.
@@ -194,16 +195,16 @@ impl Hlc {
 /// [`Hlc`] — the register-stamping capability, sliced off the whole
 /// [`crate::sync::sync_manager::SyncManager`].
 ///
-/// The host's database is built before the manager and then moved into
-/// `SyncManager::new`, but its write path must stamp `_updated_at` with the
-/// *same* clock the manager drives: coven advances that clock past every pulled
-/// row, and if the db held a separate clock that advance would never reach the
-/// db's stamper, letting a later local write sort behind a pulled row and
-/// silently lose last-writer-wins. So the host obtains this handle from the
-/// constructed manager ([`crate::sync::sync_manager::SyncManager::updated_at_stamper`])
-/// and injects it into the write path; every clone shares one `Arc<Hlc>`, so
-/// coven's seeding and advance-on-pull are reflected in every stamp the host
-/// mints.
+/// The host opens a [`crate::sync::register_clock::RegisterClock`] from a device
+/// id and the database, then obtains this handle from it
+/// ([`crate::sync::register_clock::RegisterClock::updated_at_stamper`]) and
+/// injects it into the write path — before any [`crate::sync::sync_manager::SyncManager`]
+/// exists. The manager, built later, borrows the same `Arc<Hlc>`: coven advances
+/// that clock past every pulled row, and because the stamper shares the
+/// instance, that advance reaches every stamp the host mints, so a later local
+/// write never sorts behind a pulled row and loses last-writer-wins. Every clone
+/// shares one `Arc<Hlc>`, so coven's seeding and advance-on-pull are reflected in
+/// every stamp.
 ///
 /// It exposes only [`UpdatedAtStamper::stamp`] — never `seed`/`advance_past`/
 /// `high_water`. Those drive the clock and are coven's alone; the host write
@@ -227,10 +228,10 @@ impl UpdatedAtStamper {
 
     /// A standalone stamper over a fresh in-memory HLC, for host tests that
     /// inject a real stamper through their production injection path without
-    /// constructing a [`SyncManager`](crate::sync::sync_manager::SyncManager).
+    /// opening a [`RegisterClock`](crate::sync::register_clock::RegisterClock).
     /// Not for production — production stampers come from
-    /// `SyncManager::updated_at_stamper` so they share the manager's seeded,
-    /// pull-advanced clock.
+    /// [`RegisterClock::updated_at_stamper`](crate::sync::register_clock::RegisterClock::updated_at_stamper)
+    /// so they share the seeded, pull-advanced clock.
     #[cfg(feature = "test-utils")]
     pub fn for_test() -> Self {
         Self::new(Arc::new(Hlc::new("test-device".to_string())))

@@ -18,6 +18,7 @@ pub mod pull;
 #[cfg(test)]
 mod pull_tests;
 pub mod push;
+pub mod register_clock;
 pub mod restore;
 pub mod restore_code;
 pub mod service;

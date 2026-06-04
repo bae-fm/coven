@@ -16,13 +16,13 @@ use crate::clock::SystemClock;
 use crate::db::{DbError, OutboxEntry, RawDbHandle, SyncBookkeeping};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::sync::cycle::{run_single_sync_cycle, SyncCycleOutcome};
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipEntry};
 use crate::sync::pull::{pull_changes, SendDbPtr};
 use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::register_clock::RegisterClock;
 use crate::sync::session::SyncSession;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
@@ -304,7 +304,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     }
 }
 
-/// A real-sqlite-backed `SyncDb` for exercising `SyncManager::new`'s seed read
+/// A real-sqlite-backed `SyncDb` for exercising `RegisterClock::open`'s seed read
 /// and as the bookkeeping side of a `run_single_sync_cycle`. `get_sync_state` /
 /// `set_sync_state` are an in-memory map; cursors and outbox queries answer empty
 /// so a cycle pulls without local pushes or outbox work. `raw_write_handle`
@@ -314,7 +314,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
 struct FakeSyncDb {
     state: Mutex<HashMap<String, String>>,
     /// A live in-memory sqlite connection with the synced schema. The scan in
-    /// `SyncManager::new` prepares/steps `SELECT MAX(_updated_at)` against this.
+    /// `RegisterClock::open` prepares/steps `SELECT MAX(_updated_at)` against this.
     /// [`SendDbPtr`] carries `Send`; `SyncBookkeeping: Send + Sync` also requires
     /// `Sync`, which the `unsafe impl` below adds — sound because the
     /// single-threaded test serializes all access to the connection.
@@ -404,47 +404,20 @@ impl RawDbHandle for FakeSyncDb {
     }
 }
 
-/// Build a `SyncManager` over `db` for the construction-path seed tests. Sync is
-/// never started; only the seed read on `new` runs.
-async fn build_manager_over(
-    db: std::sync::Arc<FakeSyncDb>,
-) -> crate::sync::sync_manager::SyncManager {
-    use crate::clock::SystemClock;
-    use crate::config::Config;
-    use crate::encryption::EncryptionService;
-    use crate::keys::KeyService;
-    use std::sync::Arc;
-
-    let config_provider = {
-        // The library dir is never read on the construction path under test.
-        let config = Config::with_defaults(
-            "test-lib".to_string(),
-            "dev-a".to_string(),
-            LibraryDir::new(std::path::Path::new("/nonexistent")),
-            "Test Library".to_string(),
-        );
-        let config = Arc::new(config);
-        Arc::new(move || (*config).clone()) as crate::sync::sync_manager::ConfigProvider
-    };
-
-    crate::sync::sync_manager::SyncManager::new(
-        config_provider,
-        KeyService::new(true, "test-lib".to_string()),
-        EncryptionService::new_with_key(&[3u8; 32]),
-        db,
-        Arc::new(SystemClock),
-        Arc::new(NoopBlobPlan),
-        None,
-    )
-    .await
-    .expect("manager construction")
+/// Open a seeded [`RegisterClock`] over `db` for the construction-path seed
+/// tests. This is the real unit: it reads the persisted high-water mark and runs
+/// the raw-handle `SELECT MAX(_updated_at)` scan to seed its floor.
+async fn open_clock_over(db: std::sync::Arc<FakeSyncDb>) -> RegisterClock {
+    RegisterClock::open("dev-a".to_string(), db.as_ref())
+        .await
+        .expect("register clock open")
 }
 
-/// `SyncManager::new` seeds the register from the persisted high-water mark, so
+/// `RegisterClock::open` seeds the register from the persisted high-water mark, so
 /// the very first host stamp after a restart does not regress below existing
-/// rows — without starting sync.
+/// rows.
 #[tokio::test]
-async fn manager_new_seeds_register_from_persisted_high_water() {
+async fn register_clock_seeds_from_persisted_high_water() {
     init_synced_tables();
     // A high-water mark far ahead of any plausible current wall millis, so a
     // freshly minted (unseeded) stamp would sort *below* it. No synced rows on
@@ -455,9 +428,9 @@ async fn manager_new_seeds_register_from_persisted_high_water() {
         &[],
     ));
 
-    let manager = build_manager_over(db).await;
+    let clock = open_clock_over(db).await;
 
-    let stamp = manager.stamp_updated_at();
+    let stamp = clock.updated_at_stamper().stamp();
     assert!(
         stamp.as_str() > high,
         "first stamp {stamp} must sort after the seeded high-water {high}",
@@ -473,12 +446,12 @@ async fn manager_new_seeds_register_from_persisted_high_water() {
 /// loses LWW to them — self-data-loss.
 ///
 /// This drives the real seeding path: a real `notes` row carrying a far-future
-/// `_updated_at` sits in coven's in-memory test DB, and `SyncManager::new` runs
+/// `_updated_at` sits in coven's in-memory test DB, and `RegisterClock::open` runs
 /// its own raw-handle `SELECT MAX(_updated_at)` scan over it (no host-supplied
-/// max). Removing that scan from `new` makes the clock seed only from the absent
-/// high-water mark and mint a stamp below the row — so this fails.
+/// max). Removing that scan makes the clock seed only from the absent high-water
+/// mark and mint a stamp below the row — so this fails.
 #[tokio::test]
-async fn manager_new_seeds_register_from_on_disk_rows_above_high_water() {
+async fn register_clock_seeds_from_on_disk_rows_above_high_water() {
     init_synced_tables();
     // No persisted high-water (never flushed), but a synced row exists far ahead
     // of any plausible wall millis. Seeding from high-water alone would leave the
@@ -486,9 +459,9 @@ async fn manager_new_seeds_register_from_on_disk_rows_above_high_water() {
     let row_stamp = "9999999999000-0011-dev-a";
     let db = std::sync::Arc::new(FakeSyncDb::new(HashMap::new(), &[row_stamp]));
 
-    let manager = build_manager_over(db).await;
+    let clock = open_clock_over(db).await;
 
-    let stamp = manager.stamp_updated_at();
+    let stamp = clock.updated_at_stamper().stamp();
     assert!(
         stamp.as_str() > row_stamp,
         "first stamp {stamp} must sort after the on-disk row {row_stamp}; \
@@ -496,62 +469,45 @@ async fn manager_new_seeds_register_from_on_disk_rows_above_high_water() {
     );
 }
 
-/// The host's injected [`UpdatedAtStamper`] and the manager's own
-/// `stamp_updated_at` mint from one shared, advancing clock — the whole point of
+/// The host's injected [`UpdatedAtStamper`] and a second stamper from the same
+/// [`RegisterClock`] mint from one shared, advancing clock — the whole point of
 /// handing the host a handle rather than letting its db carry a separate clock.
 ///
 /// Two external outcomes, neither a restatement of `Hlc::now`'s self-tests:
-/// - **Sharing:** the manager seeds the register past a far-future on-disk row at
-///   construction (the same forward push advance-on-pull performs). A stamper
-///   obtained *after* construction must mint above that floor — it would not if
-///   it wrapped a fresh, unseeded clock instead of the manager's `Arc<Hlc>`.
-/// - **Monotonic across both paths:** stamps interleaved between
-///   `stamp_updated_at` and `stamper.stamp` strictly increase regardless of which
-///   path mints them, which holds only if both draw from the same clock.
+/// - **Sharing:** the clock seeds the register past a far-future on-disk row at
+///   open (the same forward push advance-on-pull performs). A stamper obtained
+///   *after* open must mint above that floor — it would not if it wrapped a
+///   fresh, unseeded clock instead of the register's `Arc<Hlc>`.
+/// - **Monotonic across handles:** stamps interleaved between two stampers
+///   strictly increase regardless of which mints them, which holds only if both
+///   draw from the same clock.
 #[tokio::test]
-async fn stamper_and_stamp_updated_at_share_one_advancing_clock() {
+async fn stampers_share_one_advancing_clock() {
     init_synced_tables();
     // A synced row far ahead of any plausible wall millis seeds the register at
-    // construction, standing in for an advance-on-pull push of the shared clock.
+    // open, standing in for an advance-on-pull push of the shared clock.
     let seeded_floor = "9999999999000-0005-dev-a";
     let db = std::sync::Arc::new(FakeSyncDb::new(HashMap::new(), &[seeded_floor]));
 
-    let manager = build_manager_over(db).await;
+    let clock = open_clock_over(db).await;
 
-    // A stamper obtained after the seed reflects it: it wraps the manager's
+    // A stamper obtained after the seed reflects it: it wraps the register's
     // seeded clock, not a fresh one.
-    let stamper = manager.updated_at_stamper();
+    let stamper = clock.updated_at_stamper();
     let s1 = stamper.stamp();
     assert!(
         s1.as_str() > seeded_floor,
         "stamper minted {s1} below the seeded floor {seeded_floor}; it is not \
-         sharing the manager's clock",
+         sharing the register's clock",
     );
 
-    // Interleave the two paths; every stamp must strictly outrank the last,
-    // which holds only if both paths advance one shared clock.
-    let s2 = manager.stamp_updated_at();
+    // Interleave two handles; every stamp must strictly outrank the last, which
+    // holds only if both advance one shared clock.
+    let stamper2 = clock.updated_at_stamper();
+    let s2 = stamper2.stamp();
     let s3 = stamper.stamp();
-    let s4 = manager.stamp_updated_at();
-    assert!(
-        s2 > s1,
-        "stamp_updated_at {s2} must outrank prior stamper {s1}"
-    );
-    assert!(
-        s3 > s2,
-        "stamper {s3} must outrank prior stamp_updated_at {s2}"
-    );
-    assert!(
-        s4 > s3,
-        "stamp_updated_at {s4} must outrank prior stamper {s3}"
-    );
-
-    // A second handle is just another view of the same clock.
-    let stamper2 = manager.updated_at_stamper();
-    let s5 = stamper2.stamp();
-    assert!(
-        s5 > s4,
-        "a freshly cloned stamper {s5} must outrank the prior stamp {s4}; all \
-         handles share one clock",
-    );
+    let s4 = stamper2.stamp();
+    assert!(s2 > s1, "stamper2 {s2} must outrank prior stamper {s1}");
+    assert!(s3 > s2, "stamper {s3} must outrank prior stamper2 {s2}");
+    assert!(s4 > s3, "stamper2 {s4} must outrank prior stamper {s3}");
 }
