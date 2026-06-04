@@ -446,8 +446,15 @@ impl SyncStorage for MockSyncStorage {
 
 #[async_trait]
 impl CloudHome for MockSyncStorage {
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let total = data.len() as u64;
         self.objects.lock().unwrap().insert(key.to_string(), data);
+        progress(total);
         Ok(())
     }
 

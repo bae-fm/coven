@@ -51,6 +51,14 @@ pub trait BlobPlan: Send + Sync {
 /// `on_blob_uploaded` on success; `on_blob_upload_failed` when an attempt fails
 /// and the entry is left queued for retry.
 ///
+/// `on_blob_upload_progress` reports how many bytes of the blob have reached
+/// the cloud so far, between start and the terminal callback, so the host can
+/// move a per-file progress bar mid-upload instead of jumping from 0 to 100% at
+/// completion. The byte counts are of the encrypted payload (what the cloud
+/// backend actually transfers), which is marginally larger than the plaintext
+/// file. It fires zero or more times per upload; backends that can't report
+/// sub-file progress call it once at the end with `bytes_done == bytes_total`.
+///
 /// `should_skip_uploads` lets the host pause the upload pipeline without
 /// touching the queue contents. The sync cycle consults it before processing
 /// the outbox so a paused queue still accepts new entries but doesn't drain;
@@ -60,6 +68,14 @@ pub trait BlobPlan: Send + Sync {
 pub trait BlobUploadObserver: Send + Sync {
     /// An upload attempt for this blob is starting now.
     async fn on_blob_upload_started(&self, file_id: &str);
+
+    /// `bytes_done` of `bytes_total` encrypted bytes have reached the cloud for
+    /// this in-flight blob. `bytes_done` is cumulative and monotonic within one
+    /// upload attempt. The default is a no-op so observers that don't surface
+    /// sub-file progress don't need a stub.
+    async fn on_blob_upload_progress(&self, file_id: &str, bytes_done: u64, bytes_total: u64) {
+        let _ = (file_id, bytes_done, bytes_total);
+    }
 
     /// The blob was uploaded to the cloud successfully.
     async fn on_blob_uploaded(&self, file_id: &str);

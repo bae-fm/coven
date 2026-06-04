@@ -75,6 +75,27 @@ impl CloudHomeJoinInfo {
     }
 }
 
+/// Reports how many bytes of a `write` have reached the backend so far.
+/// Called with the cumulative byte count as the body uploads; backends that
+/// can't observe sub-call progress call it once at the end with the full size.
+/// The count is of the bytes handed to `write` (the encrypted payload).
+pub type UploadProgress<'a> = dyn Fn(u64) + Send + Sync + 'a;
+
+/// Chunk size for the streaming/chunked upload paths that have no provider-
+/// specific alignment requirement (the HTTP-proxy streaming body and the
+/// in-memory test backend). Providers whose resumable API mandates a specific
+/// alignment (OneDrive 320 KiB multiples, Google Drive 256 KiB multiples, S3
+/// 5 MiB minimum parts) define their own constant. 4 MiB gives several progress
+/// ticks on a large audio file without flooding the coalescing layer.
+pub(crate) const PROGRESS_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+/// A progress sink that discards its reports. For `write` calls whose payload
+/// is a small control file (auth keys, head pointers, the snapshot) where no
+/// per-file progress bar is driven — only the blob outbox surfaces progress.
+pub fn no_progress() -> impl Fn(u64) + Send + Sync {
+    |_| {}
+}
+
 /// Low-level cloud storage. Implementations handle a single library.
 ///
 /// All methods deal in raw bytes. No encryption or path layout logic.
@@ -90,8 +111,16 @@ pub trait CloudHome: Send + Sync {
         self.list("__bae_probe__").await.map(drop)
     }
 
-    /// Write bytes to a key, creating or overwriting.
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError>;
+    /// Write bytes to a key, creating or overwriting. `progress` is called with
+    /// the cumulative count of bytes sent so the caller can drive a per-file
+    /// progress bar; backends that can't observe sub-call progress call it once
+    /// at the end with `data.len()`.
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError>;
 
     /// Read the full contents of a key.
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError>;

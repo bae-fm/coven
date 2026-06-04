@@ -94,6 +94,78 @@ impl OneDriveCloudHome {
     ) -> Result<reqwest::Response, CloudHomeError> {
         self.session.api_call(build_request).await
     }
+
+    /// Upload via a Graph resumable upload session, reporting cumulative bytes
+    /// as each chunk's PUT returns. Opens a session, PUTs `ONEDRIVE_CHUNK_SIZE`
+    /// chunks (the last is the remainder) with a `Content-Range` header, then
+    /// the final chunk's 200/201 completes the file. The session URL is
+    /// pre-authenticated, so chunk PUTs carry no bearer token.
+    async fn write_resumable(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let total = data.len() as u64;
+        let session_url = format!("{}/createUploadSession", self.item_path_url(key));
+        let body = serde_json::json!({
+            "item": { "@microsoft.graph.conflictBehavior": "replace" }
+        });
+        let resp = self
+            .api_call(|token| {
+                self.client
+                    .post(&session_url)
+                    .bearer_auth(token)
+                    .json(&body)
+            })
+            .await?;
+        let status = resp.status();
+        let resp_body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+        if !status.is_success() {
+            return Err(classify_write_error(status, &resp_body, key));
+        }
+        let json: serde_json::Value = serde_json::from_str(&resp_body)
+            .map_err(|e| CloudHomeError::Storage(format!("parse upload session {key}: {e}")))?;
+        let upload_url = json["uploadUrl"]
+            .as_str()
+            .ok_or_else(|| {
+                CloudHomeError::Storage(format!("upload session {key}: no uploadUrl returned"))
+            })?
+            .to_string();
+
+        let mut sent: u64 = 0;
+        for chunk in data.chunks(ONEDRIVE_CHUNK_SIZE) {
+            let start = sent;
+            let end = sent + chunk.len() as u64 - 1;
+            let content_range = format!("bytes {start}-{end}/{total}");
+            // No bearer_auth: the session URL is already a signed one-time URL.
+            let resp = self
+                .client
+                .put(&upload_url)
+                .header("Content-Length", chunk.len())
+                .header("Content-Range", &content_range)
+                .body(chunk.to_vec())
+                .send()
+                .await
+                .map_err(|e| CloudHomeError::Storage(format!("upload chunk {key}: {e}")))?;
+            let status = resp.status();
+            // Each intermediate chunk returns 202 Accepted; the final returns
+            // 200/201. Anything else aborts the session by surfacing the error.
+            if !status.is_success() && status != reqwest::StatusCode::ACCEPTED {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+                return Err(classify_write_error(status, &body, key));
+            }
+            sent += chunk.len() as u64;
+            progress(sent);
+        }
+        Ok(())
+    }
 }
 
 /// `error.code` from a Microsoft Graph error body (e.g. `"quotaLimitReached"`,
@@ -124,31 +196,56 @@ fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> C
     CloudHomeError::Storage(format!("write {key} (HTTP {status}): {body}"))
 }
 
+/// Files at or below this size go up as a single PUT (the smallest payload that
+/// still warrants the round-trip of opening a resumable session). Larger files
+/// use an upload session so progress advances per chunk. Microsoft Graph caps a
+/// simple PUT at 250 MiB; this stays well under it.
+const ONEDRIVE_SIMPLE_PUT_MAX: usize = 4 * 1024 * 1024;
+
+/// Upload-session chunk size. Graph requires every chunk except the last to be
+/// a multiple of 320 KiB; 7.5 MiB (24 × 320 KiB) keeps the request count low on
+/// a large audio file while giving several progress ticks.
+const ONEDRIVE_CHUNK_SIZE: usize = 24 * 320 * 1024;
+
 #[async_trait]
 impl CloudHome for OneDriveCloudHome {
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        let url = format!("{}/content", self.item_path_url(key));
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let total = data.len() as u64;
 
-        let resp = self
-            .api_call(|token| {
-                self.client
-                    .put(&url)
-                    .bearer_auth(token)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(data.clone())
-            })
-            .await?;
+        // Small files: one PUT, no sub-file progress — report the whole size on
+        // success. Larger files go through a resumable session so progress
+        // advances per chunk.
+        if data.len() <= ONEDRIVE_SIMPLE_PUT_MAX {
+            let url = format!("{}/content", self.item_path_url(key));
+            let resp = self
+                .api_call(|token| {
+                    self.client
+                        .put(&url)
+                        .bearer_auth(token)
+                        .header("Content-Type", "application/octet-stream")
+                        .body(data.clone())
+                })
+                .await?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-            return Err(classify_write_error(status, &body, key));
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+                return Err(classify_write_error(status, &body, key));
+            }
+
+            progress(total);
+            return Ok(());
         }
 
-        Ok(())
+        self.write_resumable(key, data, progress).await
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

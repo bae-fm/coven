@@ -115,7 +115,9 @@ impl SyncStorage for EncryptedSyncStorage {
     ) -> Result<(), StorageError> {
         let key = format!("changes/{device_id}/{seq}.enc");
         let encrypted = self.enc().encrypt(&data);
-        self.home.write(&key, encrypted).await?;
+        self.home
+            .write(&key, encrypted, &crate::storage::cloud::no_progress())
+            .await?;
         Ok(())
     }
 
@@ -135,7 +137,9 @@ impl SyncStorage for EncryptedSyncStorage {
             .map_err(|e| StorageError::S3(format!("serialize head: {e}")))?;
         let encrypted = self.enc().encrypt(&json);
         let key = format!("heads/{device_id}.json.enc");
-        self.home.write(&key, encrypted).await?;
+        self.home
+            .write(&key, encrypted, &crate::storage::cloud::no_progress())
+            .await?;
         Ok(())
     }
 
@@ -152,7 +156,9 @@ impl SyncStorage for EncryptedSyncStorage {
             crate::blob::BlobScope::Derived(s) => self.enc().derive_scoped(&s),
         };
         let encrypted = enc.encrypt(&data);
-        self.home.write(&key, encrypted).await?;
+        self.home
+            .write(&key, encrypted, &crate::storage::cloud::no_progress())
+            .await?;
         Ok(())
     }
 
@@ -173,7 +179,13 @@ impl SyncStorage for EncryptedSyncStorage {
     }
 
     async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        self.home.write("snapshot.db.enc", data).await?;
+        self.home
+            .write(
+                "snapshot.db.enc",
+                data,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await?;
         Ok(())
     }
 
@@ -233,7 +245,11 @@ impl SyncStorage for EncryptedSyncStorage {
             .map_err(|e| StorageError::S3(format!("serialize min_schema_version: {e}")))?;
         let encrypted = self.enc().encrypt(&json);
         self.home
-            .write("min_schema_version.json.enc", encrypted)
+            .write(
+                "min_schema_version.json.enc",
+                encrypted,
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -246,7 +262,9 @@ impl SyncStorage for EncryptedSyncStorage {
     ) -> Result<(), StorageError> {
         let key = format!("membership/{author_pubkey}/{seq}.enc");
         let encrypted = self.enc().encrypt(&data);
-        self.home.write(&key, encrypted).await?;
+        self.home
+            .write(&key, encrypted, &crate::storage::cloud::no_progress())
+            .await?;
         Ok(())
     }
 
@@ -293,7 +311,9 @@ impl SyncStorage for EncryptedSyncStorage {
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
         let key = format!("keys/{user_pubkey}.enc");
         // Wrapped keys are already encrypted (sealed box), store as-is.
-        self.home.write(&key, data).await?;
+        self.home
+            .write(&key, data, &crate::storage::cloud::no_progress())
+            .await?;
         Ok(())
     }
 
@@ -311,7 +331,13 @@ impl SyncStorage for EncryptedSyncStorage {
 
     async fn put_snapshot_meta(&self, data: Vec<u8>) -> Result<(), StorageError> {
         let encrypted = self.enc().encrypt(&data);
-        self.home.write("snapshot_meta.json.enc", encrypted).await?;
+        self.home
+            .write(
+                "snapshot_meta.json.enc",
+                encrypted,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await?;
         Ok(())
     }
 

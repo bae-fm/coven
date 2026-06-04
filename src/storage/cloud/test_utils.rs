@@ -64,7 +64,25 @@ impl Default for InMemoryCloudHome {
 
 #[async_trait]
 impl CloudHome for InMemoryCloudHome {
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        // Chunk the report so tests exercise the same incremental-progress path
+        // the real backends drive, then store the whole buffer at once.
+        let total = data.len() as u64;
+        let mut sent = 0u64;
+        for chunk in data.chunks(super::PROGRESS_CHUNK_SIZE) {
+            sent += chunk.len() as u64;
+            progress(sent);
+        }
+        // An empty write reports nothing above; signal completion so a
+        // zero-byte blob still reaches 100%.
+        if total == 0 {
+            progress(0);
+        }
         self.writes.lock().unwrap().insert(key.to_string(), data);
         Ok(())
     }
@@ -123,29 +141,60 @@ impl CloudHome for InMemoryCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// A progress sink that does nothing — for tests that don't assert on
+    /// progress reporting.
+    fn no_progress() -> impl Fn(u64) + Send + Sync {
+        |_| {}
+    }
 
     #[tokio::test]
     async fn write_then_read_roundtrips() {
         let h = InMemoryCloudHome::new();
-        h.write("foo", b"hello".to_vec()).await.unwrap();
+        h.write("foo", b"hello".to_vec(), &no_progress())
+            .await
+            .unwrap();
         assert_eq!(h.read("foo").await.unwrap(), b"hello");
         assert!(h.exists("foo").await.unwrap());
         assert!(!h.exists("bar").await.unwrap());
     }
 
     #[tokio::test]
+    async fn write_reports_progress_in_chunks_reaching_the_total() {
+        let h = InMemoryCloudHome::new();
+        // Two-and-a-bit chunks so progress fires more than once and the final
+        // value equals the total.
+        let len = super::super::PROGRESS_CHUNK_SIZE * 2 + 7;
+        let last = Arc::new(AtomicU64::new(0));
+        let ticks = Arc::new(AtomicU64::new(0));
+        let last2 = last.clone();
+        let ticks2 = ticks.clone();
+        let sink = move |n: u64| {
+            last2.store(n, Ordering::Relaxed);
+            ticks2.fetch_add(1, Ordering::Relaxed);
+        };
+        h.write("big", vec![0u8; len], &sink).await.unwrap();
+        assert_eq!(last.load(Ordering::Relaxed), len as u64);
+        assert_eq!(ticks.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
     async fn read_range_returns_a_slice() {
         let h = InMemoryCloudHome::new();
-        h.write("k", b"0123456789".to_vec()).await.unwrap();
+        h.write("k", b"0123456789".to_vec(), &no_progress())
+            .await
+            .unwrap();
         assert_eq!(h.read_range("k", 2, 5).await.unwrap(), b"234");
     }
 
     #[tokio::test]
     async fn list_filters_by_prefix() {
         let h = InMemoryCloudHome::new();
-        h.write("a/x", vec![1]).await.unwrap();
-        h.write("a/y", vec![2]).await.unwrap();
-        h.write("b/x", vec![3]).await.unwrap();
+        h.write("a/x", vec![1], &no_progress()).await.unwrap();
+        h.write("a/y", vec![2], &no_progress()).await.unwrap();
+        h.write("b/x", vec![3], &no_progress()).await.unwrap();
         let mut got = h.list("a/").await.unwrap();
         got.sort();
         assert_eq!(got, vec!["a/x".to_string(), "a/y".to_string()]);
@@ -154,7 +203,7 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_and_records() {
         let h = InMemoryCloudHome::new();
-        h.write("k", vec![1]).await.unwrap();
+        h.write("k", vec![1], &no_progress()).await.unwrap();
         h.delete("k").await.unwrap();
         assert!(matches!(
             h.read("k").await,

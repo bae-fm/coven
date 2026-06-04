@@ -34,7 +34,9 @@ urlencoding = "2.1"
 keyring-core = "0.7"
 libsqlite3-sys = { version = "0.30.1", features = ["session", "bundled"] }
 sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
-reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+bytes = "1.11"
+futures-util = "0.3"
 aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
 aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rt-tokio", "sigv4a"] }
 aws-credential-types = "1.2"

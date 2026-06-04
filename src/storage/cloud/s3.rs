@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
+use tracing::warn;
 
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
@@ -70,7 +71,119 @@ impl S3CloudHome {
     fn full_key(&self, key: &str) -> String {
         apply_prefix(self.key_prefix.as_deref(), key)
     }
+
+    /// Upload `data` as a multipart upload, reporting cumulative bytes as each
+    /// part lands. `full` is the prefixed object key; `key` is the unprefixed
+    /// key used only for error messages. On any failure the in-progress upload
+    /// is aborted (best-effort) so the bucket isn't left holding orphaned parts
+    /// that accrue storage charges.
+    async fn write_multipart(
+        &self,
+        key: &str,
+        full: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let create = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(full)
+            .send()
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("multipart create {key}: {e}")))?;
+        let upload_id = create.upload_id().ok_or_else(|| {
+            CloudHomeError::Storage(format!("multipart create {key}: no upload id returned"))
+        })?;
+
+        match self
+            .upload_parts(key, full, upload_id, data, progress)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Best-effort cleanup; surface the original write failure, not
+                // any abort failure.
+                if let Err(abort_err) = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(full)
+                    .upload_id(upload_id)
+                    .send()
+                    .await
+                {
+                    warn!("Failed to abort multipart upload for {key}: {abort_err}");
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Upload every part for an in-progress multipart upload and complete it.
+    /// Split out from `write_multipart` so a failure anywhere here triggers the
+    /// caller's abort/cleanup.
+    async fn upload_parts(
+        &self,
+        key: &str,
+        full: &str,
+        upload_id: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let mut completed = Vec::new();
+        let mut sent: u64 = 0;
+        // Part numbers are 1-based.
+        for (i, chunk) in data.chunks(MULTIPART_PART_SIZE).enumerate() {
+            let part_number = (i + 1) as i32;
+            let part = self
+                .client
+                .upload_part()
+                .bucket(&self.bucket)
+                .key(full)
+                .upload_id(upload_id)
+                .part_number(part_number)
+                .body(chunk.to_vec().into())
+                .send()
+                .await
+                .map_err(|e| {
+                    CloudHomeError::Storage(format!("multipart part {part_number} {key}: {e}"))
+                })?;
+            completed.push(
+                aws_sdk_s3::types::CompletedPart::builder()
+                    .part_number(part_number)
+                    .set_e_tag(part.e_tag().map(str::to_string))
+                    .build(),
+            );
+            sent += chunk.len() as u64;
+            progress(sent);
+        }
+
+        let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+            .set_parts(Some(completed))
+            .build();
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(full)
+            .upload_id(upload_id)
+            .multipart_upload(completed_upload)
+            .send()
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("multipart complete {key}: {e}")))?;
+        Ok(())
+    }
 }
+
+/// Files at or below this size go up as a single PUT; larger files use a
+/// multipart upload so progress advances per part. The threshold equals the
+/// part size, so the smallest multipart upload is two parts.
+const MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
+
+/// Multipart part size. S3 requires every part except the last to be at least
+/// 5 MiB; 8 MiB keeps the part count (and request count) reasonable for large
+/// audio files while still giving several progress ticks.
+const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// Prepend an optional prefix to a key. Trailing slashes on the prefix are normalized.
 fn apply_prefix(prefix: Option<&str>, key: &str) -> String {
@@ -177,17 +290,30 @@ impl CloudHome for S3CloudHome {
         }
     }
 
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
-        self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&full)
-            .body(data.into())
-            .send()
-            .await
-            .map_err(|e| put_object_error(key, e))?;
-        Ok(())
+        // Small files: one PUT, no sub-file progress to report — signal the
+        // whole size once on success. Larger files go through multipart so the
+        // caller sees progress advance per part.
+        if data.len() <= MULTIPART_THRESHOLD {
+            let total = data.len() as u64;
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&full)
+                .body(data.into())
+                .send()
+                .await
+                .map_err(|e| put_object_error(key, e))?;
+            progress(total);
+            return Ok(());
+        }
+        self.write_multipart(key, &full, data, progress).await
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

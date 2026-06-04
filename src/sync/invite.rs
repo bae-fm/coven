@@ -234,7 +234,12 @@ mod tests {
 
     #[async_trait]
     impl CloudHome for MockCloudHome {
-        async fn write(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
+        async fn write(
+            &self,
+            _key: &str,
+            _data: Vec<u8>,
+            _progress: &crate::storage::cloud::UploadProgress<'_>,
+        ) -> Result<(), CloudHomeError> {
             Ok(())
         }
         async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {

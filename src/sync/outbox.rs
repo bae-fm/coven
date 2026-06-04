@@ -5,6 +5,9 @@
 //! outbox: uploads before push, deletes after pull.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::warn;
 
@@ -12,6 +15,71 @@ use crate::blob::BlobUploadObserver;
 use crate::db::SyncBookkeeping;
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::CloudHome;
+
+/// How often the upload pipeline forwards a mid-file byte count to the
+/// observer. coven's `write` reports per chunk (every few MiB), which on a fast
+/// link can be many times a second; coalescing to this interval keeps the host
+/// from rebuilding its outbox snapshot on every chunk while still moving the
+/// bar smoothly. Modeled on the torrent download session's fixed progress tick.
+const PROGRESS_TICK: Duration = Duration::from_millis(300);
+
+/// Run one blob upload while forwarding coalesced byte progress to the observer.
+///
+/// coven's `CloudHome::write` reports cumulative bytes through a synchronous
+/// `progress` closure as each chunk lands. That closure can't await, so it just
+/// stores the latest count in `sent`; a concurrent ticker reads `sent` every
+/// [`PROGRESS_TICK`] and makes the async `on_blob_upload_progress` call. The
+/// ticker stops as soon as `write` returns, then a final forward emits the
+/// terminal count so the bar reaches 100% even if the last chunk landed between
+/// ticks. With no observer the ticker is skipped entirely.
+async fn upload_with_progress(
+    cloud_home: &dyn CloudHome,
+    cloud_key: &str,
+    file_id: &str,
+    data: Vec<u8>,
+    observer: Option<&dyn BlobUploadObserver>,
+) -> Result<(), crate::storage::cloud::CloudHomeError> {
+    let total = data.len() as u64;
+    let sent = Arc::new(AtomicU64::new(0));
+    let progress = {
+        let sent = sent.clone();
+        move |n: u64| sent.store(n, Ordering::Relaxed)
+    };
+
+    let write = cloud_home.write(cloud_key, data, &progress);
+
+    let Some(obs) = observer else {
+        return write.await;
+    };
+
+    // Forward `sent` to the observer on a fixed tick until the write completes,
+    // skipping ticks where nothing advanced. Runs concurrently with the write
+    // on the same task; both borrow `obs` and `sent`.
+    tokio::pin!(write);
+    let mut ticker = tokio::time::interval(PROGRESS_TICK);
+    ticker.tick().await; // first tick fires immediately; consume it.
+    let mut last_forwarded = 0u64;
+    let result = loop {
+        tokio::select! {
+            r = &mut write => break r,
+            _ = ticker.tick() => {
+                let now = sent.load(Ordering::Relaxed);
+                if now != last_forwarded {
+                    last_forwarded = now;
+                    obs.on_blob_upload_progress(file_id, now, total).await;
+                }
+            }
+        }
+    };
+
+    // Terminal forward: on success the file is fully uploaded, so report the
+    // full size even if the last chunk landed between ticks. On failure leave
+    // the last observed count — the entry stays queued and will retry.
+    if result.is_ok() {
+        obs.on_blob_upload_progress(file_id, total, total).await;
+    }
+    result
+}
 
 /// Minimum delay before a failed upload entry is retried, keyed on its prior
 /// `attempt_count`. Exponential (`30s · 2^(n-1)`) capped at one hour: the base
@@ -125,7 +193,15 @@ pub async fn process_uploads(
             enc.encrypt(&data)
         };
 
-        match cloud_home.write(&entry.cloud_key, encrypted).await {
+        match upload_with_progress(
+            cloud_home,
+            &entry.cloud_key,
+            &entry.file_id,
+            encrypted,
+            observer,
+        )
+        .await
+        {
             Ok(()) => {
                 if let Err(e) = db.remove_cloud_outbox_entry(entry.id).await {
                     warn!("Failed to remove outbox entry {}: {e}", entry.id);

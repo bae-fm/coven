@@ -65,21 +65,63 @@ impl HttpCloudHome {
 
 #[async_trait]
 impl CloudHome for HttpCloudHome {
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
         let path = format!("/cloud/{key}");
         let url = format!("{}{}", self.base_url, path);
         let headers = self.sign_request("PUT", &path);
+        let total = data.len() as u64;
 
-        let resp = self
+        // Stream the body in chunks so progress advances as the bytes leave
+        // this device. The proxy PUT is a single request — there's no resumable
+        // protocol to the proxy — but a streaming body lets reqwest pull one
+        // chunk at a time. reqwest's `wrap_stream` requires a `'static` body, so
+        // the stream can't borrow `progress` directly: it reports each consumed
+        // chunk's cumulative count over a channel, and a concurrent loop here
+        // drains the channel and calls the borrowed `progress`. `Content-Length`
+        // is set explicitly so the proxy sees a sized request rather than
+        // chunked transfer-encoding.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let chunks = data
+            .chunks(super::PROGRESS_CHUNK_SIZE)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        let mut sent: u64 = 0;
+        let stream = futures_util::stream::iter(chunks.into_iter().map(move |chunk| {
+            sent += chunk.len() as u64;
+            // The receiver lives for the whole `send`; a closed channel only
+            // means the send already failed, so ignore the result.
+            let _ = tx.send(sent);
+            Ok::<_, std::io::Error>(bytes::Bytes::from(chunk))
+        }));
+
+        let send = self
             .client
             .put(&url)
             .header(headers[0].0, &headers[0].1)
             .header(headers[1].0, &headers[1].1)
             .header(headers[2].0, &headers[2].1)
-            .body(data)
-            .send()
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("write {key}: {e}")))?;
+            .header(reqwest::header::CONTENT_LENGTH, total)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send();
+        tokio::pin!(send);
+
+        // Forward consumed-byte counts to the observer until the request
+        // resolves, then drain any counts that arrived just before it did.
+        let resp = loop {
+            tokio::select! {
+                r = &mut send => break r,
+                Some(n) = rx.recv() => progress(n),
+            }
+        }
+        .map_err(|e| CloudHomeError::Storage(format!("write {key}: {e}")))?;
+        while let Ok(n) = rx.try_recv() {
+            progress(n);
+        }
 
         if resp.status().is_success() {
             Ok(())

@@ -155,6 +155,114 @@ impl DropboxCloudHome {
             "share folder timed out after 30 seconds".to_string(),
         ))
     }
+
+    /// Upload via a Dropbox upload session, reporting cumulative bytes as each
+    /// chunk lands. `upload_session/start` opens the session; `append_v2` adds
+    /// each middle chunk at its byte offset; `finish` commits the last chunk to
+    /// the destination path with overwrite mode. A single-chunk payload (one
+    /// that just crossed the simple-upload threshold) goes straight to `finish`
+    /// with `start`'s empty session.
+    async fn write_session(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let total = data.len() as u64;
+        // Open an empty session: the first chunk is sent via append/finish.
+        let start = self
+            .api_call(|token| {
+                self.client
+                    .post(format!("{}/files/upload_session/start", CONTENT_BASE))
+                    .bearer_auth(token)
+                    .header("Dropbox-API-Arg", r#"{"close":false}"#)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(Vec::new())
+            })
+            .await?;
+        let status = start.status();
+        let start_body = start
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+        if !status.is_success() {
+            return Err(classify_write_error(status, &start_body, key));
+        }
+        let start_json: serde_json::Value = serde_json::from_str(&start_body)
+            .map_err(|e| CloudHomeError::Storage(format!("parse upload session {key}: {e}")))?;
+        let session_id = start_json["session_id"]
+            .as_str()
+            .ok_or_else(|| {
+                CloudHomeError::Storage(format!("upload session {key}: no session_id returned"))
+            })?
+            .to_string();
+
+        let chunks: Vec<&[u8]> = data.chunks(DROPBOX_CHUNK_SIZE).collect();
+        let last_index = chunks.len() - 1;
+        let mut offset: u64 = 0;
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i == last_index {
+                // Final chunk: finish commits the file at the destination path.
+                let path = self.full_path(key);
+                let arg = serde_json::json!({
+                    "cursor": { "session_id": session_id, "offset": offset },
+                    "commit": {
+                        "path": path,
+                        "mode": { ".tag": "overwrite" },
+                        "autorename": false,
+                        "mute": true,
+                    },
+                })
+                .to_string();
+                let resp = self
+                    .api_call(|token| {
+                        self.client
+                            .post(format!("{}/files/upload_session/finish", CONTENT_BASE))
+                            .bearer_auth(token)
+                            .header("Dropbox-API-Arg", &arg)
+                            .header("Content-Type", "application/octet-stream")
+                            .body(chunk.to_vec())
+                    })
+                    .await?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+                    return Err(classify_write_error(status, &body, key));
+                }
+            } else {
+                let arg = serde_json::json!({
+                    "cursor": { "session_id": session_id, "offset": offset },
+                    "close": false,
+                })
+                .to_string();
+                let resp = self
+                    .api_call(|token| {
+                        self.client
+                            .post(format!("{}/files/upload_session/append_v2", CONTENT_BASE))
+                            .bearer_auth(token)
+                            .header("Dropbox-API-Arg", &arg)
+                            .header("Content-Type", "application/octet-stream")
+                            .body(chunk.to_vec())
+                    })
+                    .await?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+                    return Err(classify_write_error(status, &body, key));
+                }
+            }
+            offset += chunk.len() as u64;
+            progress(offset);
+        }
+        debug_assert_eq!(offset, total);
+        Ok(())
+    }
 }
 
 /// `error_summary` field from a Dropbox API error body (the chained tag string,
@@ -187,9 +295,34 @@ fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> C
     CloudHomeError::Storage(format!("write {key} (HTTP {status}): {body}"))
 }
 
+/// Files at or below this size go up in one `files/upload` call; larger files
+/// use an upload session so progress advances per chunk. Dropbox requires the
+/// single-shot `files/upload` endpoint for payloads up to 150 MB; this stays
+/// well under it.
+const DROPBOX_SIMPLE_UPLOAD_MAX: usize = 4 * 1024 * 1024;
+
+/// Upload-session chunk size. Dropbox imposes no alignment requirement on
+/// session chunks (only a 150 MB per-call ceiling); 8 MiB keeps the request
+/// count low while giving several progress ticks.
+const DROPBOX_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+
 #[async_trait]
 impl CloudHome for DropboxCloudHome {
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let total = data.len() as u64;
+
+        // Large files: an upload session reports progress per chunk.
+        if data.len() > DROPBOX_SIMPLE_UPLOAD_MAX {
+            return self.write_session(key, data, progress).await;
+        }
+
+        // Small files: one call, no sub-file progress — report the whole size
+        // on success.
         let path = self.full_path(key);
         let api_arg = serde_json::json!({
             "path": path,
@@ -219,6 +352,7 @@ impl CloudHome for DropboxCloudHome {
             return Err(classify_write_error(status, &body, key));
         }
 
+        progress(total);
         Ok(())
     }
 

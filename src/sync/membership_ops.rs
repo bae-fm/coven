@@ -287,6 +287,7 @@ pub async fn sync_authorized_keys(
             .write(
                 &format!("auth/keys/{pk}"),
                 role.as_str().as_bytes().to_vec(),
+                &crate::storage::cloud::no_progress(),
             )
             .await
             .map_err(|e| MembershipOpsError(format!("write auth key: {e}")))?;

@@ -584,7 +584,11 @@ pub async fn init_sync(
             let user_pk = hex::encode(user_keypair.public_key);
 
             if let Err(e) = cloud_home
-                .write(&format!("auth/keys/{user_pk}"), vec![])
+                .write(
+                    &format!("auth/keys/{user_pk}"),
+                    vec![],
+                    &crate::storage::cloud::no_progress(),
+                )
                 .await
             {
                 warn!("Failed to write auth key: {e}");

@@ -125,6 +125,110 @@ impl GoogleDriveCloudHome {
 
         Ok(None)
     }
+
+    /// Open a resumable upload session and return its session URL (the
+    /// `Location` header Google returns). `existing` selects update (PATCH an
+    /// existing file id) vs create (POST with metadata).
+    async fn open_resumable_session(
+        &self,
+        key: &str,
+        encoded: &str,
+        existing: Option<&str>,
+    ) -> Result<String, CloudHomeError> {
+        let resp = match existing {
+            Some(file_id) => {
+                let url = format!("{}/files/{}?uploadType=resumable", UPLOAD_API, file_id);
+                self.api_call(|token| {
+                    self.client
+                        .patch(&url)
+                        .bearer_auth(token)
+                        .header("Content-Type", "application/json; charset=UTF-8")
+                        .body("{}")
+                })
+                .await?
+            }
+            None => {
+                let metadata = serde_json::json!({
+                    "name": encoded,
+                    "parents": [self.folder_id],
+                })
+                .to_string();
+                self.api_call(|token| {
+                    self.client
+                        .post(format!("{}/files?uploadType=resumable", UPLOAD_API))
+                        .bearer_auth(token)
+                        .header("Content-Type", "application/json; charset=UTF-8")
+                        .body(metadata.clone())
+                })
+                .await?
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let op = if existing.is_some() {
+                "update"
+            } else {
+                "create"
+            };
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            return Err(classify_write_error(status, &body, key, op));
+        }
+        resp.headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .ok_or_else(|| {
+                CloudHomeError::Storage(format!(
+                    "resumable session {key}: no Location header returned"
+                ))
+            })
+    }
+
+    /// PUT the data to an open resumable session URL in chunks, reporting
+    /// cumulative bytes as each chunk's PUT returns. The session URL carries its
+    /// own auth, so the chunk PUTs need no bearer token.
+    async fn upload_resumable_chunks(
+        &self,
+        key: &str,
+        session_url: &str,
+        data: Vec<u8>,
+        op: &str,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let total = data.len() as u64;
+        let mut sent: u64 = 0;
+        for chunk in data.chunks(GDRIVE_CHUNK_SIZE) {
+            let start = sent;
+            let end = sent + chunk.len() as u64 - 1;
+            let content_range = format!("bytes {start}-{end}/{total}");
+            let resp = self
+                .client
+                .put(session_url)
+                .header("Content-Length", chunk.len())
+                .header("Content-Range", &content_range)
+                .body(chunk.to_vec())
+                .send()
+                .await
+                .map_err(|e| CloudHomeError::Storage(format!("upload chunk {key}: {e}")))?;
+            let status = resp.status();
+            // Intermediate chunks return 308 Resume Incomplete; the final chunk
+            // returns 200/201. Anything else is a failure.
+            if !status.is_success() && status.as_u16() != 308 {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+                return Err(classify_write_error(status, &body, key, op));
+            }
+            sent += chunk.len() as u64;
+            progress(sent);
+        }
+        Ok(())
+    }
 }
 
 /// First `error.errors[].reason` in a Google API error body (the shape Drive,
@@ -169,13 +273,46 @@ fn classify_write_error(
     CloudHomeError::Storage(format!("{op} {key} (HTTP {status}): {body}"))
 }
 
+/// Files at or below this size go up as a single media/multipart PUT; larger
+/// files use a resumable session so progress advances per chunk. Drive accepts
+/// a simple upload up to 5 MB.
+const GDRIVE_SIMPLE_UPLOAD_MAX: usize = 4 * 1024 * 1024;
+
+/// Resumable-session chunk size. Drive requires every chunk except the last to
+/// be a multiple of 256 KiB; 8 MiB (32 × 256 KiB) keeps the request count low
+/// while giving several progress ticks.
+const GDRIVE_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+
 #[async_trait]
 impl CloudHome for GoogleDriveCloudHome {
-    async fn write(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        progress: &super::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
         let encoded = Self::encode_key(key);
+        let total = data.len() as u64;
+        let existing = self.find_file_id(&encoded).await?;
 
-        // Check if file already exists (update vs create)
-        if let Some(file_id) = self.find_file_id(&encoded).await? {
+        // Large files: resumable session so progress advances per chunk.
+        if data.len() > GDRIVE_SIMPLE_UPLOAD_MAX {
+            let op = if existing.is_some() {
+                "update"
+            } else {
+                "create"
+            };
+            let session_url = self
+                .open_resumable_session(key, &encoded, existing.as_deref())
+                .await?;
+            return self
+                .upload_resumable_chunks(key, &session_url, data, op, progress)
+                .await;
+        }
+
+        // Small files: a single request, no sub-file progress to report —
+        // signal the whole size once on success.
+        if let Some(file_id) = existing {
             // Update existing file
             let resp = self
                 .api_call(|token| {
@@ -243,6 +380,7 @@ impl CloudHome for GoogleDriveCloudHome {
             }
         }
 
+        progress(total);
         Ok(())
     }
 

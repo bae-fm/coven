@@ -115,6 +115,7 @@ impl SyncBookkeeping for MockBookkeeping {
 #[derive(Debug, Clone, PartialEq)]
 enum ObsEvent {
     Started(String),
+    Progress(String, u64, u64),
     Uploaded(String),
     Failed(String, String),
 }
@@ -142,6 +143,13 @@ impl BlobUploadObserver for RecordingObserver {
             .lock()
             .unwrap()
             .push(ObsEvent::Started(file_id.to_string()));
+    }
+    async fn on_blob_upload_progress(&self, file_id: &str, bytes_done: u64, bytes_total: u64) {
+        self.events.lock().unwrap().push(ObsEvent::Progress(
+            file_id.to_string(),
+            bytes_done,
+            bytes_total,
+        ));
     }
     async fn on_blob_uploaded(&self, file_id: &str) {
         self.events
@@ -177,9 +185,67 @@ impl FailingCloudHome {
 
 #[async_trait::async_trait]
 impl CloudHome for FailingCloudHome {
-    async fn write(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn write(
+        &self,
+        _key: &str,
+        _data: Vec<u8>,
+        _progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
         self.write_calls.fetch_add(1, Ordering::SeqCst);
         Err(CloudHomeError::Storage("induced write failure".into()))
+    }
+    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        unimplemented!("not exercised by process_uploads")
+    }
+    async fn read_range(
+        &self,
+        _key: &str,
+        _start: u64,
+        _end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError> {
+        unimplemented!("not exercised by process_uploads")
+    }
+    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        unimplemented!("not exercised by process_uploads")
+    }
+    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
+        unimplemented!("not exercised by process_uploads")
+    }
+    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
+        unimplemented!("not exercised by process_uploads")
+    }
+    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        unimplemented!("not exercised by process_uploads")
+    }
+    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+        unimplemented!("not exercised by process_uploads")
+    }
+}
+
+/// A cloud backend whose `write` reports progress one chunk at a time with a
+/// delay between chunks, so the upload spans several of `process_uploads`'
+/// coalescing ticks. Lets a test assert that mid-upload progress reaches the
+/// observer (not just the terminal forward).
+struct SlowChunkedCloudHome {
+    chunk: usize,
+    per_chunk_delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl CloudHome for SlowChunkedCloudHome {
+    async fn write(
+        &self,
+        _key: &str,
+        data: Vec<u8>,
+        progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        let mut sent = 0u64;
+        for chunk in data.chunks(self.chunk) {
+            tokio::time::sleep(self.per_chunk_delay).await;
+            sent += chunk.len() as u64;
+            progress(sent);
+        }
+        Ok(())
     }
     async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
         unimplemented!("not exercised by process_uploads")
@@ -401,13 +467,23 @@ async fn observer_fires_started_then_uploaded_on_success() {
     .await
     .unwrap();
 
-    assert_eq!(
-        observer.events(),
-        vec![
-            ObsEvent::Started("fid".into()),
-            ObsEvent::Uploaded("fid".into())
-        ]
-    );
+    // A small file uploads instantly, so the coalescing ticker never fires;
+    // the terminal progress forward on success still emits one full-size
+    // Progress between Started and Uploaded. The byte count is of the encrypted
+    // payload (5 plaintext bytes + the encryption overhead), which is what the
+    // backend actually transfers.
+    let events = observer.events();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0], ObsEvent::Started("fid".into()));
+    assert_eq!(events[2], ObsEvent::Uploaded("fid".into()));
+    match events[1] {
+        ObsEvent::Progress(ref fid, done, total) => {
+            assert_eq!(fid, "fid");
+            assert_eq!(done, total, "terminal forward reports done == total");
+            assert!(total > 5, "encrypted size exceeds the 5 plaintext bytes");
+        }
+        ref other => panic!("expected Progress, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -439,6 +515,65 @@ async fn observer_fires_started_then_failed_on_failure() {
         }
         other => panic!("expected Failed, got {other:?}"),
     }
+}
+
+/// A slow, chunked upload reports mid-file progress: the coalescing ticker
+/// forwards an advancing byte count to the observer between Started and
+/// Uploaded, and the final forwarded value equals the total. Uses tokio's
+/// paused clock so the per-chunk sleeps and the 300ms tick are deterministic.
+#[tokio::test(start_paused = true)]
+async fn observer_receives_advancing_midfile_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 10 chunks of 1000 bytes; one chunk per 500ms, so the upload spans many
+    // 300ms coalescing ticks.
+    let total = 10_000usize;
+    let path = write_temp_file(tmp.path(), "big.bin", &vec![7u8; total]);
+    let db = MockBookkeeping::with_uploads(vec![upload_entry(1, "fid", "k1", Some(path))]);
+    let cloud = SlowChunkedCloudHome {
+        chunk: 1000,
+        per_chunk_delay: std::time::Duration::from_millis(500),
+    };
+    let observer = RecordingObserver::new();
+
+    process_uploads(
+        &db,
+        &cloud,
+        &enc(),
+        tmp.path(),
+        &fixed_clock(T0),
+        Some(&observer),
+    )
+    .await
+    .unwrap();
+
+    let events = observer.events();
+    assert_eq!(events.first(), Some(&ObsEvent::Started("fid".into())));
+    assert_eq!(events.last(), Some(&ObsEvent::Uploaded("fid".into())));
+
+    // The encrypted payload is a few bytes larger than the plaintext, so assert
+    // on the shape rather than exact byte counts: progress values strictly
+    // advance, more than one mid-file tick lands, and the final value (the
+    // terminal forward) reports done == total.
+    let progress: Vec<(u64, u64)> = events
+        .iter()
+        .filter_map(|e| match e {
+            ObsEvent::Progress(fid, done, total) if fid == "fid" => Some((*done, *total)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        progress.len() >= 2,
+        "expected several mid-file progress ticks, got {progress:?}"
+    );
+    for w in progress.windows(2) {
+        assert!(w[1].0 >= w[0].0, "progress went backwards: {progress:?}");
+    }
+    let (last_done, last_total) = *progress.last().unwrap();
+    assert_eq!(
+        last_done, last_total,
+        "final progress reports done == total"
+    );
+    assert!(last_total >= total as u64, "total covers the whole payload");
 }
 
 #[test]
