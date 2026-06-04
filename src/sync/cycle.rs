@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::changeset::RowChange;
@@ -518,6 +518,21 @@ pub async fn init_sync(
     clock: ClockRef,
     encryption: &EncryptionService,
 ) -> Option<SyncComponents> {
+    // Integration guard. The host must register its synced tables (via
+    // `session::set_synced_tables`) at startup. With an empty set, `SyncSession`
+    // attaches nothing, every changeset comes out empty, and sync silently
+    // becomes snapshot-only — exactly the failure that went unnoticed when the
+    // engine was extracted from the host and the registration call was dropped.
+    // A synced library reaching here with no tables is an integration bug, so
+    // refuse loudly instead of pretending to sync.
+    if crate::sync::session::synced_tables().is_empty() {
+        error!(
+            "sync init aborted: no synced tables registered — the host must call \
+             coven::sync::session::set_synced_tables(..) at startup before sync starts"
+        );
+        return None;
+    }
+
     let storage = match crate::storage::cloud::setup::create_sync_storage(
         config,
         key_service,

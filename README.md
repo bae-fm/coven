@@ -16,9 +16,14 @@ The host owns its schema and domain; coven owns the sync layer.
 
 ## Integration
 
-- Declare your synced tables with `sync::session::set_synced_tables`. Each must
-  have an `id` text primary key at column 0 and an `_updated_at TEXT NOT NULL`
-  column (the HLC/LWW timestamp).
+- Declare your synced tables with `sync::session::set_synced_tables`, **once at
+  startup, before sync starts** (and before any restore/join, which applies
+  changesets too). Each must have an `id` text primary key at column 0 and an
+  `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). This is required,
+  not optional: with no tables registered, `sync::cycle::init_sync` aborts and
+  logs an error rather than silently running a no-op (snapshot-only) sync. A
+  table you *don't* list stays local-only — that's how you keep device-local
+  state (per-device pin/cache columns, local paths) out of sync.
 - Apply `db::MIGRATION_SQL` (creates `sync_cursors`, `sync_state`,
   `cloud_outbox`) and implement `db::SyncBookkeeping` + `db::RawDbHandle` on your
   database — coven imposes no SQLite driver.

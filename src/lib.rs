@@ -13,8 +13,10 @@
 //!   `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp).
 //! - The host applies [`db::MIGRATION_SQL`] to create coven's bookkeeping tables
 //!   and implements [`db::SyncBookkeeping`] + [`db::RawDbHandle`].
-//! - The host supplies the synced-table list, a [`blob::BlobPlan`], and an
-//!   optional [`blob::BlobUploadObserver`].
+//! - The host registers the synced-table list at startup via
+//!   [`sync::session::set_synced_tables`] (required — [`sync::cycle::init_sync`]
+//!   aborts if it's empty), and supplies a [`blob::BlobPlan`] and an optional
+//!   [`blob::BlobUploadObserver`].
 
 pub mod blob;
 pub mod changeset;

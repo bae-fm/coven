@@ -10,17 +10,25 @@ use super::session_ext::{Changeset, Session};
 /// the host via [`set_synced_tables`].
 static SYNCED_TABLES: OnceLock<Vec<String>> = OnceLock::new();
 
-/// Declare the tables that participate in changeset sync. Call once at startup,
-/// before any sync session is created.
+/// Declare the tables that participate in changeset sync. The host MUST call
+/// this once at startup, before any sync session is created or `init_sync`
+/// runs — it is a required integration step, not an optional tuning knob.
 ///
 /// Each table must have an `id` text primary key at column 0 and an
 /// `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). Tables not listed
-/// here are local-only and never synced.
+/// here are local-only and never synced — that is also the mechanism for keeping
+/// device-local state (per-device pin/cache columns, local paths) out of sync:
+/// put it in a table you don't list here.
+///
+/// Forgetting this is silent at the session layer (a session with no attached
+/// tables just yields empty changesets), so [`super::cycle::init_sync`] treats an
+/// empty set as a hard error and refuses to start sync.
 pub fn set_synced_tables(tables: &[&str]) {
     let _ = SYNCED_TABLES.set(tables.iter().map(|t| t.to_string()).collect());
 }
 
-/// The configured synced tables, or empty if [`set_synced_tables`] was never called.
+/// The configured synced tables. Empty only when [`set_synced_tables`] was never
+/// called — an integration bug that [`super::cycle::init_sync`] rejects.
 pub fn synced_tables() -> &'static [String] {
     SYNCED_TABLES.get().map(Vec::as_slice).unwrap_or(&[])
 }
