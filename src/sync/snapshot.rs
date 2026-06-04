@@ -35,6 +35,14 @@ pub enum SnapshotError {
     Bucket(#[from] StorageError),
     #[error("decryption failed: {0}")]
     Decryption(String),
+    /// No synced tables were registered, so we cannot determine which tables
+    /// are safe to share. Emitting a snapshot here would either leak every
+    /// local-only table or clear the whole DB — both wrong, so we refuse.
+    #[error("no synced tables registered; refusing to emit an all-cleared snapshot")]
+    NoSyncedTables,
+    /// Clearing local-only tables out of the snapshot copy failed (sqlite FFI).
+    #[error("failed to clear local-only tables from snapshot: {0}")]
+    ClearFailed(String),
 }
 
 /// Metadata stored alongside a snapshot in `snapshot_meta.json.enc`.
@@ -58,7 +66,14 @@ pub struct BootstrapResult {
 /// Create a snapshot of the database as encrypted bytes.
 ///
 /// Uses `VACUUM INTO` to create a clean copy of the database at a temp path,
-/// reads the bytes, encrypts, and returns the encrypted blob.
+/// then clears every non-synced table's data from that copy, reads the bytes,
+/// encrypts, and returns the encrypted blob.
+///
+/// A snapshot is restored byte-for-byte as the joining device's `library.db`
+/// (no migration rebuild), so it must carry only data that is eligible to
+/// cross devices — the host's registered synced tables. Local-only tables
+/// (per-device paths, caches) and per-device sync bookkeeping must not ride
+/// along; their schemas are kept, but their rows are deleted from the copy.
 ///
 /// # Safety
 /// `db` must be a valid, open sqlite3 connection pointer.
@@ -96,7 +111,15 @@ pub unsafe fn create_snapshot(
         return Err(SnapshotError::VacuumFailed(msg));
     }
 
-    // Read the snapshot file and encrypt.
+    // The copy is a whole-DB byte image, so it still holds every local-only
+    // table's data. Strip those before reading: open the copy as its own
+    // connection and DELETE from every table outside the synced set.
+    if let Err(e) = clear_local_only_tables(&snapshot_path) {
+        let _ = std::fs::remove_file(&snapshot_path);
+        return Err(e);
+    }
+
+    // Read the cleared snapshot file and encrypt.
     let plaintext = std::fs::read(&snapshot_path)?;
     let _ = std::fs::remove_file(&snapshot_path);
 
@@ -109,6 +132,137 @@ pub unsafe fn create_snapshot(
     );
 
     Ok(encrypted)
+}
+
+/// Tables whose data is preserved in a snapshot regardless of the synced set:
+/// the migration ledger must survive so the restored DB opens without
+/// re-migrating.
+const SNAPSHOT_PRESERVED_TABLE: &str = "_sqlx_migrations";
+
+/// Delete every non-synced table's rows from the snapshot copy at `path`,
+/// keeping all table schemas intact. The migration ledger
+/// (`_sqlx_migrations`) is also preserved so the restored DB opens directly.
+///
+/// Opens `path` as its own sqlite3 connection (the copy must be edited in
+/// isolation from the live DB). Errors if no synced set is registered, or if
+/// any FFI step fails — a snapshot that silently dropped synced data, or
+/// silently kept local-only data, is worse than no snapshot.
+unsafe fn clear_local_only_tables(path: &Path) -> Result<(), SnapshotError> {
+    let synced = crate::sync::session::synced_tables();
+    if synced.is_empty() {
+        return Err(SnapshotError::NoSyncedTables);
+    }
+
+    let db = open_snapshot_db(path)?;
+    let result = clear_non_synced(db, synced);
+    let close_rc = ffi::sqlite3_close(db);
+    result?;
+    if close_rc != ffi::SQLITE_OK {
+        return Err(SnapshotError::ClearFailed(format!(
+            "sqlite3_close failed (rc={close_rc})"
+        )));
+    }
+    Ok(())
+}
+
+/// Open the snapshot copy as a standalone read-write connection.
+unsafe fn open_snapshot_db(path: &Path) -> Result<*mut ffi::sqlite3, SnapshotError> {
+    let c_path = CString::new(path.to_str().expect("temp path should be valid UTF-8"))
+        .expect("path should not contain null bytes");
+    let mut db: *mut ffi::sqlite3 = std::ptr::null_mut();
+    let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut db);
+    if rc != ffi::SQLITE_OK {
+        // sqlite3_open may allocate a handle even on failure; free it.
+        ffi::sqlite3_close(db);
+        return Err(SnapshotError::ClearFailed(format!(
+            "failed to open snapshot copy (rc={rc})"
+        )));
+    }
+    Ok(db)
+}
+
+/// On the already-open snapshot connection `db`, DELETE every user table that
+/// is neither in `synced` nor the preserved migration ledger, then VACUUM to
+/// reclaim the freed pages.
+unsafe fn clear_non_synced(db: *mut ffi::sqlite3, synced: &[String]) -> Result<(), SnapshotError> {
+    for table in list_user_tables(db)? {
+        if synced.iter().any(|t| t == &table) || table == SNAPSHOT_PRESERVED_TABLE {
+            continue;
+        }
+        // Quote the identifier, doubling any embedded quotes.
+        let stmt = format!("DELETE FROM \"{}\"", table.replace('"', "\"\""));
+        exec_or_err(db, &stmt)?;
+    }
+    // Reclaim the pages freed by the DELETEs so the blob shrinks.
+    exec_or_err(db, "VACUUM")?;
+    Ok(())
+}
+
+/// List user table names (excluding sqlite internal `sqlite_%` tables) on `db`.
+unsafe fn list_user_tables(db: *mut ffi::sqlite3) -> Result<Vec<String>, SnapshotError> {
+    let sql = c"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
+    let mut stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
+    let rc = ffi::sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, std::ptr::null_mut());
+    if rc != ffi::SQLITE_OK {
+        return Err(SnapshotError::ClearFailed(errmsg(
+            db,
+            "prepare table list",
+            rc,
+        )));
+    }
+
+    let mut tables = Vec::new();
+    loop {
+        let step = ffi::sqlite3_step(stmt);
+        if step == ffi::SQLITE_ROW {
+            let text = ffi::sqlite3_column_text(stmt, 0);
+            if text.is_null() {
+                continue;
+            }
+            let name = std::ffi::CStr::from_ptr(text as *const std::ffi::c_char)
+                .to_string_lossy()
+                .into_owned();
+            tables.push(name);
+        } else if step == ffi::SQLITE_DONE {
+            break;
+        } else {
+            ffi::sqlite3_finalize(stmt);
+            return Err(SnapshotError::ClearFailed(errmsg(
+                db,
+                "step table list",
+                step,
+            )));
+        }
+    }
+    ffi::sqlite3_finalize(stmt);
+    Ok(tables)
+}
+
+/// Run a statement on `db`, surfacing any error.
+unsafe fn exec_or_err(db: *mut ffi::sqlite3, sql: &str) -> Result<(), SnapshotError> {
+    let c_sql = CString::new(sql).expect("SQL should not contain null bytes");
+    let rc = ffi::sqlite3_exec(
+        db,
+        c_sql.as_ptr(),
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    if rc != ffi::SQLITE_OK {
+        return Err(SnapshotError::ClearFailed(errmsg(db, sql, rc)));
+    }
+    Ok(())
+}
+
+/// Render the connection's last error message, falling back to the rc.
+unsafe fn errmsg(db: *mut ffi::sqlite3, context: &str, rc: i32) -> String {
+    let err = ffi::sqlite3_errmsg(db);
+    if err.is_null() {
+        format!("{context}: sqlite3 error code {rc}")
+    } else {
+        let msg = std::ffi::CStr::from_ptr(err).to_string_lossy();
+        format!("{context}: {msg}")
+    }
 }
 
 /// Upload a snapshot to the sync storage and update the device head.
@@ -667,6 +821,103 @@ mod tests {
 
             ffi::sqlite3_close(db2);
             ffi::sqlite3_close(db);
+        }
+    }
+
+    /// Reproduces the field failure: a device-local path crossed to another
+    /// device and crashed it. A table that is NOT in the synced set — here
+    /// `device_local`, the analogue of bae's `release_local_copy`, holding a
+    /// filesystem path that exists only on the device that wrote it — must
+    /// never reach a peer. The snapshot is a propagation channel, so it must
+    /// carry only synced-table data.
+    ///
+    /// `create_snapshot` VACUUMs the whole DB, so the local-only row crosses.
+    /// This is exactly how `/Users/dima/Torrents/.../Gish (1991)` ended up in
+    /// an Android device's DB and crashed playback on a path that doesn't exist
+    /// there. This test FAILS until the snapshot excludes non-synced tables.
+    #[tokio::test]
+    async fn snapshot_does_not_carry_local_only_tables_to_a_restoring_device() {
+        unsafe {
+            // --- Device A: a synced table + a device-local table ---
+            let db_a = open_memory_db();
+            create_synced_schema(db_a); // `notes` is synced (has `_updated_at`)
+            exec(
+                db_a,
+                "CREATE TABLE device_local (note_id TEXT PRIMARY KEY, local_path TEXT NOT NULL)",
+            );
+            exec(
+                db_a,
+                "INSERT INTO notes (id, title, _updated_at, created_at) \
+                 VALUES ('n1', 'Gish', '0000000001000-0000-devA', '2026-01-01')",
+            );
+            exec(
+                db_a,
+                "INSERT INTO device_local (note_id, local_path) \
+                 VALUES ('n1', '/Users/dima/Torrents/Gish (1991)')",
+            );
+
+            let temp = tempfile::tempdir().unwrap();
+            let enc = test_encryption();
+            let encrypted = create_snapshot(db_a, temp.path(), &enc).expect("snapshot");
+
+            // --- Upload (this device -> cloud) ---
+            let storage = MockSyncStorage::new();
+            push_snapshot(
+                &storage,
+                encrypted,
+                "devA",
+                HashMap::new(),
+                1,
+                &crate::clock::SystemClock,
+            )
+            .await
+            .expect("push_snapshot");
+
+            // --- Restore on a fresh device (a peer adds the cloud home) ---
+            let target = temp.path().join("device_b.db");
+            bootstrap_from_snapshot(&storage, &enc, &target)
+                .await
+                .expect("bootstrap_from_snapshot");
+
+            let db_b = {
+                let c_path = CString::new(target.to_str().unwrap()).unwrap();
+                let mut ptr: *mut ffi::sqlite3 = std::ptr::null_mut();
+                let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut ptr);
+                assert_eq!(rc, ffi::SQLITE_OK);
+                ptr
+            };
+
+            // Synced data SHOULD cross.
+            assert_eq!(
+                query_text(db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+                "Gish",
+                "synced-table data must survive a snapshot restore",
+            );
+
+            // Device-local data must NOT cross.
+            assert!(
+                !row_exists(db_b, "SELECT 1 FROM device_local WHERE note_id = 'n1'"),
+                "device-local row leaked to a peer via the snapshot: a non-synced \
+                 table's data must never cross devices",
+            );
+
+            // The table SCHEMA is preserved (only its rows are cleared), so the
+            // restored DB can still open it — it simply has no rows.
+            assert!(
+                row_exists(
+                    db_b,
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_local'",
+                ),
+                "non-synced table schema must survive: snapshot DELETEs rows, never DROPs tables",
+            );
+            assert_eq!(
+                query_int(db_b, "SELECT COUNT(*) FROM device_local"),
+                0,
+                "non-synced table must be empty in the restored DB",
+            );
+
+            ffi::sqlite3_close(db_b);
+            ffi::sqlite3_close(db_a);
         }
     }
 
