@@ -43,6 +43,10 @@ pub enum SnapshotError {
     /// Clearing local-only tables out of the snapshot copy failed (sqlite FFI).
     #[error("failed to clear local-only tables from snapshot: {0}")]
     ClearFailed(String),
+    /// Applying the row-level gate to the snapshot copy failed (the changeset
+    /// gate excludes gated-false subtrees; the snapshot must too).
+    #[error("failed to scope gated-false rows out of snapshot: {0}")]
+    GateScope(String),
 }
 
 /// Metadata stored alongside a snapshot in `snapshot_meta.json.enc`.
@@ -192,9 +196,16 @@ unsafe fn open_snapshot_db(path: &Path) -> Result<*mut ffi::sqlite3, SnapshotErr
     Ok(db)
 }
 
-/// On the already-open snapshot connection `db`, DELETE every user table that
-/// is neither in `synced` nor the preserved migration ledger, then VACUUM to
-/// reclaim the freed pages.
+/// On the already-open snapshot connection `db`, scope the copy down to exactly
+/// what is eligible to cross devices, then VACUUM to reclaim the freed pages:
+///
+/// 1. Table-level: DELETE every user table that is neither in `synced` nor the
+///    preserved migration ledger — local-only tables keep their schema, lose
+///    their rows.
+/// 2. Row-level: within the synced tables, DELETE the rows the gate excludes
+///    (gated-false roots and their FK-descendants), so a private subtree does
+///    not ride the snapshot to a restoring peer. This is the same exclusion the
+///    outbound changeset gate applies; both reuse [`crate::sync::gate::Gates`].
 unsafe fn clear_non_synced(
     db: *mut ffi::sqlite3,
     synced: &[crate::sync::session::SyncedTable],
@@ -207,6 +218,17 @@ unsafe fn clear_non_synced(
         let stmt = format!("DELETE FROM \"{}\"", table.replace('"', "\"\""));
         exec_or_err(db, &stmt)?;
     }
+
+    // The snapshot is a second propagation channel: the changeset gate cuts
+    // gated-false rows on the wire, so the snapshot must drop them too or a
+    // private subtree leaks to a restoring device. Reuse the changeset gate's
+    // model rather than re-deriving the FK walk.
+    let gates = crate::sync::gate::Gates::from_tables(db, synced)
+        .map_err(|e| SnapshotError::GateScope(e.to_string()))?;
+    gates
+        .delete_gated_false(db)
+        .map_err(|e| SnapshotError::GateScope(e.to_string()))?;
+
     // Reclaim the pages freed by the DELETEs so the blob shrinks.
     exec_or_err(db, "VACUUM")?;
     Ok(())
@@ -815,8 +837,8 @@ mod tests {
 
             exec(
                 db,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
             );
             exec(
                 db,
@@ -871,8 +893,8 @@ mod tests {
             );
             exec(
                 db_a,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('n1', 'Gish', '0000000001000-0000-devA', '2026-01-01')",
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Gish', 1, '0000000001000-0000-devA', '2026-01-01')",
             );
             exec(
                 db_a,
@@ -938,6 +960,95 @@ mod tests {
                 query_int(db_b, "SELECT COUNT(*) FROM device_local"),
                 0,
                 "non-synced table must be empty in the restored DB",
+            );
+
+            ffi::sqlite3_close(db_b);
+            ffi::sqlite3_close(db_a);
+        }
+    }
+
+    /// The snapshot is a second propagation channel, so it must honor the same
+    /// row-level gate the outbound changeset does: a gated-false root (`notes`
+    /// with `shared = 0`) and its FK-descendants (`note_tags`) are private and
+    /// must never cross to a restoring device, while a gated-true root and its
+    /// descendants must. The table-level clear from the prior change keeps the
+    /// `notes`/`note_tags` *schema*; this verifies the *rows* are gate-scoped.
+    #[tokio::test]
+    async fn snapshot_does_not_carry_gated_false_rows_to_a_restoring_device() {
+        unsafe {
+            let db_a = open_memory_db();
+            create_synced_schema(db_a); // `notes` gated by `shared`; note_tags FK-child
+
+            // A shared note with a child tag (both must cross).
+            exec(
+                db_a,
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('pub', 'Public', 1, '0000000001000-0000-devA', '2026-01-01')",
+            );
+            exec(
+                db_a,
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('pub_t', 'pub', 'green', '0000000001000-0000-devA', '2026-01-01')",
+            );
+            // A private note with its own child tag (neither may cross).
+            exec(
+                db_a,
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('priv', 'Private', 0, '0000000002000-0000-devA', '2026-01-01')",
+            );
+            exec(
+                db_a,
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('priv_t', 'priv', 'red', '0000000002000-0000-devA', '2026-01-01')",
+            );
+
+            let temp = tempfile::tempdir().unwrap();
+            let enc = test_encryption();
+            let encrypted = create_snapshot(db_a, temp.path(), &enc).expect("snapshot");
+
+            let storage = MockSyncStorage::new();
+            push_snapshot(
+                &storage,
+                encrypted,
+                "devA",
+                HashMap::new(),
+                1,
+                &crate::clock::SystemClock,
+            )
+            .await
+            .expect("push_snapshot");
+
+            let target = temp.path().join("device_b.db");
+            bootstrap_from_snapshot(&storage, &enc, &target)
+                .await
+                .expect("bootstrap_from_snapshot");
+
+            let db_b = {
+                let c_path = CString::new(target.to_str().unwrap()).unwrap();
+                let mut ptr: *mut ffi::sqlite3 = std::ptr::null_mut();
+                let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut ptr);
+                assert_eq!(rc, ffi::SQLITE_OK);
+                ptr
+            };
+
+            // The shared root and its descendant cross.
+            assert!(
+                row_exists(db_b, "SELECT 1 FROM notes WHERE id = 'pub'"),
+                "a gated-true note must survive the snapshot restore",
+            );
+            assert!(
+                row_exists(db_b, "SELECT 1 FROM note_tags WHERE id = 'pub_t'"),
+                "a gated-true note's FK-child must survive the snapshot restore",
+            );
+
+            // The private root and its descendant must NOT cross.
+            assert!(
+                !row_exists(db_b, "SELECT 1 FROM notes WHERE id = 'priv'"),
+                "a gated-false note leaked to a peer via the snapshot",
+            );
+            assert!(
+                !row_exists(db_b, "SELECT 1 FROM note_tags WHERE id = 'priv_t'"),
+                "a gated-false note's FK-descendant leaked to a peer via the snapshot",
             );
 
             ffi::sqlite3_close(db_b);
@@ -1070,8 +1181,8 @@ mod tests {
 
             exec(
                 db,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
             );
 
             let temp = tempfile::tempdir().unwrap();
@@ -1142,8 +1253,8 @@ mod tests {
 
             exec(
                 db,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
             );
             exec(
                 db,
@@ -1214,13 +1325,13 @@ mod tests {
             let session1 = SyncSession::start(db_source).expect("session");
             exec(
                 db_source,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
             );
             exec(
                 db_source,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('a2', 'Artist Two', '0000000002000-0000-dev1', '2026-01-01')",
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('a2', 'Artist Two', 1, '0000000002000-0000-dev1', '2026-01-01')",
             );
             let cs1 = session1.changeset().unwrap().unwrap();
             let cs1_bytes = cs1.as_bytes().to_vec();
@@ -1234,8 +1345,8 @@ mod tests {
             let session2 = SyncSession::start(db_source).expect("session2");
             exec(
                 db_source,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('a3', 'Artist Three', '0000000003000-0000-dev1', '2026-01-01')",
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('a3', 'Artist Three', 1, '0000000003000-0000-dev1', '2026-01-01')",
             );
             exec(
                 db_source,
@@ -1464,8 +1575,8 @@ mod tests {
             let cs_insert = changeset_bytes_for(|db| {
                 exec(
                     db,
-                    "INSERT INTO notes (id, title, _updated_at, created_at) \
-                     VALUES ('n1', 'Release Draft', '0000000001000-0000-M', '2026-01-01')",
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                     VALUES ('n1', 'Release Draft', 1, '0000000001000-0000-M', '2026-01-01')",
                 );
             });
             storage.add_changeset("M", k, cs_insert.clone());
@@ -1475,8 +1586,8 @@ mod tests {
             let cs_update = changeset_bytes_for(|db| {
                 exec(
                     db,
-                    "INSERT INTO notes (id, title, _updated_at, created_at) \
-                     VALUES ('n1', 'Release Draft', '0000000001000-0000-M', '2026-01-01')",
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                     VALUES ('n1', 'Release Draft', 1, '0000000001000-0000-M', '2026-01-01')",
                 );
                 exec(
                     db,
@@ -1566,8 +1677,8 @@ mod tests {
             let cs1 = changeset_bytes_for(|db| {
                 exec(
                     db,
-                    "INSERT INTO notes (id, title, _updated_at, created_at) \
-                     VALUES ('n1', 'Draft', '0000000001000-0000-owner', '2026-01-01')",
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                     VALUES ('n1', 'Draft', 1, '0000000001000-0000-owner', '2026-01-01')",
                 );
             });
             storage.add_changeset("owner", 1, cs1.clone());
@@ -1605,8 +1716,8 @@ mod tests {
             let cs2 = changeset_bytes_for(|db| {
                 exec(
                     db,
-                    "INSERT INTO notes (id, title, _updated_at, created_at) \
-                     VALUES ('n1', 'Draft', '0000000001000-0000-owner', '2026-01-01')",
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                     VALUES ('n1', 'Draft', 1, '0000000001000-0000-owner', '2026-01-01')",
                 );
                 exec(
                     db,

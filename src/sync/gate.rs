@@ -231,6 +231,85 @@ impl Gates {
         names.sort_by_key(|n| chain_to_root_depth(&self.tables, n).unwrap_or(0));
         names
     }
+
+    /// Delete from `db` every row the gate excludes: each gated root row whose
+    /// gate is false, plus its FK-descendants. This is the same exclusion the
+    /// outbound changeset gate applies (a root shares iff its gate is true; a
+    /// descendant shares iff its gated-ancestor root does), expressed as SQL
+    /// `DELETE`s over the live tables rather than as a changeset filter.
+    ///
+    /// Both channels a row can use to cross devices — the changeset
+    /// ([`gate_outbound`]) and the snapshot — must honor the same gate, so the
+    /// snapshot calls this on its VACUUM'd copy to strip gated-false subtrees
+    /// before the bytes leave the device. Sharing this method (not a parallel
+    /// FK model) keeps a single definition of what the gate excludes.
+    ///
+    /// Each table — root or descendant — resolves its own gate truth by walking
+    /// its declared FK chain up to the root and testing that root's gate, so the
+    /// result is independent of deletion order and does not rely on the schema
+    /// declaring `ON DELETE CASCADE`. Roots are deleted last only so a
+    /// descendant's chain walk still sees its (gated-false) root row.
+    ///
+    /// # Safety
+    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
+    pub unsafe fn delete_gated_false(&self, db: *mut ffi::sqlite3) -> Result<(), GateError> {
+        // Descendants first, roots last: each descendant's keep-test joins up to
+        // its root row, which must still exist while the descendant is pruned.
+        let mut tables = self.gated_tables_parent_first();
+        tables.reverse();
+
+        for tbl in tables {
+            let keep = self.keep_clause(db, tbl)?;
+            let sql = format!("DELETE FROM {} WHERE NOT ({keep})", quote_ident(tbl));
+            exec_sql(db, &sql)?;
+        }
+        Ok(())
+    }
+
+    /// A SQL boolean that is true for rows of `tbl` the gate keeps: `tbl`'s gate,
+    /// resolved by walking its declared FK chain up to the gated root and testing
+    /// that root's gate column. Built inside-out — the innermost fragment is the
+    /// root gate test; each child wraps its parent's clause in a correlated
+    /// `EXISTS` joined on the FK. A dangling FK anywhere on the chain makes the
+    /// `EXISTS` false (the row is not shared), matching `resolve_root`'s
+    /// treatment of a missing ancestor as not-shared.
+    ///
+    /// # Safety
+    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
+    unsafe fn keep_clause(&self, db: *mut ffi::sqlite3, tbl: &str) -> Result<String, GateError> {
+        match self.tables.get(tbl) {
+            Some(TableGate::Root { gate_col }) => {
+                let gate = nth_column_name(db, tbl, *gate_col)?;
+                Ok(truthy_sql(&format!(
+                    "{}.{}",
+                    quote_ident(tbl),
+                    quote_ident(&gate)
+                )))
+            }
+            Some(TableGate::Child { fk_col, parent }) => {
+                let fk = nth_column_name(db, tbl, *fk_col)?;
+                let inner = self.keep_clause(db, parent)?;
+                Ok(format!(
+                    "EXISTS (SELECT 1 FROM {parent_t} \
+                       WHERE {parent_t}.{id} = {child}.{fk} AND ({inner}))",
+                    parent_t = quote_ident(parent),
+                    id = quote_ident("id"),
+                    child = quote_ident(tbl),
+                    fk = quote_ident(&fk),
+                ))
+            }
+            // Not in the gate map: ungated, always kept.
+            None => Ok("1".to_string()),
+        }
+    }
+}
+
+/// SQL predicate that is true exactly when `expr` is a gate-true value, matching
+/// [`truthy`]: a nonzero integer. NULL, `0`, and non-integers are false. The
+/// `CAST` collapses to 0 for non-numeric text, so only a genuine nonzero integer
+/// passes — the same rule the changeset gate applies in Rust.
+fn truthy_sql(expr: &str) -> String {
+    format!("({expr} IS NOT NULL AND CAST({expr} AS INTEGER) <> 0)")
 }
 
 /// Walk `gate_map` from `name` up its FK chain to its gated root: `Some(0)` for
@@ -1300,6 +1379,80 @@ mod tests {
                 has_row(&changes, "comments", "c1"),
                 "two-hop grandchild re-emitted via multi-hop FK inheritance"
             );
+
+            ffi::sqlite3_close(db);
+        }
+    }
+
+    #[test]
+    fn delete_gated_false_strips_private_subtrees_in_place() {
+        // The snapshot path: `delete_gated_false` removes gated-false roots and
+        // their FK-descendants from a live DB, keeping gated-true subtrees and
+        // ungated tables. Exercises a two-hop chain so the FK walk is tested
+        // past the single hop the snapshot integration test reaches.
+        unsafe {
+            let db = open_memory_db();
+            exec(db, "PRAGMA foreign_keys = ON");
+            exec(
+                db,
+                "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
+                 _updated_at TEXT NOT NULL)",
+            );
+            exec(
+                db,
+                "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
+                 _updated_at TEXT NOT NULL, \
+                 FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
+            );
+            exec(
+                db,
+                "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
+                 _updated_at TEXT NOT NULL, \
+                 FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE)",
+            );
+            exec(
+                db,
+                "CREATE TABLE settings (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
+            );
+
+            let tables = vec![
+                SyncedTable::new("albums").gated_by("shared"),
+                SyncedTable::new("photos"),
+                SyncedTable::new("comments"),
+                SyncedTable::new("settings"),
+            ];
+
+            // A private album with a 2-level subtree, a shared album with its
+            // own subtree, and an ungated settings row.
+            exec(db, "INSERT INTO albums (id, shared, _updated_at) VALUES ('priv', 0, '0000000001000-0000-dev1')");
+            exec(db, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('priv_p', 'priv', '0000000001000-0000-dev1')");
+            exec(db, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('priv_c', 'priv_p', '0000000001000-0000-dev1')");
+            exec(db, "INSERT INTO albums (id, shared, _updated_at) VALUES ('pub', 1, '0000000001000-0000-dev1')");
+            exec(db, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('pub_p', 'pub', '0000000001000-0000-dev1')");
+            exec(db, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('pub_c', 'pub_p', '0000000001000-0000-dev1')");
+            exec(
+                db,
+                "INSERT INTO settings (id, _updated_at) VALUES ('s1', '0000000001000-0000-dev1')",
+            );
+
+            let gates = Gates::from_tables(db, &tables).expect("gates");
+            gates.delete_gated_false(db).expect("delete gated-false");
+
+            // Private subtree gone at every level.
+            assert!(!row_exists(db, "SELECT 1 FROM albums WHERE id = 'priv'"));
+            assert!(!row_exists(db, "SELECT 1 FROM photos WHERE id = 'priv_p'"));
+            assert!(!row_exists(
+                db,
+                "SELECT 1 FROM comments WHERE id = 'priv_c'"
+            ));
+
+            // Shared subtree intact at every level.
+            assert!(row_exists(db, "SELECT 1 FROM albums WHERE id = 'pub'"));
+            assert!(row_exists(db, "SELECT 1 FROM photos WHERE id = 'pub_p'"));
+            assert!(row_exists(db, "SELECT 1 FROM comments WHERE id = 'pub_c'"));
+
+            // Ungated table untouched.
+            assert!(row_exists(db, "SELECT 1 FROM settings WHERE id = 's1'"));
 
             ffi::sqlite3_close(db);
         }
