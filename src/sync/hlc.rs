@@ -21,7 +21,7 @@
 /// authoritative floor — the high-water flush lags any local row stamp minted
 /// between cycles, so seeding from it alone could let the first post-restart
 /// stamp sort below the device's own un-flushed rows.
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `sync_state` key under which the clock's high-water mark is persisted, so it
@@ -190,6 +190,42 @@ impl Hlc {
     }
 }
 
+/// A cloneable handle that mints `_updated_at` register values from a shared
+/// [`Hlc`] — the register-stamping capability, sliced off the whole
+/// [`crate::sync::sync_manager::SyncManager`].
+///
+/// The host's database is built before the manager and then moved into
+/// `SyncManager::new`, but its write path must stamp `_updated_at` with the
+/// *same* clock the manager drives: coven advances that clock past every pulled
+/// row, and if the db held a separate clock that advance would never reach the
+/// db's stamper, letting a later local write sort behind a pulled row and
+/// silently lose last-writer-wins. So the host obtains this handle from the
+/// constructed manager ([`crate::sync::sync_manager::SyncManager::updated_at_stamper`])
+/// and injects it into the write path; every clone shares one `Arc<Hlc>`, so
+/// coven's seeding and advance-on-pull are reflected in every stamp the host
+/// mints.
+///
+/// It exposes only [`UpdatedAtStamper::stamp`] — never `seed`/`advance_past`/
+/// `high_water`. Those drive the clock and are coven's alone; the host write
+/// path is a pure consumer of stamps and must not poke clock state.
+#[derive(Clone)]
+pub struct UpdatedAtStamper {
+    hlc: Arc<Hlc>,
+}
+
+impl UpdatedAtStamper {
+    pub(crate) fn new(hlc: Arc<Hlc>) -> Self {
+        Self { hlc }
+    }
+
+    /// Mint the next `_updated_at` register value for a synced-row write. The
+    /// returned string is an opaque HLC stamp; the host binds it into the write
+    /// and must not parse or compare it as a wall-clock time.
+    pub fn stamp(&self) -> String {
+        self.hlc.now().to_string()
+    }
+}
+
 fn wall_clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -201,7 +237,6 @@ fn wall_clock_ms() -> u64 {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
 
     fn fixed_clock(ms: u64) -> impl Fn() -> u64 + Send + Sync + 'static {
         move || ms

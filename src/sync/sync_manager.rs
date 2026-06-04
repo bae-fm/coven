@@ -19,7 +19,7 @@ use crate::db::SyncDb;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
 use crate::storage::cloud::CloudHome;
-use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
+use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
 use crate::sync::membership::MemberRole;
 use crate::sync::session::synced_tables;
 use crate::sync::storage::SyncStorage;
@@ -139,13 +139,33 @@ impl SyncManager {
         })
     }
 
-    /// Stamp a synced row's `_updated_at`. The host binds this opaque string
-    /// into every synced-row write; it must not parse or compare it as a
-    /// wall-clock time. Advancing the clock persists nothing here (the value is
-    /// in-memory until a sync cycle flushes the high-water mark), but the clock
-    /// is already seeded past existing rows, so the stamp never regresses.
+    /// A cloneable handle over coven's `_updated_at` register, for hosts whose
+    /// database write path is built before — and so cannot borrow `&self` on —
+    /// the whole manager. The host obtains this once after constructing the
+    /// `SyncManager` and injects it into the write path; every synced-row
+    /// `_updated_at` write then uses [`UpdatedAtStamper::stamp`], so the host's
+    /// writes and coven's sync layer share one logical clock (every clone wraps
+    /// the same `Arc<Hlc>`, so coven's seeding and advance-on-pull reach every
+    /// stamp the host mints).
+    ///
+    /// Ordering requirement: obtain and inject the stamper before any
+    /// synced-row write occurs, or an early write stamps off a clock the host
+    /// isn't sharing.
+    pub fn updated_at_stamper(&self) -> UpdatedAtStamper {
+        UpdatedAtStamper::new(self.hlc.clone())
+    }
+
+    /// Stamp a synced row's `_updated_at`, for callers that already hold the
+    /// manager. Delegates to [`UpdatedAtStamper::stamp`] so there is one
+    /// stamping implementation; a host whose write path can't reach `&self`
+    /// holds an [`UpdatedAtStamper`] from [`SyncManager::updated_at_stamper`]
+    /// instead. The host binds this opaque string into every synced-row write;
+    /// it must not parse or compare it as a wall-clock time. Advancing the clock
+    /// persists nothing here (the value is in-memory until a sync cycle flushes
+    /// the high-water mark), but the clock is already seeded past existing rows,
+    /// so the stamp never regresses.
     pub fn stamp_updated_at(&self) -> String {
-        self.hlc.now().to_string()
+        self.updated_at_stamper().stamp()
     }
 
     pub fn encryption_service(&self) -> &EncryptionService {

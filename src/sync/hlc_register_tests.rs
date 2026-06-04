@@ -495,3 +495,63 @@ async fn manager_new_seeds_register_from_on_disk_rows_above_high_water() {
          seeding from the flushed high-water alone misses un-flushed local rows",
     );
 }
+
+/// The host's injected [`UpdatedAtStamper`] and the manager's own
+/// `stamp_updated_at` mint from one shared, advancing clock — the whole point of
+/// handing the host a handle rather than letting its db carry a separate clock.
+///
+/// Two external outcomes, neither a restatement of `Hlc::now`'s self-tests:
+/// - **Sharing:** the manager seeds the register past a far-future on-disk row at
+///   construction (the same forward push advance-on-pull performs). A stamper
+///   obtained *after* construction must mint above that floor — it would not if
+///   it wrapped a fresh, unseeded clock instead of the manager's `Arc<Hlc>`.
+/// - **Monotonic across both paths:** stamps interleaved between
+///   `stamp_updated_at` and `stamper.stamp` strictly increase regardless of which
+///   path mints them, which holds only if both draw from the same clock.
+#[tokio::test]
+async fn stamper_and_stamp_updated_at_share_one_advancing_clock() {
+    init_synced_tables();
+    // A synced row far ahead of any plausible wall millis seeds the register at
+    // construction, standing in for an advance-on-pull push of the shared clock.
+    let seeded_floor = "9999999999000-0005-dev-a";
+    let db = std::sync::Arc::new(FakeSyncDb::new(HashMap::new(), &[seeded_floor]));
+
+    let manager = build_manager_over(db).await;
+
+    // A stamper obtained after the seed reflects it: it wraps the manager's
+    // seeded clock, not a fresh one.
+    let stamper = manager.updated_at_stamper();
+    let s1 = stamper.stamp();
+    assert!(
+        s1.as_str() > seeded_floor,
+        "stamper minted {s1} below the seeded floor {seeded_floor}; it is not \
+         sharing the manager's clock",
+    );
+
+    // Interleave the two paths; every stamp must strictly outrank the last,
+    // which holds only if both paths advance one shared clock.
+    let s2 = manager.stamp_updated_at();
+    let s3 = stamper.stamp();
+    let s4 = manager.stamp_updated_at();
+    assert!(
+        s2 > s1,
+        "stamp_updated_at {s2} must outrank prior stamper {s1}"
+    );
+    assert!(
+        s3 > s2,
+        "stamper {s3} must outrank prior stamp_updated_at {s2}"
+    );
+    assert!(
+        s4 > s3,
+        "stamp_updated_at {s4} must outrank prior stamper {s3}"
+    );
+
+    // A second handle is just another view of the same clock.
+    let stamper2 = manager.updated_at_stamper();
+    let s5 = stamper2.stamp();
+    assert!(
+        s5 > s4,
+        "a freshly cloned stamper {s5} must outrank the prior stamp {s4}; all \
+         handles share one clock",
+    );
+}

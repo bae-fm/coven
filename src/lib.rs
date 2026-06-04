@@ -13,7 +13,13 @@
 //!   `_updated_at TEXT NOT NULL` column. `_updated_at` is coven's last-writer-
 //!   wins register, an opaque Hybrid Logical Clock stamp the host obtains from
 //!   [`sync::sync_manager::SyncManager::stamp_updated_at`] and binds into every
-//!   synced-row write. The host must not parse or compare it as a wall-clock
+//!   synced-row write. A host whose database write path is built before the
+//!   manager (and so can't borrow `&self` on it) instead holds an
+//!   [`UpdatedAtStamper`] obtained from
+//!   [`sync::sync_manager::SyncManager::updated_at_stamper`] after construction
+//!   and injects it into that write path — both paths share one `Arc<Hlc>`, so
+//!   coven's seeding and advance-on-pull reach every stamp. The host must not
+//!   parse or compare it as a wall-clock
 //!   time; coven advances the clock past pulled rows so a later local write
 //!   always sorts causally after them, which a wall clock cannot guarantee
 //!   under skew. Changeset envelopes and membership entries also carry an HLC
@@ -47,3 +53,5 @@ pub mod library_dir;
 pub mod oauth;
 pub mod storage;
 pub mod sync;
+
+pub use sync::hlc::UpdatedAtStamper;
