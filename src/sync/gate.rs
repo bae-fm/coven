@@ -298,16 +298,21 @@ impl Gates {
                     fk = quote_ident(&fk),
                 ))
             }
-            // Not in the gate map: ungated, always kept.
-            None => Ok("1".to_string()),
+            // Unreachable: the only caller (`delete_gated_false`) passes table
+            // names straight from `self.tables`, and the `Child` recursion above
+            // descends only to `parent`s that `from_tables` proved are in the map
+            // (a retained child's whole FK chain reaches a root, all in-map). A
+            // table outside the map never reaches this match.
+            None => unreachable!("keep_clause called for {tbl}, absent from the gate map"),
         }
     }
 }
 
-/// SQL predicate that is true exactly when `expr` is a gate-true value, matching
-/// [`truthy`]: a nonzero integer. NULL, `0`, and non-integers are false. The
-/// `CAST` collapses to 0 for non-numeric text, so only a genuine nonzero integer
-/// passes — the same rule the changeset gate applies in Rust.
+/// The SQL form of [`truthy`]: a predicate that is true for `expr` exactly when
+/// [`truthy`] would return true for the same value. [`truthy`] owns the single
+/// definition of gate-truth; this realizes it in SQL — the `CAST` collapses to 0
+/// for NULL and non-numeric text, so only a genuine nonzero integer passes.
+/// Keep the two in lockstep: a change to the gate-truth rule changes both.
 fn truthy_sql(expr: &str) -> String {
     format!("({expr} IS NOT NULL AND CAST({expr} AS INTEGER) <> 0)")
 }
@@ -757,8 +762,10 @@ impl ChangeRow {
     }
 }
 
-/// SQLite boolean truth for a gate value read as text: a nonzero integer is
-/// true; `0`/empty/non-integer is false.
+/// The single definition of gate-truth, evaluated in Rust over a gate value read
+/// as text: a nonzero integer is true; `0`/empty/non-integer is false.
+/// [`truthy_sql`] is the SQL realization of this same rule for the snapshot path;
+/// changing the rule here means changing it there too.
 fn truthy(s: &str) -> bool {
     s.trim().parse::<i64>().map(|n| n != 0).unwrap_or(false)
 }
@@ -1388,8 +1395,9 @@ mod tests {
     fn delete_gated_false_strips_private_subtrees_in_place() {
         // The snapshot path: `delete_gated_false` removes gated-false roots and
         // their FK-descendants from a live DB, keeping gated-true subtrees and
-        // ungated tables. Exercises a two-hop chain so the FK walk is tested
-        // past the single hop the snapshot integration test reaches.
+        // ungated tables. Exercises a two-hop FK chain (root → child →
+        // grandchild) so the recursive keep-clause walk is tested across more
+        // than one hop.
         unsafe {
             let db = open_memory_db();
             exec(db, "PRAGMA foreign_keys = ON");

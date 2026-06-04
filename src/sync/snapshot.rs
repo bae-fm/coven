@@ -40,13 +40,11 @@ pub enum SnapshotError {
     /// local-only table or clear the whole DB — both wrong, so we refuse.
     #[error("no synced tables registered; refusing to emit an all-cleared snapshot")]
     NoSyncedTables,
-    /// Clearing local-only tables out of the snapshot copy failed (sqlite FFI).
-    #[error("failed to clear local-only tables from snapshot: {0}")]
+    /// Scoping the snapshot copy down to shareable data failed (sqlite FFI):
+    /// either clearing local-only tables or applying the row-level gate that
+    /// excludes gated-false subtrees (the changeset gate cuts them too).
+    #[error("failed to scope snapshot down to shareable data: {0}")]
     ClearFailed(String),
-    /// Applying the row-level gate to the snapshot copy failed (the changeset
-    /// gate excludes gated-false subtrees; the snapshot must too).
-    #[error("failed to scope gated-false rows out of snapshot: {0}")]
-    GateScope(String),
 }
 
 /// Metadata stored alongside a snapshot in `snapshot_meta.json.enc`.
@@ -224,10 +222,10 @@ unsafe fn clear_non_synced(
     // private subtree leaks to a restoring device. Reuse the changeset gate's
     // model rather than re-deriving the FK walk.
     let gates = crate::sync::gate::Gates::from_tables(db, synced)
-        .map_err(|e| SnapshotError::GateScope(e.to_string()))?;
+        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
     gates
         .delete_gated_false(db)
-        .map_err(|e| SnapshotError::GateScope(e.to_string()))?;
+        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
 
     // Reclaim the pages freed by the DELETEs so the blob shrinks.
     exec_or_err(db, "VACUUM")?;
@@ -971,8 +969,9 @@ mod tests {
     /// row-level gate the outbound changeset does: a gated-false root (`notes`
     /// with `shared = 0`) and its FK-descendants (`note_tags`) are private and
     /// must never cross to a restoring device, while a gated-true root and its
-    /// descendants must. The table-level clear from the prior change keeps the
-    /// `notes`/`note_tags` *schema*; this verifies the *rows* are gate-scoped.
+    /// descendants must. The table-level clear keeps the `notes`/`note_tags`
+    /// *schema* (both are synced tables); this verifies the *rows* are
+    /// gate-scoped.
     #[tokio::test]
     async fn snapshot_does_not_carry_gated_false_rows_to_a_restoring_device() {
         unsafe {
