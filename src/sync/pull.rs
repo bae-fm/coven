@@ -163,7 +163,7 @@ pub async unsafe fn pull_changes(
     // applied row's stamp. Built once from the live schema so column additions
     // stay safe.
     let synced = super::session::synced_tables();
-    let table_refs: Vec<&str> = synced.iter().map(String::as_str).collect();
+    let table_refs: Vec<&str> = synced.iter().map(|t| t.name()).collect();
     let schema = TableSchema::from_db(db.0, &table_refs);
 
     let mut updated_cursors = cursors.clone();

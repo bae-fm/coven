@@ -16,7 +16,7 @@ use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
 };
-use crate::sync::session::SyncSession;
+use crate::sync::session::{SyncSession, SyncedTable};
 use crate::sync::storage::{DeviceHead, StorageError, SyncStorage};
 
 /// Open an in-memory sqlite3 database via libsqlite3-sys directly.
@@ -79,14 +79,21 @@ pub unsafe fn row_exists(db: *mut ffi::sqlite3, sql: &str) -> bool {
 }
 
 /// The synthetic, domain-free schema the sync tests run against. Three synced
-/// tables exercising the engine's generic mechanics: a root table (`notes`), a
-/// child with a foreign key (`note_tags`, for FK-violation retry), and a
-/// blob-bearing table (`note_photos`).
-pub const TEST_SYNCED_TABLES: &[&str] = &["notes", "note_tags", "note_photos"];
+/// tables exercising the engine's generic mechanics: a *gated root* (`notes`,
+/// gated by its `shared` boolean), a child with a foreign key (`note_tags`,
+/// which inherits the gate and exercises FK-violation retry), and a blob-bearing
+/// child (`note_photos`, also FK-to-`notes`, so it inherits the gate too).
+pub fn test_synced_tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("notes").gated_by("shared"),
+        SyncedTable::new("note_tags"),
+        SyncedTable::new("note_photos"),
+    ]
+}
 
-/// Declare [`TEST_SYNCED_TABLES`] as the synced set (idempotent; first call wins).
+/// Declare [`test_synced_tables`] as the synced set (idempotent; first call wins).
 pub fn init_synced_tables() {
-    crate::sync::session::set_synced_tables(TEST_SYNCED_TABLES);
+    crate::sync::session::set_synced_tables(&test_synced_tables());
 }
 
 pub unsafe fn create_synced_schema(db: *mut ffi::sqlite3) {
@@ -97,6 +104,7 @@ pub unsafe fn create_synced_schema(db: *mut ffi::sqlite3) {
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             body TEXT,
+            shared INTEGER NOT NULL DEFAULT 0,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL
         )",
@@ -119,7 +127,8 @@ pub unsafe fn create_synced_schema(db: *mut ffi::sqlite3) {
             note_id TEXT NOT NULL,
             kind TEXT NOT NULL,
             _updated_at TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
         )",
     );
 }

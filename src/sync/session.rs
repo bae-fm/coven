@@ -6,9 +6,50 @@ use std::sync::OnceLock;
 
 use super::session_ext::{Changeset, Session};
 
+/// A table that participates in changeset sync, declared once at startup by the
+/// host via [`set_synced_tables`].
+///
+/// A plain [`SyncedTable::new`] table syncs unconditionally — every row goes to
+/// peers. [`SyncedTable::gated_by`] makes it a *gated root*: a boolean column
+/// whose truth decides, per row, whether that row (and its declared
+/// FK-descendants) is shared. A gated-false root and its subtree stay local;
+/// flipping the gate true re-emits the whole now-visible subtree to peers. See
+/// [`super::gate`] for the gating mechanics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncedTable {
+    name: String,
+    gate_column: Option<String>,
+}
+
+impl SyncedTable {
+    /// An ungated synced table: every row syncs.
+    pub fn new(name: impl Into<String>) -> Self {
+        SyncedTable {
+            name: name.into(),
+            gate_column: None,
+        }
+    }
+
+    /// Make this a gated root: rows sync iff the boolean `column` is true.
+    pub fn gated_by(mut self, column: impl Into<String>) -> Self {
+        self.gate_column = Some(column.into());
+        self
+    }
+
+    /// The table name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The gate column name, if this table is a gated root.
+    pub fn gate_column(&self) -> Option<&str> {
+        self.gate_column.as_deref()
+    }
+}
+
 /// The tables that participate in changeset sync, declared once at startup by
 /// the host via [`set_synced_tables`].
-static SYNCED_TABLES: OnceLock<Vec<String>> = OnceLock::new();
+static SYNCED_TABLES: OnceLock<Vec<SyncedTable>> = OnceLock::new();
 
 /// Declare the tables that participate in changeset sync. The host MUST call
 /// this once at startup, before any sync session is created or `init_sync`
@@ -20,16 +61,20 @@ static SYNCED_TABLES: OnceLock<Vec<String>> = OnceLock::new();
 /// device-local state (per-device pin/cache columns, local paths) out of sync:
 /// put it in a table you don't list here.
 ///
+/// A table declared with [`SyncedTable::gated_by`] is a gated root: only rows
+/// whose gate column is true sync, and the gate flows down declared foreign keys
+/// to descendant rows. See [`super::gate`].
+///
 /// Forgetting this is silent at the session layer (a session with no attached
 /// tables just yields empty changesets), so [`super::cycle::init_sync`] treats an
 /// empty set as a hard error and refuses to start sync.
-pub fn set_synced_tables(tables: &[&str]) {
-    let _ = SYNCED_TABLES.set(tables.iter().map(|t| t.to_string()).collect());
+pub fn set_synced_tables(tables: &[SyncedTable]) {
+    let _ = SYNCED_TABLES.set(tables.to_vec());
 }
 
 /// The configured synced tables. Empty only when [`set_synced_tables`] was never
 /// called — an integration bug that [`super::cycle::init_sync`] rejects.
-pub fn synced_tables() -> &'static [String] {
+pub fn synced_tables() -> &'static [SyncedTable] {
     SYNCED_TABLES.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
@@ -59,8 +104,8 @@ impl SyncSession {
 
         for table in synced_tables() {
             session
-                .attach(Some(table.as_str()))
-                .map_err(|rc| SyncError::SessionAttach(table.clone(), rc))?;
+                .attach(Some(table.name()))
+                .map_err(|rc| SyncError::SessionAttach(table.name().to_string(), rc))?;
         }
 
         Ok(SyncSession { session })

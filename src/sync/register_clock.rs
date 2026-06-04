@@ -149,7 +149,8 @@ async fn scan_max_synced_updated_at(db: &dyn SyncDb) -> Result<Option<String>, S
 unsafe fn max_synced_updated_at_on(db: *mut ffi::sqlite3) -> Result<Option<String>, String> {
     let mut overall: Option<String> = None;
 
-    for table in synced_tables() {
+    for synced in synced_tables() {
+        let table = synced.name();
         // `table` comes from `set_synced_tables` (trusted host input) and cannot
         // be bound as a parameter; quote it as an identifier (doubling any inner
         // quote) so it interpolates safely.

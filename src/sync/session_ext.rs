@@ -195,6 +195,14 @@ pub struct Session {
     raw: *mut ffi::sqlite3_session,
 }
 
+impl Session {
+    /// The raw `sqlite3_session*`, for FFI that the safe wrappers here don't
+    /// cover (e.g. `sqlite3session_diff` in [`super::gate`]).
+    pub(crate) fn raw_ptr(&self) -> *mut ffi::sqlite3_session {
+        self.raw
+    }
+}
+
 // SAFETY: The sqlite3_session is a heap-allocated C structure with no thread
 // affinity. It's safe to move between threads as long as it's only accessed
 // from one thread at a time (which is guaranteed by the sync loop's sequential

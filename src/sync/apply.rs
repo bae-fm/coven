@@ -34,7 +34,7 @@ pub unsafe fn apply_changeset_lww(
     changeset: &Changeset,
 ) -> Result<ApplyResult, SyncError> {
     let synced = super::session::synced_tables();
-    let table_refs: Vec<&str> = synced.iter().map(String::as_str).collect();
+    let table_refs: Vec<&str> = synced.iter().map(|t| t.name()).collect();
     let schema = TableSchema::from_db(db, &table_refs);
     let mut tracker = ConflictTracker::new();
 

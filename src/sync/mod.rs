@@ -4,6 +4,7 @@ pub mod conflict;
 pub mod cycle;
 pub mod encrypted_storage;
 pub mod envelope;
+pub mod gate;
 pub mod hlc;
 #[cfg(test)]
 mod hlc_register_tests;

@@ -80,10 +80,29 @@ impl SyncService {
         let _ = library_dir;
 
         // Step 1: grab outgoing changeset from the session.
-        let outgoing_cs = session.changeset().map_err(SyncCycleError::Session)?;
+        let captured_cs = session.changeset().map_err(SyncCycleError::Session)?;
 
-        // Step 2: end the session (drop it).
+        // Step 2: end the session (drop it) — gating below opens its own session
+        // for the re-emit diff, and the next round's session starts after sync.
         drop(session);
+
+        // Step 2b: apply row-level sync gating. Cut gated-false rows (and their
+        // FK-descendants) so they stay local; re-emit a root's full subtree when
+        // its gate flips false→true. Done before the blob scan so blob upload
+        // sees the gated set, not the cut rows.
+        let outgoing_cs = match captured_cs {
+            Some(cs) => {
+                let gates = super::gate::Gates::from_db(db).map_err(SyncCycleError::Gate)?;
+                let gated =
+                    super::gate::gate_outbound(db, &cs, &gates).map_err(SyncCycleError::Gate)?;
+                if gated.is_empty() {
+                    None
+                } else {
+                    Some(gated)
+                }
+            }
+            None => None,
+        };
 
         // Step 3: upload blobs the outgoing changeset references, before the
         // envelope, so pullers can fetch them as soon as they see the change.
@@ -158,6 +177,7 @@ impl SyncService {
 #[derive(Debug)]
 pub enum SyncCycleError {
     Session(super::session::SyncError),
+    Gate(super::gate::GateError),
     Pull(pull::PullError),
     AssetScan(String),
     AssetUpload(String),
@@ -167,6 +187,7 @@ impl std::fmt::Display for SyncCycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncCycleError::Session(e) => write!(f, "session error: {e}"),
+            SyncCycleError::Gate(e) => write!(f, "gate error: {e}"),
             SyncCycleError::Pull(e) => write!(f, "pull error: {e}"),
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
             SyncCycleError::AssetUpload(e) => write!(f, "asset upload error: {e}"),

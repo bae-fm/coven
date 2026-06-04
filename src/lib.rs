@@ -10,7 +10,8 @@
 //!
 //! Integration contract for the host:
 //! - Every synced table has an `id` text primary key at column 0 and an
-//!   `_updated_at TEXT NOT NULL` column. `_updated_at` is coven's last-writer-
+//!   `_updated_at TEXT NOT NULL` column, and is declared as a
+//!   [`sync::session::SyncedTable`]. `_updated_at` is coven's last-writer-
 //!   wins register, an opaque Hybrid Logical Clock stamp the host mints with an
 //!   [`UpdatedAtStamper`] and binds into every synced-row write. The host obtains
 //!   the stamper from a [`sync::register_clock::RegisterClock`] (see the startup
@@ -25,8 +26,13 @@
 //! - The host applies [`db::MIGRATION_SQL`] to create coven's bookkeeping tables
 //!   and implements [`db::SyncBookkeeping`] + [`db::RawDbHandle`].
 //! - Startup sequence, in order:
-//!   1. Register the synced-table list via [`sync::session::set_synced_tables`]
-//!      (required — [`sync::cycle::init_sync`] aborts if it's empty).
+//!   1. Register the synced-table list via [`sync::session::set_synced_tables`],
+//!      passing a [`sync::session::SyncedTable`] per table (required —
+//!      [`sync::cycle::init_sync`] aborts if it's empty). A plain
+//!      [`sync::session::SyncedTable::new`] table syncs unconditionally;
+//!      [`sync::session::SyncedTable::gated_by`] marks a *gated root* whose
+//!      boolean gate column decides, per row, whether that row and its declared
+//!      FK-descendants are shared. See [`sync::gate`] for the gating semantics.
 //!   2. Open the register clock:
 //!      [`sync::register_clock::RegisterClock::open`]`(device_id, &db)`. It scans
 //!      `MAX(_updated_at)` across the registered synced tables (via the raw write

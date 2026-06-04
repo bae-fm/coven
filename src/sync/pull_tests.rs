@@ -211,8 +211,8 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         let session = SyncSession::start(db1).expect("start session");
         exec(
             db1,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
         );
         exec(
             db1,

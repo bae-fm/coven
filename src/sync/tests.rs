@@ -23,9 +23,9 @@ unsafe fn capture(db: *mut ffi::sqlite3, stmts: &[&str]) -> Option<Changeset> {
 fn synced_tables_are_configured() {
     init_synced_tables();
     let tables = synced_tables();
-    assert!(tables.iter().any(|t| t == "notes"));
-    assert!(tables.iter().any(|t| t == "note_tags"));
-    assert!(tables.iter().any(|t| t == "note_photos"));
+    assert!(tables.iter().any(|t| t.name() == "notes"));
+    assert!(tables.iter().any(|t| t.name() == "note_tags"));
+    assert!(tables.iter().any(|t| t.name() == "note_photos"));
 }
 
 #[test]
