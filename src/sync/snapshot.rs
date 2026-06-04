@@ -160,7 +160,10 @@ const SNAPSHOT_PRESERVED_TABLE: &str = "_sqlx_migrations";
 /// only reader of the process-global). Errors if any FFI step fails — a
 /// snapshot that silently dropped synced data, or silently kept local-only
 /// data, is worse than no snapshot.
-unsafe fn clear_local_only_tables(path: &Path, synced: &[String]) -> Result<(), SnapshotError> {
+unsafe fn clear_local_only_tables(
+    path: &Path,
+    synced: &[crate::sync::session::SyncedTable],
+) -> Result<(), SnapshotError> {
     let db = open_snapshot_db(path)?;
     let result = clear_non_synced(db, synced);
     let close_rc = ffi::sqlite3_close(db);
@@ -192,9 +195,12 @@ unsafe fn open_snapshot_db(path: &Path) -> Result<*mut ffi::sqlite3, SnapshotErr
 /// On the already-open snapshot connection `db`, DELETE every user table that
 /// is neither in `synced` nor the preserved migration ledger, then VACUUM to
 /// reclaim the freed pages.
-unsafe fn clear_non_synced(db: *mut ffi::sqlite3, synced: &[String]) -> Result<(), SnapshotError> {
+unsafe fn clear_non_synced(
+    db: *mut ffi::sqlite3,
+    synced: &[crate::sync::session::SyncedTable],
+) -> Result<(), SnapshotError> {
     for table in list_user_tables(db)? {
-        if synced.iter().any(|t| t == &table) || table == SNAPSHOT_PRESERVED_TABLE {
+        if synced.iter().any(|t| t.name() == table) || table == SNAPSHOT_PRESERVED_TABLE {
             continue;
         }
         // Quote the identifier, doubling any embedded quotes.
