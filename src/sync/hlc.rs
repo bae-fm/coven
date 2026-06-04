@@ -224,6 +224,17 @@ impl UpdatedAtStamper {
     pub fn stamp(&self) -> String {
         self.hlc.now().to_string()
     }
+
+    /// A standalone stamper over a fresh in-memory HLC, for host tests that
+    /// inject a real stamper through their production injection path without
+    /// constructing a [`SyncManager`](crate::sync::sync_manager::SyncManager).
+    /// Not for production — production stampers come from
+    /// `SyncManager::updated_at_stamper` so they share the manager's seeded,
+    /// pull-advanced clock.
+    #[cfg(feature = "test-utils")]
+    pub fn for_test() -> Self {
+        Self::new(Arc::new(Hlc::new("test-device".to_string())))
+    }
 }
 
 fn wall_clock_ms() -> u64 {
