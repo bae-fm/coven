@@ -99,8 +99,8 @@ pub fn init_synced_tables() {
 pub unsafe fn create_synced_schema(db: *mut ffi::sqlite3) {
     // The synced set is process-global; register it here so any test that
     // builds this schema (and then snapshots) has a synced set to scope by.
-    // `create_snapshot` now requires one and refuses to emit an all-cleared
-    // blob otherwise.
+    // `create_snapshot` requires one and refuses to emit an all-cleared blob
+    // otherwise.
     init_synced_tables();
     exec(db, "PRAGMA foreign_keys = ON");
     exec(

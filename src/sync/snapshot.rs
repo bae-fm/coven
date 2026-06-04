@@ -82,6 +82,14 @@ pub unsafe fn create_snapshot(
     temp_dir: &Path,
     encryption: &EncryptionService,
 ) -> Result<Vec<u8>, SnapshotError> {
+    // A snapshot with no synced set would either leak every local-only table or
+    // clear the whole DB — both wrong. Refuse before doing any work, and read
+    // the synced set once here so the clearing helper stays pure.
+    let synced = crate::sync::session::synced_tables();
+    if synced.is_empty() {
+        return Err(SnapshotError::NoSyncedTables);
+    }
+
     let snapshot_path = temp_dir.join("snapshot.db");
     let path_str = snapshot_path
         .to_str()
@@ -107,15 +115,19 @@ pub unsafe fn create_snapshot(
         } else {
             std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
         };
-        let _ = std::fs::remove_file(&snapshot_path);
+        if let Err(rm) = std::fs::remove_file(&snapshot_path) {
+            warn!(error = %rm, "failed to remove temp snapshot after VACUUM error");
+        }
         return Err(SnapshotError::VacuumFailed(msg));
     }
 
     // The copy is a whole-DB byte image, so it still holds every local-only
     // table's data. Strip those before reading: open the copy as its own
     // connection and DELETE from every table outside the synced set.
-    if let Err(e) = clear_local_only_tables(&snapshot_path) {
-        let _ = std::fs::remove_file(&snapshot_path);
+    if let Err(e) = clear_local_only_tables(&snapshot_path, synced) {
+        if let Err(rm) = std::fs::remove_file(&snapshot_path) {
+            warn!(error = %rm, "failed to remove temp snapshot after clear error");
+        }
         return Err(e);
     }
 
@@ -144,15 +156,11 @@ const SNAPSHOT_PRESERVED_TABLE: &str = "_sqlx_migrations";
 /// (`_sqlx_migrations`) is also preserved so the restored DB opens directly.
 ///
 /// Opens `path` as its own sqlite3 connection (the copy must be edited in
-/// isolation from the live DB). Errors if no synced set is registered, or if
-/// any FFI step fails — a snapshot that silently dropped synced data, or
-/// silently kept local-only data, is worse than no snapshot.
-unsafe fn clear_local_only_tables(path: &Path) -> Result<(), SnapshotError> {
-    let synced = crate::sync::session::synced_tables();
-    if synced.is_empty() {
-        return Err(SnapshotError::NoSyncedTables);
-    }
-
+/// isolation from the live DB). The synced set is passed in by the caller (the
+/// only reader of the process-global). Errors if any FFI step fails — a
+/// snapshot that silently dropped synced data, or silently kept local-only
+/// data, is worse than no snapshot.
+unsafe fn clear_local_only_tables(path: &Path, synced: &[String]) -> Result<(), SnapshotError> {
     let db = open_snapshot_db(path)?;
     let result = clear_non_synced(db, synced);
     let close_rc = ffi::sqlite3_close(db);
@@ -217,11 +225,26 @@ unsafe fn list_user_tables(db: *mut ffi::sqlite3) -> Result<Vec<String>, Snapsho
         if step == ffi::SQLITE_ROW {
             let text = ffi::sqlite3_column_text(stmt, 0);
             if text.is_null() {
-                continue;
+                // A NULL `name` in `sqlite_master WHERE type='table'` is
+                // corruption, not an empty result set — refuse rather than
+                // silently skip a table whose rows we then can't scope.
+                ffi::sqlite3_finalize(stmt);
+                return Err(SnapshotError::ClearFailed(
+                    "sqlite_master row has NULL table name".to_string(),
+                ));
             }
-            let name = std::ffi::CStr::from_ptr(text as *const std::ffi::c_char)
-                .to_string_lossy()
-                .into_owned();
+            let name = match std::ffi::CStr::from_ptr(text as *const std::ffi::c_char).to_str() {
+                Ok(name) => name.to_string(),
+                Err(e) => {
+                    // Table names are ASCII in practice; non-UTF-8 means the
+                    // catalog is corrupt. Surface it instead of mangling the
+                    // name and DELETE-ing (or sparing) the wrong table.
+                    ffi::sqlite3_finalize(stmt);
+                    return Err(SnapshotError::ClearFailed(format!(
+                        "table name is not valid UTF-8: {e}"
+                    )));
+                }
+            };
             tables.push(name);
         } else if step == ffi::SQLITE_DONE {
             break;
@@ -824,17 +847,12 @@ mod tests {
         }
     }
 
-    /// Reproduces the field failure: a device-local path crossed to another
-    /// device and crashed it. A table that is NOT in the synced set — here
-    /// `device_local`, the analogue of bae's `release_local_copy`, holding a
-    /// filesystem path that exists only on the device that wrote it — must
-    /// never reach a peer. The snapshot is a propagation channel, so it must
-    /// carry only synced-table data.
-    ///
-    /// `create_snapshot` VACUUMs the whole DB, so the local-only row crosses.
-    /// This is exactly how `/Users/dima/Torrents/.../Gish (1991)` ended up in
-    /// an Android device's DB and crashed playback on a path that doesn't exist
-    /// there. This test FAILS until the snapshot excludes non-synced tables.
+    /// A snapshot is a propagation channel between devices, so it carries only
+    /// synced-table data. A non-synced table (here `device_local`, holding a
+    /// filesystem path meaningful only on the device that wrote it) keeps its
+    /// schema in the restored DB but none of its rows: the schema survives so
+    /// the table still opens, while its device-local rows never cross to a
+    /// restoring peer.
     #[tokio::test]
     async fn snapshot_does_not_carry_local_only_tables_to_a_restoring_device() {
         unsafe {
