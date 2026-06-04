@@ -10,54 +10,15 @@ use libsqlite3_sys as ffi;
 use crate::blob::BlobPlan;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cycle;
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
-use crate::sync::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
-};
 use crate::sync::pull::{pull_changes, SendDbPtr};
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::service::SyncService;
 use crate::sync::session::SyncSession;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
-
-/// Capture a changeset's bytes after running `stmts`.
-unsafe fn capture_bytes(db: *mut ffi::sqlite3, stmts: &[&str]) -> Vec<u8> {
-    let session = SyncSession::start(db).expect("start session");
-    for s in stmts {
-        exec(db, s);
-    }
-    session
-        .changeset()
-        .expect("changeset")
-        .expect("non-empty")
-        .as_bytes()
-        .to_vec()
-}
-
-fn temp_library_dir() -> (tempfile::TempDir, LibraryDir) {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = LibraryDir::new(tmp.path());
-    (tmp, dir)
-}
-
-/// A signed founder (first) membership entry for `kp`.
-fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
-    let pk_hex = hex::encode(kp.public_key);
-    let mut entry = MembershipEntry {
-        action: MembershipAction::Add,
-        user_pubkey: pk_hex.clone(),
-        role: MemberRole::Owner,
-        timestamp: timestamp.to_string(),
-        author_pubkey: pk_hex,
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, kp);
-    entry
-}
 
 #[tokio::test]
 async fn pull_applies_remote_changeset_and_surfaces_row_changes() {

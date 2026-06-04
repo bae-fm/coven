@@ -273,6 +273,7 @@ impl MembershipChain {
 mod tests {
     use super::*;
     use crate::keys::UserKeypair;
+    use crate::sync::test_helpers::{founder_entry, make_entry};
 
     fn gen_keypair() -> UserKeypair {
         UserKeypair::generate()
@@ -280,41 +281,6 @@ mod tests {
 
     fn pubkey_hex(kp: &UserKeypair) -> String {
         hex::encode(kp.public_key)
-    }
-
-    /// Create a signed "founder" entry (first entry in the chain).
-    fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
-        let pk_hex = pubkey_hex(kp);
-        let mut entry = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: pk_hex.clone(),
-            role: MemberRole::Owner,
-            timestamp: timestamp.to_string(),
-            author_pubkey: pk_hex,
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut entry, kp);
-        entry
-    }
-
-    /// Create a signed entry where `author` adds/removes `subject`.
-    fn make_entry(
-        author: &UserKeypair,
-        action: MembershipAction,
-        subject: &UserKeypair,
-        role: MemberRole,
-        timestamp: &str,
-    ) -> MembershipEntry {
-        let mut entry = MembershipEntry {
-            action,
-            user_pubkey: pubkey_hex(subject),
-            role,
-            timestamp: timestamp.to_string(),
-            author_pubkey: pubkey_hex(author),
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut entry, author);
-        entry
     }
 
     #[test]

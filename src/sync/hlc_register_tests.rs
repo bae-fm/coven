@@ -3,8 +3,8 @@
 //! Unlike the self-tests in `hlc.rs` (which prove the clock is a correct
 //! clock), these assert an *external* outcome of wiring the clock to the data
 //! plane: they fail if `_updated_at` is wall-clock-stamped, if the clock
-//! regresses across a restart, or if revocation leaned on the deleted temporal
-//! authorization gate.
+//! regresses across a restart, or if revocation depended on an author-supplied
+//! envelope timestamp rather than current write-capable membership.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -12,39 +12,20 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use libsqlite3_sys as ffi;
 
+use crate::clock::SystemClock;
 use crate::db::{DbError, OutboxEntry, RawDbHandle, SyncBookkeeping};
+use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::sync::cycle::{run_single_sync_cycle, SyncCycleOutcome};
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
-use crate::sync::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
-};
+use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipEntry};
 use crate::sync::pull::{pull_changes, SendDbPtr};
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::SyncSession;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
-
-/// Capture a changeset's bytes after running `stmts` against `db`.
-unsafe fn capture_bytes(db: *mut ffi::sqlite3, stmts: &[&str]) -> Vec<u8> {
-    let session = SyncSession::start(db).expect("start session");
-    for s in stmts {
-        exec(db, s);
-    }
-    session
-        .changeset()
-        .expect("changeset")
-        .expect("non-empty")
-        .as_bytes()
-        .to_vec()
-}
-
-fn temp_library_dir() -> (tempfile::TempDir, LibraryDir) {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = LibraryDir::new(tmp.path());
-    (tmp, dir)
-}
 
 /// Store a changeset signed by `author` into the mock storage, stamping the
 /// envelope timestamp with `env_ts`. Mirrors the real publish path (sign then
@@ -72,41 +53,6 @@ fn store_signed_changeset(
     storage.put_changeset_packed(device_id, seq, packed);
 }
 
-/// A signed founder (first) membership entry for `kp`.
-fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
-    let pk_hex = hex::encode(kp.public_key);
-    let mut entry = MembershipEntry {
-        action: MembershipAction::Add,
-        user_pubkey: pk_hex.clone(),
-        role: MemberRole::Owner,
-        timestamp: timestamp.to_string(),
-        author_pubkey: pk_hex,
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, kp);
-    entry
-}
-
-/// A signed entry where `author` adds/removes `subject` with `role`.
-fn make_entry(
-    author: &UserKeypair,
-    action: MembershipAction,
-    subject: &UserKeypair,
-    role: MemberRole,
-    timestamp: &str,
-) -> MembershipEntry {
-    let mut entry = MembershipEntry {
-        action,
-        user_pubkey: hex::encode(subject.public_key),
-        role,
-        timestamp: timestamp.to_string(),
-        author_pubkey: hex::encode(author.public_key),
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, author);
-    entry
-}
-
 async fn upload_chain(storage: &MockSyncStorage, entries: &[MembershipEntry]) {
     for (i, entry) in entries.iter().enumerate() {
         let bytes = serde_json::to_vec(entry).expect("serialize entry");
@@ -117,11 +63,18 @@ async fn upload_chain(storage: &MockSyncStorage, entries: &[MembershipEntry]) {
     }
 }
 
-/// The causality-under-skew guarantee. Device B edits a row *after* applying
-/// A's edit of the same row; B's write must win because its HLC stamp is
-/// causally greater — *even with B's wall clock set behind A's*. A plain
-/// wall-clock `_updated_at` would let A win here (A's wall time is larger), so
-/// this fails if `_updated_at` is not the HLC register advanced by pull.
+/// The causality-under-skew guarantee, driven through the real sync cycle.
+/// Device B runs a full [`run_single_sync_cycle`] that pulls A's edit of `n1`;
+/// the cycle must advance B's HLC from the applied row's `_updated_at` so B's
+/// next stamp is causally greater than A's — *even with B's wall clock set far
+/// behind A's*. A plain wall-clock `_updated_at` would let A win here (A's wall
+/// time is larger), so this fails if `_updated_at` is not the HLC register.
+///
+/// Critically, the cycle is the unit under test. Its advance source must be the
+/// max applied-row `_updated_at`, not the envelope/head timestamp: the mock
+/// envelope timestamp is an RFC-3339 string the HLC cannot parse, so an advance
+/// from it leaves B's clock ignorant of A's stamp, B's next stamp sorts below
+/// A's, and the LWW assertion below fails.
 #[tokio::test]
 async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     unsafe {
@@ -145,30 +98,50 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         );
         storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
 
-        // B pulls A's edit and advances its HLC past every applied row's
-        // `_updated_at` — exactly what the sync cycle does.
+        // B runs a real sync cycle: it pulls A's edit into db_b and advances
+        // b_hlc from the applied row's `_updated_at`. A fresh session means B has
+        // no outgoing changeset, so the cycle only pulls.
         let db_b = open_memory_db();
         create_synced_schema(db_b);
         let (_t, ld) = temp_library_dir();
-        let (_cursors, pull) = pull_changes(
-            SendDbPtr(db_b),
+        let encryption = std::sync::RwLock::new(EncryptionService::new_with_key(&[3u8; 32]));
+        let keypair = UserKeypair::generate();
+        let bookkeeping = FakeSyncDb::new(HashMap::new(), &[]);
+        let session = SyncSession::start(db_b).expect("start B session");
+
+        let outcome = run_single_sync_cycle(
             &storage,
             "dev-b",
-            &HashMap::new(),
+            &b_hlc,
+            &SystemClock,
+            db_b,
+            session,
+            &encryption,
+            &keypair,
+            &bookkeeping,
             &ld,
+            None,
             &NoopBlobPlan,
+            None,
         )
-        .await
-        .expect("pull");
+        .await;
 
-        let max_applied = pull
-            .max_applied_updated_at
-            .expect("pull surfaced an applied _updated_at");
-        assert_eq!(max_applied.to_string(), a_stamp);
-        b_hlc.advance_past(&max_applied);
+        let result = match outcome {
+            SyncCycleOutcome::Ok(result, _session) => result,
+            SyncCycleOutcome::ErrWithSession(e, _) | SyncCycleOutcome::ErrNoSession(e) => {
+                panic!("B's sync cycle did not complete: {e}");
+            }
+        };
+        assert_eq!(result.changesets_applied, 1, "B must apply A's changeset");
+        assert_eq!(
+            query_text(db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+            "A wrote this",
+            "A's row must be present on B after the cycle",
+        );
 
-        // B now edits the same row. Its stamp must sort after A's despite B's
-        // wall clock (1_000) being far behind A's (9_000).
+        // B now edits the same row. The cycle must have advanced b_hlc from A's
+        // applied stamp, so B's next stamp sorts after A's despite B's wall clock
+        // (1_000) being far behind A's (9_000).
         let b_stamp = b_hlc.now().to_string();
         assert!(
             b_stamp > a_stamp,
@@ -243,12 +216,13 @@ fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
     );
 }
 
-/// Revocation no longer depends on a temporal authorization gate. A removed
-/// member signs a changeset whose envelope timestamp falls *inside* their old
-/// membership window — the exact case the deleted `can_write_at(pk, ts)` would
-/// have admitted. Pull must reject it because the author is not a *current*
-/// write-capable member. This proves the temporal check wasn't doing the work;
-/// signatures + current membership (backed by key rotation) are.
+/// Revocation is enforced by current write-capable membership, not by when a
+/// changeset claims to have been authored. A removed member signs a changeset
+/// whose envelope timestamp falls between their Add and Remove entries — a
+/// timestamp that, taken at face value, sits squarely within their membership.
+/// Pull must still reject it, because the author is not a *current* write-capable
+/// member. The author-signed envelope timestamp carries no authorization weight;
+/// signatures plus current membership (backed by key rotation) do.
 #[tokio::test]
 async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     unsafe {
@@ -276,8 +250,8 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
                 "0000000004000-0000-owner",
             ),
         ];
-        // Sanity: the old temporal gate WOULD have admitted a write stamped at
-        // t=3000 (after Add, before Remove). The new non-temporal gate must not.
+        // The membership check is the authorization boundary: a removed member is
+        // not a current writer, regardless of any timestamp on their write.
         let chain = MembershipChain::from_entries(entries.clone()).expect("valid chain");
         assert!(
             !chain.can_write_now(&hex::encode(member.public_key)),
@@ -330,25 +304,26 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     }
 }
 
-/// A real-sqlite-backed `SyncDb` for exercising `SyncManager::new`'s seed read.
-/// `get_sync_state` is an in-memory map; `raw_write_handle` returns a live
-/// in-memory connection carrying the synced schema (and any seeded rows), so the
-/// register-floor scan runs its real FFI path against actual `_updated_at` rows
-/// rather than a hand-returned max. The remaining bookkeeping is unreachable on
-/// the construction path under test.
-/// The fake's live connection pointer. `SyncBookkeeping: Send + Sync` requires
-/// the fake be both; access is serialized by the single-threaded test, so this
-/// is sound here.
-struct ConnPtr(*mut ffi::sqlite3);
-unsafe impl Send for ConnPtr {}
-unsafe impl Sync for ConnPtr {}
-
+/// A real-sqlite-backed `SyncDb` for exercising `SyncManager::new`'s seed read
+/// and as the bookkeeping side of a `run_single_sync_cycle`. `get_sync_state` /
+/// `set_sync_state` are an in-memory map; cursors and outbox queries answer empty
+/// so a cycle pulls without local pushes or outbox work. `raw_write_handle`
+/// returns a live in-memory connection carrying the synced schema (and any seeded
+/// rows), so the register-floor scan runs its real FFI path against actual
+/// `_updated_at` rows rather than a hand-returned max.
 struct FakeSyncDb {
     state: Mutex<HashMap<String, String>>,
     /// A live in-memory sqlite connection with the synced schema. The scan in
     /// `SyncManager::new` prepares/steps `SELECT MAX(_updated_at)` against this.
-    db: ConnPtr,
+    /// [`SendDbPtr`] carries `Send`; `SyncBookkeeping: Send + Sync` also requires
+    /// `Sync`, which the `unsafe impl` below adds — sound because the
+    /// single-threaded test serializes all access to the connection.
+    db: SendDbPtr,
 }
+
+// SAFETY: access to the wrapped connection is serialized by the single-threaded
+// test; see the `db` field doc.
+unsafe impl Sync for FakeSyncDb {}
 
 impl FakeSyncDb {
     /// Build over a fresh in-memory DB with the synced schema, inserting a `notes`
@@ -371,7 +346,7 @@ impl FakeSyncDb {
         };
         Self {
             state: Mutex::new(state),
-            db: ConnPtr(db),
+            db: SendDbPtr(db),
         }
     }
 }

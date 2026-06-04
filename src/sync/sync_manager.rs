@@ -112,21 +112,18 @@ impl SyncManager {
         let device_id = (config_provider)().device_id;
         let hlc = Arc::new(Hlc::new(device_id));
 
-        if let Some(stored) = db
+        let persisted_high_water = db
             .get_sync_state(HIGHWATER_STATE_KEY)
             .await
-            .map_err(|e| format!("Failed to read HLC high-water mark: {e}"))?
-        {
-            let high_water = Timestamp::parse(&stored)
-                .ok_or_else(|| format!("Corrupt HLC high-water mark in sync_state: {stored:?}"))?;
-            hlc.seed(&high_water);
-        }
+            .map_err(|e| format!("Failed to read HLC high-water mark: {e}"))?;
+        seed_from_stamp(
+            &hlc,
+            persisted_high_water,
+            "HLC high-water mark in sync_state",
+        )?;
 
-        if let Some(max_row) = scan_max_synced_updated_at(db.as_ref()).await? {
-            let row_floor = Timestamp::parse(&max_row)
-                .ok_or_else(|| format!("Corrupt `_updated_at` in synced tables: {max_row:?}"))?;
-            hlc.seed(&row_floor);
-        }
+        let on_disk_row_floor = scan_max_synced_updated_at(db.as_ref()).await?;
+        seed_from_stamp(&hlc, on_disk_row_floor, "`_updated_at` in synced tables")?;
 
         Ok(Self {
             config_provider,
@@ -405,6 +402,21 @@ impl SyncManager {
 ///
 /// A table with no rows (or all-`NULL` `_updated_at`) yields SQL `NULL` and
 /// contributes nothing — distinct from an error.
+/// Seed the register from one candidate floor, if present. `value` is a resolved
+/// register stamp (the persisted high-water mark, or the on-disk row max); a
+/// `None` simply contributes no floor. A present-but-unparseable value is a
+/// corrupt register and aborts construction — `context` names which source it
+/// came from so the error is actionable. [`Hlc::seed`] is monotonic, so seeding
+/// from each candidate in turn lands the clock on their max.
+fn seed_from_stamp(hlc: &Hlc, value: Option<String>, context: &str) -> Result<(), String> {
+    if let Some(stamp) = value {
+        let floor =
+            Timestamp::parse(&stamp).ok_or_else(|| format!("Corrupt {context}: {stamp:?}"))?;
+        hlc.seed(&floor);
+    }
+    Ok(())
+}
+
 async fn scan_max_synced_updated_at(db: &dyn SyncDb) -> Result<Option<String>, String> {
     let raw = db
         .raw_write_handle()

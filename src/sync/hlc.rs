@@ -307,8 +307,8 @@ mod tests {
     /// authoritative value the LWW layer already wrote to disk, not an untrusted
     /// peer wall clock. The clock must advance past it *unconditionally* — even
     /// when it sits far beyond local wall time — or the next local stamp sorts
-    /// below an already-stored row and loses LWW to it. (The deleted 24h skew
-    /// guard capped exactly this case to wall time.)
+    /// below an already-stored row and loses LWW to it. Any skew cap that bounded
+    /// the advance to wall time would reintroduce exactly that loss.
     #[test]
     fn advance_past_far_future_applied_row_is_not_capped() {
         let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));

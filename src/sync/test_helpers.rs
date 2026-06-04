@@ -9,8 +9,14 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use libsqlite3_sys as ffi;
 
+use crate::keys::UserKeypair;
+use crate::library_dir::LibraryDir;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::envelope::{self, ChangesetEnvelope};
+use crate::sync::membership::{
+    sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
+};
+use crate::sync::session::SyncSession;
 use crate::sync::storage::{DeviceHead, StorageError, SyncStorage};
 
 /// Open an in-memory sqlite3 database via libsqlite3-sys directly.
@@ -118,6 +124,63 @@ pub unsafe fn create_synced_schema(db: *mut ffi::sqlite3) {
     );
 }
 
+/// Capture a changeset's bytes after running `stmts` against `db`.
+pub unsafe fn capture_bytes(db: *mut ffi::sqlite3, stmts: &[&str]) -> Vec<u8> {
+    let session = SyncSession::start(db).expect("start session");
+    for s in stmts {
+        exec(db, s);
+    }
+    session
+        .changeset()
+        .expect("changeset")
+        .expect("non-empty")
+        .as_bytes()
+        .to_vec()
+}
+
+/// A temp dir plus a [`LibraryDir`] rooted at it. The returned `TempDir` must be
+/// held for the directory to outlive the test.
+pub fn temp_library_dir() -> (tempfile::TempDir, LibraryDir) {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = LibraryDir::new(tmp.path());
+    (tmp, dir)
+}
+
+/// A signed founder (first) membership entry for `kp`.
+pub fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
+    let pk_hex = hex::encode(kp.public_key);
+    let mut entry = MembershipEntry {
+        action: MembershipAction::Add,
+        user_pubkey: pk_hex.clone(),
+        role: MemberRole::Owner,
+        timestamp: timestamp.to_string(),
+        author_pubkey: pk_hex,
+        signature: String::new(),
+    };
+    sign_membership_entry(&mut entry, kp);
+    entry
+}
+
+/// A signed entry where `author` adds/removes `subject` with `role`.
+pub fn make_entry(
+    author: &UserKeypair,
+    action: MembershipAction,
+    subject: &UserKeypair,
+    role: MemberRole,
+    timestamp: &str,
+) -> MembershipEntry {
+    let mut entry = MembershipEntry {
+        action,
+        user_pubkey: hex::encode(subject.public_key),
+        role,
+        timestamp: timestamp.to_string(),
+        author_pubkey: hex::encode(author.public_key),
+        signature: String::new(),
+    };
+    sign_membership_entry(&mut entry, author);
+    entry
+}
+
 /// In-memory mock of SyncStorage for tests.
 /// Stores changesets as plaintext (no encryption in tests).
 pub struct MockSyncStorage {
@@ -163,19 +226,19 @@ impl MockSyncStorage {
             signature: None,
         };
         let packed = envelope::pack(&env, changeset_bytes);
-
-        let key = format!("changes/{device_id}/{seq}");
-        self.objects.lock().unwrap().insert(key, packed);
-        self.heads
-            .lock()
-            .unwrap()
-            .insert(device_id.to_string(), seq);
+        self.store_packed(device_id, seq, packed);
     }
 
     /// Store a pre-packed envelope (already signed/packed by the caller) and
     /// advance the device head. For tests that need a specific signature or
     /// envelope timestamp `store_changeset`'s synthetic envelope can't express.
     pub fn put_changeset_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
+        self.store_packed(device_id, seq, packed);
+    }
+
+    /// Insert packed envelope bytes at `changes/{device_id}/{seq}` and advance
+    /// the device head to `seq`.
+    fn store_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
         let key = format!("changes/{device_id}/{seq}");
         self.objects.lock().unwrap().insert(key, packed);
         self.heads

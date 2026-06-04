@@ -265,8 +265,8 @@ pub async unsafe fn pull_changes(
             // or Member *now*, not at some envelope-embedded timestamp. That
             // timestamp is author-signed and so spoofable; revocation is
             // enforced by the key rotation that `remove_member` performs (a
-            // removed member can no longer produce changesets the chain admits,
-            // because they lose the rotated library key and their auth key file).
+            // removed member cannot produce changesets the chain admits, because
+            // they lack the rotated library key and their auth key file).
             if let Some(chain) = membership_chain.as_ref() {
                 // A Follower is a read-only member, so a changeset it authored
                 // is rejected here even though it is registered — the logical
@@ -374,7 +374,18 @@ fn advance_max_updated_at(
 ) {
     for change in changes {
         let idx = schema.get(&change.table).updated_at;
-        let Some(raw) = change.col(idx) else { continue };
+        let Some(raw) = change.col(idx) else {
+            // A DELETE carries no new-state columns, and an absent value at the
+            // schema's `_updated_at` index means this row change has no stamp to
+            // advance past — expected for deletes, but a genuinely wrong index
+            // or a schema mismatch surfaces here as the same absence, so log it.
+            debug!(
+                table = %change.table,
+                updated_at_idx = idx,
+                "applied row change has no _updated_at value (DELETE or absent new-state column), not advancing HLC past it"
+            );
+            continue;
+        };
         match Timestamp::parse(raw) {
             Some(ts) => {
                 if max.as_ref().is_none_or(|cur| ts > *cur) {

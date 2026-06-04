@@ -58,7 +58,7 @@ unsigned envelopes — the chain check only fires once the chain is non-empty.
 Removing a member does not rely on a temporal replay of the chain. When an
 owner removes a member, coven rotates the library's symmetric key and re-wraps
 it for the remaining members; the removed member loses both the new key and
-their `auth/keys/{pubkey}` file. They can no longer produce a changeset the
+their `auth/keys/{pubkey}` file. A removed member cannot produce a changeset the
 chain admits, encrypt against the current key, or authenticate to the proxy.
 That key rotation — together with per-changeset signatures and the current-
 membership check above — is what enforces revocation.
