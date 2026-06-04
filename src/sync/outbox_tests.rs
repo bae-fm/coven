@@ -50,6 +50,9 @@ impl SyncBookkeeping for MockBookkeeping {
     async fn get_sync_state(&self, _key: &str) -> Result<Option<String>, DbError> {
         unimplemented!("not exercised by process_uploads")
     }
+    async fn max_synced_updated_at(&self) -> Result<Option<String>, DbError> {
+        unimplemented!("not exercised by process_uploads")
+    }
     async fn set_sync_state(&self, _key: &str, _value: &str) -> Result<(), DbError> {
         unimplemented!("not exercised by process_uploads")
     }

@@ -370,9 +370,12 @@ pub async unsafe fn run_single_sync_cycle(
     // Advance the HLC past every applied row's `_updated_at`, so the next local
     // stamp sorts causally after anything just pulled. The source is the max
     // applied-row `_updated_at` (a real HLC stamp), not the envelope/head
-    // timestamp — only the row register drives last-writer-wins.
+    // timestamp — only the row register drives last-writer-wins. This is an
+    // authoritative register value the LWW layer already wrote to disk, so the
+    // advance is unconditional (no skew cap): capping it could mint the next
+    // local stamp below an already-stored applied row and lose LWW to it.
     if let Some(max_applied) = &sync_result.pull.max_applied_updated_at {
-        hlc.update(max_applied);
+        hlc.advance_past(max_applied);
     }
 
     // Flush the clock's high-water mark so a restart re-seeds past it. This

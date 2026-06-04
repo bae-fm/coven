@@ -165,7 +165,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
             .max_applied_updated_at
             .expect("pull surfaced an applied _updated_at");
         assert_eq!(max_applied.to_string(), a_stamp);
-        b_hlc.update(&max_applied);
+        b_hlc.advance_past(&max_applied);
 
         // B now edits the same row. Its stamp must sort after A's despite B's
         // wall clock (1_000) being far behind A's (9_000).
@@ -331,10 +331,22 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
 }
 
 /// A minimal in-memory `SyncDb` for exercising `SyncManager::new`'s seed read.
-/// Only `get_sync_state` is wired meaningfully; the rest is unreachable on the
-/// construction path under test.
+/// `get_sync_state` and `max_synced_updated_at` are wired meaningfully; the rest
+/// is unreachable on the construction path under test.
 struct FakeSyncDb {
     state: Mutex<HashMap<String, String>>,
+    /// The lexicographic MAX `_updated_at` across the host's synced tables, as
+    /// `max_synced_updated_at` would return it. `None` means no synced rows.
+    max_synced: Option<String>,
+}
+
+impl FakeSyncDb {
+    fn new(state: HashMap<String, String>, max_synced: Option<String>) -> Self {
+        Self {
+            state: Mutex::new(state),
+            max_synced,
+        }
+    }
 }
 
 #[async_trait]
@@ -348,6 +360,9 @@ impl SyncBookkeeping for FakeSyncDb {
             .unwrap()
             .insert(key.to_string(), value.to_string());
         Ok(())
+    }
+    async fn max_synced_updated_at(&self) -> Result<Option<String>, DbError> {
+        Ok(self.max_synced.clone())
     }
     async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {
         Ok(HashMap::new())
@@ -384,26 +399,16 @@ impl RawDbHandle for FakeSyncDb {
     }
 }
 
-/// `SyncManager::new` seeds the register from the persisted high-water mark, so
-/// the very first host stamp after a restart does not regress below existing
-/// rows — without starting sync.
-#[tokio::test]
-async fn manager_new_seeds_register_from_persisted_high_water() {
+/// Build a `SyncManager` over `db` for the construction-path seed tests. Sync is
+/// never started; only the seed read on `new` runs.
+async fn build_manager_over(
+    db: std::sync::Arc<FakeSyncDb>,
+) -> crate::sync::sync_manager::SyncManager {
     use crate::clock::SystemClock;
     use crate::config::Config;
     use crate::encryption::EncryptionService;
     use crate::keys::KeyService;
     use std::sync::Arc;
-
-    // A high-water mark far ahead of any plausible current wall millis, so a
-    // freshly minted (unseeded) stamp would sort *below* it.
-    let high = "9999999999000-0007-dev-a";
-    let db = Arc::new(FakeSyncDb {
-        state: Mutex::new(HashMap::from([(
-            HIGHWATER_STATE_KEY.to_string(),
-            high.to_string(),
-        )])),
-    });
 
     let config_provider = {
         // The library dir is never read on the construction path under test.
@@ -417,7 +422,7 @@ async fn manager_new_seeds_register_from_persisted_high_water() {
         Arc::new(move || (*config).clone()) as crate::sync::sync_manager::ConfigProvider
     };
 
-    let manager = crate::sync::sync_manager::SyncManager::new(
+    crate::sync::sync_manager::SyncManager::new(
         config_provider,
         KeyService::new(true, "test-lib".to_string()),
         EncryptionService::new_with_key(&[3u8; 32]),
@@ -427,11 +432,53 @@ async fn manager_new_seeds_register_from_persisted_high_water() {
         None,
     )
     .await
-    .expect("manager construction");
+    .expect("manager construction")
+}
+
+/// `SyncManager::new` seeds the register from the persisted high-water mark, so
+/// the very first host stamp after a restart does not regress below existing
+/// rows — without starting sync.
+#[tokio::test]
+async fn manager_new_seeds_register_from_persisted_high_water() {
+    // A high-water mark far ahead of any plausible current wall millis, so a
+    // freshly minted (unseeded) stamp would sort *below* it.
+    let high = "9999999999000-0007-dev-a";
+    let db = std::sync::Arc::new(FakeSyncDb::new(
+        HashMap::from([(HIGHWATER_STATE_KEY.to_string(), high.to_string())]),
+        None,
+    ));
+
+    let manager = build_manager_over(db).await;
 
     let stamp = manager.stamp_updated_at();
     assert!(
         stamp.as_str() > high,
         "first stamp {stamp} must sort after the seeded high-water {high}",
+    );
+}
+
+/// The on-disk register is the authoritative seed floor — not just the flushed
+/// high-water mark. Local stamps minted between cycles are written to synced-row
+/// `_updated_at` but the high-water flush happens only at cycle end, so on an
+/// offline restart the persisted high-water can lag the device's own rows. The
+/// clock must seed from `max(persisted high-water, max_synced_updated_at)`, or
+/// the first post-restart stamp sorts below the device's own un-flushed rows and
+/// loses LWW to them — self-data-loss. Here the high-water mark is absent (never
+/// flushed) while a synced row sits far in the future.
+#[tokio::test]
+async fn manager_new_seeds_register_from_on_disk_rows_above_high_water() {
+    // No persisted high-water (never flushed), but a synced row exists far ahead
+    // of any plausible wall millis. Seeding from high-water alone would leave the
+    // clock unseeded and mint a stamp below this row.
+    let row_stamp = "9999999999000-0011-dev-a";
+    let db = std::sync::Arc::new(FakeSyncDb::new(HashMap::new(), Some(row_stamp.to_string())));
+
+    let manager = build_manager_over(db).await;
+
+    let stamp = manager.stamp_updated_at();
+    assert!(
+        stamp.as_str() > row_stamp,
+        "first stamp {stamp} must sort after the on-disk row {row_stamp}; \
+         seeding from the flushed high-water alone misses un-flushed local rows",
     );
 }

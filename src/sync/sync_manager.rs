@@ -68,12 +68,20 @@ pub struct SyncStatus {
 }
 
 impl SyncManager {
-    /// Build the manager, seeding the `_updated_at` register from the persisted
-    /// high-water mark so it cannot regress across restarts.
+    /// Build the manager, seeding the `_updated_at` register so it cannot mint a
+    /// stamp behind a value already on disk across a restart.
     ///
-    /// Construction reads `sync_state` (the seed); a read or parse error is
-    /// surfaced rather than swallowed — starting with an unseeded clock could
-    /// mint stamps behind existing rows and silently lose merges.
+    /// The seed floor is `max(persisted high-water, max synced-row
+    /// `_updated_at`)`. The flushed high-water mark covers envelope/membership
+    /// stamps but lags any local row stamp minted between cycles (it's flushed
+    /// only at cycle end); the on-disk row scan is the register's own ground
+    /// truth, immune to flush timing. [`Hlc::seed`] is monotonic, so seeding
+    /// from each candidate in turn lands on their max.
+    ///
+    /// Both reads run on construction; a read or parse error is surfaced rather
+    /// than swallowed — starting with an unseeded clock could mint stamps behind
+    /// existing rows and silently lose merges. An absent value (fresh library)
+    /// is distinct from a failure and simply contributes no floor.
     pub async fn new(
         config_provider: ConfigProvider,
         key_service: KeyService,
@@ -94,6 +102,16 @@ impl SyncManager {
             let high_water = Timestamp::parse(&stored)
                 .ok_or_else(|| format!("Corrupt HLC high-water mark in sync_state: {stored:?}"))?;
             hlc.seed(&high_water);
+        }
+
+        if let Some(max_row) = db
+            .max_synced_updated_at()
+            .await
+            .map_err(|e| format!("Failed to read max synced `_updated_at`: {e}"))?
+        {
+            let row_floor = Timestamp::parse(&max_row)
+                .ok_or_else(|| format!("Corrupt `_updated_at` in synced tables: {max_row:?}"))?;
+            hlc.seed(&row_floor);
         }
 
         Ok(Self {

@@ -13,9 +13,14 @@
 /// `_updated_at` is opaque to the host: it binds the string coven hands it and
 /// never parses it. Format (coven-internal): `{millis:013}-{counter:04}-{device_id}`.
 ///
-/// The in-memory monotonic state is seeded from a persisted high-water mark on
-/// construction ([`Hlc::seed`]) so it cannot regress across restarts; the
-/// caller persists [`Hlc::high_water`] whenever the clock advances.
+/// The in-memory monotonic state is seeded on construction ([`Hlc::seed`]) so
+/// it cannot regress across restarts. The seed floor is the max of two sources:
+/// the persisted high-water mark ([`Hlc::high_water`], flushed at cycle end) and
+/// the max `_updated_at` across the host's synced tables
+/// ([`crate::db::SyncBookkeeping::max_synced_updated_at`]). The on-disk row scan
+/// is the authoritative floor — the high-water flush lags any local row stamp
+/// minted between cycles, so seeding from it alone could let the first
+/// post-restart stamp sort below the device's own un-flushed rows.
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,11 +28,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// cannot regress across restarts (see [`Hlc::seed`]). Written whenever the
 /// clock advances (host stamp flushed at cycle end, and on apply-merge).
 pub const HIGHWATER_STATE_KEY: &str = "hlc_highwater";
-
-/// Maximum allowed clock skew from a remote timestamp (24 hours in ms).
-/// If an incoming timestamp is more than this far ahead of local wall time,
-/// we accept it but don't advance our local clock past wall time.
-const MAX_CLOCK_DRIFT_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// A parsed HLC timestamp.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -143,41 +143,35 @@ impl Hlc {
         Timestamp::new(state.millis, state.counter, self.device_id.clone())
     }
 
-    /// Merge with a remote timestamp. Advances the local clock to maintain
-    /// the "happened after" relationship. Returns the new local timestamp.
+    /// Advance the clock past an applied row's `_updated_at`, so the next local
+    /// stamp sorts causally after it. `remote` is an authoritative register
+    /// value the LWW layer already accepted and wrote to disk — never an
+    /// untrusted peer wall clock — so the advance is **unconditional**: no skew
+    /// cap. Capping here would let the next local edit mint a stamp below an
+    /// already-stored applied row and lose LWW to it.
     ///
-    /// Implements a clock skew guard: if the remote's wall time is more than
-    /// 24 hours ahead of local wall time, we accept the remote but don't
-    /// advance our physical clock past local wall time.
-    pub fn update(&self, remote: &Timestamp) -> Timestamp {
+    /// Monotonic: a `remote` at or behind the current state only bumps the
+    /// counter; a `remote` ahead adopts its time. Either way the next [`now`]
+    /// outranks `remote`.
+    pub fn advance_past(&self, remote: &Timestamp) {
         let wall = (self.wall_clock)();
         let mut state = self.state.lock().unwrap();
 
-        let remote_millis = if remote.millis > wall + MAX_CLOCK_DRIFT_MS {
-            // Remote clock is unreasonably far ahead. Don't let it pull us
-            // into the future -- use our wall clock instead.
-            wall
-        } else {
-            remote.millis
-        };
-
-        if wall > state.millis && wall > remote_millis {
-            // Wall clock is ahead of both local and remote: reset counter.
+        if wall > state.millis && wall > remote.millis {
+            // Wall clock is ahead of both: adopt it, reset counter.
             state.millis = wall;
             state.counter = 0;
-        } else if remote_millis > state.millis {
+        } else if remote.millis > state.millis {
             // Remote is ahead of local: adopt remote's time, increment counter.
-            state.millis = remote_millis;
+            state.millis = remote.millis;
             state.counter = remote.counter + 1;
-        } else if state.millis > remote_millis {
+        } else if state.millis > remote.millis {
             // Local is ahead: keep local time, increment counter.
             state.counter += 1;
         } else {
             // Same millis: take the higher counter + 1.
             state.counter = state.counter.max(remote.counter) + 1;
         }
-
-        Timestamp::new(state.millis, state.counter, self.device_id.clone())
     }
 
     #[cfg(test)]
@@ -273,79 +267,67 @@ mod tests {
     }
 
     #[test]
-    fn merge_with_remote_ahead() {
+    fn advance_past_remote_ahead() {
         let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
 
-        // Local clock is at 1000. Remote is at 5000.
+        // Local clock is at 1000. Applied row stamp is at 5000.
         let remote = Timestamp::new(5000, 3, "dev-remote".into());
-        let t = hlc.update(&remote);
+        hlc.advance_past(&remote);
 
+        // The next stamp must sort strictly after the applied row.
+        let t = hlc.now();
+        assert!(
+            t.to_string() > remote.to_string(),
+            "t={t} must beat {remote}"
+        );
         assert_eq!(t.millis, 5000);
-        assert_eq!(t.counter, 4); // remote counter + 1
         assert_eq!(t.device_id, "dev-local");
-
-        // Subsequent now() should still be >= the merged timestamp.
-        let t2 = hlc.now();
-        assert!(t2 > t, "t2={t2} should be > t={t}");
     }
 
     #[test]
-    fn merge_with_remote_behind() {
+    fn advance_past_remote_behind() {
         let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(5000));
 
-        // Prime the local clock.
-        hlc.now();
+        // Prime the local clock to 5000.
+        let primed = hlc.now();
 
-        // Remote is behind.
+        // An applied row stamp that's behind must not regress the clock.
         let remote = Timestamp::new(1000, 10, "dev-remote".into());
-        let t = hlc.update(&remote);
+        hlc.advance_past(&remote);
 
-        // Local millis should stay at 5000 (ahead), counter increments.
+        let t = hlc.now();
+        assert!(
+            t > primed,
+            "t={t} must stay above the primed clock {primed}"
+        );
         assert_eq!(t.millis, 5000);
-        assert_eq!(t.counter, 1); // was 0, now incremented
-        assert_eq!(t.device_id, "dev-local");
     }
 
+    /// The register-floor guarantee: an applied row's `_updated_at` is an
+    /// authoritative value the LWW layer already wrote to disk, not an untrusted
+    /// peer wall clock. The clock must advance past it *unconditionally* — even
+    /// when it sits far beyond local wall time — or the next local stamp sorts
+    /// below an already-stored row and loses LWW to it. (The deleted 24h skew
+    /// guard capped exactly this case to wall time.)
     #[test]
-    fn merge_with_same_millis() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(3000));
-
-        // Prime: millis=3000, counter=0.
-        hlc.now();
-
-        // Remote also at 3000 but with counter=5.
-        let remote = Timestamp::new(3000, 5, "dev-remote".into());
-        let t = hlc.update(&remote);
-
-        assert_eq!(t.millis, 3000);
-        // max(local_counter=0, remote_counter=5) + 1 = 6
-        assert_eq!(t.counter, 6);
-    }
-
-    #[test]
-    fn clock_skew_guard_rejects_far_future() {
+    fn advance_past_far_future_applied_row_is_not_capped() {
         let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
 
-        // Remote claims a time 48 hours in the future -- beyond the 24h guard.
-        let far_future = 1000 + MAX_CLOCK_DRIFT_MS + 1;
-        let remote = Timestamp::new(far_future, 0, "dev-remote".into());
-        let t = hlc.update(&remote);
+        // An applied row stamped 48 hours beyond local wall — well past the old
+        // 24h cap.
+        let far_future = 1000 + 48 * 60 * 60 * 1000;
+        let applied = Timestamp::new(far_future, 7, "dev-remote".into());
+        hlc.advance_past(&applied);
 
-        // Should NOT adopt the far-future millis. Should use wall clock instead.
-        assert_eq!(t.millis, 1000);
-    }
-
-    #[test]
-    fn clock_skew_guard_accepts_near_future() {
-        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
-
-        // Remote is 1 hour ahead -- within the 24h guard.
-        let near_future = 1000 + 60 * 60 * 1000;
-        let remote = Timestamp::new(near_future, 0, "dev-remote".into());
-        let t = hlc.update(&remote);
-
-        // Should adopt the near-future millis.
-        assert_eq!(t.millis, near_future);
+        // The next local stamp must sort *after* the applied row, not be capped
+        // back to wall time (1000) where it would sort below it.
+        let next = hlc.now();
+        assert!(
+            next.to_string() > applied.to_string(),
+            "next stamp {next} regressed below applied row {applied}: the clock \
+             refused to advance past an authoritative register value",
+        );
+        assert_eq!(next.millis, far_future);
     }
 
     #[test]
