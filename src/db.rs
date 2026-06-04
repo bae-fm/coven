@@ -93,15 +93,6 @@ pub trait SyncBookkeeping: Send + Sync {
     /// Read a value from `sync_state` by key.
     async fn get_sync_state(&self, key: &str) -> Result<Option<String>, DbError>;
 
-    /// The lexicographic `MAX(_updated_at)` across all of the host's synced
-    /// tables, or `None` when no synced rows exist. coven seeds its
-    /// `_updated_at` register from this on construction so the clock cannot mint
-    /// a stamp behind a row already on disk — even one whose stamp was minted
-    /// between sync cycles and so never reached the flushed high-water mark. The
-    /// host runs `SELECT MAX(_updated_at) FROM <table>` across its synced tables
-    /// and returns the overall max (coven imposes no SQLite driver).
-    async fn max_synced_updated_at(&self) -> Result<Option<String>, DbError>;
-
     /// Write a value to `sync_state`.
     async fn set_sync_state(&self, key: &str, value: &str) -> Result<(), DbError>;
 

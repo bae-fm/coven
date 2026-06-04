@@ -330,22 +330,55 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     }
 }
 
-/// A minimal in-memory `SyncDb` for exercising `SyncManager::new`'s seed read.
-/// `get_sync_state` and `max_synced_updated_at` are wired meaningfully; the rest
-/// is unreachable on the construction path under test.
+/// A real-sqlite-backed `SyncDb` for exercising `SyncManager::new`'s seed read.
+/// `get_sync_state` is an in-memory map; `raw_write_handle` returns a live
+/// in-memory connection carrying the synced schema (and any seeded rows), so the
+/// register-floor scan runs its real FFI path against actual `_updated_at` rows
+/// rather than a hand-returned max. The remaining bookkeeping is unreachable on
+/// the construction path under test.
+/// The fake's live connection pointer. `SyncBookkeeping: Send + Sync` requires
+/// the fake be both; access is serialized by the single-threaded test, so this
+/// is sound here.
+struct ConnPtr(*mut ffi::sqlite3);
+unsafe impl Send for ConnPtr {}
+unsafe impl Sync for ConnPtr {}
+
 struct FakeSyncDb {
     state: Mutex<HashMap<String, String>>,
-    /// The lexicographic MAX `_updated_at` across the host's synced tables, as
-    /// `max_synced_updated_at` would return it. `None` means no synced rows.
-    max_synced: Option<String>,
+    /// A live in-memory sqlite connection with the synced schema. The scan in
+    /// `SyncManager::new` prepares/steps `SELECT MAX(_updated_at)` against this.
+    db: ConnPtr,
 }
 
 impl FakeSyncDb {
-    fn new(state: HashMap<String, String>, max_synced: Option<String>) -> Self {
+    /// Build over a fresh in-memory DB with the synced schema, inserting a `notes`
+    /// row at each of `row_stamps` so the scan sees real on-disk `_updated_at`
+    /// values. Pass an empty slice for a schema with no synced rows.
+    fn new(state: HashMap<String, String>, row_stamps: &[&str]) -> Self {
+        let db = unsafe {
+            let db = open_memory_db();
+            create_synced_schema(db);
+            for (i, stamp) in row_stamps.iter().enumerate() {
+                exec(
+                    db,
+                    &format!(
+                        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                         VALUES ('n{i}', 'row {i}', NULL, '{stamp}', '2026-01-01')"
+                    ),
+                );
+            }
+            db
+        };
         Self {
             state: Mutex::new(state),
-            max_synced,
+            db: ConnPtr(db),
         }
+    }
+}
+
+impl Drop for FakeSyncDb {
+    fn drop(&mut self) {
+        unsafe { ffi::sqlite3_close(self.db.0) };
     }
 }
 
@@ -360,9 +393,6 @@ impl SyncBookkeeping for FakeSyncDb {
             .unwrap()
             .insert(key.to_string(), value.to_string());
         Ok(())
-    }
-    async fn max_synced_updated_at(&self) -> Result<Option<String>, DbError> {
-        Ok(self.max_synced.clone())
     }
     async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {
         Ok(HashMap::new())
@@ -395,7 +425,7 @@ impl SyncBookkeeping for FakeSyncDb {
 #[async_trait]
 impl RawDbHandle for FakeSyncDb {
     async fn raw_write_handle(&self) -> Result<*mut libsqlite3_sys::sqlite3, DbError> {
-        Err(DbError("not used on the construction path".into()))
+        Ok(self.db.0)
     }
 }
 
@@ -440,12 +470,14 @@ async fn build_manager_over(
 /// rows — without starting sync.
 #[tokio::test]
 async fn manager_new_seeds_register_from_persisted_high_water() {
+    init_synced_tables();
     // A high-water mark far ahead of any plausible current wall millis, so a
-    // freshly minted (unseeded) stamp would sort *below* it.
+    // freshly minted (unseeded) stamp would sort *below* it. No synced rows on
+    // disk, so the high-water mark is the only floor.
     let high = "9999999999000-0007-dev-a";
     let db = std::sync::Arc::new(FakeSyncDb::new(
         HashMap::from([(HIGHWATER_STATE_KEY.to_string(), high.to_string())]),
-        None,
+        &[],
     ));
 
     let manager = build_manager_over(db).await;
@@ -461,17 +493,23 @@ async fn manager_new_seeds_register_from_persisted_high_water() {
 /// high-water mark. Local stamps minted between cycles are written to synced-row
 /// `_updated_at` but the high-water flush happens only at cycle end, so on an
 /// offline restart the persisted high-water can lag the device's own rows. The
-/// clock must seed from `max(persisted high-water, max_synced_updated_at)`, or
+/// clock must seed from `max(persisted high-water, on-disk MAX(_updated_at))`, or
 /// the first post-restart stamp sorts below the device's own un-flushed rows and
-/// loses LWW to them — self-data-loss. Here the high-water mark is absent (never
-/// flushed) while a synced row sits far in the future.
+/// loses LWW to them — self-data-loss.
+///
+/// This drives the real seeding path: a real `notes` row carrying a far-future
+/// `_updated_at` sits in coven's in-memory test DB, and `SyncManager::new` runs
+/// its own raw-handle `SELECT MAX(_updated_at)` scan over it (no host-supplied
+/// max). Removing that scan from `new` makes the clock seed only from the absent
+/// high-water mark and mint a stamp below the row — so this fails.
 #[tokio::test]
 async fn manager_new_seeds_register_from_on_disk_rows_above_high_water() {
+    init_synced_tables();
     // No persisted high-water (never flushed), but a synced row exists far ahead
     // of any plausible wall millis. Seeding from high-water alone would leave the
     // clock unseeded and mint a stamp below this row.
     let row_stamp = "9999999999000-0011-dev-a";
-    let db = std::sync::Arc::new(FakeSyncDb::new(HashMap::new(), Some(row_stamp.to_string())));
+    let db = std::sync::Arc::new(FakeSyncDb::new(HashMap::new(), &[row_stamp]));
 
     let manager = build_manager_over(db).await;
 

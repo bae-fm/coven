@@ -21,17 +21,18 @@
 //!   bearing — pull authorizes by signature and current write-capable
 //!   membership, and revocation is enforced by key rotation.
 //! - The host applies [`db::MIGRATION_SQL`] to create coven's bookkeeping tables
-//!   and implements [`db::SyncBookkeeping`] + [`db::RawDbHandle`]. Because coven
-//!   imposes no SQLite driver, [`db::SyncBookkeeping::max_synced_updated_at`]
-//!   has the host run `SELECT MAX(_updated_at)` across its synced tables;
-//!   coven seeds its `_updated_at` register from this on construction so a
-//!   restart cannot mint a stamp behind a row already on disk — including one
-//!   whose stamp was minted between sync cycles and so never reached the
-//!   flushed high-water mark.
+//!   and implements [`db::SyncBookkeeping`] + [`db::RawDbHandle`].
 //! - The host registers the synced-table list at startup via
 //!   [`sync::session::set_synced_tables`] (required — [`sync::cycle::init_sync`]
-//!   aborts if it's empty), and supplies a [`blob::BlobPlan`] and an optional
-//!   [`blob::BlobUploadObserver`].
+//!   aborts if it's empty) **before constructing
+//!   [`sync::sync_manager::SyncManager`]**, and supplies a [`blob::BlobPlan`] and
+//!   an optional [`blob::BlobUploadObserver`]. Registration must precede
+//!   construction because `SyncManager::new` scans `MAX(_updated_at)` across the
+//!   registered synced tables (via the raw write handle) to seed the register
+//!   floor — so a restart cannot mint a stamp behind a row already on disk,
+//!   including one whose stamp never reached the flushed high-water mark between
+//!   cycles. coven derives this floor itself; the host implements no
+//!   `MAX(_updated_at)` query.
 
 pub mod blob;
 pub mod changeset;

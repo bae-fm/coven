@@ -16,11 +16,11 @@
 /// The in-memory monotonic state is seeded on construction ([`Hlc::seed`]) so
 /// it cannot regress across restarts. The seed floor is the max of two sources:
 /// the persisted high-water mark ([`Hlc::high_water`], flushed at cycle end) and
-/// the max `_updated_at` across the host's synced tables
-/// ([`crate::db::SyncBookkeeping::max_synced_updated_at`]). The on-disk row scan
-/// is the authoritative floor — the high-water flush lags any local row stamp
-/// minted between cycles, so seeding from it alone could let the first
-/// post-restart stamp sort below the device's own un-flushed rows.
+/// the max `_updated_at` coven scans across its registered synced tables in
+/// [`crate::sync::sync_manager::SyncManager::new`]. The on-disk row scan is the
+/// authoritative floor — the high-water flush lags any local row stamp minted
+/// between cycles, so seeding from it alone could let the first post-restart
+/// stamp sort below the device's own un-flushed rows.
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
