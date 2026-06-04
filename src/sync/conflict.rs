@@ -5,10 +5,6 @@
 ///
 /// The `_updated_at` column index is looked up dynamically from the schema
 /// (via `TableSchema`) so adding columns to the end of a table is safe.
-///
-/// For `release_files`, the `encryption_nonce` column is device-specific.
-/// When incoming wins a DATA conflict on that table, the row ID is recorded
-/// so the caller can restore the local value afterward.
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
@@ -91,9 +87,6 @@ impl TableSchema {
 pub struct ConflictTracker {
     /// True if any FK constraint violations were reported.
     pub had_constraint_conflict: bool,
-    /// Row IDs in `release_files` where incoming won a DATA conflict and
-    /// device-specific columns need to be restored afterward.
-    pub release_file_restore_ids: Vec<String>,
 }
 
 impl ConflictTracker {
@@ -106,8 +99,6 @@ impl ConflictTracker {
 ///
 /// Rules:
 /// - **DATA** (same row, both sides edited): compare `_updated_at`. Newer wins.
-///   For `release_files`, records the row ID so device-specific columns can
-///   be restored by the caller.
 /// - **NOTFOUND** (row deleted locally, incoming UPDATE): OMIT (delete wins).
 /// - **CONFLICT** (row exists, incoming INSERT): compare `_updated_at`. Newer wins.
 /// - **CONSTRAINT** (FK violation): OMIT and track for retry.
@@ -127,17 +118,7 @@ pub fn lww_conflict_handler(
             let local = ctx.conflict_value(cols.updated_at);
 
             match (incoming.as_deref(), local.as_deref()) {
-                (Some(inc), Some(loc)) if inc > loc => {
-                    // Incoming wins. For release_files, record the row ID
-                    // so device-specific columns can be restored after apply.
-                    if table == "release_files" {
-                        if let Some(row_id) = ctx.conflict_value(0) {
-                            tracker.release_file_restore_ids.push(row_id);
-                        }
-                    }
-
-                    ConflictAction::Replace
-                }
+                (Some(inc), Some(loc)) if inc > loc => ConflictAction::Replace,
                 (Some(_), Some(_)) => ConflictAction::Omit,
                 _ => {
                     warn!(
