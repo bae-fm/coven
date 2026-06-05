@@ -171,21 +171,29 @@ pub fn ed25519_to_x25519_public_key(
 /// happen lazily in `get_*` methods, because the macOS protected keyring
 /// triggers a system password prompt.
 ///
-/// Keyring service name — the host app's identity (e.g. "visible"), used as the
-/// first namespace component of every keyring entry. Set once at startup via
-/// [`set_keyring_service`]; defaults to "coven". Mirrors keyring_core's own
-/// process-global default store, which this design already relies on.
+/// Keyring service name: the host app's identity, used as the first namespace
+/// component of every keyring entry. The host sets it once at startup via
+/// [`set_keyring_service`]. It is required, not defaulted: a machine can run
+/// more than one coven-based app, and every key entry must live under the app
+/// that owns it so two apps never read or overwrite each other's keys.
 static KEYRING_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// Set the keyring service name. Call once at startup, before any keyring access.
+/// Set the keyring service name to the host app's identity. Call once at
+/// startup, before any keyring access. Required: see [`keyring_service`].
 pub fn set_keyring_service(name: impl Into<String>) {
     let _ = KEYRING_SERVICE.set(name.into());
 }
 
-/// The configured keyring service name (see [`set_keyring_service`]). Public so
-/// host apps store their own credentials under the same service.
+/// The keyring service name (see [`set_keyring_service`]). Public so host apps
+/// store their own credentials under the same service. Panics if the host has
+/// not set it: namespacing every key entry under the host app is the only thing
+/// that keeps multiple coven-based apps on one machine from colliding, so there
+/// is no safe default to fall back to.
 pub fn keyring_service() -> &'static str {
-    KEYRING_SERVICE.get().map(String::as_str).unwrap_or("coven")
+    KEYRING_SERVICE
+        .get()
+        .map(String::as_str)
+        .expect("set_keyring_service(host_app_identity) must be called once at startup")
 }
 
 /// Read a keyring password by account name, distinguishing "not set"
@@ -440,12 +448,14 @@ pub(crate) mod test_keyring {
     /// be serialized.
     pub(crate) static SIGNING_KEY_GUARD: Mutex<()> = Mutex::new(());
 
-    /// Install the in-memory keyring store as the process default (once).
+    /// Install the in-memory keyring store as the process default and set a
+    /// keyring service (the host app's job in production), once.
     pub(crate) fn install() {
         INSTALL.call_once(|| {
             keyring_core::set_default_store(
                 keyring_core::mock::Store::new().expect("create mock keyring store"),
             );
+            super::set_keyring_service("coven-tests");
         });
     }
 }
