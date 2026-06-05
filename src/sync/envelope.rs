@@ -251,15 +251,17 @@ mod tests {
 
     // ---- Signing tests ----
 
-    /// Combined test for signing operations. Uses a single KeyService call
-    /// because env vars are process-global and parallel tests race.
+    /// Combined test for signing operations. Holds the global signing-key guard
+    /// because the user keypair is one process-wide keyring account and parallel
+    /// tests would otherwise race on it.
     #[test]
     fn changeset_signing() {
-        // Clear env to avoid interference from other tests.
-        std::env::remove_var("BAE_USER_SIGNING_KEY");
-        std::env::remove_var("BAE_USER_PUBLIC_KEY");
+        crate::keys::test_keyring::install();
+        let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let ks = KeyService::new(true, "test-signing".to_string());
+        let ks = KeyService::new("test-signing".to_string());
+        // Start from a clean global signing-key account.
+        let _ = ks.delete_user_keypair_for_test();
         let keypair = ks.get_or_create_user_keypair().unwrap();
 
         let changeset_bytes = b"some changeset payload";
@@ -318,8 +320,7 @@ mod tests {
         bad_pk_env.author_pubkey = Some(hex::encode([0u8; 16])); // 16 bytes, not 32
         assert!(!verify_changeset_signature(&bad_pk_env, changeset_bytes));
 
-        // Clean up
-        std::env::remove_var("BAE_USER_SIGNING_KEY");
-        std::env::remove_var("BAE_USER_PUBLIC_KEY");
+        // Clean up the shared global account.
+        let _ = ks.delete_user_keypair_for_test();
     }
 }

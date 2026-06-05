@@ -278,8 +278,8 @@ pub async fn authorize(
                         include_str!("oauth_success.html")
                             .replace("Authorization complete", "Authorization denied")
                             .replace(
-                                "You can close this window and return to bae.",
-                                "Authorization was denied. You can close this window and try again in bae.",
+                                "You can close this window and return to the app.",
+                                "Authorization was denied. You can close this window and try again in the app.",
                             )
                     } else {
                         include_str!("oauth_success.html").to_string()

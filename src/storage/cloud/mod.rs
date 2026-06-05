@@ -108,7 +108,7 @@ pub trait CloudHome: Send + Sync {
     /// a sentinel prefix — backends override with cheaper provider-specific
     /// auth checks (e.g. S3 HeadBucket) where available.
     async fn probe(&self) -> Result<(), CloudHomeError> {
-        self.list("__bae_probe__").await.map(drop)
+        self.list("__coven_probe__").await.map(drop)
     }
 
     /// Write bytes to a key, creating or overwriting. `progress` is called with
@@ -282,7 +282,8 @@ pub async fn create_cloud_home(
             Ok(Box::new(http::HttpCloudHome::new(url, keypair, clock)))
         }
         Some(CloudProvider::CloudKit) => Err(CloudHomeError::Storage(
-            "CloudKit requires the native Swift driver; construct via bae-bridge".to_string(),
+            "CloudKit requires the native Swift driver; construct via the host's Swift layer"
+                .to_string(),
         )),
     }
 }

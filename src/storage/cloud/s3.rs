@@ -31,7 +31,8 @@ impl S3CloudHome {
         secret_key: String,
         key_prefix: Option<String>,
     ) -> Result<Self, CloudHomeError> {
-        let credentials = Credentials::new(&access_key, &secret_key, None, None, "bae-cloud-home");
+        let credentials =
+            Credentials::new(&access_key, &secret_key, None, None, "coven-cloud-home");
 
         // aws-config has default-features disabled, so the SDK won't auto-bundle
         // an HTTP client. Plug in the rustls-ring smithy client explicitly.
@@ -490,8 +491,8 @@ mod tests {
     // ── probe() against a real S3 endpoint ──────────────────────────────
     //
     // These tests require a minio (or any S3-compatible server) reachable at
-    // `BAE_TEST_S3_URL` (default http://localhost:19000) with credentials
-    // `BAE_TEST_S3_KEY` / `BAE_TEST_S3_SECRET` (default minioadmin / minioadmin).
+    // `COVEN_TEST_S3_URL` (default http://localhost:19000) with credentials
+    // `COVEN_TEST_S3_KEY` / `COVEN_TEST_S3_SECRET` (default minioadmin / minioadmin).
     // Marked `#[ignore]` so `cargo test` skips them; run with
     // `cargo test -- --ignored` when an endpoint is available.
 
@@ -516,9 +517,9 @@ mod tests {
 
     fn test_creds() -> TestCreds {
         TestCreds {
-            endpoint: test_env("BAE_TEST_S3_URL", "http://localhost:19000"),
-            access_key: test_env("BAE_TEST_S3_KEY", "baetest"),
-            secret_key: test_env("BAE_TEST_S3_SECRET", "baetestpass"),
+            endpoint: test_env("COVEN_TEST_S3_URL", "http://localhost:19000"),
+            access_key: test_env("COVEN_TEST_S3_KEY", "coventest"),
+            secret_key: test_env("COVEN_TEST_S3_SECRET", "coventestpass"),
         }
     }
 
@@ -536,7 +537,7 @@ mod tests {
     #[ignore]
     async fn probe_succeeds_against_existing_bucket() {
         let creds = test_creds();
-        let bucket = format!("bae-probe-ok-{}", uuid::Uuid::new_v4());
+        let bucket = format!("coven-probe-ok-{}", uuid::Uuid::new_v4());
         let home = S3CloudHome::new(
             bucket,
             "us-east-1".to_string(),
@@ -555,7 +556,7 @@ mod tests {
     #[ignore]
     async fn probe_fails_for_missing_bucket() {
         let creds = test_creds();
-        let bucket = format!("bae-probe-missing-{}", uuid::Uuid::new_v4());
+        let bucket = format!("coven-probe-missing-{}", uuid::Uuid::new_v4());
         let home = S3CloudHome::new(
             bucket.clone(),
             "us-east-1".to_string(),
@@ -582,7 +583,7 @@ mod tests {
     #[ignore]
     async fn probe_fails_for_bad_secret_key() {
         let creds = test_creds();
-        let bucket = format!("bae-probe-badkey-{}", uuid::Uuid::new_v4());
+        let bucket = format!("coven-probe-badkey-{}", uuid::Uuid::new_v4());
         // Provision the bucket with the good creds so the only difference is the bad secret.
         let good = S3CloudHome::new(
             bucket.clone(),

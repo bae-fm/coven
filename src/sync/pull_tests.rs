@@ -357,13 +357,16 @@ mod schema_version_too_old_display {
     use crate::sync::pull::PullError;
 
     #[test]
-    fn names_bae_and_versions_and_recovery() {
+    fn names_app_and_versions_and_recovery() {
         let err = PullError::SchemaVersionTooOld {
             local_version: 3,
             min_version: 5,
         };
         let msg = err.to_string();
-        assert!(msg.contains("Update bae"), "missing recovery verb: {msg}");
+        assert!(
+            msg.contains("Update the app"),
+            "missing recovery verb: {msg}"
+        );
         assert!(msg.contains("v5"), "missing required version: {msg}");
         assert!(msg.contains("v3"), "missing current version: {msg}");
     }

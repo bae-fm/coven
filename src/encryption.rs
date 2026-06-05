@@ -356,12 +356,12 @@ impl EncryptionService {
         Ok(plaintext[offset_in_first_chunk..end].to_vec())
     }
 
-    /// Derive a per-release encryption service.
+    /// Derive a scoped encryption service.
     ///
-    /// Uses HKDF: master_key + "bae-release-v1:{release_id}" -> 32-byte key.
-    /// Deterministic: same master + release_id always gives the same key.
-    pub fn derive_scoped(&self, release_id: &str) -> EncryptionService {
-        let derived = self.derive_key(&format!("bae-release-v1:{release_id}"));
+    /// Uses HKDF: master_key + "coven-scope-v1:{scope_id}" -> 32-byte key.
+    /// Deterministic: same master + scope_id always gives the same key.
+    pub fn derive_scoped(&self, scope_id: &str) -> EncryptionService {
+        let derived = self.derive_key(&format!("coven-scope-v1:{scope_id}"));
         EncryptionService::from_key(derived)
     }
 
@@ -370,13 +370,13 @@ impl EncryptionService {
     /// The derivation is deterministic: same master key + same info string always
     /// produces the same derived key.
     ///
-    /// - Salt: `HMAC-SHA256(master_key, "bae-hkdf-salt-v1")`
+    /// - Salt: `HMAC-SHA256(master_key, "coven-hkdf-salt-v1")`
     /// - IKM: master key
     /// - Info: caller-provided label
     pub fn derive_key(&self, info: &str) -> [u8; 32] {
         let mut mac =
             <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC accepts any key length");
-        mac.update(b"bae-hkdf-salt-v1");
+        mac.update(b"coven-hkdf-salt-v1");
         let salt = mac.finalize().into_bytes();
 
         let hk = Hkdf::<Sha256>::new(Some(&salt), &self.key);

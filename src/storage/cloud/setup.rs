@@ -25,7 +25,7 @@ pub async fn sign_in_google_drive(
     let client = reqwest::Client::new();
 
     // Create or find the folder
-    let folder_name = format!("bae - {library_name}");
+    let folder_name = format!("your-app - {library_name}");
 
     let search_query = format!(
         "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
@@ -120,7 +120,7 @@ pub async fn sign_in_dropbox(
 
     let client = reqwest::Client::new();
 
-    let folder_path = format!("/Apps/bae/{library_name}");
+    let folder_path = format!("/Apps/your-app/{library_name}");
 
     // Create the folder (ignore error if it already exists)
     let create_body = serde_json::json!({
@@ -209,7 +209,7 @@ pub async fn sign_in_onedrive(
         ))
         .bearer_auth(&tokens.access_token)
         .json(&serde_json::json!({
-            "name": "bae",
+            "name": "your-app",
             "folder": {},
             "@microsoft.graph.conflictBehavior": "useExisting",
         }))

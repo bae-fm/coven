@@ -37,8 +37,7 @@ pub fn generate_join_request(
     needs_email: bool,
     email: String,
 ) -> Result<String, crate::keys::KeyError> {
-    let dev_mode = crate::config::Config::is_dev_mode();
-    let global_ks = crate::keys::KeyService::new(dev_mode, "global".to_string());
+    let global_ks = crate::keys::KeyService::new("global".to_string());
     let keypair = global_ks.get_or_create_user_keypair()?;
 
     let code = JoinRequestCode {

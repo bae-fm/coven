@@ -516,7 +516,7 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            KeyService::new(true, "test".to_string()),
+            KeyService::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         );
 
@@ -537,7 +537,7 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            KeyService::new(true, "test".to_string()),
+            KeyService::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         );
 

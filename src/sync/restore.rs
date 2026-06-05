@@ -92,7 +92,6 @@ impl From<JoinError> for RestoreError {
 async fn build_cloud_home(
     source: RestoreSource,
     library_id: &str,
-    dev_mode: bool,
     global_ks: &KeyService,
     clock: crate::clock::ClockRef,
 ) -> Result<(CloudHomeJoinInfo, Box<dyn CloudHome>), RestoreError> {
@@ -137,7 +136,7 @@ async fn build_cloud_home(
         }
 
         RestoreSource::GoogleDrive { folder_id, tokens } => {
-            let ks = KeyService::new(dev_mode, library_id.to_string());
+            let ks = KeyService::new(library_id.to_string());
             let home =
                 google_drive::GoogleDriveCloudHome::new(folder_id.clone(), tokens, ks, clock);
             let info = CloudHomeJoinInfo::GoogleDrive { folder_id };
@@ -148,7 +147,7 @@ async fn build_cloud_home(
             folder_path,
             tokens,
         } => {
-            let ks = KeyService::new(dev_mode, library_id.to_string());
+            let ks = KeyService::new(library_id.to_string());
             let home = dropbox::DropboxCloudHome::new(folder_path.clone(), tokens, ks, clock);
             let info = CloudHomeJoinInfo::Dropbox {
                 shared_folder_id: folder_path,
@@ -161,7 +160,7 @@ async fn build_cloud_home(
             folder_id,
             tokens,
         } => {
-            let ks = KeyService::new(dev_mode, library_id.to_string());
+            let ks = KeyService::new(library_id.to_string());
             let home = onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),
@@ -218,11 +217,9 @@ pub async fn restore_from_cloud(
         ));
     }
 
-    let dev_mode = Config::is_dev_mode();
-    let global_ks = KeyService::new(dev_mode, "global".to_string());
+    let global_ks = KeyService::new("global".to_string());
 
-    let (join_info, cloud_home) =
-        build_cloud_home(source, library_id, dev_mode, &global_ks, clock).await?;
+    let (join_info, cloud_home) = build_cloud_home(source, library_id, &global_ks, clock).await?;
 
     // Create encryption service from the user-provided key.
     on_status("Verifying encryption key...");
@@ -236,7 +233,7 @@ pub async fn restore_from_cloud(
     // The host's blob plan is bound to the library dir we just created.
     let blob_plan = make_blob_plan(&library_dir);
 
-    let key_service = KeyService::new(dev_mode, library_id.to_string());
+    let key_service = KeyService::new(library_id.to_string());
 
     let result = bootstrap_and_save(
         &storage,
@@ -358,8 +355,7 @@ pub async fn restore_from_code(
 
     // Import signing key after restore succeeds so we don't overwrite an existing
     // keypair if the restore fails.
-    let dev_mode = Config::is_dev_mode();
-    let global_ks = KeyService::new(dev_mode, "global".to_string());
+    let global_ks = KeyService::new("global".to_string());
     global_ks
         .import_user_keypair(&signing_key_bytes)
         .map_err(RestoreError::Key)?;

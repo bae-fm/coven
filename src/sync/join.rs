@@ -174,10 +174,9 @@ pub async fn join_from_invite_code(
     let code = crate::join_code::decode(invite_code_str)
         .map_err(|e| JoinError::Database(format!("Invalid invite code: {e}")))?;
 
-    let dev_mode = Config::is_dev_mode();
-    let global_ks = KeyService::new(dev_mode, "global".to_string());
+    let global_ks = KeyService::new("global".to_string());
     let keypair = global_ks.get_or_create_user_keypair()?;
-    let lib_ks = KeyService::new(dev_mode, code.library_id.clone());
+    let lib_ks = KeyService::new(code.library_id.clone());
 
     let cloud_home = build_cloud_home_for_join(
         &code.join_info,
@@ -211,7 +210,7 @@ pub async fn join_from_invite_code(
 ///
 /// `on_status` is called with progress messages for UI feedback.
 pub async fn join_library(
-    bae_dir: &Path,
+    data_dir: &Path,
     code: InviteCode,
     key_service: &KeyService,
     cloud_home: Box<dyn CloudHome>,
@@ -239,13 +238,13 @@ pub async fn join_library(
     // Step 4: Create library directory using the invite code's library_id.
     let library_id = code.library_id;
     let device_id = ids.new_id();
-    let library_dir = LibraryDir::new(bae_dir.join("libraries").join(&library_id));
+    let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
     std::fs::create_dir_all(&*library_dir)?;
     // The host's blob plan is bound to the library dir we just created.
     let blob_plan = make_blob_plan(&library_dir);
 
     // All steps after directory creation are wrapped so we can clean up on failure.
-    let new_key_service = KeyService::new(key_service.is_dev_mode(), library_id.clone());
+    let new_key_service = KeyService::new(library_id.clone());
 
     let result = bootstrap_and_save(
         &storage,

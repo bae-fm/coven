@@ -1,7 +1,7 @@
 //! Restore codes: single-string encoding of everything needed to restore a library from cloud.
 //!
 //! A restore code encodes the library ID, encryption key, cloud provider details, and
-//! credentials into a single base64url string prefixed with "bae:".
+//! credentials into a single base64url string prefixed with "coven:".
 //!
 //! The code contains secrets (encryption key, S3 credentials). OAuth tokens are NOT included
 //! because they expire -- the user re-authenticates on restore.
@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-const PREFIX: &str = "bae:";
+const PREFIX: &str = "coven:";
 
 /// Everything needed to restore a library from cloud storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +59,7 @@ pub enum RestoreProvider {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreCodeError {
-    #[error("That doesn't look like a bae restore code — it should start with \"bae:\".")]
+    #[error("That doesn't look like a coven restore code — it should start with \"coven:\".")]
     MissingPrefix,
     #[error(
         "The restore code is incomplete or has a typo. Check that you copied the entire code."
@@ -68,7 +68,7 @@ pub enum RestoreCodeError {
     #[error("The restore code is corrupted. Regenerate it on the source device. ({0})")]
     InvalidJson(String),
     #[error(
-        "This restore code was made with a newer version of bae (v{0}). Update bae to use it."
+        "This restore code was made with a newer version of the app (v{0}). Update the app to use it."
     )]
     UnsupportedVersion(u8),
 }
@@ -180,7 +180,7 @@ mod tests {
     fn roundtrip_s3() {
         let code = sample_s3_code();
         let encoded = encode_restore_code(&code);
-        assert!(encoded.starts_with("bae:"));
+        assert!(encoded.starts_with("coven:"));
 
         let decoded = decode_restore_code(&encoded).unwrap();
         assert_eq!(decoded.v, 1);
@@ -253,14 +253,14 @@ mod tests {
             ek: "dd".repeat(32),
             name: "Dropbox Library".to_string(),
             provider: RestoreProvider::Dropbox {
-                folder_path: "/Apps/bae/My Library".to_string(),
+                folder_path: "/Apps/your-app/My Library".to_string(),
             },
             sk: test_sk(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
             RestoreProvider::Dropbox { folder_path } => {
-                assert_eq!(folder_path, "/Apps/bae/My Library");
+                assert_eq!(folder_path, "/Apps/your-app/My Library");
             }
             _ => panic!("expected Dropbox provider"),
         }
@@ -293,21 +293,21 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_bae_cloud() {
+    fn roundtrip_http_proxy_cloud() {
         let code = RestoreCode {
             v: 1,
             lid: "lib-def".to_string(),
             ek: "ff".repeat(32),
             name: "Cloud Library".to_string(),
             provider: RestoreProvider::HttpProxy {
-                url: "https://cloud.bae.fm/lib/abc".to_string(),
+                url: "https://proxy.example.com/lib/abc".to_string(),
             },
             sk: test_sk(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
             RestoreProvider::HttpProxy { url } => {
-                assert_eq!(url, "https://cloud.bae.fm/lib/abc");
+                assert_eq!(url, "https://proxy.example.com/lib/abc");
             }
             _ => panic!("expected HttpProxy provider"),
         }
@@ -317,8 +317,8 @@ mod tests {
     fn missing_prefix() {
         let code = sample_s3_code();
         let encoded = encode_restore_code(&code);
-        // Strip the "bae:" prefix
-        let without_prefix = &encoded[4..];
+        // Strip the "coven:" prefix
+        let without_prefix = &encoded[PREFIX.len()..];
         assert!(matches!(
             decode_restore_code(without_prefix),
             Err(RestoreCodeError::MissingPrefix)
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn invalid_base64() {
         assert!(matches!(
-            decode_restore_code("bae:not-valid!!!"),
+            decode_restore_code("coven:not-valid!!!"),
             Err(RestoreCodeError::InvalidBase64)
         ));
     }
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn invalid_json() {
         let b64 = URL_SAFE_NO_PAD.encode(b"not json");
-        let code = format!("bae:{b64}");
+        let code = format!("coven:{b64}");
         assert!(matches!(
             decode_restore_code(&code),
             Err(RestoreCodeError::InvalidJson(_))
@@ -417,8 +417,8 @@ mod tests {
     #[test]
     fn display_messages_name_cause_and_recovery() {
         let missing = RestoreCodeError::MissingPrefix.to_string();
-        assert!(missing.contains("bae:"), "{missing}");
-        assert!(missing.contains("bae restore code"), "{missing}");
+        assert!(missing.contains("coven:"), "{missing}");
+        assert!(missing.contains("coven restore code"), "{missing}");
 
         let invalid_b64 = RestoreCodeError::InvalidBase64.to_string();
         assert!(
@@ -432,6 +432,6 @@ mod tests {
 
         let bad_version = RestoreCodeError::UnsupportedVersion(99).to_string();
         assert!(bad_version.contains("v99"), "{bad_version}");
-        assert!(bad_version.contains("Update bae"), "{bad_version}");
+        assert!(bad_version.contains("Update the app"), "{bad_version}");
     }
 }

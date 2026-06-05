@@ -113,12 +113,6 @@ impl Config {
         }
     }
 
-    /// Whether the app is running in dev mode (loads secrets from env / `.env`
-    /// instead of the OS keyring). Set `COVEN_DEV_MODE` or place a `.env` file.
-    pub fn is_dev_mode() -> bool {
-        std::env::var("COVEN_DEV_MODE").is_ok() || std::path::Path::new(".env").exists()
-    }
-
     /// Construct a config with defaults for a new or joined library.
     pub fn with_defaults(
         library_id: String,

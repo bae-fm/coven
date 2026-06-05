@@ -1,6 +1,6 @@
 //! HTTP-backed `CloudHome` implementation.
 //!
-//! Talks to a bae-proxy's `/cloud/*` write proxy endpoints.
+//! Talks to the proxy's `/cloud/*` write proxy endpoints.
 //! Requests are authenticated with Ed25519 signatures.
 
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use crate::keys::UserKeypair;
 
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
-/// HTTP-backed cloud home that proxies through a bae-proxy.
+/// HTTP-backed cloud home that proxies through the proxy.
 pub struct HttpCloudHome {
     base_url: String,
     keypair: UserKeypair,
@@ -37,9 +37,9 @@ impl HttpCloudHome {
         let signature = self.keypair.sign(message.as_bytes());
 
         [
-            ("X-Bae-Pubkey", hex::encode(self.keypair.public_key)),
-            ("X-Bae-Timestamp", timestamp.to_string()),
-            ("X-Bae-Signature", hex::encode(signature)),
+            ("X-Coven-Pubkey", hex::encode(self.keypair.public_key)),
+            ("X-Coven-Timestamp", timestamp.to_string()),
+            ("X-Coven-Signature", hex::encode(signature)),
         ]
     }
 
@@ -304,9 +304,9 @@ mod tests {
         let cloud_home = test_cloud_home("https://example.com", kp);
         let headers = cloud_home.sign_request("PUT", "/cloud/changes/dev1/42.enc");
 
-        assert_eq!(headers[0].0, "X-Bae-Pubkey");
-        assert_eq!(headers[1].0, "X-Bae-Timestamp");
-        assert_eq!(headers[2].0, "X-Bae-Signature");
+        assert_eq!(headers[0].0, "X-Coven-Pubkey");
+        assert_eq!(headers[1].0, "X-Coven-Timestamp");
+        assert_eq!(headers[2].0, "X-Coven-Signature");
 
         // Pubkey is hex-encoded 32-byte key = 64 hex chars
         assert_eq!(headers[0].1.len(), 64);

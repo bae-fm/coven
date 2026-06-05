@@ -1,7 +1,7 @@
 //! Dropbox `CloudHome` implementation.
 //!
 //! Uses the Dropbox HTTP API v2 with OAuth 2.0 (PKCE) tokens.
-//! Files are stored in a folder (e.g. `/Apps/bae/{library_name}`) using native
+//! Files are stored in a folder (e.g. `/Apps/your-app/{library_name}`) using native
 //! path-based access -- no filename encoding needed unlike Google Drive.
 
 use async_trait::async_trait;
@@ -18,7 +18,7 @@ const CONTENT_BASE: &str = "https://content.dropboxapi.com/2";
 /// Dropbox cloud home backend.
 pub struct DropboxCloudHome {
     client: reqwest::Client,
-    /// Folder path in Dropbox, e.g. "/Apps/bae/my-library"
+    /// Folder path in Dropbox, e.g. "/Apps/your-app/my-library"
     folder_path: String,
     session: OAuthSession,
 }
@@ -51,7 +51,7 @@ impl DropboxCloudHome {
     }
 
     /// Build the full Dropbox path for a key.
-    /// `changes/dev1/42.enc` -> `/Apps/bae/my-library/changes/dev1/42.enc`
+    /// `changes/dev1/42.enc` -> `/Apps/your-app/my-library/changes/dev1/42.enc`
     fn full_path(&self, key: &str) -> String {
         format!("{}/{}", self.folder_path, key)
     }
@@ -724,23 +724,23 @@ mod tests {
     #[test]
     fn full_path_joins_correctly() {
         let home = DropboxCloudHome::new(
-            "/Apps/bae/my-library".to_string(),
+            "/Apps/your-app/my-library".to_string(),
             OAuthTokens {
                 access_token: String::new(),
                 refresh_token: None,
                 expires_at: None,
             },
-            KeyService::new(true, "test".to_string()),
+            KeyService::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         );
 
         assert_eq!(
             home.full_path("changes/dev1/42.enc"),
-            "/Apps/bae/my-library/changes/dev1/42.enc"
+            "/Apps/your-app/my-library/changes/dev1/42.enc"
         );
         assert_eq!(
             home.full_path("snapshot.db.enc"),
-            "/Apps/bae/my-library/snapshot.db.enc"
+            "/Apps/your-app/my-library/snapshot.db.enc"
         );
     }
 

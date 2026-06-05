@@ -37,4 +37,4 @@ The host owns its schema and domain; coven owns the sync layer.
 
 ## Status
 
-Pre-1.0. Extracted from [bae](https://github.com/bae-fm/bae).
+Pre-1.0.

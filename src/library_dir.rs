@@ -79,12 +79,12 @@ impl LibraryDir {
     /// The caller is responsible for encryption key setup and calling
     /// `Config::save_active_library()` afterward.
     pub fn create(
-        bae_dir: &Path,
+        data_dir: &Path,
         library_id: String,
         library_name: String,
         ids: &dyn crate::id_provider::IdProvider,
     ) -> Result<Config, ConfigError> {
-        let library_dir = LibraryDir::new(bae_dir.join("libraries").join(&library_id));
+        let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
         std::fs::create_dir_all(&*library_dir)?;
 
         let device_id = ids.new_id();

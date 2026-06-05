@@ -467,7 +467,7 @@ impl std::fmt::Display for PullError {
                 min_version,
             } => write!(
                 f,
-                "Update bae to keep syncing — this library was upgraded by a newer device (schema v{min_version}; you have v{local_version})."
+                "Update the app to keep syncing — this library was upgraded by a newer device (schema v{min_version}; you have v{local_version})."
             ),
         }
     }
