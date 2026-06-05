@@ -123,16 +123,14 @@ export default defineConfig({
                     text: 'Docs',
                     items: [
                         { text: 'Overview', link: '/docs/' },
-                        { text: 'Example', link: '/docs/example' },
-                    ],
-                },
-                {
-                    text: 'Model',
-                    items: [
-                        { text: 'Sync Model', link: '/docs/sync-model' },
-                        { text: 'Membership', link: '/docs/membership' },
+                        { text: 'Sync', link: '/docs/sync-model' },
+                        { text: 'Local data', link: '/docs/local-data' },
+                        { text: 'Bootstrap', link: '/docs/bootstrap' },
+                        { text: 'Sharing', link: '/docs/sharing' },
+                        { text: 'Encryption', link: '/docs/encryption' },
                         { text: 'Storage', link: '/docs/storage' },
                         { text: 'Blobs', link: '/docs/blobs' },
+                        { text: 'Example', link: '/docs/example' },
                     ],
                 },
                 {

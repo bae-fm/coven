@@ -5,7 +5,7 @@ name: rules review (matrix)
 # The reusable workflow discovers applicable rules from each rule's `paths`
 # frontmatter; coven is pure Rust so SwiftUI/Kotlin/TS rules auto-skip.
 #
-# Requires the CLAUDE_CODE_OAUTH_TOKEN secret on this repo (or the bae-fm org).
+# Requires the CLAUDE_CODE_OAUTH_TOKEN secret on this repo (or the org).
 
 on:
   workflow_dispatch:

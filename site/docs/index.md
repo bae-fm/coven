@@ -25,7 +25,7 @@ control, and applies remote changes back into SQLite. No coordination server.
   <text x="28" y="174" style="fill: var(--vp-c-text-2); font-size: 11px; letter-spacing: 0.5px;">their app</text>
   <text x="330" y="174" text-anchor="middle" style="fill: var(--vp-c-brand-1); font-size: 11px; letter-spacing: 0.5px;">coven</text>
 
-  <!-- app boxes (host code — tinted fill to set apart from coven/storage) -->
+  <!-- app boxes (host code, tinted fill to set apart from coven/storage) -->
   <rect x="28"  y="52"  width="132" height="52" rx="8" style="fill: var(--vp-c-tip-soft); stroke: var(--vp-c-divider);" />
   <rect x="28"  y="184" width="132" height="52" rx="8" style="fill: var(--vp-c-tip-soft); stroke: var(--vp-c-divider);" />
 
@@ -120,16 +120,18 @@ You own the app:
 
 ## Topics
 
-- [Example](/docs/example) — a shared-todos host wired end-to-end.
-- [Sync model](/docs/sync-model) — change capture, the cycle, schema
-  versioning, backoff.
-- [Storage](/docs/storage) — the `CloudHome` trait, errors, per-provider
-  classification.
-- [Blobs](/docs/blobs) — the blob plan, outbox, observer, layout.
-- [Membership](/docs/membership) — signed chain, library-key wrapping,
-  invite/join/restore.
+- [Sync](/docs/sync-model): change capture, the cycle, conflict resolution,
+  schema versions.
+- [Local data](/docs/local-data): gating, what stays on one device.
+- [Bootstrap](/docs/bootstrap): snapshots and how a new device joins.
+- [Sharing](/docs/sharing): the membership chain, roles, invite, join, revoke.
+- [Encryption](/docs/encryption): the keys, what is encrypted, what the provider
+  sees.
+- [Storage](/docs/storage): the `CloudHome` trait and providers.
+- [Blobs](/docs/blobs): large files, the plan, outbox, retry.
+- [Example](/docs/example): the tables and traits you implement, the
+  startup order.
 
 ## Status
 
-coven is pre-1.0 and extracted from
-[bae](https://github.com/bae-fm/bae).
+coven is pre-1.0.
