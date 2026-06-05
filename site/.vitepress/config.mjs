@@ -119,6 +119,7 @@ export default defineConfig({
 
         sidebar: {
             '/docs/': [
+                { text: 'Example', link: '/docs/example' },
                 {
                     text: 'Docs',
                     items: [
@@ -130,7 +131,6 @@ export default defineConfig({
                         { text: 'Encryption', link: '/docs/encryption' },
                         { text: 'Storage', link: '/docs/storage' },
                         { text: 'Blobs', link: '/docs/blobs' },
-                        { text: 'Example', link: '/docs/example' },
                     ],
                 },
                 {

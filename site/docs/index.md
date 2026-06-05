@@ -120,6 +120,8 @@ You own the app:
 
 ## Topics
 
+- [Example](/docs/example): the tables and traits you implement, the startup
+  order.
 - [Sync](/docs/sync-model): change capture, the cycle, conflict resolution,
   schema versions.
 - [Local data](/docs/local-data): gating, what stays on one device.
@@ -129,8 +131,6 @@ You own the app:
   sees.
 - [Storage](/docs/storage): the `CloudHome` trait and providers.
 - [Blobs](/docs/blobs): large files, the plan, outbox, retry.
-- [Example](/docs/example): the tables and traits you implement, the
-  startup order.
 
 ## Status
 
