@@ -608,7 +608,7 @@ mod tests {
             &self,
             _namespace: &str,
             _id: &str,
-            _scope: crate::blob::BlobScope,
+            _scope: crate::blob::ResolvedScope,
             _data: Vec<u8>,
         ) -> Result<(), StorageError> {
             Ok(())
@@ -618,7 +618,7 @@ mod tests {
             &self,
             namespace: &str,
             id: &str,
-            _scope: crate::blob::BlobScope,
+            _scope: crate::blob::ResolvedScope,
         ) -> Result<Vec<u8>, StorageError> {
             Err(StorageError::NotFound(format!("{namespace}/{id}")))
         }
@@ -992,8 +992,8 @@ mod tests {
         );
         exec(
             &db_a,
-            "INSERT INTO cloud_outbox (operation, file_id, cloud_key, created_at) \
-             VALUES ('upload', 'f1', 'blobs/f1', '2026-01-01')",
+            "INSERT INTO cloud_outbox (operation, file_id, cloud_key, scope, created_at) \
+             VALUES ('upload', 'f1', 'blobs/f1', 'master', '2026-01-01')",
         );
         // A synced row that SHOULD cross, to prove the snapshot still carries data.
         exec(

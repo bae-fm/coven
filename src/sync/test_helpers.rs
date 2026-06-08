@@ -356,7 +356,7 @@ impl SyncStorage for MockSyncStorage {
         &self,
         namespace: &str,
         id: &str,
-        _scope: crate::blob::BlobScope,
+        _scope: crate::blob::ResolvedScope,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = format!("{namespace}/{id}");
@@ -368,7 +368,7 @@ impl SyncStorage for MockSyncStorage {
         &self,
         namespace: &str,
         id: &str,
-        _scope: crate::blob::BlobScope,
+        _scope: crate::blob::ResolvedScope,
     ) -> Result<Vec<u8>, StorageError> {
         let key = format!("{namespace}/{id}");
         let objects = self.objects.lock().unwrap();

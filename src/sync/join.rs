@@ -376,9 +376,11 @@ pub(crate) async fn open_db_and_pull(
         .await
         .map_err(|e| JoinError::Database(format!("Failed to suspend capture session: {e}")))?;
 
+    // Pull over the set `Database::open` owns (the host's tables plus coven's
+    // injected `item_keys`), not the raw host list — one source of truth.
     let (_updated_cursors, pull_result) = pull_changes(
         &db,
-        synced_tables,
+        db.synced_tables(),
         storage,
         device_id,
         cursors,

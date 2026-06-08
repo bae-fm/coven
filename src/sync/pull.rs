@@ -88,9 +88,10 @@ struct DeferredChangeset {
 /// session before calling — the protocol requires ending capture before pulling
 /// so the applied rows are not re-recorded into the next outgoing changeset.
 ///
-/// `tables` is the host's declared synced set (for the `_updated_at` index map
-/// and apply conflict resolution). `cursors` maps device_id -> last_seq we've
-/// applied from that device.
+/// `tables` is the synced set [`Database::open`] owns — the host's declared
+/// tables plus coven's injected `item_keys` (for the `_updated_at` index map and
+/// apply conflict resolution); call sites pass `db.synced_tables()`. `cursors`
+/// maps device_id -> last_seq we've applied from that device.
 ///
 /// Returns the updated cursors map and a summary of what was applied.
 #[allow(clippy::too_many_arguments)]
@@ -304,8 +305,10 @@ pub async fn pull_changes(
             };
 
             // Download any blobs the changeset references. If any download fails,
-            // don't advance the cursor — retry next cycle.
-            let blobs_ok = download_changeset_blobs(&changes, blob_plan, storage).await;
+            // don't advance the cursor — retry next cycle. Resolution reads
+            // `item_keys` AFTER the apply above committed this (or an earlier)
+            // changeset's key rows, so an `Item(id)`-scoped blob finds its key.
+            let blobs_ok = download_changeset_blobs(db, &changes, blob_plan, storage).await;
 
             if apply_result.had_fk_violations {
                 deferred.push(DeferredChangeset {
@@ -418,7 +421,15 @@ fn advance_max_updated_at(
 /// Skips blobs whose local file already exists. The host's [`BlobPlan`] decides
 /// which row-changes carry blobs, their cloud namespace/scope, and the local
 /// destination path.
+///
+/// Each blob's public scope is resolved to the internal key scope here — not in
+/// `BlobPlan`, which only sees `RowChange` columns and has no DB. By this point
+/// the changeset's `item_keys` rows are committed (the apply ran first), so an
+/// `Item(id)`-scoped blob finds its key. A blob whose item key is missing is a
+/// failed download (logged, `all_ok = false`) so the cursor doesn't advance and
+/// the next cycle retries once the key row has landed.
 async fn download_changeset_blobs(
+    db: &Database,
     changes: &[RowChange],
     blob_plan: &dyn BlobPlan,
     storage: &dyn SyncStorage,
@@ -429,10 +440,16 @@ async fn download_changeset_blobs(
             continue;
         }
 
-        match storage
-            .get_blob(&blob.namespace, &blob.id, blob.scope.clone())
-            .await
-        {
+        let resolved = match db.resolve_blob_scope(blob.scope.clone()).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot resolve blob scope, skipping download");
+                all_ok = false;
+                continue;
+            }
+        };
+
+        match storage.get_blob(&blob.namespace, &blob.id, resolved).await {
             Ok(bytes) => {
                 if let Some(parent) = blob.local_path.parent() {
                     if let Err(e) = std::fs::create_dir_all(parent) {

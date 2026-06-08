@@ -60,14 +60,15 @@ impl EncryptedSyncStorage {
         self.encryption.read().unwrap()
     }
 
-    /// The `EncryptionService` a blob's `scope` selects: the library master, a
-    /// per-scope key derived from it, or an explicit host-supplied key. Push
-    /// and pull resolve the scope the same way, so they share this.
-    fn enc_for_scope(&self, scope: crate::blob::BlobScope) -> EncryptionService {
+    /// The `EncryptionService` a blob's resolved `scope` selects: the library
+    /// master, a per-scope key derived from it, or an explicit key (a resolved
+    /// item key). Push and pull resolve the scope the same way, so they share
+    /// this.
+    fn enc_for_scope(&self, scope: crate::blob::ResolvedScope) -> EncryptionService {
         match scope {
-            crate::blob::BlobScope::Master => self.enc().clone(),
-            crate::blob::BlobScope::Derived(s) => self.enc().derive_scoped(&s),
-            crate::blob::BlobScope::Key(k) => EncryptionService::from_key(k),
+            crate::blob::ResolvedScope::Master => self.enc().clone(),
+            crate::blob::ResolvedScope::Derived(s) => self.enc().derive_scoped(&s),
+            crate::blob::ResolvedScope::Key(k) => EncryptionService::from_key(k),
         }
     }
 
@@ -158,7 +159,7 @@ impl SyncStorage for EncryptedSyncStorage {
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::BlobScope,
+        scope: crate::blob::ResolvedScope,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = Self::blob_key(namespace, id);
@@ -174,7 +175,7 @@ impl SyncStorage for EncryptedSyncStorage {
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::BlobScope,
+        scope: crate::blob::ResolvedScope,
     ) -> Result<Vec<u8>, StorageError> {
         let key = Self::blob_key(namespace, id);
         let encrypted = self.home.read(&key).await?;
@@ -357,25 +358,26 @@ impl SyncStorage for EncryptedSyncStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::BlobScope;
+    use crate::blob::ResolvedScope;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
 
-    /// A `BlobScope::Key` blob is encrypted under the host's explicit key, not
+    /// A `ResolvedScope::Key` blob is encrypted under the explicit (item) key, not
     /// the master: it round-trips with that key and the master key cannot read
-    /// it. This is what lets a host scope a blob to a random per-item key it
-    /// owns (e.g. bae's per-release content key for cover images).
+    /// it. This is what lets coven scope a blob to a per-item key (the resolved
+    /// form of a `BlobScope::Item`) so it can be read — or handed to a share
+    /// recipient — without exposing the whole library.
     #[tokio::test]
     async fn key_scoped_blob_round_trips_and_master_cannot_read_it() {
         let master = EncryptionService::new_with_key(&[7u8; 32]);
         let storage = EncryptedSyncStorage::new(Box::new(InMemoryCloudHome::new()), master);
 
-        let content_key = [9u8; 32];
+        let item_key = [9u8; 32];
         let plaintext = b"per-item content bytes".to_vec();
         storage
             .put_blob(
                 "images",
                 "item-1",
-                BlobScope::Key(content_key),
+                ResolvedScope::Key(item_key),
                 plaintext.clone(),
             )
             .await
@@ -391,13 +393,13 @@ mod tests {
 
         // The explicit key reads it back; the master key does not.
         let got = storage
-            .get_blob("images", "item-1", BlobScope::Key(content_key))
+            .get_blob("images", "item-1", ResolvedScope::Key(item_key))
             .await
             .expect("get_blob with the same Key");
         assert_eq!(got, plaintext);
         assert!(
             storage
-                .get_blob("images", "item-1", BlobScope::Master)
+                .get_blob("images", "item-1", ResolvedScope::Master)
                 .await
                 .is_err(),
             "the master key must not decrypt a Key-scoped blob"

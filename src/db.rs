@@ -1,13 +1,30 @@
-//! coven's bookkeeping schema and the cloud-outbox row types.
+//! coven's bookkeeping schema, the `item_keys` synced table, and the
+//! cloud-outbox row types.
 //!
-//! coven owns three bookkeeping tables — `sync_cursors`, `sync_state`,
-//! `cloud_outbox` — created by `MIGRATION_SQL`, which [`crate::database::Database::open`]
-//! runs against the connection coven owns. The host no longer implements any of
-//! this; it runs its own SQL through [`crate::database::Database::call`] and
-//! reads/writes the outbox through the [`crate::database::Database`] API.
+//! coven owns three device-local bookkeeping tables — `sync_cursors`,
+//! `sync_state`, `cloud_outbox` — plus the library-global synced table
+//! `item_keys`, all created by `MIGRATION_SQL`, which
+//! [`crate::database::Database::open`] runs against the connection coven owns.
+//! The host no longer implements any of this; it runs its own SQL through
+//! [`crate::database::Database::call`] and reads/writes the outbox through the
+//! [`crate::database::Database`] API.
+//!
+//! Unlike the bookkeeping tables, `item_keys` is content every member needs, so
+//! coven injects it into the synced-table set (see
+//! [`crate::database::Database::open`]) and it rides both sync paths: the
+//! changeset capture session records `mint_item_key` INSERTs, and the snapshot
+//! preserves it (it is in the synced set, so `clear_non_synced` keeps its rows).
 
-/// SQL that creates coven's bookkeeping tables, run by `Database::open` before
-/// the host's own migration. Idempotent (`IF NOT EXISTS`).
+/// The coven-owned synced table holding per-item content keys. Injected into the
+/// synced-table set by [`crate::database::Database::open`], so it is captured,
+/// snapshotted, and applied like any synced table — but is owned by coven, not
+/// the host. The `_updated_at` HLC stamp satisfies the synced-table contract;
+/// rows are immutable (idempotent INSERT) so LWW never has to pick a winner.
+pub(crate) const ITEM_KEYS_TABLE: &str = "item_keys";
+
+/// SQL that creates coven's bookkeeping tables and the `item_keys` synced table,
+/// run by `Database::open` before the host's own migration. Idempotent
+/// (`IF NOT EXISTS`).
 pub(crate) const MIGRATION_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS sync_cursors (
     device_id TEXT PRIMARY KEY,
@@ -25,15 +42,22 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     file_id TEXT NOT NULL,
     cloud_key TEXT NOT NULL,
     source_path TEXT,
-    -- The 32-byte key this blob is encrypted under (NULL falls back to the
-    -- library master key). Local bookkeeping; this table does not sync.
-    content_key BLOB,
+    -- The blob's encryption scope (master / derived / item), serialized so the
+    -- async drain resolves it to a key long after the enqueue site is gone.
+    -- Local bookkeeping; this table does not sync.
+    scope TEXT NOT NULL,
     created_at TEXT NOT NULL,
     min_seq INTEGER,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     last_attempt_at TEXT,
     UNIQUE(operation, cloud_key)
+);
+
+CREATE TABLE IF NOT EXISTS item_keys (
+    item_id TEXT PRIMARY KEY,
+    key BLOB NOT NULL,
+    _updated_at TEXT NOT NULL
 );
 ";
 
@@ -45,11 +69,12 @@ pub struct OutboxEntry {
     pub file_id: String,
     pub cloud_key: String,
     pub source_path: Option<String>,
-    /// The 32-byte key this blob's bytes are encrypted under. `None` falls back
-    /// to the library master key. The host supplies it at enqueue time and
-    /// persists it on the row, since the upload drains long after the enqueue
-    /// site is gone.
-    pub content_key: Option<[u8; 32]>,
+    /// The blob's encryption scope, named by the host at enqueue. `process_uploads`
+    /// resolves it to a key at drain (looking up `item_keys` for a
+    /// [`crate::blob::BlobScope::Item`] scope), since the upload runs long after
+    /// the enqueue site is gone. Delete entries carry [`crate::blob::BlobScope::Master`]
+    /// as a placeholder — a delete touches no key.
+    pub scope: crate::blob::BlobScope,
     pub created_at: String,
     pub min_seq: Option<u64>,
     /// How many times an upload of this entry has failed. `0` for a freshly

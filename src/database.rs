@@ -123,6 +123,13 @@ impl Database {
         conn.execute_batch(MIGRATION_SQL).map_err(DbError::from)?;
         migrate(&conn)?;
 
+        // `item_keys` is coven-owned but is library-global content every member
+        // needs, so coven — not the host — declares it synced. Injecting it here
+        // is the single point that puts it on every path that reads the set: the
+        // capture session attaches it, the snapshot preserves it, and the gate
+        // and apply operate over it. The host never sees or declares it.
+        let synced_tables = with_item_keys(synced_tables);
+
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
         // `_updated_at`).
@@ -289,18 +296,87 @@ impl Database {
         .await
     }
 
+    // ---- Item keys ----
+
+    /// Mint a random per-item content key and store it in the synced `item_keys`
+    /// table, keyed by `item_id`. Idempotent: a no-op if the item already has a
+    /// key (a re-mint must not rotate it out from under blobs already encrypted
+    /// under it).
+    ///
+    /// The INSERT runs through [`Self::call`], so the attached capture session
+    /// records it into the outgoing changeset and it replays to every member; the
+    /// `_updated_at` HLC stamp satisfies the synced-table contract. Because
+    /// `item_keys` is in the synced set, the row also survives a snapshot
+    /// bootstrap. Returns the item's key (the freshly minted one, or the existing
+    /// one if it was already present).
+    pub async fn mint_item_key(&self, item_id: &str) -> Result<[u8; 32], DbError> {
+        let item_id = item_id.to_string();
+        let new_key = crate::encryption::generate_random_key();
+        let updated_at = self.hlc.now().to_string();
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO item_keys (item_id, key, _updated_at) \
+                 VALUES (?1, ?2, ?3)",
+                (&item_id, new_key.to_vec(), updated_at),
+            )
+            .map_err(DbError::from)?;
+            // Read back the stored key — `INSERT OR IGNORE` keeps the existing
+            // row, so on a re-mint this returns the original key, not `new_key`.
+            read_item_key(conn, &item_id)?
+                .ok_or_else(|| DbError(format!("item_keys row absent after mint for {item_id}")))
+        })
+        .await
+    }
+
+    /// The content key for `item_id` from the synced `item_keys` table, or `None`
+    /// if no key has been minted for it. A local SELECT — the row arrives via the
+    /// changeset (for members) or the snapshot (for a bootstrapped joiner).
+    pub async fn item_key(&self, item_id: &str) -> Result<Option<[u8; 32]>, DbError> {
+        let item_id = item_id.to_string();
+        self.call(move |conn| read_item_key(conn, &item_id)).await
+    }
+
+    /// Resolve a public [`crate::blob::BlobScope`] to the internal
+    /// [`crate::blob::ResolvedScope`] storage and encryption consume. `Master`
+    /// and `Derived` pass through unchanged; `Item(id)` looks up the item's key
+    /// in `item_keys`. This is the single resolution point shared by the three
+    /// blob paths (changeset push, changeset pull, outbox drain).
+    ///
+    /// A missing `item_keys` row is a host bug — the host must mint the key (and
+    /// let it sync) before tagging a blob with that item. coven surfaces it as an
+    /// error rather than silently falling back to the master key, which would
+    /// encrypt the blob so no share recipient could ever read it.
+    pub async fn resolve_blob_scope(
+        &self,
+        scope: crate::blob::BlobScope,
+    ) -> Result<crate::blob::ResolvedScope, DbError> {
+        use crate::blob::{BlobScope, ResolvedScope};
+        match scope {
+            BlobScope::Master => Ok(ResolvedScope::Master),
+            BlobScope::Derived(s) => Ok(ResolvedScope::Derived(s)),
+            BlobScope::Item(item_id) => match self.item_key(&item_id).await? {
+                Some(key) => Ok(ResolvedScope::Key(key)),
+                None => Err(DbError(format!(
+                    "no item key for {item_id:?}: a blob was scoped to an item with no minted key \
+                     (mint_item_key must run and sync before tagging the blob)"
+                ))),
+            },
+        }
+    }
+
     // ---- Cloud outbox ----
 
-    /// Enqueue a blob upload. `content_key` is the 32-byte key the blob is
-    /// encrypted under (`None` falls back to the library master key); coven
-    /// persists it on the row so the async drain encrypts with it long after the
-    /// enqueue site is gone. Idempotent on `(operation, cloud_key)`.
+    /// Enqueue a blob upload. `scope` names which key the blob is encrypted
+    /// under (master, a derived scope, or a coven-managed item); coven persists
+    /// it on the row and resolves it to a key at drain — looking up the
+    /// `item_keys` row for an [`crate::blob::BlobScope::Item`] scope — long after
+    /// the enqueue site is gone. Idempotent on `(operation, cloud_key)`.
     pub async fn enqueue_upload(
         &self,
         file_id: &str,
         cloud_key: &str,
         source_path: Option<&str>,
-        content_key: Option<[u8; 32]>,
+        scope: crate::blob::BlobScope,
         created_at: &str,
     ) -> Result<(), DbError> {
         let (file_id, cloud_key, source_path, created_at) = (
@@ -309,13 +385,13 @@ impl Database {
             source_path.map(str::to_string),
             created_at.to_string(),
         );
-        let content_key = content_key.map(|k| k.to_vec());
+        let scope = scope.to_outbox_str();
         self.call(move |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, file_id, cloud_key, source_path, content_key, created_at) \
+                 (operation, file_id, cloud_key, source_path, scope, created_at) \
                  VALUES ('upload', ?1, ?2, ?3, ?4, ?5)",
-                (file_id, cloud_key, source_path, content_key, created_at),
+                (file_id, cloud_key, source_path, scope, created_at),
             )
             .map(|_| ())
             .map_err(DbError::from)
@@ -333,12 +409,15 @@ impl Database {
         created_at: &str,
     ) -> Result<(), DbError> {
         let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
+        // A delete touches no key; `scope` is NOT NULL, so write the master
+        // placeholder. The delete drain never reads it.
+        let scope = crate::blob::BlobScope::Master.to_outbox_str();
         self.call(move |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, file_id, cloud_key, created_at, min_seq) \
-                 VALUES ('delete', '', ?1, ?2, ?3)",
-                (cloud_key, created_at, min_seq as i64),
+                 (operation, file_id, cloud_key, scope, created_at, min_seq) \
+                 VALUES ('delete', '', ?1, ?2, ?3, ?4)",
+                (cloud_key, scope, created_at, min_seq as i64),
             )
             .map(|_| ())
             .map_err(DbError::from)
@@ -388,7 +467,7 @@ impl Database {
         self.call(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, operation, file_id, cloud_key, source_path, content_key, \
+                    "SELECT id, operation, file_id, cloud_key, source_path, scope, \
                             created_at, min_seq, attempt_count, last_error, last_attempt_at \
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
@@ -487,6 +566,26 @@ impl Database {
     }
 }
 
+/// Read the 32-byte content key for `item_id` from `item_keys`, or `None` if no
+/// row exists. A stored key of the wrong length is a corrupt row and panics —
+/// `mint_item_key` only ever writes 32 bytes.
+fn read_item_key(conn: &Connection, item_id: &str) -> Result<Option<[u8; 32]>, DbError> {
+    conn.query_row(
+        "SELECT key FROM item_keys WHERE item_id = ?1",
+        [item_id],
+        |r| r.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(DbError::from)
+    .map(|opt| {
+        opt.map(|v| {
+            v.try_into().unwrap_or_else(|v: Vec<u8>| {
+                panic!("item_keys.key must be 32 bytes, got {}", v.len())
+            })
+        })
+    })
+}
+
 /// Map a `cloud_outbox` row to an [`OutboxEntry`]. Column order matches the
 /// SELECT in [`Database::pending_outbox`].
 fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
@@ -497,16 +596,31 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
         file_id: r.get(2)?,
         cloud_key: r.get(3)?,
         source_path: r.get(4)?,
-        content_key: r.get::<_, Option<Vec<u8>>>(5)?.map(|v| {
-            v.try_into()
-                .expect("cloud_outbox.content_key must be 32 bytes")
-        }),
+        scope: {
+            let s: String = r.get(5)?;
+            crate::blob::BlobScope::from_outbox_str(&s)
+                .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {s:?}"))
+        },
         created_at: r.get(6)?,
         min_seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
         attempt_count: r.get(8)?,
         last_error: r.get(9)?,
         last_attempt_at: r.get(10)?,
     })
+}
+
+/// Append coven's own `item_keys` synced table to the host's declared set. Plain
+/// (ungated, syncs unconditionally): every member needs every item key. Skips the
+/// append if the host already declared a table by that name — `item_keys` is a
+/// coven-reserved name, but a defensive no-op beats a duplicate attach.
+fn with_item_keys(mut synced_tables: Vec<SyncedTable>) -> Vec<SyncedTable> {
+    if !synced_tables
+        .iter()
+        .any(|t| t.name() == crate::db::ITEM_KEYS_TABLE)
+    {
+        synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
+    }
+    synced_tables
 }
 
 /// Seed the register clock from one candidate floor, if present. A present but

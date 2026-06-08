@@ -54,9 +54,9 @@ async fn insert_upload(
     db.call(move |conn| {
         conn.execute(
             "INSERT INTO cloud_outbox \
-             (id, operation, file_id, cloud_key, source_path, created_at, \
+             (id, operation, file_id, cloud_key, source_path, scope, created_at, \
               attempt_count, last_attempt_at) \
-             VALUES (?1, 'upload', ?2, ?3, ?4, '2024-01-01T00:00:00Z', ?5, ?6)",
+             VALUES (?1, 'upload', ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z', ?5, ?6)",
             rusqlite::params![
                 id,
                 file_id,
@@ -533,16 +533,17 @@ fn backoff_window_is_exponential_and_capped() {
 
 /// The whole multi-device flow for managed (cloud) content. Device A creates a
 /// library, invites device B (wrapping the library master key to B's identity),
-/// and uploads a release's audio through the real outbox encrypted with a random
-/// per-release key. Device B joins (unwraps the master key with its own keypair),
-/// then fetches the blob and decrypts it with the per-release key — the key that,
-/// in the app, rides the synced `releases` row.
+/// mints a per-release item key, and uploads a release's audio through the real
+/// outbox scoped to that item. `process_uploads` resolves the `Item` scope to the
+/// minted key and encrypts under it. Device B joins (unwraps the master key with
+/// its own keypair), then fetches the blob and decrypts it with the item key —
+/// the key that, in the app, rides the synced `item_keys` table.
 ///
 /// The load-bearing assertion is that the master key — which every member holds —
-/// does NOT decrypt the content: the per-release key is what scopes a release so
-/// it can be read (or handed to a share recipient) without exposing the whole
+/// does NOT decrypt the content: the per-item key is what scopes a release so it
+/// can be read (or handed to a share recipient) without exposing the whole
 /// library. This test fails if `process_uploads` encrypts content with the master
-/// key instead of the entry's `content_key`.
+/// key instead of resolving the entry's `Item` scope to the item key.
 #[tokio::test]
 async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     // --- Device A: library master key, owner identity, membership chain. ---
@@ -573,24 +574,32 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     .await
     .expect("invite device B");
 
-    // --- Device A uploads a release's audio through the real outbox, encrypted
-    // with a random per-release key (distinct from the master key). ---
-    let k_release: [u8; 32] = [9u8; 32];
+    // --- Device A mints a per-release item key (distinct from the master key)
+    // and uploads the release's audio through the real outbox scoped to that
+    // item. `process_uploads` resolves the `Item` scope to the minted key. ---
     let plaintext = b"AUDIO-FILE-BYTES-for-one-release";
     let tmp = tempfile::tempdir().unwrap();
     let source = write_temp_file(tmp.path(), "track.flac", plaintext);
 
     let cloud_key = "storage/ab/cd/file-1";
     let db = open_outbox_db();
+    let k_release = db
+        .mint_item_key("release-1")
+        .await
+        .expect("mint the per-release item key");
+    assert_ne!(
+        k_release, master_key,
+        "a minted item key is independent of the master"
+    );
     db.enqueue_upload(
         "file-1",
         cloud_key,
         Some(source.as_str()),
-        Some(k_release),
+        crate::blob::BlobScope::Item("release-1".to_string()),
         T0,
     )
     .await
-    .expect("enqueue the release blob under its content key");
+    .expect("enqueue the release blob scoped to its item");
     let master_enc = RwLock::new(EncryptionService::from_key(master_key));
 
     let n = process_uploads(&db, &cloud, &master_enc, tmp.path(), &fixed_clock(T0), None)

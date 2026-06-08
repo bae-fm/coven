@@ -188,9 +188,24 @@ pub async fn process_uploads(
             }
         };
 
-        let encrypted = match &entry.content_key {
-            Some(key) => EncryptionService::from_key(*key).encrypt(&data),
-            None => encryption.read().unwrap().encrypt(&data),
+        // Resolve the entry's public scope to a key at drain — an `Item(id)`
+        // scope reads `item_keys` here, holding `db`. A missing key is a host
+        // bug; record it as a failure rather than silently encrypting under the
+        // master key (which no share recipient could read).
+        let encrypted = match db.resolve_blob_scope(entry.scope.clone()).await {
+            Ok(crate::blob::ResolvedScope::Master) => encryption.read().unwrap().encrypt(&data),
+            Ok(crate::blob::ResolvedScope::Derived(s)) => {
+                encryption.read().unwrap().derive_scoped(&s).encrypt(&data)
+            }
+            Ok(crate::blob::ResolvedScope::Key(key)) => {
+                EncryptionService::from_key(key).encrypt(&data)
+            }
+            Err(e) => {
+                let msg = format!("cannot resolve blob scope: {e}");
+                warn!("Upload failed for {}: {msg}", entry.cloud_key);
+                record_failure(db, &entry, &msg, now, observer).await;
+                continue;
+            }
         };
 
         match upload_with_progress(

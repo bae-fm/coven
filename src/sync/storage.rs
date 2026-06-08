@@ -87,23 +87,25 @@ pub trait SyncStorage: Send + Sync {
     ) -> Result<(), StorageError>;
 
     /// Upload an encrypted blob to `{namespace}/{id[0..2]}/{id[2..4]}/{id}`.
-    /// The plaintext is encrypted with the key selected by `scope`
-    /// (master, or a per-scope derived key).
+    /// The plaintext is encrypted with the key the resolved `scope` selects
+    /// (master, a per-scope derived key, or an explicit item key). The caller
+    /// resolves the public [`crate::blob::BlobScope`] to a
+    /// [`crate::blob::ResolvedScope`] before storage sees it.
     async fn put_blob(
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::BlobScope,
+        scope: crate::blob::ResolvedScope,
         data: Vec<u8>,
     ) -> Result<(), StorageError>;
 
     /// Download and decrypt a blob from `{namespace}/{id[0..2]}/{id[2..4]}/{id}`,
-    /// using the key selected by `scope`.
+    /// using the key the resolved `scope` selects.
     async fn get_blob(
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::BlobScope,
+        scope: crate::blob::ResolvedScope,
     ) -> Result<Vec<u8>, StorageError>;
 
     /// Upload an encrypted snapshot.
