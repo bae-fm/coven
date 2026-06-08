@@ -559,6 +559,38 @@ impl crate::blob::BlobPlan for NoopBlobPlan {
     }
 }
 
+/// Map every non-Delete `note_photos` row to a [`crate::blob::BlobRef`] under
+/// `dir` in `namespace`, scoping each via `scope_for(row, note_id)`. Shared by
+/// the photo blob plans in the test suite so the filter-and-extract logic lives
+/// once. A row that survives the `note_photos` filter must have a primary key and
+/// a `note_id` at column 1; their absence is a malformed test fixture, surfaced
+/// loudly rather than silently skipped.
+pub fn note_photos_refs(
+    changes: &[crate::changeset::RowChange],
+    dir: &std::path::Path,
+    namespace: &str,
+    scope_for: impl Fn(&crate::changeset::RowChange, &str) -> crate::blob::BlobScope,
+) -> Vec<crate::blob::BlobRef> {
+    use crate::changeset::ChangeOp;
+    changes
+        .iter()
+        .filter(|c| c.table == "note_photos" && c.op != ChangeOp::Delete)
+        .map(|c| {
+            let id = c
+                .pk()
+                .expect("note_photos row has a primary key")
+                .to_string();
+            let note_id = c.col(1).expect("note_photos row has a note_id at column 1");
+            crate::blob::BlobRef {
+                namespace: namespace.to_string(),
+                local_path: dir.join(&id),
+                id,
+                scope: scope_for(c, note_id),
+            }
+        })
+        .collect()
+}
+
 /// A blob plan that maps `note_photos` rows to blobs under `dir`. `kind = "cover"`
 /// uses a per-note derived key; everything else uses the master key.
 pub struct PhotoBlobPlan {
@@ -567,27 +599,13 @@ pub struct PhotoBlobPlan {
 
 impl PhotoBlobPlan {
     fn refs(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
-        use crate::blob::{BlobRef, BlobScope};
-        use crate::changeset::ChangeOp;
-        changes
-            .iter()
-            .filter(|c| c.table == "note_photos" && c.op != ChangeOp::Delete)
-            .filter_map(|c| {
-                let id = c.pk()?.to_string();
-                let note_id = c.col(1)?.to_string();
-                let scope = if c.col(2) == Some("cover") {
-                    BlobScope::Derived(note_id)
-                } else {
-                    BlobScope::Master
-                };
-                Some(BlobRef {
-                    namespace: "photos".to_string(),
-                    local_path: self.dir.join(&id),
-                    id,
-                    scope,
-                })
-            })
-            .collect()
+        note_photos_refs(changes, &self.dir, "photos", |c, note_id| {
+            if c.col(2) == Some("cover") {
+                crate::blob::BlobScope::Derived(note_id.to_string())
+            } else {
+                crate::blob::BlobScope::Master
+            }
+        })
     }
 }
 

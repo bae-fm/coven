@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use crate::blob::{BlobPlan, BlobRef, BlobScope, ResolvedScope};
-use crate::changeset::{ChangeOp, RowChange};
+use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -180,20 +180,9 @@ struct ItemPhotoBlobPlan {
 
 impl ItemPhotoBlobPlan {
     fn refs(&self, changes: &[RowChange]) -> Vec<BlobRef> {
-        changes
-            .iter()
-            .filter(|c| c.table == "note_photos" && c.op != ChangeOp::Delete)
-            .filter_map(|c| {
-                let id = c.pk()?.to_string();
-                let note_id = c.col(1)?.to_string();
-                Some(BlobRef {
-                    namespace: "audio".to_string(),
-                    local_path: self.dir.join(&id),
-                    id,
-                    scope: BlobScope::Item(note_id),
-                })
-            })
-            .collect()
+        crate::sync::test_helpers::note_photos_refs(changes, &self.dir, "audio", |_c, note_id| {
+            BlobScope::Item(note_id.to_string())
+        })
     }
 }
 
@@ -237,8 +226,8 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
 /// an item key, writes a shareable note + its blob-bearing child row, and uploads
 /// the `Item`-scoped blob; then publishes the changeset (carrying the `item_keys`
 /// row). Device B runs the production [`pull_changes`] — which applies the
-/// changeset and then calls `download_changeset_blobs`, the function this PR
-/// taught to resolve `Item(id)` via the freshly-applied `item_keys` row — so the
+/// changeset and then calls `download_changeset_blobs`, which resolves
+/// `Item(id)` via the freshly-applied `item_keys` row — so the
 /// blob lands on B's disk already decrypted. This catches a regression where the
 /// pull-side resolution is dropped: B would fail to decrypt and the blob would
 /// not land. Members that join before any snapshot exists take this path.
