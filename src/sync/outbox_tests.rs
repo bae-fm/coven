@@ -17,8 +17,14 @@ use crate::blob::BlobUploadObserver;
 use crate::clock::{Clock, FixedClock};
 use crate::db::{DbError, OutboxEntry, OutboxOperation, SyncBookkeeping};
 use crate::encryption::EncryptionService;
+use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::sync::invite::{create_invitation, unwrap_library_key};
+use crate::sync::membership::{
+    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
+};
+use crate::sync::test_helpers::MockSyncStorage;
 
 // --- Fakes -----------------------------------------------------------------
 
@@ -275,6 +281,56 @@ impl CloudHome for SlowChunkedCloudHome {
     }
 }
 
+/// A `CloudHome` that only answers `grant_access` (with a dummy S3 join info),
+/// which is all `create_invitation` reads from the cloud home. The rest is
+/// unreachable in these tests.
+struct GrantingCloudHome;
+
+#[async_trait::async_trait]
+impl CloudHome for GrantingCloudHome {
+    async fn write(
+        &self,
+        _key: &str,
+        _data: Vec<u8>,
+        _progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        unimplemented!("not exercised by create_invitation")
+    }
+    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        unimplemented!("not exercised by create_invitation")
+    }
+    async fn read_range(
+        &self,
+        _key: &str,
+        _start: u64,
+        _end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError> {
+        unimplemented!("not exercised by create_invitation")
+    }
+    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        unimplemented!("not exercised by create_invitation")
+    }
+    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
+        unimplemented!("not exercised by create_invitation")
+    }
+    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
+        unimplemented!("not exercised by create_invitation")
+    }
+    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        Ok(CloudHomeJoinInfo::S3 {
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: None,
+            access_key: "test-access-key".to_string(),
+            secret_key: "test-secret-key".to_string(),
+            key_prefix: None,
+        })
+    }
+    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+        unimplemented!("not exercised by create_invitation")
+    }
+}
+
 // --- Helpers ---------------------------------------------------------------
 
 const T0: &str = "2024-06-01T00:00:00Z";
@@ -303,6 +359,7 @@ fn upload_entry(
         file_id: file_id.to_string(),
         cloud_key: cloud_key.to_string(),
         source_path,
+        content_key: None,
         created_at: "2024-01-01T00:00:00Z".to_string(),
         min_seq: None,
         attempt_count: 0,
@@ -315,6 +372,27 @@ fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String
     let p = dir.join(name);
     std::fs::write(&p, contents).unwrap();
     p.to_string_lossy().to_string()
+}
+
+fn pubkey_hex(kp: &UserKeypair) -> String {
+    hex::encode(kp.public_key)
+}
+
+/// A membership chain seeded with `owner` as the founding owner.
+fn bootstrap_chain(owner: &UserKeypair) -> MembershipChain {
+    let pk_hex = pubkey_hex(owner);
+    let mut entry = MembershipEntry {
+        action: MembershipAction::Add,
+        user_pubkey: pk_hex.clone(),
+        role: MemberRole::Owner,
+        timestamp: "0000000001000-0000-dev1".to_string(),
+        author_pubkey: pk_hex,
+        signature: String::new(),
+    };
+    sign_membership_entry(&mut entry, owner);
+    let mut chain = MembershipChain::new();
+    chain.add_entry(entry).unwrap();
+    chain
 }
 
 // --- Tests -----------------------------------------------------------------
@@ -585,4 +663,107 @@ fn backoff_window_is_exponential_and_capped() {
     // 30 · 2^7 = 3840, capped to the 3600s ceiling.
     assert_eq!(backoff_window(8), Duration::seconds(3600));
     assert_eq!(backoff_window(50), Duration::seconds(3600));
+}
+
+/// The whole multi-device flow for managed (cloud) content. Device A creates a
+/// library, invites device B (wrapping the library master key to B's identity),
+/// and uploads a release's audio through the real outbox encrypted with a random
+/// per-release key. Device B joins (unwraps the master key with its own keypair),
+/// then fetches the blob and decrypts it with the per-release key — the key that,
+/// in the app, rides the synced `releases` row.
+///
+/// The load-bearing assertion is that the master key — which every member holds —
+/// does NOT decrypt the content: the per-release key is what scopes a release so
+/// it can be read (or handed to a share recipient) without exposing the whole
+/// library. This test fails if `process_uploads` encrypts content with the master
+/// key instead of the entry's `content_key`.
+#[tokio::test]
+async fn member_joins_then_fetches_and_decrypts_per_release_content() {
+    // --- Device A: library master key, owner identity, membership chain. ---
+    let master_key: [u8; 32] = [7u8; 32];
+    let owner = UserKeypair::generate(); // device A
+    let joiner = UserKeypair::generate(); // device B
+    let mut chain = bootstrap_chain(&owner);
+
+    // The content blob lives in the cloud home; the wrapped library key lives in
+    // the membership storage. (In production both are paths in one cloud home;
+    // the join API routes the wrapped key through `SyncStorage`, so the test uses
+    // a `MockSyncStorage` for it and an `InMemoryCloudHome` for content.)
+    let cloud = InMemoryCloudHome::new();
+    let membership = MockSyncStorage::new();
+
+    // Device A invites device B: seals the master key to B's pubkey and records a
+    // signed membership entry.
+    create_invitation(
+        &membership,
+        &GrantingCloudHome,
+        &mut chain,
+        &owner,
+        &pubkey_hex(&joiner),
+        MemberRole::Member,
+        &master_key,
+        "0000000002000-0000-dev1",
+    )
+    .await
+    .expect("invite device B");
+
+    // --- Device A uploads a release's audio through the real outbox, encrypted
+    // with a random per-release key (distinct from the master key). ---
+    let k_release: [u8; 32] = [9u8; 32];
+    let plaintext = b"AUDIO-FILE-BYTES-for-one-release";
+    let tmp = tempfile::tempdir().unwrap();
+    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
+
+    let cloud_key = "storage/ab/cd/file-1";
+    let mut entry = upload_entry(1, "file-1", cloud_key, Some(source));
+    entry.content_key = Some(k_release);
+    let db = MockBookkeeping::with_uploads(vec![entry]);
+    let master_enc = RwLock::new(EncryptionService::from_key(master_key));
+
+    let n = process_uploads(&db, &cloud, &master_enc, tmp.path(), &fixed_clock(T0), None)
+        .await
+        .expect("upload");
+    assert_eq!(n, 1, "the release blob uploads");
+
+    // At rest the blob is per-release ciphertext: not plaintext, and NOT
+    // decryptable with the master key every member holds.
+    let at_rest = cloud.get(cloud_key).expect("blob present in cloud");
+    assert_ne!(at_rest, plaintext, "content is encrypted at rest");
+    assert!(
+        EncryptionService::from_key(master_key)
+            .decrypt(&at_rest)
+            .is_err(),
+        "the master key must NOT decrypt per-release content"
+    );
+    assert_eq!(
+        EncryptionService::from_key(k_release)
+            .decrypt(&at_rest)
+            .unwrap(),
+        plaintext,
+        "the per-release key decrypts the content"
+    );
+
+    // --- Device B joins: unwraps the library master key with its own identity. ---
+    let joined_master = unwrap_library_key(&membership as &dyn CloudHome, &joiner)
+        .await
+        .expect("device B unwraps the library key by joining");
+    assert_eq!(
+        joined_master, master_key,
+        "joining recovers the library master key"
+    );
+
+    // Device B fetches the blob. Membership alone (the master key) does not unlock
+    // it; with the release's content key — which rides the synced `releases` row,
+    // handed here as the sync would deliver it — B recovers the audio.
+    let fetched = cloud.get(cloud_key).expect("device B fetches the blob");
+    assert!(
+        EncryptionService::from_key(joined_master)
+            .decrypt(&fetched)
+            .is_err(),
+        "membership alone does not unlock a release's content"
+    );
+    let recovered = EncryptionService::from_key(k_release)
+        .decrypt(&fetched)
+        .expect("device B decrypts the content with the per-release key");
+    assert_eq!(recovered, plaintext, "device B recovers the original audio");
 }
