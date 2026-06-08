@@ -85,12 +85,17 @@ For the queue, the host writes the plaintext file to `local_path`, then calls
 the blob's cloud path; `source_path` is optional and overrides where the
 plaintext is read from when the file lives outside the library directory. The
 matching call for a removal is `db.enqueue_delete(cloud_key, min_seq,
-created_at)`, where `min_seq` is the sync sequence the delete becomes safe past.
+created_at)`, where `min_seq` is the device's current `db.local_seq()`. The
+delete becomes safe once every peer has synced past that sequence. `local_seq`
+is a typed accessor, so the host never reads coven's `sync_state` by hand.
 
-The `cloud_outbox` table these write to is coven's, not the host's. coven
-creates it during `Database::open`, alongside its other bookkeeping tables, and
-the host never touches it directly: it enqueues through the `Database` methods
-and lets coven own the rows. Each row is an
+The `cloud_outbox` table these write to is coven's, not the host's. coven creates
+it during `Database::open`, alongside its other bookkeeping tables. The host
+never mutates the rows by hand: it enqueues and clears them through the
+`Database` methods (`enqueue_upload`/`enqueue_delete`,
+`get_pending_cloud_uploads`/`get_pending_cloud_deletes`,
+`remove_cloud_outbox_entry`, `reset_cloud_outbox_backoff`). It can read the queue
+through those methods, or join the shared table into its own queries. Each row is an
 [`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) carrying its
 [`OutboxOperation`](rustdoc:variant:coven::db::OutboxOperation::Upload), `file_id`,
 `cloud_key`, `source_path`, and the retry bookkeeping below.

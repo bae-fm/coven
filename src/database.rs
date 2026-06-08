@@ -318,8 +318,9 @@ impl Database {
         .await
     }
 
-    /// Enqueue a blob delete, safe to run once every device has synced past
-    /// `min_seq`. Idempotent on `(operation, cloud_key)`.
+    /// Enqueue a blob delete, safe to run once every peer has synced past
+    /// `min_seq`. The host passes its current [`local_seq`](Self::local_seq) as the
+    /// floor. Idempotent on `(operation, cloud_key)`.
     pub async fn enqueue_delete(
         &self,
         cloud_key: &str,
@@ -340,11 +341,37 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
+    /// The device's local sequence number: the highest changeset seq this device
+    /// has produced. A host reads it to use as the `min_seq` floor when enqueuing
+    /// a blob delete, so it never reaches into coven's `sync_state` by hand.
+    pub async fn local_seq(&self) -> Result<u64, DbError> {
+        self.call(move |conn| {
+            match conn
+                .query_row(
+                    "SELECT value FROM sync_state WHERE key = 'local_seq'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?
+            {
+                Some(v) => v
+                    .parse()
+                    .map_err(|e| DbError(format!("corrupt local_seq in sync_state: {e}"))),
+                None => Ok(0),
+            }
+        })
+        .await
+    }
+
+    /// Pending upload entries, oldest first. The host reads these to drive its
+    /// own upload-status UI; coven's sync loop reads them to do the uploads.
+    pub async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.pending_outbox(OutboxOperation::Upload).await
     }
 
-    pub(crate) async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
+    /// Pending delete entries, oldest first.
+    pub async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.pending_outbox(OutboxOperation::Delete).await
     }
 
@@ -373,7 +400,9 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn has_pending_cloud_uploads(&self) -> Result<bool, DbError> {
+    /// Whether any upload is still queued. The host's changeset push gates on
+    /// this so peers never learn of a row whose blob isn't in the cloud yet.
+    pub async fn has_pending_cloud_uploads(&self) -> Result<bool, DbError> {
         self.call(move |conn| {
             conn.query_row(
                 "SELECT 1 FROM cloud_outbox WHERE operation = 'upload' LIMIT 1",
@@ -387,7 +416,8 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn remove_cloud_outbox_entry(&self, id: i64) -> Result<(), DbError> {
+    /// Remove an outbox entry by id (after the upload or delete completed).
+    pub async fn remove_cloud_outbox_entry(&self, id: i64) -> Result<(), DbError> {
         self.call(move |conn| {
             conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
                 .map(|_| ())
@@ -396,7 +426,42 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn record_cloud_upload_failure(
+    /// Drop any queued uploads for `cloud_key`. The host calls this when a file
+    /// is deleted before its upload ran — no point uploading what's about to go.
+    pub async fn remove_cloud_outbox_uploads_for_key(
+        &self,
+        cloud_key: &str,
+    ) -> Result<(), DbError> {
+        let cloud_key = cloud_key.to_string();
+        self.call(move |conn| {
+            conn.execute(
+                "DELETE FROM cloud_outbox WHERE operation = 'upload' AND cloud_key = ?1",
+                [cloud_key],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// Clear the retry-backoff timestamp on failed uploads so the next cycle
+    /// retries them immediately. Backs a host "retry now" action.
+    pub async fn reset_cloud_outbox_backoff(&self) -> Result<(), DbError> {
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE cloud_outbox SET last_attempt_at = NULL \
+                 WHERE operation = 'upload' AND attempt_count > 0",
+                [],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// Record a failed upload attempt (bumps `attempt_count`, stores the error
+    /// and the time). The entry stays queued for retry.
+    pub async fn record_cloud_upload_failure(
         &self,
         id: i64,
         error: &str,
