@@ -80,7 +80,7 @@ library**: the item key is independent of the master, so coven can hand it to an
 outsider without exposing the library, and coven manages its lifecycle (mint,
 sync, share, revoke).
 
-Item keys are opt-in. An app that never shares to non-members simply never emits
+Item keys are opt-in. An app that never shares to non-members never emits
 `Item` — it stays on `Master`/`Derived`, the `item_keys` table stays empty, and
 none of the share machinery runs.
 

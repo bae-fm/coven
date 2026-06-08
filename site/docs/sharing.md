@@ -263,11 +263,9 @@ A *member* can read every item key (each rides the master-encrypted changeset, a
 a member holds the master), so an item key does not hide an item *from members*. It
 exists so one item can be shared *outward* on its own.
 
-**Don't need sharing?** Then don't use item keys. An app that never shares to
-outsiders simply never emits `BlobScope::Item` and never
-calls `mint_item_key`: it stays on `Master`/`Derived`, the `item_keys` table stays
-empty, and the share machinery below never runs. Item keys are a layer you opt
-into, not a tax every app pays.
+Item keys are opt-in. An app that never shares to outsiders never emits
+`BlobScope::Item` and never calls `mint_item_key`: it stays on `Master`/`Derived`,
+the `item_keys` table stays empty, and the share machinery below never runs.
 
 ## Creating and opening a share
 
