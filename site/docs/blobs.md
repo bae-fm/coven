@@ -81,11 +81,15 @@ separate, durable path, with retry and progress, and it does not read `scope`:
 it encrypts under the master key only.
 
 For the queue, the host writes the plaintext file to `local_path`, then calls
-`db.enqueue_upload(file_id, cloud_key, source_path, created_at)`. `cloud_key` is
-the blob's cloud path; `source_path` is optional and overrides where the
-plaintext is read from when the file lives outside the library directory. The
-matching call for a removal is `db.enqueue_delete(cloud_key, min_seq,
-created_at)`, where `min_seq` is the device's current `db.local_seq()`. The
+`db.enqueue_upload(file_id, cloud_key, source_path, content_key, created_at)`.
+`cloud_key` is the blob's cloud path; `source_path` is optional and overrides
+where the plaintext is read from when the file lives outside the library
+directory. `content_key` is an optional 32-byte key this blob's bytes are
+encrypted under; `None` falls back to the library master key. The host supplies
+it at enqueue time and coven persists it on the row, since the upload drains long
+after the enqueue site is gone. The matching call for a removal is
+`db.enqueue_delete(cloud_key, min_seq, created_at)`, where `min_seq` is the
+device's current `db.local_seq()`. The
 delete becomes safe once every peer has synced past that sequence. `local_seq`
 is a typed accessor, so the host never reads coven's `sync_state` by hand.
 
@@ -98,13 +102,13 @@ never mutates the rows by hand: it enqueues and clears them through the
 through those methods, or join the shared table into its own queries. Each row is an
 [`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) carrying its
 [`OutboxOperation`](rustdoc:variant:coven::db::OutboxOperation::Upload), `file_id`,
-`cloud_key`, `source_path`, and the retry bookkeeping below.
+`cloud_key`, `source_path`, `content_key`, and the retry bookkeeping below.
 
 The queue is the durable record of upload intent. Nothing uploads at enqueue
 time; the next sync cycle drains it. coven reads the pending entries, and for
-each one reads the local file, encrypts it under the library master key, writes
-the encrypted bytes to the cloud at the entry's `cloud_key`, and removes the
-entry on success.
+each one reads the local file, encrypts it under the entry's `content_key` (or
+the library master key when that is `None`), writes the encrypted bytes to the
+cloud at the entry's `cloud_key`, and removes the entry on success.
 
 Uploads run before the changeset push, and the cycle will not publish a changeset
 while uploads are still pending. A peer therefore never pulls a changeset that

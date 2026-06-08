@@ -291,12 +291,16 @@ impl Database {
 
     // ---- Cloud outbox ----
 
-    /// Enqueue a blob upload. Idempotent on `(operation, cloud_key)`.
+    /// Enqueue a blob upload. `content_key` is the 32-byte key the blob is
+    /// encrypted under (`None` falls back to the library master key); coven
+    /// persists it on the row so the async drain encrypts with it long after the
+    /// enqueue site is gone. Idempotent on `(operation, cloud_key)`.
     pub async fn enqueue_upload(
         &self,
         file_id: &str,
         cloud_key: &str,
         source_path: Option<&str>,
+        content_key: Option<[u8; 32]>,
         created_at: &str,
     ) -> Result<(), DbError> {
         let (file_id, cloud_key, source_path, created_at) = (
@@ -305,12 +309,13 @@ impl Database {
             source_path.map(str::to_string),
             created_at.to_string(),
         );
+        let content_key = content_key.map(|k| k.to_vec());
         self.call(move |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, file_id, cloud_key, source_path, created_at) \
-                 VALUES ('upload', ?1, ?2, ?3, ?4)",
-                (file_id, cloud_key, source_path, created_at),
+                 (operation, file_id, cloud_key, source_path, content_key, created_at) \
+                 VALUES ('upload', ?1, ?2, ?3, ?4, ?5)",
+                (file_id, cloud_key, source_path, content_key, created_at),
             )
             .map(|_| ())
             .map_err(DbError::from)
@@ -383,8 +388,8 @@ impl Database {
         self.call(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, operation, file_id, cloud_key, source_path, created_at, \
-                            min_seq, attempt_count, last_error, last_attempt_at \
+                    "SELECT id, operation, file_id, cloud_key, source_path, content_key, \
+                            created_at, min_seq, attempt_count, last_error, last_attempt_at \
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
                 .map_err(DbError::from)?;
@@ -492,11 +497,15 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
         file_id: r.get(2)?,
         cloud_key: r.get(3)?,
         source_path: r.get(4)?,
-        created_at: r.get(5)?,
-        min_seq: r.get::<_, Option<i64>>(6)?.map(|v| v as u64),
-        attempt_count: r.get(7)?,
-        last_error: r.get(8)?,
-        last_attempt_at: r.get(9)?,
+        content_key: r.get::<_, Option<Vec<u8>>>(5)?.map(|v| {
+            v.try_into()
+                .expect("cloud_outbox.content_key must be 32 bytes")
+        }),
+        created_at: r.get(6)?,
+        min_seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+        attempt_count: r.get(8)?,
+        last_error: r.get(9)?,
+        last_attempt_at: r.get(10)?,
     })
 }
 

@@ -320,27 +320,6 @@ fn enc() -> RwLock<EncryptionService> {
     RwLock::new(EncryptionService::new_with_key(&[0u8; 32]))
 }
 
-fn upload_entry(
-    id: i64,
-    file_id: &str,
-    cloud_key: &str,
-    source_path: Option<String>,
-) -> OutboxEntry {
-    OutboxEntry {
-        id,
-        operation: OutboxOperation::Upload,
-        file_id: file_id.to_string(),
-        cloud_key: cloud_key.to_string(),
-        source_path,
-        content_key: None,
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-        min_seq: None,
-        attempt_count: 0,
-        last_error: None,
-        last_attempt_at: None,
-    }
-}
-
 fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String {
     let p = dir.join(name);
     std::fs::write(&p, contents).unwrap();
@@ -675,9 +654,16 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     let source = write_temp_file(tmp.path(), "track.flac", plaintext);
 
     let cloud_key = "storage/ab/cd/file-1";
-    let mut entry = upload_entry(1, "file-1", cloud_key, Some(source));
-    entry.content_key = Some(k_release);
-    let db = MockBookkeeping::with_uploads(vec![entry]);
+    let db = open_outbox_db();
+    db.enqueue_upload(
+        "file-1",
+        cloud_key,
+        Some(source.as_str()),
+        Some(k_release),
+        T0,
+    )
+    .await
+    .expect("enqueue the release blob under its content key");
     let master_enc = RwLock::new(EncryptionService::from_key(master_key));
 
     let n = process_uploads(&db, &cloud, &master_enc, tmp.path(), &fixed_clock(T0), None)

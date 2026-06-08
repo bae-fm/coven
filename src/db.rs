@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     file_id TEXT NOT NULL,
     cloud_key TEXT NOT NULL,
     source_path TEXT,
+    -- The 32-byte key this blob is encrypted under (NULL falls back to the
+    -- library master key). Local bookkeeping; this table does not sync.
+    content_key BLOB,
     created_at TEXT NOT NULL,
     min_seq INTEGER,
     attempt_count INTEGER NOT NULL DEFAULT 0,
