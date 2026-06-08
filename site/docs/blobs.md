@@ -35,7 +35,7 @@ pub struct BlobRef {
     pub namespace: String,   // cloud namespace, e.g. "attachments"
     pub id: String,          // blob id, typically the attachment row's id
     pub local_path: PathBuf, // source on push, destination on pull
-    pub scope: BlobScope,    // Master | Derived(scope_id) | Key(bytes)
+    pub scope: BlobScope,    // Master | Derived(scope_id) | Item(item_id)
 }
 ```
 
@@ -55,11 +55,15 @@ encrypted under:
   [`derive_scoped`](rustdoc:method:coven::encryption::EncryptionService::derive_scoped),
   one distinct key per `scope_id`. A blob scoped to `Derived("todo-42")` is
   encrypted under a different key from one scoped to `Derived("todo-99")`.
-- `BlobScope::Key(bytes)` encrypts with an explicit 32-byte key the host supplies
-  directly. Unlike `Derived`, it isn't a function of the master, so the host can
-  rotate it independently — at the cost of storing and syncing the key itself
-  (typically a column on the blob-bearing row). The host must pass the same key
-  back through `blobs_to_pull` for the puller to decrypt.
+- `BlobScope::Item(item_id)` encrypts with a coven-managed **item key** — a random
+  per-item key coven mints with
+  [`mint_item_key`](rustdoc:method:coven::database::Database::mint_item_key), keeps in the
+  synced `item_keys` table (so it reaches every member and survives snapshots),
+  and resolves by `item_id` on both push and pull. The host names the item; coven
+  holds the key, so the host never handles raw key bytes. Unlike `Derived`, an
+  item key is *not* a function of the master, so it can be rotated independently
+  and **exported to a non-member** without exposing the master — that export is a
+  share. See [Item keys and sharing](sharing.md#item-keys).
 
 The derivation is deterministic: the same `scope_id` always yields the same key,
 on push and on pull alike. That is what lets a puller decrypt: it passes the same
@@ -68,31 +72,37 @@ decrypt. The corollary is that `scope_id` must be stable. If it is a row id that
 later changes, the re-derived key will not match and the stored blob will not
 decrypt.
 
-Use `Master` when every member should read the blob, which is the common case.
-`Derived` exists for a finer split: scoping a blob to a key only some members
-hold is the building block for revoking access to a subset of blobs without
-rotating the whole library key. The split happens at encryption time, so the
-choice is made now even though the revocation path that consumes it is future
-work.
+Use `Master` when every member should read the blob, which is the common case —
+it needs no key management at all. `Derived` gives a finer split among members
+with a key that is still a deterministic function of the master. Reach for `Item`
+only when a blob belongs to a unit you want to **share with someone outside the
+library** or **rotate on its own**: the item key is independent of the master and
+coven manages its lifecycle (mint, sync, share, revoke).
+
+Item keys are opt-in. An app that never shares to non-members and never rotates
+per-item simply never emits `Item` — it stays on `Master`/`Derived`, the
+`item_keys` table stays empty, and none of the share machinery runs.
 
 ## How a blob moves out
 
 A blob reaches the cloud one of two ways. A `BlobRef` returned from
 `blobs_to_push` is uploaded by the cycle itself, inside `sync`, before the
-envelope: coven reads `local_path`, encrypts under the ref's `scope` (master or
-derived), and writes to `{namespace}/{ab}/{cd}/{id}`. That path is synchronous
-and reports no progress. The `cloud_outbox` queue described below is the
-separate, durable path, with retry and progress, and it does not read `scope`:
-it encrypts under the master key only.
+envelope: coven reads `local_path`, resolves the ref's `scope` to a key (master,
+a derived key, or — for `Item(item_id)` — the item key from the `item_keys`
+table), encrypts under it, and writes to `{namespace}/{ab}/{cd}/{id}`. That path
+is synchronous and reports no progress. The `cloud_outbox` queue described below
+is the separate, durable path, with retry and progress; it carries the same
+`BlobScope` and resolves it the same way when it drains.
 
 For the queue, the host writes the plaintext file to `local_path`, then calls
-`db.enqueue_upload(file_id, cloud_key, source_path, content_key, created_at)`.
+`db.enqueue_upload(file_id, cloud_key, source_path, scope, created_at)`.
 `cloud_key` is the blob's cloud path; `source_path` is optional and overrides
 where the plaintext is read from when the file lives outside the library
-directory. `content_key` is an optional 32-byte key this blob's bytes are
-encrypted under; `None` falls back to the library master key. The host supplies
-it at enqueue time and coven persists it on the row, since the upload drains long
-after the enqueue site is gone. The matching call for a removal is
+directory. `scope` is the blob's
+[`BlobScope`](rustdoc:enum:coven::blob::BlobScope) — `Master`, `Derived`, or
+`Item(item_id)` — naming which key the bytes are encrypted under; coven persists
+it on the row and resolves it when the upload drains, long after the enqueue site
+is gone. The matching call for a removal is
 `db.enqueue_delete(cloud_key, min_seq, created_at)`, where `min_seq` is the
 device's current `db.local_seq()`. The
 delete becomes safe once every peer has synced past that sequence. `local_seq`
@@ -105,15 +115,16 @@ never mutates the rows by hand: it enqueues and clears them through the
 `get_pending_cloud_uploads`/`get_pending_cloud_deletes`,
 `remove_cloud_outbox_entry`, `reset_cloud_outbox_backoff`). It can read the queue
 through those methods, or join the shared table into its own queries. Each row is an
-[`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) carrying its
-[`OutboxOperation`](rustdoc:variant:coven::db::OutboxOperation::Upload), `file_id`,
-`cloud_key`, `source_path`, `content_key`, and the retry bookkeeping below.
+[`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) whose
+[`OutboxOperation`](rustdoc:enum:coven::db::OutboxOperation) is either an
+`Upload { file_id, source_path, scope }` or a `Delete { min_seq }`, alongside the
+shared `cloud_key` and the retry bookkeeping below.
 
 The queue is the durable record of upload intent. Nothing uploads at enqueue
 time; the next sync cycle drains it. coven reads the pending entries, and for
-each one reads the local file, encrypts it under the entry's `content_key` (or
-the library master key when that is `None`), writes the encrypted bytes to the
-cloud at the entry's `cloud_key`, and removes the entry on success.
+each one reads the local file, resolves the entry's `scope` to a key (an `Item`
+scope reads the `item_keys` table), encrypts under it, writes the encrypted bytes
+to the cloud at the entry's `cloud_key`, and removes the entry on success.
 
 Uploads run before the changeset push, and the cycle will not publish a changeset
 while uploads are still pending. A peer therefore never pulls a changeset that

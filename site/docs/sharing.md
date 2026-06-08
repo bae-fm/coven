@@ -5,6 +5,15 @@ append-only, Ed25519-signed log of membership changes, the membership chain.
 Pull verifies both each changeset's own signature and the chain itself, so the
 cloud provider never has to be trusted with who is allowed to write.
 
+Coven shares at two scopes. **Membership** — most of this page — grants the
+*whole library* to another *writer*: a peer with their own identity in the chain.
+An **item share** ([below](#item-keys)) grants *one item* to an *outsider* who
+holds only a URL — read-only, never a member — using a per-item key rather than
+the library key. The two reuse a single idea, sealing a key to a recipient, and
+nothing else: membership seals the library key to a member's keypair
+(asymmetric); a share wraps an item key under a random secret that lives in the
+URL (symmetric, because the recipient has no keypair).
+
 The examples use a todos app: `workspaces` hold `lists`, a `list` holds
 `todos`, and a todo can carry `todo_attachments`. Two people sharing the
 library both write todos; the owner controls who else can.
@@ -226,3 +235,91 @@ consumer cloud the user re-authenticates during restore.
 Because the code contains the library key and any stored credentials, it is the
 most sensitive string coven produces; anyone holding it has full access to the
 library.
+
+## Item keys
+
+An **item key** is a random 32-byte key for one *item* — a logical unit the host
+names (a todo with its attachments, a music release with its files), identified by
+an opaque `item_id`. It is the second key tier, below the library master key.
+
+Coven owns its lifecycle. The host calls
+[`mint_item_key(item_id)`](rustdoc:method:coven::database::Database::mint_item_key) when it
+creates the item; coven generates the key and stores it in the synced `item_keys`
+table. Because that table is synced like any other, the key rides the
+master-encrypted changeset to every member and is preserved in snapshots — a
+member who joins by changeset replay *or* by snapshot bootstrap gets it. The host
+never sees raw key bytes: it tags a blob with
+[`BlobScope::Item(item_id)`](rustdoc:enum:coven::blob::BlobScope) (see
+[Blobs](blobs.md#encryption-scope)), and coven resolves the id to the key when it
+encrypts on push and decrypts on pull.
+
+**Why an item key and not `Master` or `Derived`?** Two properties the others lack:
+
+- It is **independent of the master** (not derived from it), so it can be
+  **rotated on its own** to cut access to one item without re-keying the whole
+  library.
+- It can be **handed to a non-member** — a share — without handing over the
+  master, so an outsider reads exactly one item and nothing else.
+
+A *member* can read every item key (each rides the master-encrypted changeset, and
+a member holds the master), so an item key does not hide an item *from members*. It
+exists so one item can be rotated or shared *outward* on its own.
+
+**Don't need sharing?** Then don't use item keys. An app that never shares to
+outsiders and never rotates per-item simply never emits `BlobScope::Item` and never
+calls `mint_item_key`: it stays on `Master`/`Derived`, the `item_keys` table stays
+empty, and the share machinery below never runs. Item keys are a layer you opt
+into, not a tax every app pays.
+
+## Creating and opening a share
+
+A share hands one item to someone outside the library through a URL. The recipient
+has no coven identity and no library key — only a secret in the URL fragment.
+
+[`create_share(db, cloud_home, item_id, blobs)`](rustdoc:fn:coven::share::create_share):
+
+1. Reads the item's key (errors if it was never minted — the host must mint it and
+   let it sync first, since the recipient holds the exact key the blobs are
+   encrypted under).
+2. Generates a random per-share `secret` and a high-entropy `share_id`.
+3. Wraps the item key under the secret with the symmetric AEAD —
+   `key.enc = EncryptionService::from_key(secret).encrypt(item_key)`, the same
+   cipher that encrypts blobs. Symmetric, not the asymmetric `seal_box` membership
+   uses, because the recipient has only the secret, no keypair.
+4. Writes two objects under `shares/{share_id}/`: `key.enc` (the wrapped key) and
+   `manifest.json`, a [`ShareManifest`](rustdoc:struct:coven::share::ShareManifest)
+   listing the authorized blobs as `(namespace, id)` logical refs.
+5. Returns a [`ShareToken`](rustdoc:struct:coven::share::ShareToken) — the
+   `share_id` and the raw `secret`. The host builds the URL
+   `{base}/share/{share_id}#{base64url(secret)}`.
+
+The recipient's browser reads the secret from the URL fragment (never sent to the
+server), fetches `key.enc`, and calls
+[`open_share(secret, key_enc)`](rustdoc:fn:coven::share::open_share) to recover the
+item key, then fetches and decrypts the item's blobs with it. `open_share` is a
+pure function of the encryption primitive alone, so a browser client that can't
+link coven opens a share by reproducing the documented wire format.
+
+### Serving a share
+
+Whatever serves `shares/{share_id}/*` (coven's HTTP proxy, or the host's) is
+untrusted and unauthenticated. It gates each blob request with
+[`ShareManifest::allows(cloud_key)`](rustdoc:method:coven::share::ShareManifest::allows):
+coven hashes each authorized `(namespace, id)` to its cloud key internally and
+compares, so the server never learns coven's path layout. The manifest authorizes
+*fetch*; the wrapped item key authorizes *decrypt* — independently, so a stray
+blob ref in a manifest only ever leaks undecryptable ciphertext.
+
+A share's security rests on two things: the `secret` stays in the URL fragment (so
+the server never sees it), and `share_id` is unguessable (so the unauthenticated
+`shares/{share_id}/` prefix can't be enumerated).
+
+### Revoking a share
+
+[`revoke_share(cloud_home, share_id)`](rustdoc:fn:coven::share::revoke_share)
+deletes the `shares/{share_id}/` objects. The server can no longer read the
+manifest, so it stops serving the share and the URL goes dead. Bytes the recipient
+already downloaded are not clawed back — the same envelope model coven uses for
+membership revocation. To cut off a recipient who has the URL but hasn't downloaded
+yet, rotate the item key (re-encrypt the item's blobs under a fresh key), which is
+independent of the master and of every other item.
