@@ -188,9 +188,9 @@ pub async fn process_uploads(
             }
         };
 
-        let encrypted = {
-            let enc = encryption.read().unwrap();
-            enc.encrypt(&data)
+        let encrypted = match &entry.content_key {
+            Some(key) => EncryptionService::from_key(*key).encrypt(&data),
+            None => encryption.read().unwrap().encrypt(&data),
         };
 
         match upload_with_progress(

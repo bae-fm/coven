@@ -57,6 +57,11 @@ pub struct OutboxEntry {
     pub file_id: String,
     pub cloud_key: String,
     pub source_path: Option<String>,
+    /// The 32-byte key this blob's bytes are encrypted under. `None` falls back
+    /// to the library master key. The host supplies it at enqueue time and
+    /// persists it on the row, since the upload drains long after the enqueue
+    /// site is gone.
+    pub content_key: Option<[u8; 32]>,
     pub created_at: String,
     pub min_seq: Option<u64>,
     /// How many times an upload of this entry has failed. `0` for a freshly
