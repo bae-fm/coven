@@ -19,6 +19,7 @@ use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
 use crate::sync::join::{build_config, derive_credentials, open_db_and_pull, JoinError};
 use crate::sync::pull::PullError;
+use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
 use crate::sync::storage::SyncStorage;
 
@@ -190,10 +191,12 @@ async fn build_cloud_home(
 ///
 /// Validates inputs, constructs the cloud home from the source, runs the sync
 /// protocol, and sets the library as active.
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     library_id: &str,
     encryption_key_hex: &str,
     library_name: &str,
+    synced_tables: &[SyncedTable],
     source: RestoreSource,
     app_dir: &Path,
     clock: crate::clock::ClockRef,
@@ -242,6 +245,7 @@ pub async fn restore_from_cloud(
         &library_dir,
         library_id,
         &device_id,
+        synced_tables,
         &join_info,
         library_name,
         &key_service,
@@ -271,8 +275,10 @@ pub async fn restore_from_cloud(
 /// Decodes the restore code, converts provider → RestoreSource (adding OAuth
 /// tokens for providers that need them), imports the signing key, and
 /// delegates to `restore_from_cloud`.
+#[allow(clippy::too_many_arguments)]
 pub async fn restore_from_code(
     code: &str,
+    synced_tables: &[SyncedTable],
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     app_dir: &Path,
@@ -344,6 +350,7 @@ pub async fn restore_from_code(
         &parsed.lid,
         &parsed.ek,
         &parsed.name,
+        synced_tables,
         source,
         app_dir,
         clock,
@@ -364,6 +371,7 @@ pub async fn restore_from_code(
 }
 
 /// Inner bootstrap + save logic, separated so the caller can clean up on failure.
+#[allow(clippy::too_many_arguments)]
 async fn bootstrap_and_save(
     storage: &EncryptedSyncStorage,
     encryption: &EncryptionService,
@@ -371,6 +379,7 @@ async fn bootstrap_and_save(
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
+    synced_tables: &[SyncedTable],
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
     key_service: &KeyService,
@@ -394,8 +403,9 @@ async fn bootstrap_and_save(
 
     let changesets_applied = open_db_and_pull(
         &db_path,
-        bucket_dyn,
+        synced_tables,
         device_id,
+        bucket_dyn,
         &cursors,
         library_dir,
         blob_plan,

@@ -19,12 +19,10 @@ pub mod pull;
 #[cfg(test)]
 mod pull_tests;
 pub mod push;
-pub mod register_clock;
 pub mod restore;
 pub mod restore_code;
 pub mod service;
 pub mod session;
-pub mod session_ext;
 pub mod snapshot;
 pub mod status;
 pub mod storage;

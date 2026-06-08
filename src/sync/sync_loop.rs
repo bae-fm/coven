@@ -1,8 +1,14 @@
-//! Sync loop handle: manages the background sync loop thread.
+//! Sync loop handle: runs the background sync loop on a dedicated OS thread.
 //!
-//! Owns the sync infrastructure (storage client, HLC, session, etc.) and
-//! spawns a dedicated OS thread that runs sync cycles on a timer or manual
-//! trigger. Emits `SyncLoopStatus` events through a broadcast channel.
+//! Owns the sync infrastructure (storage client, HLC, the owned [`Database`]
+//! handle, etc.) and runs sync cycles on a timer or manual trigger. The
+//! connection itself lives on the [`Database`] actor thread, so the loop holds
+//! nothing `!Send` — but it still runs on its own OS thread (a current-thread
+//! tokio runtime that `block_on`s the loop) for the *stack*: aws-sdk-s3's
+//! endpoint/auth resolution recurses deeply enough to overflow the default
+//! secondary-thread stack in debug builds. The thread is given a main-thread-
+//! sized stack so S3 sync doesn't `SIGBUS` in `resolve_endpoint`.
+//! Emits [`SyncLoopStatus`] events through a broadcast channel.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,15 +19,14 @@ use tracing::{debug, info, warn};
 use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::changeset::RowChange;
 use crate::clock::ClockRef;
-use crate::db::SyncBookkeeping;
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 
-use super::cycle::{SyncComponents, SyncCycleOutcome};
+use super::cycle::SyncComponents;
 use super::encrypted_storage::EncryptedSyncStorage;
 use super::hlc::Hlc;
-use super::session::SyncSession;
 use super::storage::SyncStorage;
 
 /// Status emitted by the sync loop after each cycle.
@@ -41,13 +46,12 @@ pub struct SyncLoopStatus {
 /// Manages the background sync loop and provides access to sync components.
 pub struct SyncLoopHandle {
     inner: Arc<SyncLoopInner>,
-    db: Arc<dyn SyncBookkeeping>,
     clock: ClockRef,
     library_dir: LibraryDir,
     trigger_tx: tokio::sync::mpsc::Sender<()>,
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
     event_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
-    loop_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 struct SyncLoopInner {
@@ -55,23 +59,16 @@ struct SyncLoopInner {
     hlc: Arc<Hlc>,
     device_id: String,
     encryption: Arc<std::sync::RwLock<EncryptionService>>,
-    raw_db: *mut libsqlite3_sys::sqlite3,
-    session: tokio::sync::Mutex<Option<SyncSession>>,
+    db: Database,
     user_keypair: UserKeypair,
     blob_plan: Arc<dyn BlobPlan>,
     observer: Option<Arc<dyn BlobUploadObserver>>,
 }
 
-// SAFETY: The raw sqlite3 pointer is only used for session extension operations
-// which are serialized through the sync loop. The pointer itself is stable
-// (heap-allocated write connection held by the host).
-unsafe impl Send for SyncLoopInner {}
-unsafe impl Sync for SyncLoopInner {}
-
 impl SyncLoopHandle {
     pub fn new(
         components: SyncComponents,
-        db: Arc<dyn SyncBookkeeping>,
+        db: Database,
         clock: ClockRef,
         library_dir: LibraryDir,
         blob_plan: Arc<dyn BlobPlan>,
@@ -86,30 +83,34 @@ impl SyncLoopHandle {
                 hlc: components.hlc,
                 device_id: components.device_id,
                 encryption: components.encryption,
-                raw_db: components.raw_db,
-                session: tokio::sync::Mutex::new(Some(components.session)),
+                db,
                 user_keypair: components.user_keypair,
                 blob_plan,
                 observer,
             }),
-            db,
             clock,
             library_dir,
             trigger_tx,
             trigger_rx: std::sync::Mutex::new(Some(trigger_rx)),
             event_tx,
-            loop_handle: std::sync::Mutex::new(None),
+            thread_handle: std::sync::Mutex::new(None),
         }
     }
 
-    /// Start the background sync loop. No-op if already running.
+    /// Start the background sync loop on a dedicated OS thread. No-op if already
+    /// running.
     ///
-    /// Spawns a dedicated OS thread with its own tokio runtime because
-    /// the sync session holds a raw sqlite3 pointer (not Send across
-    /// tokio task boundaries).
+    /// The thread runs a current-thread tokio runtime that `block_on`s the loop.
+    /// A dedicated thread (rather than `tokio::spawn` on the host runtime) is for
+    /// the *stack*: aws-sdk-s3's endpoint/auth resolution recurses deeply enough
+    /// to overflow the default secondary-thread stack in debug builds (SIGBUS in
+    /// `resolve_endpoint`), so the thread is given a main-thread-sized stack.
+    /// Everything the loop holds is `Send` — the connection lives on the
+    /// [`Database`] actor thread, reached only through async calls — so nothing
+    /// here is bound to this thread except by choice of stack size.
     pub fn start(&self) {
         {
-            let guard = self.loop_handle.lock().unwrap();
+            let guard = self.thread_handle.lock().unwrap();
             if guard.is_some() {
                 return;
             }
@@ -125,16 +126,15 @@ impl SyncLoopHandle {
 
         let inner = Arc::clone(&self.inner);
         let event_tx = self.event_tx.clone();
-        let db = Arc::clone(&self.db);
         let clock = self.clock.clone();
         let library_dir = self.library_dir.clone();
 
         let handle = std::thread::Builder::new()
             .name("coven-sync-loop".to_string())
-            // aws-sdk-s3's endpoint/auth resolution recurses deeply enough to
-            // blow the ~2 MiB default secondary-thread stack in debug builds
-            // (SIGBUS in resolve_endpoint). Give this thread a main-thread-sized
-            // stack so S3 sync doesn't overflow it.
+            // aws-sdk-s3's endpoint/auth resolution recurses deeply enough to blow
+            // the ~2 MiB default secondary-thread stack in debug builds (SIGBUS in
+            // resolve_endpoint). Give this thread a main-thread-sized stack so S3
+            // sync doesn't overflow it.
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -148,20 +148,19 @@ impl SyncLoopHandle {
                     }
                 };
 
-                rt.block_on(async {
-                    // Short delay to avoid racing with app startup
+                rt.block_on(async move {
+                    // Short delay to avoid racing with app startup.
                     tokio::time::sleep(Duration::from_secs(3)).await;
 
                     let mut consecutive_failures: u32 = 0;
                     loop {
-                        match run_single_cycle(&inner, db.as_ref(), clock.as_ref(), &library_dir)
-                            .await
-                        {
+                        match run_single_cycle(&inner, clock.as_ref(), &library_dir).await {
                             Ok(result) => {
                                 consecutive_failures = 0;
-                                // Schema-skip takes priority — newer-version changesets are
-                                // permanently inapplicable until the user updates the app, while
-                                // asset download failures retry naturally on the next cycle.
+                                // Schema-skip takes priority — newer-version changesets
+                                // are permanently inapplicable until the user updates the
+                                // app, while asset download failures retry naturally next
+                                // cycle.
                                 let error = if result.skipped_schema > 0 {
                                     Some(format!(
                                         "{} changes from a newer app version were skipped. Update the app to apply them.",
@@ -173,8 +172,7 @@ impl SyncLoopHandle {
                                     None
                                 };
                                 let data_changed = result.changesets_applied > 0;
-                                let row_changes = if data_changed && !result.row_changes.is_empty()
-                                {
+                                let row_changes = if data_changed && !result.row_changes.is_empty() {
                                     Some(result.row_changes)
                                 } else {
                                     None
@@ -228,19 +226,19 @@ impl SyncLoopHandle {
             })
             .expect("Failed to spawn sync loop thread");
 
-        *self.loop_handle.lock().unwrap() = Some(handle);
+        *self.thread_handle.lock().unwrap() = Some(handle);
     }
 
     /// Whether the background sync thread is running.
     pub fn is_running(&self) -> bool {
-        self.loop_handle.lock().unwrap().is_some()
+        self.thread_handle.lock().unwrap().is_some()
     }
 
     /// Signal the sync loop to run a cycle immediately.
     ///
-    /// `Full` means a trigger is already pending — our request collapses
-    /// into the existing one, which is exactly what the capacity-1 channel
-    /// is for. `Closed` means the loop is gone, so the trigger is moot.
+    /// `Full` means a trigger is already pending — our request collapses into the
+    /// existing one, which is exactly what the capacity-1 channel is for.
+    /// `Closed` means the loop is gone, so the trigger is moot.
     pub fn trigger(&self) {
         match self.trigger_tx.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => {}
@@ -274,54 +272,27 @@ impl SyncLoopHandle {
     }
 }
 
-/// Run a single sync cycle, managing session lifecycle.
+/// Run a single sync cycle.
 async fn run_single_cycle(
     inner: &SyncLoopInner,
-    db: &dyn SyncBookkeeping,
     clock: &dyn crate::clock::Clock,
     library_dir: &LibraryDir,
 ) -> Result<super::cycle::SyncCycleResult, String> {
     let storage: &dyn SyncStorage = &*inner.storage;
-
-    let session = match inner.session.lock().await.take() {
-        Some(s) => s,
-        None => {
-            warn!("Sync session was None, creating a new one");
-            unsafe { SyncSession::start(inner.raw_db) }
-                .map_err(|e| format!("Failed to create replacement sync session: {e}"))?
-        }
-    };
-
     let cloud_home = inner.storage.cloud_home();
 
-    let outcome = unsafe {
-        super::cycle::run_single_sync_cycle(
-            storage,
-            &inner.device_id,
-            &inner.hlc,
-            clock,
-            inner.raw_db,
-            session,
-            &inner.encryption,
-            &inner.user_keypair,
-            db,
-            library_dir,
-            Some(cloud_home),
-            inner.blob_plan.as_ref(),
-            inner.observer.as_deref(),
-        )
-        .await
-    };
-
-    match outcome {
-        SyncCycleOutcome::Ok(result, new_session) => {
-            *inner.session.lock().await = Some(new_session);
-            Ok(result)
-        }
-        SyncCycleOutcome::ErrWithSession(e, new_session) => {
-            *inner.session.lock().await = Some(new_session);
-            Err(e)
-        }
-        SyncCycleOutcome::ErrNoSession(e) => Err(e),
-    }
+    super::cycle::run_single_sync_cycle(
+        storage,
+        &inner.device_id,
+        &inner.hlc,
+        clock,
+        &inner.db,
+        &inner.encryption,
+        &inner.user_keypair,
+        library_dir,
+        Some(cloud_home),
+        inner.blob_plan.as_ref(),
+        inner.observer.as_deref(),
+    )
+    .await
 }

@@ -1,18 +1,26 @@
-/// Production conflict handler for changeset application.
-///
-/// Uses row-level Last-Writer-Wins (LWW) based on the `_updated_at` column,
-/// which contains HLC timestamps that sort lexicographically = causally.
-///
-/// The `_updated_at` column index is looked up dynamically from the schema
-/// (via `TableSchema`) so adding columns to the end of a table is safe.
-use std::collections::HashMap;
-use std::ffi::{c_char, c_int, CStr, CString};
-use std::ptr;
+//! Production conflict resolution for changeset application.
+//!
+//! Row-level Last-Writer-Wins (LWW) on the `_updated_at` column, whose HLC
+//! timestamps sort lexicographically = causally. The `_updated_at` column index
+//! is looked up dynamically from the schema (via [`TableColumns`]) so adding
+//! columns to the end of a table is safe.
+//!
+//! The logic runs inside the `apply_strm` conflict closure in [`super::apply`],
+//! which is `Fn(ConflictType, ChangesetItem) -> ConflictAction + Send + 'static`.
+//! This module provides the per-table column map (moved owned into the closure)
+//! and the pure per-row decision; FK-violation tracking is an `Arc<AtomicBool>`
+//! the closure owns, since `Fn` forbids `&mut` state.
 
-use libsqlite3_sys as ffi;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use rusqlite::session::{ChangesetItem, ConflictAction, ConflictType};
+use rusqlite::Connection;
 use tracing::warn;
 
-use super::session_ext::{ConflictAction, ConflictContext, ConflictType};
+use crate::changeset::value_ref_to_string;
+use crate::database::DbError;
 
 /// Column indices for a synced table, looked up from `PRAGMA table_info`.
 pub struct TableColumns {
@@ -20,149 +28,123 @@ pub struct TableColumns {
     pub updated_at: usize,
 }
 
-/// Schema info for all synced tables: maps table name to column indices.
+/// Schema info for all synced tables: maps table name to column indices. Built
+/// once before an apply and moved (owned) into the conflict closure, which must
+/// be `'static`.
 pub struct TableSchema {
     tables: HashMap<String, TableColumns>,
 }
 
 impl TableSchema {
     /// Build schema info by querying `PRAGMA table_info` for each synced table.
-    ///
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection pointer.
-    pub unsafe fn from_db(db: *mut ffi::sqlite3, synced_tables: &[&str]) -> Self {
+    /// A registered table that has no `_updated_at` column is a host integration
+    /// error and surfaces as `Err`.
+    pub fn from_db(conn: &Connection, synced_tables: &[&str]) -> Result<Self, DbError> {
         let mut tables = HashMap::new();
 
         for &table in synced_tables {
-            let sql = format!("PRAGMA table_info({table})");
-            let c_sql = CString::new(sql).unwrap();
-            let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-            let rc = ffi::sqlite3_prepare_v2(db, c_sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
-            assert_eq!(
-                rc,
-                ffi::SQLITE_OK as c_int,
-                "PRAGMA table_info failed for {table}"
-            );
+            let mut stmt = conn
+                .prepare(&format!(
+                    "PRAGMA table_info({})",
+                    super::session::quote_ident(table)
+                ))
+                .map_err(DbError::from)?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)? as usize, r.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?;
 
             let mut updated_at = None;
-
-            while ffi::sqlite3_step(stmt) == ffi::SQLITE_ROW as c_int {
-                let col_index = ffi::sqlite3_column_int(stmt, 0) as usize;
-                let name_ptr = ffi::sqlite3_column_text(stmt, 1);
-                if name_ptr.is_null() {
-                    continue;
-                }
-                let name = CStr::from_ptr(name_ptr as *const c_char)
-                    .to_str()
-                    .expect("SQLite column names are always UTF-8");
-
+            for row in rows {
+                let (col_index, name) = row.map_err(DbError::from)?;
                 if name == "_updated_at" {
                     updated_at = Some(col_index);
                 }
             }
 
-            ffi::sqlite3_finalize(stmt);
-
-            let updated_at = updated_at.unwrap_or_else(|| {
-                panic!("synced table {table} has no _updated_at column");
-            });
-
+            let updated_at = updated_at.ok_or_else(|| {
+                DbError(format!("synced table {table} has no _updated_at column"))
+            })?;
             tables.insert(table.to_string(), TableColumns { updated_at });
         }
 
-        TableSchema { tables }
+        Ok(TableSchema { tables })
     }
 
-    /// Look up column info for a table. Panics if the table was not in the
-    /// synced tables list passed to `from_db`.
-    pub fn get(&self, table: &str) -> &TableColumns {
-        self.tables.get(table).unwrap_or_else(|| {
-            panic!("unknown synced table in conflict handler: {table}");
-        })
-    }
-}
-
-/// Tracks state across conflict handler invocations within a single apply.
-#[derive(Default)]
-pub struct ConflictTracker {
-    /// True if any FK constraint violations were reported.
-    pub had_constraint_conflict: bool,
-}
-
-impl ConflictTracker {
-    pub fn new() -> Self {
-        Self::default()
+    /// The `_updated_at` column index for a table, or `None` if the table was not
+    /// in the synced set passed to `from_db`. A remote changeset can carry a table
+    /// this device hasn't declared (a newer peer added it); rather than panic mid-
+    /// apply, the caller treats an unresolved table as a row to omit.
+    pub fn get(&self, table: &str) -> Option<&TableColumns> {
+        self.tables.get(table)
     }
 }
 
-/// The production conflict handler for `apply_changeset_with_context`.
+/// The production LWW decision for one conflicting changeset row.
 ///
 /// Rules:
 /// - **DATA** (same row, both sides edited): compare `_updated_at`. Newer wins.
 /// - **NOTFOUND** (row deleted locally, incoming UPDATE): OMIT (delete wins).
 /// - **CONFLICT** (row exists, incoming INSERT): compare `_updated_at`. Newer wins.
-/// - **CONSTRAINT** (FK violation): OMIT and track for retry.
-/// - **FOREIGN_KEY**: OMIT (deferred FK check failure, handled by retry).
+/// - **CONSTRAINT** (uniqueness/other constraint): OMIT and flag for retry.
+///
+/// FOREIGN_KEY conflicts never reach here — [`super::apply`] resolves them before
+/// calling this, because that conflict type's iterator does not expose the row.
+///
+/// For DATA/CONFLICT, `item.new_value(uat)` is the incoming `_updated_at` and
+/// `item.conflict(uat)` the existing local one; either can be absent (an
+/// unchanged column in an UPDATE) → `None` → OMIT (keep local). `fk_flag` is set
+/// on a CONSTRAINT so the caller can retry the changeset once its missing
+/// parents have landed.
 pub fn lww_conflict_handler(
     conflict_type: ConflictType,
-    ctx: &ConflictContext,
+    item: ChangesetItem,
+    table: &str,
     schema: &TableSchema,
-    tracker: &mut ConflictTracker,
+    fk_flag: &Arc<AtomicBool>,
 ) -> ConflictAction {
     match conflict_type {
-        ConflictType::Data => {
-            let table = ctx.table_name();
-            let cols = schema.get(table);
-
-            let incoming = ctx.new_value(cols.updated_at);
-            let local = ctx.conflict_value(cols.updated_at);
+        ConflictType::SQLITE_CHANGESET_DATA | ConflictType::SQLITE_CHANGESET_CONFLICT => {
+            let Some(cols) = schema.get(table) else {
+                // The changeset carries a table this device doesn't declare (a
+                // newer peer's schema). We can't resolve its `_updated_at`, so we
+                // can't LWW it — omit rather than blindly apply a row we don't
+                // understand.
+                warn!(
+                    table,
+                    "conflict on a table not in this device's synced set, omitting the row"
+                );
+                return ConflictAction::SQLITE_CHANGESET_OMIT;
+            };
+            let uat = cols.updated_at;
+            let incoming = item.new_value(uat).ok().and_then(value_ref_to_string);
+            let local = item.conflict(uat).ok().and_then(value_ref_to_string);
 
             match (incoming.as_deref(), local.as_deref()) {
-                (Some(inc), Some(loc)) if inc > loc => ConflictAction::Replace,
-                (Some(_), Some(_)) => ConflictAction::Omit,
+                (Some(inc), Some(loc)) if inc > loc => ConflictAction::SQLITE_CHANGESET_REPLACE,
+                (Some(_), Some(_)) => ConflictAction::SQLITE_CHANGESET_OMIT,
                 _ => {
-                    warn!(
-                        table,
-                        "DATA conflict without _updated_at values, keeping local"
-                    );
-                    ConflictAction::Omit
+                    warn!(table, "conflict without _updated_at values, keeping local");
+                    ConflictAction::SQLITE_CHANGESET_OMIT
                 }
             }
         }
 
-        ConflictType::NotFound => {
-            // Row was deleted locally, incoming changeset has an UPDATE.
-            // Delete wins.
-            ConflictAction::Omit
+        // Row was deleted locally, incoming changeset has an UPDATE. Delete wins.
+        ConflictType::SQLITE_CHANGESET_NOTFOUND => ConflictAction::SQLITE_CHANGESET_OMIT,
+
+        ConflictType::SQLITE_CHANGESET_CONSTRAINT => {
+            fk_flag.store(true, Ordering::Relaxed);
+            ConflictAction::SQLITE_CHANGESET_OMIT
         }
 
-        ConflictType::Conflict => {
-            // Row already exists locally but incoming changeset has an INSERT
-            // (duplicate PK). Compare _updated_at to decide which version wins.
-            let table = ctx.table_name();
-            let cols = schema.get(table);
-
-            let incoming = ctx.new_value(cols.updated_at);
-            let local = ctx.conflict_value(cols.updated_at);
-
-            match (incoming.as_deref(), local.as_deref()) {
-                (Some(inc), Some(loc)) if inc > loc => ConflictAction::Replace,
-                (Some(_), Some(_)) => ConflictAction::Omit,
-                _ => {
-                    warn!(table, "CONFLICT without _updated_at values, keeping local");
-                    ConflictAction::Omit
-                }
-            }
-        }
-
-        ConflictType::Constraint => {
-            tracker.had_constraint_conflict = true;
-            ConflictAction::Omit
-        }
-
-        ConflictType::ForeignKey => {
-            tracker.had_constraint_conflict = true;
-            ConflictAction::Omit
+        // FOREIGN_KEY is filtered out in `apply`; `ConflictType` is also
+        // `#[non_exhaustive]` (an `UNKNOWN` sentinel for codes outside the five
+        // SQLite documents). None reach a well-formed apply here, so keep local.
+        _ => {
+            warn!(table, "unexpected changeset conflict type, keeping local");
+            ConflictAction::SQLITE_CHANGESET_OMIT
         }
     }
 }

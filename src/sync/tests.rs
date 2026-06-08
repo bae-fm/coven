@@ -1,227 +1,190 @@
-//! Integration tests for the session / apply / conflict stack.
+//! Integration tests for the capture / apply / conflict stack.
 //!
 //! Run against the synthetic, domain-free schema (`notes` / `note_tags` /
-//! `note_photos`) from `test_helpers`, using raw sqlite3 connections so the
-//! engine is exercised end-to-end without a host `Database`.
+//! `note_photos`) through a real [`crate::database::Database`], so the engine is
+//! exercised end-to-end the same way production drives it.
 
-use crate::sync::apply::apply_changeset_lww;
-use crate::sync::session::{synced_tables, SyncSession};
-use crate::sync::session_ext::Changeset;
 use crate::sync::test_helpers::*;
-use libsqlite3_sys as ffi;
 
-/// Capture a changeset: start a session, run `stmts`, return the diff.
-unsafe fn capture(db: *mut ffi::sqlite3, stmts: &[&str]) -> Option<Changeset> {
-    let session = SyncSession::start(db).expect("start session");
-    for s in stmts {
-        exec(db, s);
-    }
-    session.changeset().expect("changeset")
+#[tokio::test]
+async fn session_captures_and_applies_inserts() {
+    let src = open_test_db();
+    let cs = capture_bytes(
+        &src,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'First', 'hello', '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+             VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    assert!(!cs.is_empty());
+
+    let target = open_test_db();
+    apply_to_db(&target, &cs, &test_synced_tables()).await;
+
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "First"
+    );
+    assert_eq!(
+        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        "green"
+    );
 }
 
-#[test]
-fn synced_tables_are_configured() {
-    init_synced_tables();
-    let tables = synced_tables();
-    assert!(tables.iter().any(|t| t.name() == "notes"));
-    assert!(tables.iter().any(|t| t.name() == "note_tags"));
-    assert!(tables.iter().any(|t| t.name() == "note_photos"));
+#[tokio::test]
+async fn lww_later_update_wins() {
+    // Source builds an UPDATE changeset from base ts=1 to ts=9.
+    let src = open_test_db();
+    exec(
+        &src,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'A', NULL, '0000000001000-0000-s', '2026-01-01')",
+    )
+    .await;
+    // Drain the insert capture so the changeset is just the UPDATE.
+    let _ = capture_bytes(&src, &[]).await;
+    let cs = capture_bytes(
+        &src,
+        &["UPDATE notes SET title = 'B', _updated_at = '0000000009000-0000-s' WHERE id = 'n1'"],
+    )
+    .await;
+
+    // Target has its own edit at ts=5 (older than the incoming ts=9).
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'A', NULL, '0000000005000-0000-t', '2026-01-01')",
+    )
+    .await;
+    apply_to_db(&target, &cs, &test_synced_tables()).await;
+
+    // Incoming ts=9 > local ts=5, so the incoming title wins.
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "B"
+    );
 }
 
-#[test]
-fn session_captures_and_applies_inserts() {
-    unsafe {
-        init_synced_tables();
-        let db = open_memory_db();
-        create_synced_schema(db);
+#[tokio::test]
+async fn lww_earlier_update_loses() {
+    // Source builds an UPDATE changeset from base ts=1 to ts=3 (older).
+    let src = open_test_db();
+    exec(
+        &src,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'A', NULL, '0000000001000-0000-s', '2026-01-01')",
+    )
+    .await;
+    let _ = capture_bytes(&src, &[]).await;
+    let cs = capture_bytes(
+        &src,
+        &["UPDATE notes SET title = 'B', _updated_at = '0000000003000-0000-s' WHERE id = 'n1'"],
+    )
+    .await;
 
-        let cs = capture(
-            db,
-            &[
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-                 VALUES ('n1', 'First', 'hello', '0000000001000-0000-dev1', '2026-01-01')",
-                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-                 VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
-            ],
-        )
-        .expect("should have changes");
-        assert!(!cs.is_empty());
+    // Target's edit at ts=5 is newer than the incoming ts=3.
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'LOCAL', NULL, '0000000005000-0000-t', '2026-01-01')",
+    )
+    .await;
+    apply_to_db(&target, &cs, &test_synced_tables()).await;
 
-        let db2 = open_memory_db();
-        create_synced_schema(db2);
-        let result = apply_changeset_lww(db2, &cs).expect("apply");
-        assert!(!result.had_fk_violations);
-
-        assert_eq!(
-            query_text(db2, "SELECT title FROM notes WHERE id = 'n1'"),
-            "First"
-        );
-        assert_eq!(
-            query_text(db2, "SELECT tag FROM note_tags WHERE id = 't1'"),
-            "green"
-        );
-
-        ffi::sqlite3_close(db);
-        ffi::sqlite3_close(db2);
-    }
+    // Incoming ts=3 < local ts=5, so the local title is kept.
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "LOCAL"
+    );
 }
 
-#[test]
-fn lww_later_update_wins() {
-    unsafe {
-        init_synced_tables();
-        // Source builds an UPDATE changeset from base ts=1 to ts=9.
-        let src = open_memory_db();
-        create_synced_schema(src);
-        exec(
-            src,
+#[tokio::test]
+async fn fk_violation_is_reported_then_resolved_on_retry() {
+    // Capture a child insert (note_tags -> notes) on a source that has the parent.
+    let src = open_test_db();
+    exec(
+        &src,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
+    )
+    .await;
+    let _ = capture_bytes(&src, &[]).await;
+    let child_cs = capture_bytes(
+        &src,
+        &[
+            "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+           VALUES ('t1', 'n1', 'green', '0000000002000-0000-s', '2026-01-01')",
+        ],
+    )
+    .await;
+
+    let parent_src = open_test_db();
+    let parent_cs = capture_bytes(
+        &parent_src,
+        &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'A', NULL, '0000000001000-0000-s', '2026-01-01')",
-        );
-        let cs = capture(
-            src,
-            &["UPDATE notes SET title = 'B', _updated_at = '0000000009000-0000-s' WHERE id = 'n1'"],
-        )
-        .expect("cs");
+           VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
+        ],
+    )
+    .await;
 
-        // Target has its own edit at ts=5 (older than the incoming ts=9).
-        let target = open_memory_db();
-        create_synced_schema(target);
-        exec(
-            target,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'A', NULL, '0000000005000-0000-t', '2026-01-01')",
-        );
-        apply_changeset_lww(target, &cs).expect("apply");
+    // Apply child first on an empty target: FK violation flagged.
+    let target = open_test_db();
+    let r1 = apply_reporting(&target, &child_cs).await;
+    assert!(r1, "child without parent violates FK");
 
-        // Incoming ts=9 > local ts=5, so the incoming title wins.
-        assert_eq!(
-            query_text(target, "SELECT title FROM notes WHERE id = 'n1'"),
-            "B"
-        );
-
-        ffi::sqlite3_close(src);
-        ffi::sqlite3_close(target);
-    }
+    // Apply parent, then re-apply child: now it resolves.
+    apply_to_db(&target, &parent_cs, &test_synced_tables()).await;
+    let r2 = apply_reporting(&target, &child_cs).await;
+    assert!(!r2);
+    assert_eq!(
+        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        "green"
+    );
 }
 
-#[test]
-fn lww_earlier_update_loses() {
-    unsafe {
-        init_synced_tables();
-        // Source builds an UPDATE changeset from base ts=1 to ts=3 (older).
-        let src = open_memory_db();
-        create_synced_schema(src);
-        exec(
-            src,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'A', NULL, '0000000001000-0000-s', '2026-01-01')",
-        );
-        let cs = capture(
-            src,
-            &["UPDATE notes SET title = 'B', _updated_at = '0000000003000-0000-s' WHERE id = 'n1'"],
-        )
-        .expect("cs");
-
-        // Target's edit at ts=5 is newer than the incoming ts=3.
-        let target = open_memory_db();
-        create_synced_schema(target);
-        exec(
-            target,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'LOCAL', NULL, '0000000005000-0000-t', '2026-01-01')",
-        );
-        apply_changeset_lww(target, &cs).expect("apply");
-
-        // Incoming ts=3 < local ts=5, so the local title is kept.
-        assert_eq!(
-            query_text(target, "SELECT title FROM notes WHERE id = 'n1'"),
-            "LOCAL"
-        );
-
-        ffi::sqlite3_close(src);
-        ffi::sqlite3_close(target);
-    }
+/// Apply a changeset and report whether it had FK violations, mirroring the
+/// suspend/apply/resume lifecycle of [`apply_to_db`].
+async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
+    use crate::sync::apply::apply_changeset_lww;
+    db.take_changeset_and_suspend().await.expect("suspend");
+    let bytes = bytes.to_vec();
+    let tables = test_synced_tables();
+    let had = db
+        .call(move |conn| apply_changeset_lww(conn, &bytes, &tables).map(|r| r.had_fk_violations))
+        .await
+        .expect("apply");
+    db.resume_session().await.expect("resume");
+    had
 }
 
-#[test]
-fn fk_violation_is_reported_then_resolved_on_retry() {
-    unsafe {
-        init_synced_tables();
-        // Capture a child insert (note_tags -> notes) on a source that has the parent.
-        let src = open_memory_db();
-        create_synced_schema(src);
-        exec(
-            src,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
-        );
-        let child_cs = capture(
-            src,
-            &[
-                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-               VALUES ('t1', 'n1', 'green', '0000000002000-0000-s', '2026-01-01')",
-            ],
-        )
-        .expect("child cs");
+#[tokio::test]
+async fn delete_applies() {
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'Doomed', NULL, '0000000001000-0000-t', '2026-01-01')",
+    )
+    .await;
 
-        let parent_src = open_memory_db();
-        create_synced_schema(parent_src);
-        let parent_cs = capture(
-            parent_src,
-            &[
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-               VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
-            ],
-        )
-        .expect("parent cs");
+    let src = open_test_db();
+    exec(
+        &src,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'Doomed', NULL, '0000000001000-0000-t', '2026-01-01')",
+    )
+    .await;
+    // Drain the insert capture so the changeset is just the DELETE (an INSERT +
+    // DELETE of the same row in one session nets to no change).
+    let _ = capture_bytes(&src, &[]).await;
+    let cs = capture_bytes(&src, &["DELETE FROM notes WHERE id = 'n1'"]).await;
 
-        // Apply child first on an empty target: FK violation flagged.
-        let target = open_memory_db();
-        create_synced_schema(target);
-        let r1 = apply_changeset_lww(target, &child_cs).expect("apply child");
-        assert!(r1.had_fk_violations, "child without parent violates FK");
-
-        // Apply parent, then re-apply child: now it resolves.
-        apply_changeset_lww(target, &parent_cs).expect("apply parent");
-        let r2 = apply_changeset_lww(target, &child_cs).expect("retry child");
-        assert!(!r2.had_fk_violations);
-        assert_eq!(
-            query_text(target, "SELECT tag FROM note_tags WHERE id = 't1'"),
-            "green"
-        );
-
-        ffi::sqlite3_close(src);
-        ffi::sqlite3_close(parent_src);
-        ffi::sqlite3_close(target);
-    }
-}
-
-#[test]
-fn delete_applies() {
-    unsafe {
-        init_synced_tables();
-        let target = open_memory_db();
-        create_synced_schema(target);
-        exec(
-            target,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'Doomed', NULL, '0000000001000-0000-t', '2026-01-01')",
-        );
-
-        let src = open_memory_db();
-        create_synced_schema(src);
-        exec(
-            src,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'Doomed', NULL, '0000000001000-0000-t', '2026-01-01')",
-        );
-        let cs = capture(src, &["DELETE FROM notes WHERE id = 'n1'"]).expect("cs");
-
-        apply_changeset_lww(target, &cs).expect("apply");
-        assert!(!row_exists(target, "SELECT 1 FROM notes WHERE id = 'n1'"));
-
-        ffi::sqlite3_close(src);
-        ffi::sqlite3_close(target);
-    }
+    apply_to_db(&target, &cs, &test_synced_tables()).await;
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
 }

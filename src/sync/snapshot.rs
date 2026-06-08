@@ -8,13 +8,13 @@
 /// Snapshot creation policy: after every N changesets (default 100) or
 /// T hours (default 24) since the last snapshot.
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::path::Path;
 
-use libsqlite3_sys as ffi;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use super::session::SyncedTable;
 use super::storage::{StorageError, SyncStorage};
 use crate::encryption::EncryptionService;
 
@@ -73,22 +73,20 @@ pub struct BootstrapResult {
 ///
 /// A snapshot is restored byte-for-byte as the joining device's `library.db`
 /// (no migration rebuild), so it must carry only data that is eligible to
-/// cross devices — the host's registered synced tables. Local-only tables
+/// cross devices — the host's declared synced tables. Local-only tables
 /// (per-device paths, caches) and per-device sync bookkeeping must not ride
 /// along; their schemas are kept, but their rows are deleted from the copy.
 ///
-/// # Safety
-/// `db` must be a valid, open sqlite3 connection pointer.
-pub unsafe fn create_snapshot(
-    db: *mut ffi::sqlite3,
+/// `conn` is the owned live connection; `tables` is the host's synced set.
+pub fn create_snapshot(
+    conn: &Connection,
     temp_dir: &Path,
+    tables: &[SyncedTable],
     encryption: &EncryptionService,
 ) -> Result<Vec<u8>, SnapshotError> {
     // A snapshot with no synced set would either leak every local-only table or
-    // clear the whole DB — both wrong. Refuse before doing any work, and read
-    // the synced set once here so the clearing helper stays pure.
-    let synced = crate::sync::session::synced_tables();
-    if synced.is_empty() {
+    // clear the whole DB — both wrong. Refuse before doing any work.
+    if tables.is_empty() {
         return Err(SnapshotError::NoSyncedTables);
     }
 
@@ -100,33 +98,19 @@ pub unsafe fn create_snapshot(
     // Remove any leftover snapshot file from a previous failed attempt.
     let _ = std::fs::remove_file(&snapshot_path);
 
-    // VACUUM INTO creates a clean, defragmented copy of the database.
-    let sql = format!("VACUUM INTO '{}'", path_str.replace('\'', "''"));
-    let c_sql = CString::new(sql).expect("SQL should not contain null bytes");
-    let rc = ffi::sqlite3_exec(
-        db,
-        c_sql.as_ptr(),
-        None,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
-    if rc != ffi::SQLITE_OK {
-        let err = ffi::sqlite3_errmsg(db);
-        let msg = if err.is_null() {
-            format!("sqlite3 error code {rc}")
-        } else {
-            std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
-        };
+    // VACUUM INTO creates a clean, defragmented copy of the live database.
+    let vacuum = format!("VACUUM INTO '{}'", path_str.replace('\'', "''"));
+    if let Err(e) = conn.execute_batch(&vacuum) {
         if let Err(rm) = std::fs::remove_file(&snapshot_path) {
             warn!(error = %rm, "failed to remove temp snapshot after VACUUM error");
         }
-        return Err(SnapshotError::VacuumFailed(msg));
+        return Err(SnapshotError::VacuumFailed(e.to_string()));
     }
 
     // The copy is a whole-DB byte image, so it still holds every local-only
     // table's data. Strip those before reading: open the copy as its own
     // connection and DELETE from every table outside the synced set.
-    if let Err(e) = clear_local_only_tables(&snapshot_path, synced) {
+    if let Err(e) = clear_local_only_tables(&snapshot_path, tables) {
         if let Err(rm) = std::fs::remove_file(&snapshot_path) {
             warn!(error = %rm, "failed to remove temp snapshot after clear error");
         }
@@ -148,170 +132,70 @@ pub unsafe fn create_snapshot(
     Ok(encrypted)
 }
 
-/// Tables whose data is preserved in a snapshot regardless of the synced set:
-/// the migration ledger must survive so the restored DB opens without
-/// re-migrating.
-const SNAPSHOT_PRESERVED_TABLE: &str = "_sqlx_migrations";
-
 /// Delete every non-synced table's rows from the snapshot copy at `path`,
-/// keeping all table schemas intact. The migration ledger
-/// (`_sqlx_migrations`) is also preserved so the restored DB opens directly.
+/// keeping all table schemas intact.
 ///
-/// Opens `path` as its own sqlite3 connection (the copy must be edited in
-/// isolation from the live DB). The synced set is passed in by the caller (the
-/// only reader of the process-global). Errors if any FFI step fails — a
-/// snapshot that silently dropped synced data, or silently kept local-only
-/// data, is worse than no snapshot.
-unsafe fn clear_local_only_tables(
-    path: &Path,
-    synced: &[crate::sync::session::SyncedTable],
-) -> Result<(), SnapshotError> {
-    let db = open_snapshot_db(path)?;
-    let result = clear_non_synced(db, synced);
-    let close_rc = ffi::sqlite3_close(db);
-    result?;
-    if close_rc != ffi::SQLITE_OK {
-        return Err(SnapshotError::ClearFailed(format!(
-            "sqlite3_close failed (rc={close_rc})"
-        )));
-    }
-    Ok(())
+/// Opens `path` as its own connection (the copy must be edited in isolation from
+/// the live DB). Errors if any step fails — a snapshot that silently dropped
+/// synced data, or silently kept local-only data, is worse than no snapshot.
+fn clear_local_only_tables(path: &Path, synced: &[SyncedTable]) -> Result<(), SnapshotError> {
+    let conn = Connection::open(path)
+        .map_err(|e| SnapshotError::ClearFailed(format!("failed to open snapshot copy: {e}")))?;
+    clear_non_synced(&conn, synced)?;
+    conn.close()
+        .map_err(|(_, e)| SnapshotError::ClearFailed(format!("failed to close snapshot copy: {e}")))
 }
 
-/// Open the snapshot copy as a standalone read-write connection.
-unsafe fn open_snapshot_db(path: &Path) -> Result<*mut ffi::sqlite3, SnapshotError> {
-    let c_path = CString::new(path.to_str().expect("temp path should be valid UTF-8"))
-        .expect("path should not contain null bytes");
-    let mut db: *mut ffi::sqlite3 = std::ptr::null_mut();
-    let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut db);
-    if rc != ffi::SQLITE_OK {
-        // sqlite3_open may allocate a handle even on failure; free it.
-        ffi::sqlite3_close(db);
-        return Err(SnapshotError::ClearFailed(format!(
-            "failed to open snapshot copy (rc={rc})"
-        )));
-    }
-    Ok(db)
-}
-
-/// On the already-open snapshot connection `db`, scope the copy down to exactly
-/// what is eligible to cross devices, then VACUUM to reclaim the freed pages:
+/// On the snapshot-copy connection, scope it down to exactly what is eligible to
+/// cross devices, then VACUUM to reclaim the freed pages:
 ///
-/// 1. Table-level: DELETE every user table that is neither in `synced` nor the
-///    preserved migration ledger — local-only tables keep their schema, lose
-///    their rows.
+/// 1. Table-level: DELETE every user table not in `synced` — local-only tables
+///    keep their schema, lose their rows.
 /// 2. Row-level: within the synced tables, DELETE the rows the gate excludes
 ///    (gated-false roots and their FK-descendants), so a private subtree does
 ///    not ride the snapshot to a restoring peer. This is the same exclusion the
 ///    outbound changeset gate applies; both reuse [`crate::sync::gate::Gates`].
-unsafe fn clear_non_synced(
-    db: *mut ffi::sqlite3,
-    synced: &[crate::sync::session::SyncedTable],
-) -> Result<(), SnapshotError> {
-    for table in list_user_tables(db)? {
-        if synced.iter().any(|t| t.name() == table) || table == SNAPSHOT_PRESERVED_TABLE {
+fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), SnapshotError> {
+    for table in list_user_tables(conn)? {
+        if synced.iter().any(|t| t.name() == table) {
             continue;
         }
-        // Quote the identifier, doubling any embedded quotes.
-        let stmt = format!("DELETE FROM \"{}\"", table.replace('"', "\"\""));
-        exec_or_err(db, &stmt)?;
+        conn.execute_batch(&format!(
+            "DELETE FROM {}",
+            crate::sync::session::quote_ident(&table)
+        ))
+        .map_err(|e| SnapshotError::ClearFailed(format!("clear {table}: {e}")))?;
     }
 
     // The snapshot is a second propagation channel: the changeset gate cuts
     // gated-false rows on the wire, so the snapshot must drop them too or a
     // private subtree leaks to a restoring device. Reuse the changeset gate's
     // model rather than re-deriving the FK walk.
-    let gates = crate::sync::gate::Gates::from_tables(db, synced)
+    let gates = crate::sync::gate::Gates::from_tables(conn, synced)
         .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
     gates
-        .delete_gated_false(db)
+        .delete_gated_false(conn)
         .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
 
     // Reclaim the pages freed by the DELETEs so the blob shrinks.
-    exec_or_err(db, "VACUUM")?;
+    conn.execute_batch("VACUUM")
+        .map_err(|e| SnapshotError::ClearFailed(format!("vacuum: {e}")))?;
     Ok(())
 }
 
-/// List user table names (excluding sqlite internal `sqlite_%` tables) on `db`.
-unsafe fn list_user_tables(db: *mut ffi::sqlite3) -> Result<Vec<String>, SnapshotError> {
-    let sql = c"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'";
-    let mut stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
-    let rc = ffi::sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut stmt, std::ptr::null_mut());
-    if rc != ffi::SQLITE_OK {
-        return Err(SnapshotError::ClearFailed(errmsg(
-            db,
-            "prepare table list",
-            rc,
-        )));
-    }
-
+/// List user table names (excluding sqlite internal `sqlite_%` tables).
+fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        .map_err(|e| SnapshotError::ClearFailed(format!("prepare table list: {e}")))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| SnapshotError::ClearFailed(format!("query table list: {e}")))?;
     let mut tables = Vec::new();
-    loop {
-        let step = ffi::sqlite3_step(stmt);
-        if step == ffi::SQLITE_ROW {
-            let text = ffi::sqlite3_column_text(stmt, 0);
-            if text.is_null() {
-                // A NULL `name` in `sqlite_master WHERE type='table'` is
-                // corruption, not an empty result set — refuse rather than
-                // silently skip a table whose rows we then can't scope.
-                ffi::sqlite3_finalize(stmt);
-                return Err(SnapshotError::ClearFailed(
-                    "sqlite_master row has NULL table name".to_string(),
-                ));
-            }
-            let name = match std::ffi::CStr::from_ptr(text as *const std::ffi::c_char).to_str() {
-                Ok(name) => name.to_string(),
-                Err(e) => {
-                    // Table names are ASCII in practice; non-UTF-8 means the
-                    // catalog is corrupt. Surface it instead of mangling the
-                    // name and DELETE-ing (or sparing) the wrong table.
-                    ffi::sqlite3_finalize(stmt);
-                    return Err(SnapshotError::ClearFailed(format!(
-                        "table name is not valid UTF-8: {e}"
-                    )));
-                }
-            };
-            tables.push(name);
-        } else if step == ffi::SQLITE_DONE {
-            break;
-        } else {
-            ffi::sqlite3_finalize(stmt);
-            return Err(SnapshotError::ClearFailed(errmsg(
-                db,
-                "step table list",
-                step,
-            )));
-        }
+    for row in rows {
+        tables.push(row.map_err(|e| SnapshotError::ClearFailed(format!("step table list: {e}")))?);
     }
-    ffi::sqlite3_finalize(stmt);
     Ok(tables)
-}
-
-/// Run a statement on `db`, surfacing any error.
-unsafe fn exec_or_err(db: *mut ffi::sqlite3, sql: &str) -> Result<(), SnapshotError> {
-    let c_sql = CString::new(sql).expect("SQL should not contain null bytes");
-    let rc = ffi::sqlite3_exec(
-        db,
-        c_sql.as_ptr(),
-        None,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
-    if rc != ffi::SQLITE_OK {
-        return Err(SnapshotError::ClearFailed(errmsg(db, sql, rc)));
-    }
-    Ok(())
-}
-
-/// Render the connection's last error message, falling back to the rc.
-unsafe fn errmsg(db: *mut ffi::sqlite3, context: &str, rc: i32) -> String {
-    let err = ffi::sqlite3_errmsg(db);
-    if err.is_null() {
-        format!("{context}: sqlite3 error code {rc}")
-    } else {
-        let msg = std::ffi::CStr::from_ptr(err).to_string_lossy();
-        format!("{context}: {msg}")
-    }
 }
 
 /// Upload a snapshot to the sync storage and update the device head.
@@ -532,12 +416,97 @@ pub async fn bootstrap_from_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::session::SyncSession;
+    use crate::sync::apply::apply_changeset_lww;
     use crate::sync::storage::DeviceHead;
-    use crate::sync::test_helpers::*;
     use async_trait::async_trait;
+    use rusqlite::session::Session as RqSession;
+    use rusqlite::{Connection, OptionalExtension};
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    // ---- in-process db helpers (rusqlite, the new `&Connection` API) ----
+
+    /// The synthetic synced set the snapshot tests scope by.
+    fn synced_tables() -> Vec<SyncedTable> {
+        vec![
+            SyncedTable::new("notes").gated_by("shared"),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos"),
+        ]
+    }
+
+    /// A fresh in-memory connection with `foreign_keys=ON` and the synthetic
+    /// notes/note_tags/note_photos schema.
+    fn synced_conn() -> Connection {
+        let c = Connection::open_in_memory().expect("open in-memory");
+        c.execute_batch(
+            "PRAGMA foreign_keys = ON;
+            CREATE TABLE notes (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT,
+                shared INTEGER NOT NULL DEFAULT 0,
+                _updated_at TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE note_tags (
+                id TEXT PRIMARY KEY, note_id TEXT NOT NULL, tag TEXT NOT NULL,
+                _updated_at TEXT NOT NULL, created_at TEXT NOT NULL,
+                FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
+            );
+            CREATE TABLE note_photos (
+                id TEXT PRIMARY KEY, note_id TEXT NOT NULL, kind TEXT NOT NULL,
+                _updated_at TEXT NOT NULL, created_at TEXT NOT NULL,
+                FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
+            );",
+        )
+        .expect("create schema");
+        c
+    }
+
+    /// Open a SQLite database file by path as a standalone connection.
+    fn open_db_at(path: &Path) -> Connection {
+        Connection::open(path).expect("open db file")
+    }
+
+    fn exec(c: &Connection, sql: &str) {
+        c.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("exec failed for {sql}: {e}"));
+    }
+
+    fn query_text(c: &Connection, sql: &str) -> String {
+        c.query_row(sql, [], |r| r.get::<_, String>(0))
+            .unwrap_or_else(|e| panic!("query_text failed for {sql}: {e}"))
+    }
+
+    fn query_int(c: &Connection, sql: &str) -> i64 {
+        c.query_row(sql, [], |r| r.get::<_, i64>(0))
+            .unwrap_or_else(|e| panic!("query_int failed for {sql}: {e}"))
+    }
+
+    fn row_exists(c: &Connection, sql: &str) -> bool {
+        c.query_row(sql, [], |_| Ok(()))
+            .optional()
+            .unwrap_or_else(|e| panic!("row_exists failed for {sql}: {e}"))
+            .is_some()
+    }
+
+    /// Apply a changeset's bytes with the production LWW path scoped to the test
+    /// synced set.
+    fn apply(c: &Connection, bytes: &[u8]) {
+        apply_changeset_lww(c, bytes, &synced_tables()).expect("apply changeset");
+    }
+
+    /// Record a changeset over the synced tables while `body` runs SQL against a
+    /// fresh schema-only connection. Returns the recorded bytes.
+    fn changeset_bytes_for(body: impl FnOnce(&Connection)) -> Vec<u8> {
+        let c = synced_conn();
+        let mut session = RqSession::new(&c).expect("session");
+        for t in synced_tables() {
+            session.attach(Some(t.name())).expect("attach");
+        }
+        body(&c);
+        let mut buf = Vec::new();
+        session.changeset_strm(&mut buf).expect("changeset");
+        buf
+    }
 
     /// Full-featured mock storage for snapshot tests.
     struct MockSyncStorage {
@@ -794,83 +763,58 @@ mod tests {
 
     #[test]
     fn create_snapshot_produces_encrypted_db() {
-        unsafe {
-            let db = open_memory_db();
-            create_synced_schema(db);
+        let c = synced_conn();
+        exec(
+            &c,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'Note One', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+        );
 
-            exec(
-                db,
-                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-                 VALUES ('n1', 'Note One', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            );
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("create_snapshot");
 
-            let temp = tempfile::tempdir().unwrap();
-            let enc = test_encryption();
-
-            let encrypted =
-                create_snapshot(db, temp.path(), &enc).expect("create_snapshot should succeed");
-
-            // Should be non-empty encrypted bytes.
-            assert!(!encrypted.is_empty());
-
-            // Should be decryptable.
-            let plaintext = enc.decrypt(&encrypted).expect("decrypt should succeed");
-            assert!(!plaintext.is_empty());
-
-            // The plaintext should be a valid SQLite database (starts with "SQLite format 3\0").
-            assert!(
-                plaintext.starts_with(b"SQLite format 3\0"),
-                "snapshot should be a valid SQLite database"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        assert!(!encrypted.is_empty());
+        let plaintext = enc.decrypt(&encrypted).expect("decrypt should succeed");
+        assert!(!plaintext.is_empty());
+        assert!(
+            plaintext.starts_with(b"SQLite format 3\0"),
+            "snapshot should be a valid SQLite database"
+        );
     }
 
     #[test]
     fn create_snapshot_contains_data() {
-        unsafe {
-            let db = open_memory_db();
-            create_synced_schema(db);
+        let c = synced_conn();
+        exec(
+            &c,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
+        );
+        exec(
+            &c,
+            "INSERT INTO note_tags (id, tag, note_id, _updated_at, created_at) \
+             VALUES ('al1', 'Album One', 'a1', '0000000001000-0000-dev1', '2026-01-01')",
+        );
 
-            exec(
-                db,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
-            );
-            exec(
-                db,
-                "INSERT INTO note_tags (id, tag, note_id, _updated_at, created_at) \
-                 VALUES ('al1', 'Album One', 'a1', '0000000001000-0000-dev1', '2026-01-01')",
-            );
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted = create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let plaintext = enc.decrypt(&encrypted).expect("decrypt");
 
-            let temp = tempfile::tempdir().unwrap();
-            let enc = test_encryption();
+        let db_path = temp.path().join("verify.db");
+        std::fs::write(&db_path, &plaintext).unwrap();
+        let db2 = open_db_at(&db_path);
 
-            let encrypted = create_snapshot(db, temp.path(), &enc).expect("snapshot");
-            let plaintext = enc.decrypt(&encrypted).expect("decrypt");
-
-            // Write to file and open to verify contents.
-            let db_path = temp.path().join("verify.db");
-            std::fs::write(&db_path, &plaintext).unwrap();
-
-            let db2 = {
-                let c_path = CString::new(db_path.to_str().unwrap()).unwrap();
-                let mut ptr: *mut ffi::sqlite3 = std::ptr::null_mut();
-                let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut ptr);
-                assert_eq!(rc, ffi::SQLITE_OK);
-                ptr
-            };
-
-            let name = query_text(db2, "SELECT title FROM notes WHERE id = 'a1'");
-            assert_eq!(name, "Artist One");
-
-            let title = query_text(db2, "SELECT tag FROM note_tags WHERE id = 'al1'");
-            assert_eq!(title, "Album One");
-
-            ffi::sqlite3_close(db2);
-            ffi::sqlite3_close(db);
-        }
+        assert_eq!(
+            query_text(&db2, "SELECT title FROM notes WHERE id = 'a1'"),
+            "Artist One"
+        );
+        assert_eq!(
+            query_text(&db2, "SELECT tag FROM note_tags WHERE id = 'al1'"),
+            "Album One"
+        );
     }
 
     /// A snapshot is a propagation channel between devices, so it carries only
@@ -881,88 +825,70 @@ mod tests {
     /// restoring peer.
     #[tokio::test]
     async fn snapshot_does_not_carry_local_only_tables_to_a_restoring_device() {
-        unsafe {
-            // --- Device A: a synced table + a device-local table ---
-            let db_a = open_memory_db();
-            create_synced_schema(db_a); // `notes` is synced (has `_updated_at`)
-            exec(
-                db_a,
-                "CREATE TABLE device_local (note_id TEXT PRIMARY KEY, local_path TEXT NOT NULL)",
-            );
-            exec(
-                db_a,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('n1', 'Gish', 1, '0000000001000-0000-devA', '2026-01-01')",
-            );
-            exec(
-                db_a,
-                "INSERT INTO device_local (note_id, local_path) \
-                 VALUES ('n1', '/Users/dima/Torrents/Gish (1991)')",
-            );
+        // --- Device A: a synced table + a device-local table ---
+        let db_a = synced_conn();
+        exec(
+            &db_a,
+            "CREATE TABLE device_local (note_id TEXT PRIMARY KEY, local_path TEXT NOT NULL)",
+        );
+        exec(
+            &db_a,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('n1', 'Gish', 1, '0000000001000-0000-devA', '2026-01-01')",
+        );
+        exec(
+            &db_a,
+            "INSERT INTO device_local (note_id, local_path) \
+             VALUES ('n1', '/Users/dima/Torrents/Gish (1991)')",
+        );
 
-            let temp = tempfile::tempdir().unwrap();
-            let enc = test_encryption();
-            let encrypted = create_snapshot(db_a, temp.path(), &enc).expect("snapshot");
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
-            // --- Upload (this device -> cloud) ---
-            let storage = MockSyncStorage::new();
-            push_snapshot(
-                &storage,
-                encrypted,
-                "devA",
-                HashMap::new(),
-                1,
-                &crate::clock::SystemClock,
-            )
+        let storage = MockSyncStorage::new();
+        push_snapshot(
+            &storage,
+            encrypted,
+            "devA",
+            HashMap::new(),
+            1,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push_snapshot");
+
+        let target = temp.path().join("device_b.db");
+        bootstrap_from_snapshot(&storage, &enc, &target)
             .await
-            .expect("push_snapshot");
+            .expect("bootstrap_from_snapshot");
+        let db_b = open_db_at(&target);
 
-            // --- Restore on a fresh device (a peer adds the cloud home) ---
-            let target = temp.path().join("device_b.db");
-            bootstrap_from_snapshot(&storage, &enc, &target)
-                .await
-                .expect("bootstrap_from_snapshot");
-
-            let db_b = {
-                let c_path = CString::new(target.to_str().unwrap()).unwrap();
-                let mut ptr: *mut ffi::sqlite3 = std::ptr::null_mut();
-                let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut ptr);
-                assert_eq!(rc, ffi::SQLITE_OK);
-                ptr
-            };
-
-            // Synced data SHOULD cross.
-            assert_eq!(
-                query_text(db_b, "SELECT title FROM notes WHERE id = 'n1'"),
-                "Gish",
-                "synced-table data must survive a snapshot restore",
-            );
-
-            // Device-local data must NOT cross.
-            assert!(
-                !row_exists(db_b, "SELECT 1 FROM device_local WHERE note_id = 'n1'"),
-                "device-local row leaked to a peer via the snapshot: a non-synced \
-                 table's data must never cross devices",
-            );
-
-            // The table SCHEMA is preserved (only its rows are cleared), so the
-            // restored DB can still open it — it simply has no rows.
-            assert!(
-                row_exists(
-                    db_b,
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_local'",
-                ),
-                "non-synced table schema must survive: snapshot DELETEs rows, never DROPs tables",
-            );
-            assert_eq!(
-                query_int(db_b, "SELECT COUNT(*) FROM device_local"),
-                0,
-                "non-synced table must be empty in the restored DB",
-            );
-
-            ffi::sqlite3_close(db_b);
-            ffi::sqlite3_close(db_a);
-        }
+        // Synced data SHOULD cross.
+        assert_eq!(
+            query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Gish",
+            "synced-table data must survive a snapshot restore",
+        );
+        // Device-local data must NOT cross.
+        assert!(
+            !row_exists(&db_b, "SELECT 1 FROM device_local WHERE note_id = 'n1'"),
+            "device-local row leaked to a peer via the snapshot",
+        );
+        // The table SCHEMA is preserved (only its rows are cleared).
+        assert!(
+            row_exists(
+                &db_b,
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_local'",
+            ),
+            "non-synced table schema must survive: snapshot DELETEs rows, never DROPs tables",
+        );
+        assert_eq!(
+            query_int(&db_b, "SELECT COUNT(*) FROM device_local"),
+            0,
+            "non-synced table must be empty in the restored DB",
+        );
     }
 
     /// The snapshot is a second propagation channel, so it must honor the same
@@ -974,84 +900,153 @@ mod tests {
     /// gate-scoped.
     #[tokio::test]
     async fn snapshot_does_not_carry_gated_false_rows_to_a_restoring_device() {
-        unsafe {
-            let db_a = open_memory_db();
-            create_synced_schema(db_a); // `notes` gated by `shared`; note_tags FK-child
+        let db_a = synced_conn();
 
-            // A shared note with a child tag (both must cross).
-            exec(
-                db_a,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('pub', 'Public', 1, '0000000001000-0000-devA', '2026-01-01')",
-            );
-            exec(
-                db_a,
-                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-                 VALUES ('pub_t', 'pub', 'green', '0000000001000-0000-devA', '2026-01-01')",
-            );
-            // A private note with its own child tag (neither may cross).
-            exec(
-                db_a,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('priv', 'Private', 0, '0000000002000-0000-devA', '2026-01-01')",
-            );
-            exec(
-                db_a,
-                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-                 VALUES ('priv_t', 'priv', 'red', '0000000002000-0000-devA', '2026-01-01')",
-            );
+        // A shared note with a child tag (both must cross).
+        exec(
+            &db_a,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('pub', 'Public', 1, '0000000001000-0000-devA', '2026-01-01')",
+        );
+        exec(
+            &db_a,
+            "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+             VALUES ('pub_t', 'pub', 'green', '0000000001000-0000-devA', '2026-01-01')",
+        );
+        // A private note with its own child tag (neither may cross).
+        exec(
+            &db_a,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('priv', 'Private', 0, '0000000002000-0000-devA', '2026-01-01')",
+        );
+        exec(
+            &db_a,
+            "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+             VALUES ('priv_t', 'priv', 'red', '0000000002000-0000-devA', '2026-01-01')",
+        );
 
-            let temp = tempfile::tempdir().unwrap();
-            let enc = test_encryption();
-            let encrypted = create_snapshot(db_a, temp.path(), &enc).expect("snapshot");
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
-            let storage = MockSyncStorage::new();
-            push_snapshot(
-                &storage,
-                encrypted,
-                "devA",
-                HashMap::new(),
-                1,
-                &crate::clock::SystemClock,
-            )
+        let storage = MockSyncStorage::new();
+        push_snapshot(
+            &storage,
+            encrypted,
+            "devA",
+            HashMap::new(),
+            1,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push_snapshot");
+
+        let target = temp.path().join("device_b.db");
+        bootstrap_from_snapshot(&storage, &enc, &target)
             .await
-            .expect("push_snapshot");
+            .expect("bootstrap_from_snapshot");
+        let db_b = open_db_at(&target);
 
-            let target = temp.path().join("device_b.db");
-            bootstrap_from_snapshot(&storage, &enc, &target)
-                .await
-                .expect("bootstrap_from_snapshot");
+        assert!(
+            row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'pub'"),
+            "a gated-true note must survive the snapshot restore",
+        );
+        assert!(
+            row_exists(&db_b, "SELECT 1 FROM note_tags WHERE id = 'pub_t'"),
+            "a gated-true note's FK-child must survive the snapshot restore",
+        );
+        assert!(
+            !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'priv'"),
+            "a gated-false note leaked to a peer via the snapshot",
+        );
+        assert!(
+            !row_exists(&db_b, "SELECT 1 FROM note_tags WHERE id = 'priv_t'"),
+            "a gated-false note's FK-descendant leaked to a peer via the snapshot",
+        );
+    }
 
-            let db_b = {
-                let c_path = CString::new(target.to_str().unwrap()).unwrap();
-                let mut ptr: *mut ffi::sqlite3 = std::ptr::null_mut();
-                let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut ptr);
-                assert_eq!(rc, ffi::SQLITE_OK);
-                ptr
-            };
+    /// coven's own bookkeeping tables (`sync_state`, `sync_cursors`,
+    /// `cloud_outbox`) are per-device: a peer's cursors, pending outbox, and HLC
+    /// high-water must NOT ride a snapshot to a restoring device — inheriting them
+    /// would make the new device think it had already pulled the snapshotter's
+    /// peers, or replay the snapshotter's blob queue. They are not in the synced
+    /// set, so the table-level clear must strip their rows while keeping the
+    /// schemas (so the restored DB opens and coven can immediately write its own
+    /// fresh bookkeeping). This guards that present-but-empty invariant, which the
+    /// other snapshot tests miss because their schema omits coven's tables.
+    #[tokio::test]
+    async fn snapshot_does_not_carry_bookkeeping_tables_to_a_restoring_device() {
+        let db_a = synced_conn();
+        // Add coven's bookkeeping tables (the snapshot source normally has them;
+        // the synthetic test schema doesn't) and populate every one.
+        exec(&db_a, crate::db::MIGRATION_SQL);
+        exec(
+            &db_a,
+            "INSERT INTO sync_state (key, value) VALUES \
+             ('local_seq', '42'), ('hlc_high_water', '0000000009000-0000-devA')",
+        );
+        exec(
+            &db_a,
+            "INSERT INTO sync_cursors (device_id, last_seq) VALUES ('devB', 7), ('devC', 3)",
+        );
+        exec(
+            &db_a,
+            "INSERT INTO cloud_outbox (operation, file_id, cloud_key, created_at) \
+             VALUES ('upload', 'f1', 'blobs/f1', '2026-01-01')",
+        );
+        // A synced row that SHOULD cross, to prove the snapshot still carries data.
+        exec(
+            &db_a,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('n1', 'Keep me', 1, '0000000001000-0000-devA', '2026-01-01')",
+        );
 
-            // The shared root and its descendant cross.
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
+
+        let storage = MockSyncStorage::new();
+        push_snapshot(
+            &storage,
+            encrypted,
+            "devA",
+            HashMap::new(),
+            1,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push_snapshot");
+
+        let target = temp.path().join("device_b.db");
+        bootstrap_from_snapshot(&storage, &enc, &target)
+            .await
+            .expect("bootstrap_from_snapshot");
+        let db_b = open_db_at(&target);
+
+        // Synced data still crosses.
+        assert_eq!(
+            query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Keep me",
+            "synced data must survive alongside the bookkeeping clear",
+        );
+
+        // Each bookkeeping table is present (schema kept) but empty (rows cleared).
+        for table in ["sync_state", "sync_cursors", "cloud_outbox"] {
             assert!(
-                row_exists(db_b, "SELECT 1 FROM notes WHERE id = 'pub'"),
-                "a gated-true note must survive the snapshot restore",
+                row_exists(
+                    &db_b,
+                    &format!("SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}'"),
+                ),
+                "bookkeeping table {table} schema must survive the snapshot restore",
             );
-            assert!(
-                row_exists(db_b, "SELECT 1 FROM note_tags WHERE id = 'pub_t'"),
-                "a gated-true note's FK-child must survive the snapshot restore",
+            assert_eq!(
+                query_int(&db_b, &format!("SELECT COUNT(*) FROM {table}")),
+                0,
+                "{table} must be empty in the restored DB — a peer's bookkeeping \
+                 (cursors/outbox/clock) must never ride a snapshot to a new device",
             );
-
-            // The private root and its descendant must NOT cross.
-            assert!(
-                !row_exists(db_b, "SELECT 1 FROM notes WHERE id = 'priv'"),
-                "a gated-false note leaked to a peer via the snapshot",
-            );
-            assert!(
-                !row_exists(db_b, "SELECT 1 FROM note_tags WHERE id = 'priv_t'"),
-                "a gated-false note's FK-descendant leaked to a peer via the snapshot",
-            );
-
-            ffi::sqlite3_close(db_b);
-            ffi::sqlite3_close(db_a);
         }
     }
 
@@ -1173,59 +1168,44 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_downloads_decrypts_and_writes_db() {
-        unsafe {
-            // First create a snapshot from a real database.
-            let db = open_memory_db();
-            create_synced_schema(db);
+        // First create a snapshot from a real database.
+        let db = synced_conn();
+        exec(
+            &db,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
-            exec(
-                db,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
-            );
+        let storage = MockSyncStorage::new();
+        storage.put_snapshot(encrypted).await.unwrap();
+        let meta = SnapshotMeta {
+            cursors: HashMap::from([("dev-1".to_string(), 10), ("dev-2".to_string(), 7)]),
+            created_at: "2026-02-10T00:00:00Z".to_string(),
+        };
+        storage
+            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
+            .await
+            .unwrap();
 
-            let temp = tempfile::tempdir().unwrap();
-            let enc = test_encryption();
+        let target = temp.path().join("bootstrapped.db");
+        let result = bootstrap_from_snapshot(&storage, &enc, &target)
+            .await
+            .expect("bootstrap");
 
-            let encrypted = create_snapshot(db, temp.path(), &enc).expect("snapshot");
-            ffi::sqlite3_close(db);
+        assert_eq!(result.cursors.get("dev-1"), Some(&10));
+        assert_eq!(result.cursors.get("dev-2"), Some(&7));
+        assert_eq!(result.cursors.len(), 2);
+        assert!(target.exists());
 
-            // Put snapshot in mock storage with metadata.
-            let storage = MockSyncStorage::new();
-            storage.put_snapshot(encrypted).await.unwrap();
-
-            let meta = SnapshotMeta {
-                cursors: HashMap::from([("dev-1".to_string(), 10), ("dev-2".to_string(), 7)]),
-                created_at: "2026-02-10T00:00:00Z".to_string(),
-            };
-            storage
-                .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
-                .await
-                .unwrap();
-
-            // Bootstrap a new database.
-            let target = temp.path().join("bootstrapped.db");
-            let result = bootstrap_from_snapshot(&storage, &enc, &target)
-                .await
-                .expect("bootstrap");
-
-            // Should have per-device cursors from metadata.
-            assert_eq!(result.cursors.get("dev-1"), Some(&10));
-            assert_eq!(result.cursors.get("dev-2"), Some(&7));
-            assert_eq!(result.cursors.len(), 2);
-            assert!(target.exists());
-
-            // Open the bootstrapped DB and verify data.
-            let c_path = CString::new(target.to_str().unwrap()).unwrap();
-            let mut db2: *mut ffi::sqlite3 = std::ptr::null_mut();
-            let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut db2);
-            assert_eq!(rc, ffi::SQLITE_OK);
-
-            let name = query_text(db2, "SELECT title FROM notes WHERE id = 'a1'");
-            assert_eq!(name, "Artist One");
-
-            ffi::sqlite3_close(db2);
-        }
+        let db2 = open_db_at(&target);
+        assert_eq!(
+            query_text(&db2, "SELECT title FROM notes WHERE id = 'a1'"),
+            "Artist One"
+        );
     }
 
     #[tokio::test]
@@ -1245,166 +1225,137 @@ mod tests {
 
     #[tokio::test]
     async fn full_snapshot_round_trip() {
-        unsafe {
-            // Device 1 creates some data.
-            let db = open_memory_db();
-            create_synced_schema(db);
+        let db = synced_conn();
+        exec(
+            &db,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
+        );
+        exec(
+            &db,
+            "INSERT INTO note_tags (id, tag, note_id, _updated_at, created_at) \
+             VALUES ('al1', 'Album One', 'a1', '0000000001000-0000-dev1', '2026-01-01')",
+        );
 
-            exec(
-                db,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
-            );
-            exec(
-                db,
-                "INSERT INTO note_tags (id, tag, note_id, _updated_at, created_at) \
-                 VALUES ('al1', 'Album One', 'a1', '0000000001000-0000-dev1', '2026-01-01')",
-            );
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let storage = MockSyncStorage::new();
 
-            let temp = tempfile::tempdir().unwrap();
-            let enc = test_encryption();
-            let storage = MockSyncStorage::new();
+        let encrypted =
+            create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        push_snapshot(
+            &storage,
+            encrypted,
+            "dev-1",
+            HashMap::new(),
+            5,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push");
 
-            // Create and push snapshot at seq 5.
-            let encrypted = create_snapshot(db, temp.path(), &enc).expect("snapshot");
-            push_snapshot(
-                &storage,
-                encrypted,
-                "dev-1",
-                HashMap::new(),
-                5,
-                &crate::clock::SystemClock,
-            )
+        let target = temp.path().join("device2.db");
+        let result = bootstrap_from_snapshot(&storage, &enc, &target)
             .await
-            .expect("push");
+            .expect("bootstrap");
+        assert_eq!(result.cursors.get("dev-1"), Some(&5));
 
-            ffi::sqlite3_close(db);
-
-            // Device 2 bootstraps.
-            let target = temp.path().join("device2.db");
-            let result = bootstrap_from_snapshot(&storage, &enc, &target)
-                .await
-                .expect("bootstrap");
-
-            assert_eq!(result.cursors.get("dev-1"), Some(&5));
-
-            // Open and verify.
-            let c_path = CString::new(target.to_str().unwrap()).unwrap();
-            let mut db2: *mut ffi::sqlite3 = std::ptr::null_mut();
-            let rc = ffi::sqlite3_open(c_path.as_ptr(), &mut db2);
-            assert_eq!(rc, ffi::SQLITE_OK);
-
-            let name = query_text(db2, "SELECT title FROM notes WHERE id = 'a1'");
-            assert_eq!(name, "Artist One");
-
-            let title = query_text(db2, "SELECT tag FROM note_tags WHERE id = 'al1'");
-            assert_eq!(title, "Album One");
-
-            // Device 2 can now pull only changesets > per-device cursors.
-            // (Not tested here since pull is already tested in pull_tests.rs.)
-
-            ffi::sqlite3_close(db2);
-        }
+        let db2 = open_db_at(&target);
+        assert_eq!(
+            query_text(&db2, "SELECT title FROM notes WHERE id = 'a1'"),
+            "Artist One"
+        );
+        assert_eq!(
+            query_text(&db2, "SELECT tag FROM note_tags WHERE id = 'al1'"),
+            "Album One"
+        );
     }
 
     /// Verify that a snapshot + subsequent changesets produces the same state
     /// as applying all changesets from scratch.
     #[tokio::test]
     async fn snapshot_plus_changesets_equals_full_replay() {
-        unsafe {
-            let enc = test_encryption();
-            let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let temp = tempfile::tempdir().unwrap();
 
-            // --- Phase 1: create data, snapshot, then more data ---
+        // --- Phase 1: create data, snapshot, then more data ---
+        let db_source = synced_conn();
 
-            let db_source = open_memory_db();
-            create_synced_schema(db_source);
-
-            // Initial data (before snapshot).
-            let session1 = SyncSession::start(db_source).expect("session");
-            exec(
-                db_source,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
-            );
-            exec(
-                db_source,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('a2', 'Artist Two', 1, '0000000002000-0000-dev1', '2026-01-01')",
-            );
-            let cs1 = session1.changeset().unwrap().unwrap();
-            let cs1_bytes = cs1.as_bytes().to_vec();
-            drop(session1);
-
-            // Create snapshot after cs1.
-            let snapshot_encrypted =
-                create_snapshot(db_source, temp.path(), &enc).expect("snapshot");
-
-            // More data after snapshot.
-            let session2 = SyncSession::start(db_source).expect("session2");
-            exec(
-                db_source,
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('a3', 'Artist Three', 1, '0000000003000-0000-dev1', '2026-01-01')",
-            );
-            exec(
-                db_source,
-                "UPDATE notes SET title = 'Artist One Updated' \
-                 WHERE id = 'a1'",
-            );
-            let cs2 = session2.changeset().unwrap().unwrap();
-            let cs2_bytes = cs2.as_bytes().to_vec();
-            drop(session2);
-
-            ffi::sqlite3_close(db_source);
-
-            // --- Path A: bootstrap from snapshot + apply cs2 ---
-
-            let snapshot_plain = enc.decrypt(&snapshot_encrypted).unwrap();
-            let path_a = temp.path().join("path_a.db");
-            std::fs::write(&path_a, &snapshot_plain).unwrap();
-
-            let db_a = {
-                let c = CString::new(path_a.to_str().unwrap()).unwrap();
-                let mut p: *mut ffi::sqlite3 = std::ptr::null_mut();
-                ffi::sqlite3_open(c.as_ptr(), &mut p);
-                p
-            };
-
-            let cs2_obj = crate::sync::session_ext::Changeset::from_bytes(&cs2_bytes);
-            crate::sync::apply::apply_changeset_lww(db_a, &cs2_obj).expect("apply cs2");
-
-            // --- Path B: fresh DB + apply cs1 + apply cs2 ---
-
-            let db_b = open_memory_db();
-            create_synced_schema(db_b);
-
-            let cs1_obj = crate::sync::session_ext::Changeset::from_bytes(&cs1_bytes);
-            crate::sync::apply::apply_changeset_lww(db_b, &cs1_obj).expect("apply cs1");
-
-            let cs2_obj2 = crate::sync::session_ext::Changeset::from_bytes(&cs2_bytes);
-            crate::sync::apply::apply_changeset_lww(db_b, &cs2_obj2).expect("apply cs2");
-
-            // --- Compare: both paths should have identical data ---
-
-            let count_a = query_int(db_a, "SELECT COUNT(*) FROM notes");
-            let count_b = query_int(db_b, "SELECT COUNT(*) FROM notes");
-            assert_eq!(count_a, count_b, "artist count should match");
-            assert_eq!(count_a, 3);
-
-            let name_a = query_text(db_a, "SELECT title FROM notes WHERE id = 'a1'");
-            let name_b = query_text(db_b, "SELECT title FROM notes WHERE id = 'a1'");
-            assert_eq!(name_a, name_b);
-            assert_eq!(name_a, "Artist One Updated");
-
-            let name_a3 = query_text(db_a, "SELECT title FROM notes WHERE id = 'a3'");
-            let name_b3 = query_text(db_b, "SELECT title FROM notes WHERE id = 'a3'");
-            assert_eq!(name_a3, name_b3);
-            assert_eq!(name_a3, "Artist Three");
-
-            ffi::sqlite3_close(db_a);
-            ffi::sqlite3_close(db_b);
+        // Initial data (before snapshot), captured as cs1.
+        let mut session1 = RqSession::new(&db_source).expect("session");
+        for t in synced_tables() {
+            session1.attach(Some(t.name())).expect("attach");
         }
+        exec(
+            &db_source,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
+        );
+        exec(
+            &db_source,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('a2', 'Artist Two', 1, '0000000002000-0000-dev1', '2026-01-01')",
+        );
+        let mut cs1_bytes = Vec::new();
+        session1.changeset_strm(&mut cs1_bytes).expect("cs1");
+        drop(session1);
+
+        // Snapshot after cs1.
+        let snapshot_encrypted =
+            create_snapshot(&db_source, temp.path(), &synced_tables(), &enc).expect("snapshot");
+
+        // More data after snapshot, captured as cs2.
+        let mut session2 = RqSession::new(&db_source).expect("session2");
+        for t in synced_tables() {
+            session2.attach(Some(t.name())).expect("attach");
+        }
+        exec(
+            &db_source,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('a3', 'Artist Three', 1, '0000000003000-0000-dev1', '2026-01-01')",
+        );
+        exec(
+            &db_source,
+            "UPDATE notes SET title = 'Artist One Updated' WHERE id = 'a1'",
+        );
+        let mut cs2_bytes = Vec::new();
+        session2.changeset_strm(&mut cs2_bytes).expect("cs2");
+        drop(session2);
+
+        // --- Path A: bootstrap from snapshot + apply cs2 ---
+        let snapshot_plain = enc.decrypt(&snapshot_encrypted).unwrap();
+        let path_a = temp.path().join("path_a.db");
+        std::fs::write(&path_a, &snapshot_plain).unwrap();
+        let db_a = open_db_at(&path_a);
+        apply(&db_a, &cs2_bytes);
+
+        // --- Path B: fresh DB + apply cs1 + apply cs2 ---
+        let db_b = synced_conn();
+        apply(&db_b, &cs1_bytes);
+        apply(&db_b, &cs2_bytes);
+
+        // --- Compare: both paths should have identical data ---
+        let count_a = query_int(&db_a, "SELECT COUNT(*) FROM notes");
+        let count_b = query_int(&db_b, "SELECT COUNT(*) FROM notes");
+        assert_eq!(count_a, count_b, "artist count should match");
+        assert_eq!(count_a, 3);
+
+        assert_eq!(
+            query_text(&db_a, "SELECT title FROM notes WHERE id = 'a1'"),
+            query_text(&db_b, "SELECT title FROM notes WHERE id = 'a1'")
+        );
+        assert_eq!(
+            query_text(&db_a, "SELECT title FROM notes WHERE id = 'a1'"),
+            "Artist One Updated"
+        );
+        assert_eq!(
+            query_text(&db_a, "SELECT title FROM notes WHERE id = 'a3'"),
+            query_text(&db_b, "SELECT title FROM notes WHERE id = 'a3'")
+        );
+        assert_eq!(
+            query_text(&db_a, "SELECT title FROM notes WHERE id = 'a3'"),
+            "Artist Three"
+        );
     }
 
     // ---- new safety tests ----
@@ -1491,71 +1442,40 @@ mod tests {
     /// rather than seed cursors from a heuristic on `heads`.
     #[tokio::test]
     async fn bootstrap_fails_when_snapshot_meta_missing() {
-        unsafe {
-            let db = open_memory_db();
-            create_synced_schema(db);
+        let db = synced_conn();
+        exec(
+            &db,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
-            exec(
-                db,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('a1', 'Artist One', '0000000001000-0000-dev1', '2026-01-01')",
-            );
+        // Put snapshot in storage WITHOUT metadata (torn-bucket simulation).
+        let storage = MockSyncStorage::new();
+        storage.put_snapshot(encrypted).await.unwrap();
+        storage
+            .put_head("dev-1", 20, Some(15), "2026-02-10T00:00:00Z")
+            .await
+            .unwrap();
 
-            let temp = tempfile::tempdir().unwrap();
-            let enc = test_encryption();
-
-            let encrypted = create_snapshot(db, temp.path(), &enc).expect("snapshot");
-            ffi::sqlite3_close(db);
-
-            // Put snapshot in storage WITHOUT metadata (torn-bucket simulation).
-            let storage = MockSyncStorage::new();
-            storage.put_snapshot(encrypted).await.unwrap();
-            storage
-                .put_head("dev-1", 20, Some(15), "2026-02-10T00:00:00Z")
-                .await
-                .unwrap();
-
-            let target = temp.path().join("torn.db");
-            let err = bootstrap_from_snapshot(&storage, &enc, &target)
-                .await
-                .expect_err("bootstrap must refuse torn bucket");
-            assert!(
-                matches!(err, SnapshotError::Bucket(StorageError::NotFound(_))),
-                "expected Bucket(NotFound), got {err:?}",
-            );
-            assert!(
-                !target.exists(),
-                "no DB should be written when metadata is missing",
-            );
-        }
+        let target = temp.path().join("torn.db");
+        let err = bootstrap_from_snapshot(&storage, &enc, &target)
+            .await
+            .expect_err("bootstrap must refuse torn bucket");
+        assert!(
+            matches!(err, SnapshotError::Bucket(StorageError::NotFound(_))),
+            "expected Bucket(NotFound), got {err:?}",
+        );
+        assert!(
+            !target.exists(),
+            "no DB should be written when metadata is missing"
+        );
     }
 
     // ---- snapshot cursor honesty (the overclaim bug) ----
-
-    /// Open a SQLite database file by path. Caller owns the returned handle.
-    unsafe fn open_db_at(path: &Path) -> *mut ffi::sqlite3 {
-        let c = CString::new(path.to_str().unwrap()).unwrap();
-        let mut p: *mut ffi::sqlite3 = std::ptr::null_mut();
-        let rc = ffi::sqlite3_open(c.as_ptr(), &mut p);
-        assert_eq!(rc, ffi::SQLITE_OK);
-        p
-    }
-
-    /// Produce a signed-free changeset's raw bytes by recording the SQL run
-    /// inside `body` against a fresh schema-only DB, and return those bytes.
-    /// This is what device M would push as a changeset blob.
-    unsafe fn changeset_bytes_for(body: impl FnOnce(*mut ffi::sqlite3)) -> Vec<u8> {
-        init_synced_tables();
-        let db = open_memory_db();
-        create_synced_schema(db);
-        let session = SyncSession::start(db).expect("session");
-        body(db);
-        let cs = session.changeset().unwrap().unwrap();
-        let bytes = cs.as_bytes().to_vec();
-        drop(session);
-        ffi::sqlite3_close(db);
-        bytes
-    }
 
     /// The core regression: a device that snapshots a DB it has NOT fully
     /// caught up to must record cursors describing what the snapshot DB
@@ -1564,102 +1484,88 @@ mod tests {
     /// restore can ever recover it.
     #[tokio::test]
     async fn snapshot_meta_reflects_applied_not_published() {
-        unsafe {
-            let enc = test_encryption();
-            let temp = tempfile::tempdir().unwrap();
-            let storage = MockSyncStorage::new();
+        let enc = test_encryption();
+        let temp = tempfile::tempdir().unwrap();
+        let storage = MockSyncStorage::new();
 
-            // Owner device M inserts a note and is at applied seq K = 1.
-            let k = 1u64;
-            let cs_insert = changeset_bytes_for(|db| {
-                exec(
-                    db,
-                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Release Draft', 1, '0000000001000-0000-M', '2026-01-01')",
-                );
-            });
-            storage.add_changeset("M", k, cs_insert.clone());
+        // Owner device M inserts a note and is at applied seq K = 1.
+        let k = 1u64;
+        let cs_insert = changeset_bytes_for(|db| {
+            exec(
+                db,
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Release Draft', 1, '0000000001000-0000-M', '2026-01-01')",
+            );
+        });
+        storage.add_changeset("M", k, cs_insert.clone());
 
-            // M later pushes a "manage release" UPDATE as seq K+1 = 2, raising
-            // M's head to 2 — but this edit is NOT in any snapshot yet.
-            let cs_update = changeset_bytes_for(|db| {
-                exec(
-                    db,
-                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Release Draft', 1, '0000000001000-0000-M', '2026-01-01')",
-                );
-                exec(
-                    db,
-                    "UPDATE notes SET title = 'Release Managed', \
-                     _updated_at = '0000000002000-0000-M' WHERE id = 'n1'",
-                );
-            });
-            storage.add_changeset("M", k + 1, cs_update.clone());
+        // M later pushes a "manage release" UPDATE as seq K+1 = 2, raising M's
+        // head to 2 — but this edit is NOT in any snapshot yet.
+        let cs_update = changeset_bytes_for(|db| {
+            exec(
+                db,
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Release Draft', 1, '0000000001000-0000-M', '2026-01-01')",
+            );
+            exec(
+                db,
+                "UPDATE notes SET title = 'Release Managed', \
+                 _updated_at = '0000000002000-0000-M' WHERE id = 'n1'",
+            );
+        });
+        storage.add_changeset("M", k + 1, cs_update.clone());
 
-            // Device B is behind: it has applied M only up to K, and its DB
-            // lacks the K+1 edit. B builds a snapshot DB of its applied state.
-            let db_b = open_memory_db();
-            create_synced_schema(db_b);
-            let cs_insert_obj = crate::sync::session_ext::Changeset::from_bytes(&cs_insert);
-            crate::sync::apply::apply_changeset_lww(db_b, &cs_insert_obj).expect("apply insert");
-            let snapshot = create_snapshot(db_b, temp.path(), &enc).expect("snapshot");
-            ffi::sqlite3_close(db_b);
+        // Device B is behind: it has applied M only up to K. B snapshots its state.
+        let db_b = synced_conn();
+        apply(&db_b, &cs_insert);
+        let snapshot =
+            create_snapshot(&db_b, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
-            // B pushes the snapshot with ITS applied cursors {M: K}.
-            let applied = HashMap::from([("M".to_string(), k)]);
-            push_snapshot(
-                &storage,
-                snapshot,
-                "B",
-                applied,
-                0,
-                &crate::clock::SystemClock,
-            )
+        let applied = HashMap::from([("M".to_string(), k)]);
+        push_snapshot(
+            &storage,
+            snapshot,
+            "B",
+            applied,
+            0,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push");
+
+        let meta_json = storage.get_stored_snapshot_meta().expect("meta");
+        let meta: SnapshotMeta = serde_json::from_slice(&meta_json).unwrap();
+        assert_eq!(
+            meta.cursors.get("M"),
+            Some(&k),
+            "snapshot meta must reflect applied seq K, not published head K+1"
+        );
+
+        garbage_collect(&storage).await.expect("gc");
+        storage
+            .get_changeset("M", k + 1)
             .await
-            .expect("push");
+            .expect("K+1 must survive GC");
 
-            // The metadata must claim only K for M, not M's head K+1.
-            let meta_json = storage.get_stored_snapshot_meta().expect("meta");
-            let meta: SnapshotMeta = serde_json::from_slice(&meta_json).unwrap();
-            assert_eq!(
-                meta.cursors.get("M"),
-                Some(&k),
-                "snapshot meta must reflect applied seq K, not published head K+1"
-            );
+        let target = temp.path().join("device_c.db");
+        let boot = bootstrap_from_snapshot(&storage, &enc, &target)
+            .await
+            .expect("bootstrap");
+        let c_cursor = *boot.cursors.get("M").unwrap_or(&0);
 
-            // GC must NOT delete M's K+1 changeset (it is not in the snapshot).
-            garbage_collect(&storage).await.expect("gc");
-            storage
-                .get_changeset("M", k + 1)
-                .await
-                .expect("K+1 must survive GC");
-
-            // A fresh device C bootstraps from the snapshot and pulls M's
-            // changesets newer than its bootstrap cursor — it must end up
-            // with the "manage release" edit.
-            let target = temp.path().join("device_c.db");
-            let boot = bootstrap_from_snapshot(&storage, &enc, &target)
-                .await
-                .expect("bootstrap");
-            let c_cursor = *boot.cursors.get("M").unwrap_or(&0);
-
-            let db_c = open_db_at(&target);
-            for seq in storage.list_changesets("M").await.unwrap() {
-                if seq <= c_cursor {
-                    continue;
-                }
-                let bytes = storage.get_changeset("M", seq).await.unwrap();
-                let obj = crate::sync::session_ext::Changeset::from_bytes(&bytes);
-                crate::sync::apply::apply_changeset_lww(db_c, &obj).expect("apply pulled");
+        let db_c = open_db_at(&target);
+        for seq in storage.list_changesets("M").await.unwrap() {
+            if seq <= c_cursor {
+                continue;
             }
-
-            let title = query_text(db_c, "SELECT title FROM notes WHERE id = 'n1'");
-            assert_eq!(
-                title, "Release Managed",
-                "device C must receive the post-snapshot edit"
-            );
-            ffi::sqlite3_close(db_c);
+            let bytes = storage.get_changeset("M", seq).await.unwrap();
+            apply(&db_c, &bytes);
         }
+        assert_eq!(
+            query_text(&db_c, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Release Managed",
+            "device C must receive the post-snapshot edit"
+        );
     }
 
     /// End-to-end: owner inserts + snapshots, B bootstraps, owner pushes an
@@ -1667,118 +1573,108 @@ mod tests {
     /// also has the update. All through the real snapshot/GC/bootstrap funcs.
     #[tokio::test]
     async fn multi_device_managed_edit_reaches_restore() {
-        unsafe {
-            let enc = test_encryption();
-            let temp = tempfile::tempdir().unwrap();
-            let storage = MockSyncStorage::new();
+        let enc = test_encryption();
+        let temp = tempfile::tempdir().unwrap();
+        let storage = MockSyncStorage::new();
 
-            // Owner inserts a note (seq 1) and snapshots its applied state.
-            let cs1 = changeset_bytes_for(|db| {
-                exec(
-                    db,
-                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Draft', 1, '0000000001000-0000-owner', '2026-01-01')",
-                );
-            });
-            storage.add_changeset("owner", 1, cs1.clone());
+        // Owner inserts a note (seq 1) and snapshots its applied state.
+        let cs1 = changeset_bytes_for(|db| {
+            exec(
+                db,
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Draft', 1, '0000000001000-0000-owner', '2026-01-01')",
+            );
+        });
+        storage.add_changeset("owner", 1, cs1.clone());
 
-            let db_owner = open_memory_db();
-            create_synced_schema(db_owner);
-            let cs1_obj = crate::sync::session_ext::Changeset::from_bytes(&cs1);
-            crate::sync::apply::apply_changeset_lww(db_owner, &cs1_obj).expect("apply cs1");
-            let snap1 = create_snapshot(db_owner, temp.path(), &enc).expect("snap1");
-            ffi::sqlite3_close(db_owner);
+        let db_owner = synced_conn();
+        apply(&db_owner, &cs1);
+        let snap1 = create_snapshot(&db_owner, temp.path(), &synced_tables(), &enc).expect("snap1");
+        push_snapshot(
+            &storage,
+            snap1,
+            "owner",
+            HashMap::new(),
+            1,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push snap1");
 
-            push_snapshot(
-                &storage,
-                snap1,
-                "owner",
-                HashMap::new(),
-                1,
-                &crate::clock::SystemClock,
-            )
+        // Device B bootstraps and has the note.
+        let b_path = temp.path().join("b.db");
+        let b_boot = bootstrap_from_snapshot(&storage, &enc, &b_path)
             .await
-            .expect("push snap1");
+            .expect("b bootstrap");
+        let db_b = open_db_at(&b_path);
+        assert_eq!(
+            query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Draft"
+        );
 
-            // Device B bootstraps and has the note.
-            let b_path = temp.path().join("b.db");
-            let b_boot = bootstrap_from_snapshot(&storage, &enc, &b_path)
-                .await
-                .expect("b bootstrap");
-            let db_b = open_db_at(&b_path);
-            assert_eq!(
-                query_text(db_b, "SELECT title FROM notes WHERE id = 'n1'"),
-                "Draft"
+        // Owner pushes a row-UPDATE changeset (seq 2).
+        let cs2 = changeset_bytes_for(|db| {
+            exec(
+                db,
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Draft', 1, '0000000001000-0000-owner', '2026-01-01')",
             );
+            exec(
+                db,
+                "UPDATE notes SET title = 'Published', \
+                 _updated_at = '0000000002000-0000-owner' WHERE id = 'n1'",
+            );
+        });
+        storage.add_changeset("owner", 2, cs2.clone());
 
-            // Owner pushes a row-UPDATE changeset (seq 2).
-            let cs2 = changeset_bytes_for(|db| {
-                exec(
-                    db,
-                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Draft', 1, '0000000001000-0000-owner', '2026-01-01')",
-                );
-                exec(
-                    db,
-                    "UPDATE notes SET title = 'Published', \
-                     _updated_at = '0000000002000-0000-owner' WHERE id = 'n1'",
-                );
-            });
-            storage.add_changeset("owner", 2, cs2.clone());
-
-            // B pulls the update (everything past its bootstrap cursor).
-            let mut b_cursors = b_boot.cursors.clone();
-            let b_owner_cursor = *b_cursors.get("owner").unwrap_or(&0);
-            for seq in storage.list_changesets("owner").await.unwrap() {
-                if seq <= b_owner_cursor {
-                    continue;
-                }
-                let bytes = storage.get_changeset("owner", seq).await.unwrap();
-                let obj = crate::sync::session_ext::Changeset::from_bytes(&bytes);
-                crate::sync::apply::apply_changeset_lww(db_b, &obj).expect("b apply");
-                b_cursors.insert("owner".to_string(), seq);
+        // B pulls the update (everything past its bootstrap cursor).
+        let mut b_cursors = b_boot.cursors.clone();
+        let b_owner_cursor = *b_cursors.get("owner").unwrap_or(&0);
+        for seq in storage.list_changesets("owner").await.unwrap() {
+            if seq <= b_owner_cursor {
+                continue;
             }
-            assert_eq!(
-                query_text(db_b, "SELECT title FROM notes WHERE id = 'n1'"),
-                "Published"
-            );
-
-            // B snapshots its now-current state with honest cursors {owner: 2}.
-            let snap2 = create_snapshot(db_b, temp.path(), &enc).expect("snap2");
-            ffi::sqlite3_close(db_b);
-            push_snapshot(
-                &storage,
-                snap2,
-                "B",
-                b_cursors.clone(),
-                0,
-                &crate::clock::SystemClock,
-            )
-            .await
-            .expect("push snap2");
-
-            // Device C bootstraps + pulls and must also have the update.
-            let c_path = temp.path().join("c.db");
-            let c_boot = bootstrap_from_snapshot(&storage, &enc, &c_path)
-                .await
-                .expect("c bootstrap");
-            let db_c = open_db_at(&c_path);
-            let c_owner_cursor = *c_boot.cursors.get("owner").unwrap_or(&0);
-            for seq in storage.list_changesets("owner").await.unwrap() {
-                if seq <= c_owner_cursor {
-                    continue;
-                }
-                let bytes = storage.get_changeset("owner", seq).await.unwrap();
-                let obj = crate::sync::session_ext::Changeset::from_bytes(&bytes);
-                crate::sync::apply::apply_changeset_lww(db_c, &obj).expect("c apply");
-            }
-            assert_eq!(
-                query_text(db_c, "SELECT title FROM notes WHERE id = 'n1'"),
-                "Published",
-                "device C must receive the managed edit through B's snapshot + pull"
-            );
-            ffi::sqlite3_close(db_c);
+            let bytes = storage.get_changeset("owner", seq).await.unwrap();
+            apply(&db_b, &bytes);
+            b_cursors.insert("owner".to_string(), seq);
         }
+        assert_eq!(
+            query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Published"
+        );
+
+        // B snapshots its now-current state with honest cursors {owner: 2}.
+        let snap2 = create_snapshot(&db_b, temp.path(), &synced_tables(), &enc).expect("snap2");
+        push_snapshot(
+            &storage,
+            snap2,
+            "B",
+            b_cursors.clone(),
+            0,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push snap2");
+
+        // Device C bootstraps + pulls and must also have the update.
+        let c_path = temp.path().join("c.db");
+        let c_boot = bootstrap_from_snapshot(&storage, &enc, &c_path)
+            .await
+            .expect("c bootstrap");
+        let db_c = open_db_at(&c_path);
+        let c_owner_cursor = *c_boot.cursors.get("owner").unwrap_or(&0);
+        for seq in storage.list_changesets("owner").await.unwrap() {
+            if seq <= c_owner_cursor {
+                continue;
+            }
+            let bytes = storage.get_changeset("owner", seq).await.unwrap();
+            apply(&db_c, &bytes);
+        }
+        assert_eq!(
+            query_text(&db_c, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Published",
+            "device C must receive the managed edit through B's snapshot + pull"
+        );
     }
 
     /// GC deletes only seqs <= the snapshot's accurate cursor; a changeset
@@ -1813,41 +1709,36 @@ mod tests {
     /// from.
     #[tokio::test]
     async fn bootstrap_cursors_match_snapshot_contents() {
-        unsafe {
-            let enc = test_encryption();
-            let temp = tempfile::tempdir().unwrap();
-            let storage = MockSyncStorage::new();
+        let enc = test_encryption();
+        let temp = tempfile::tempdir().unwrap();
+        let storage = MockSyncStorage::new();
 
-            // Snapshot taken from a state where M is applied through seq 7.
-            let db = open_memory_db();
-            create_synced_schema(db);
-            exec(
-                db,
-                "INSERT INTO notes (id, title, _updated_at, created_at) \
-                 VALUES ('n1', 'A', '0000000001000-0000-M', '2026-01-01')",
-            );
-            let snap = create_snapshot(db, temp.path(), &enc).expect("snap");
-            ffi::sqlite3_close(db);
+        // Snapshot taken from a state where M is applied through seq 7.
+        let db = synced_conn();
+        exec(
+            &db,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('n1', 'A', 1, '0000000001000-0000-M', '2026-01-01')",
+        );
+        let snap = create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snap");
 
-            let applied = HashMap::from([("M".to_string(), 7)]);
-            push_snapshot(
-                &storage,
-                snap,
-                "self",
-                applied,
-                0,
-                &crate::clock::SystemClock,
-            )
+        let applied = HashMap::from([("M".to_string(), 7)]);
+        push_snapshot(
+            &storage,
+            snap,
+            "self",
+            applied,
+            0,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push");
+
+        let target = temp.path().join("boot.db");
+        let boot = bootstrap_from_snapshot(&storage, &enc, &target)
             .await
-            .expect("push");
-
-            let target = temp.path().join("boot.db");
-            let boot = bootstrap_from_snapshot(&storage, &enc, &target)
-                .await
-                .expect("bootstrap");
-
-            assert_eq!(boot.cursors.get("M"), Some(&7));
-        }
+            .expect("bootstrap");
+        assert_eq!(boot.cursors.get("M"), Some(&7));
     }
 
     /// A device that snapshots while another device's head is ahead writes

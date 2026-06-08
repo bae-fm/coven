@@ -1,15 +1,12 @@
-/// Production session management for sync.
-///
-/// `SyncSession` wraps the low-level FFI `Session` and attaches the
-/// synced tables. It provides a clean start/changeset/end lifecycle.
-use std::sync::OnceLock;
+//! Synced-table declarations and the shared identifier-quoting helper.
+//!
+//! [`SyncedTable`] is how a host declares which tables participate in changeset
+//! sync. The set is no longer a process-global: the host passes it to
+//! [`crate::database::Database::open`], which owns it for the lifetime of the
+//! connection and hands it to the capture session, the gate, and apply.
 
-use tracing::warn;
-
-use super::session_ext::{Changeset, Session};
-
-/// A table that participates in changeset sync, declared once at startup by the
-/// host via [`set_synced_tables`].
+/// A table that participates in changeset sync, declared at startup by the host
+/// and passed to [`crate::database::Database::open`].
 ///
 /// A plain [`SyncedTable::new`] table syncs unconditionally — every row goes to
 /// peers. [`SyncedTable::gated_by`] makes it a *gated root*: a boolean column
@@ -30,6 +27,13 @@ use super::session_ext::{Changeset, Session};
 ///
 /// A table is *either* a gated root *or* a gated-by-descendants ancestor *or*
 /// plain — never two of these. See [`super::gate`] for the gating mechanics.
+///
+/// Each table must have an `id` text primary key at column 0 and an
+/// `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). Tables not in the
+/// set the host passes to `Database::open` are local-only and never synced —
+/// that is also the mechanism for keeping device-local state (per-device
+/// pin/cache columns, local paths) out of sync: put it in a table you don't
+/// declare. An empty set is rejected by [`super::cycle::init_sync`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncedTable {
     /// Every row syncs unconditionally.
@@ -93,123 +97,9 @@ impl SyncedTable {
     }
 }
 
-/// The tables that participate in changeset sync, declared once at startup by
-/// the host via [`set_synced_tables`].
-static SYNCED_TABLES: OnceLock<Vec<SyncedTable>> = OnceLock::new();
-
-/// Declare the tables that participate in changeset sync. The host MUST call
-/// this once at startup, before any sync session is created or `init_sync`
-/// runs — it is a required integration step, not an optional tuning knob.
-///
-/// Each table must have an `id` text primary key at column 0 and an
-/// `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). Tables not listed
-/// here are local-only and never synced — that is also the mechanism for keeping
-/// device-local state (per-device pin/cache columns, local paths) out of sync:
-/// put it in a table you don't list here.
-///
-/// A table declared with [`SyncedTable::gated_by`] is a gated root: only rows
-/// whose gate column is true sync, and the gate flows down declared foreign keys
-/// to descendant rows. A table declared with [`SyncedTable::gated_by_descendants`]
-/// is an always-shared ancestor that syncs only while a gated descendant
-/// survives. See [`super::gate`].
-///
-/// Forgetting this is silent at the session layer (a session with no attached
-/// tables just yields empty changesets), so [`super::cycle::init_sync`] treats an
-/// empty set as a hard error and refuses to start sync.
-pub fn set_synced_tables(tables: &[SyncedTable]) {
-    if let Err(attempted) = SYNCED_TABLES.set(tables.to_vec()) {
-        // First call wins. A second call with the same set is a harmless
-        // re-init (e.g. repeated test setup); a second call with a *different*
-        // set is an integration bug — the live set is already in use and won't
-        // change, so surface it loudly.
-        let current = SYNCED_TABLES.get();
-        if current != Some(&attempted) {
-            warn!(
-                "set_synced_tables called again with a different table set; \
-                 the first declaration stays in effect (current={current:?}, ignored={attempted:?})"
-            );
-        }
-    }
+/// Quote an SQL identifier (table/column name), doubling any embedded quote, so
+/// a trusted-but-unbindable name interpolates safely. Identifiers cannot be
+/// passed as bound parameters; this is the safe interpolation path for them.
+pub(crate) fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
-
-/// The configured synced tables. Empty only when [`set_synced_tables`] was never
-/// called — an integration bug that [`super::cycle::init_sync`] rejects.
-pub fn synced_tables() -> &'static [SyncedTable] {
-    SYNCED_TABLES.get().map(Vec::as_slice).unwrap_or(&[])
-}
-
-/// A sync session that tracks changes to all synced tables on a single connection.
-///
-/// Lifecycle:
-/// 1. `SyncSession::start(db)` -- creates and attaches
-/// 2. App writes normally through the connection
-/// 3. `session.changeset()` -- grabs the binary diff (None if no changes)
-/// 4. Session is dropped (or explicitly ended by dropping)
-///
-/// The session must be dropped before applying incoming changesets to avoid
-/// contaminating the next outgoing changeset with other devices' changes.
-pub struct SyncSession {
-    session: Session,
-}
-
-impl SyncSession {
-    /// Create a new sync session on the given raw sqlite3 connection,
-    /// attaching all synced tables.
-    ///
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection pointer. The session
-    /// must be dropped before the connection is closed.
-    pub unsafe fn start(db: *mut libsqlite3_sys::sqlite3) -> Result<Self, SyncError> {
-        let session = Session::new(db).map_err(SyncError::SessionCreate)?;
-
-        for table in synced_tables() {
-            session
-                .attach(Some(table.name()))
-                .map_err(|rc| SyncError::SessionAttach(table.name().to_string(), rc))?;
-        }
-
-        Ok(SyncSession { session })
-    }
-
-    /// Grab the binary changeset of all changes since the session started.
-    /// Returns `None` if no changes were made (avoids pushing empty changesets).
-    pub fn changeset(&self) -> Result<Option<Changeset>, SyncError> {
-        let cs = self
-            .session
-            .changeset()
-            .map_err(SyncError::ChangesetExtract)?;
-
-        if cs.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(cs))
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum SyncError {
-    /// Failed to create a session (sqlite3 error code).
-    SessionCreate(i32),
-    /// Failed to attach a table (table name, sqlite3 error code).
-    SessionAttach(String, i32),
-    /// Failed to extract a changeset (sqlite3 error code).
-    ChangesetExtract(i32),
-    /// Failed to apply a changeset (sqlite3 error code).
-    ChangesetApply(i32),
-}
-
-impl std::fmt::Display for SyncError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SyncError::SessionCreate(rc) => write!(f, "session create failed (rc={rc})"),
-            SyncError::SessionAttach(table, rc) => {
-                write!(f, "session attach failed for {table} (rc={rc})")
-            }
-            SyncError::ChangesetExtract(rc) => write!(f, "changeset extract failed (rc={rc})"),
-            SyncError::ChangesetApply(rc) => write!(f, "changeset apply failed (rc={rc})"),
-        }
-    }
-}
-
-impl std::error::Error for SyncError {}

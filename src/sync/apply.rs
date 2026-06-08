@@ -1,62 +1,91 @@
-/// Apply a changeset to a database with the production conflict handler.
-///
-/// Within a single changeset, SQLite defers FK checks -- parent and child
-/// rows in the same changeset are applied in recording order. Cross-changeset
-/// FK dependencies are handled by applying changesets in seq order (parents
-/// are always in earlier changesets than children).
-///
-/// If a FK violation remains after applying a changeset, the conflict handler
-/// reports it via `FOREIGN_KEY` type and the tracker notes it for the caller.
-use libsqlite3_sys as ffi;
+//! Apply a changeset to the connection with the production LWW conflict handler.
+//!
+//! Within a single changeset, SQLite defers FK checks — parent and child rows in
+//! the same changeset are applied in recording order. Cross-changeset FK
+//! dependencies are handled by applying changesets in seq order (parents are
+//! always in earlier changesets than children).
+//!
+//! If a FK violation remains after applying a changeset, the conflict handler
+//! reports it via `FOREIGN_KEY`/`CONSTRAINT` and the returned flag notes it for
+//! the caller, which retries the changeset once its parents have landed.
 
-use super::conflict::{lww_conflict_handler, ConflictTracker, TableSchema};
-use super::session::{SyncError, SyncedTable};
-use super::session_ext::{apply_changeset_with_context, Changeset};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use rusqlite::session::{ConflictAction, ConflictType};
+use rusqlite::Connection;
+
+use super::conflict::{lww_conflict_handler, TableSchema};
+use super::session::SyncedTable;
+use crate::database::DbError;
 
 /// Result of applying a changeset.
 pub struct ApplyResult {
-    /// True if any FK constraint violations were reported. The caller may
-    /// want to retry this changeset after applying other changesets that
-    /// contain the missing parent rows.
+    /// True if any FK/uniqueness constraint violations were reported. The caller
+    /// may retry this changeset after applying other changesets that contain the
+    /// missing parent rows.
     pub had_fk_violations: bool,
 }
 
-/// Apply a changeset over the process-global synced tables. The production entry
-/// point; tests that run against a different schema call
-/// [`apply_changeset_lww_for`] with their own table set.
-///
-/// # Safety
-/// `db` must be a valid, open sqlite3 connection pointer.
-pub unsafe fn apply_changeset_lww(
-    db: *mut ffi::sqlite3,
-    changeset: &Changeset,
-) -> Result<ApplyResult, SyncError> {
-    apply_changeset_lww_for(db, changeset, super::session::synced_tables())
+/// Apply `bytes` to `conn` using LWW conflict resolution, building the
+/// [`TableSchema`] from `tables` once. A convenience wrapper over
+/// [`apply_changeset_lww_with_schema`] for callers that apply a single changeset
+/// and don't already hold a schema (tests, snapshot round-trips).
+pub fn apply_changeset_lww(
+    conn: &Connection,
+    bytes: &[u8],
+    tables: &[SyncedTable],
+) -> Result<ApplyResult, DbError> {
+    let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
+    let schema = Arc::new(TableSchema::from_db(conn, &table_refs)?);
+    apply_changeset_lww_with_schema(conn, bytes, schema)
 }
 
-/// Apply a changeset to the given database connection using LWW conflict
-/// resolution, resolving `_updated_at` indices over `tables`.
+/// Apply `bytes` to `conn` using LWW conflict resolution against a pre-built
+/// [`TableSchema`].
 ///
-/// Builds schema info from the database to look up `_updated_at` column
-/// indices dynamically, so future migrations that add columns are safe.
+/// The schema's per-table `_updated_at` column index map is derived once (from
+/// the live schema, so future migrations that add columns are safe) and reused
+/// across every changeset in a pull, rather than re-querying `PRAGMA table_info`
+/// per changeset. The conflict closure resolves each conflicting row's table from
+/// its operation and decides REPLACE/OMIT by comparing `_updated_at`;
+/// FK/constraint violations flip a shared flag for the caller to retry.
 ///
-/// # Safety
-/// `db` must be a valid, open sqlite3 connection pointer.
-pub unsafe fn apply_changeset_lww_for(
-    db: *mut ffi::sqlite3,
-    changeset: &Changeset,
-    tables: &[SyncedTable],
-) -> Result<ApplyResult, SyncError> {
-    let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
-    let schema = TableSchema::from_db(db, &table_refs);
-    let mut tracker = ConflictTracker::new();
+/// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
+/// without re-deriving it per call.
+pub fn apply_changeset_lww_with_schema(
+    conn: &Connection,
+    bytes: &[u8],
+    schema: Arc<TableSchema>,
+) -> Result<ApplyResult, DbError> {
+    let fk_flag = Arc::new(AtomicBool::new(false));
 
-    apply_changeset_with_context(db, changeset, |ct, ctx| {
-        lww_conflict_handler(ct, ctx, &schema, &mut tracker)
-    })
-    .map_err(SyncError::ChangesetApply)?;
+    let closure_flag = fk_flag.clone();
+    conn.apply_strm(
+        &mut &bytes[..],
+        // Apply to every table in the changeset (it only ever carries synced
+        // tables; the gate already excluded local-only rows on the wire).
+        Some(|_table: &str| true),
+        move |conflict_type, item| {
+            // A FOREIGN_KEY conflict's iterator supports ONLY `fk_conflicts()`;
+            // calling `op()`/`new_value()`/`conflict()` on it is undefined (it
+            // crashes the process). Resolve it first, without touching the row.
+            if conflict_type == ConflictType::SQLITE_CHANGESET_FOREIGN_KEY {
+                closure_flag.store(true, Ordering::Relaxed);
+                return ConflictAction::SQLITE_CHANGESET_OMIT;
+            }
+            // Every other conflict type exposes the operation, so the table name
+            // (needed to find the `_updated_at` column) is readable.
+            let table = match item.op() {
+                Ok(op) => op.table_name().to_string(),
+                Err(_) => return ConflictAction::SQLITE_CHANGESET_OMIT,
+            };
+            lww_conflict_handler(conflict_type, item, &table, &schema, &closure_flag)
+        },
+    )
+    .map_err(DbError::from)?;
 
     Ok(ApplyResult {
-        had_fk_violations: tracker.had_constraint_conflict,
+        had_fk_violations: fk_flag.load(Ordering::Relaxed),
     })
 }

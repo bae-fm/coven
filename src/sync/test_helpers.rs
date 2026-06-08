@@ -1,82 +1,25 @@
 /// Shared test helpers for sync module tests.
 ///
-/// These operate on raw sqlite3 connections via libsqlite3-sys.
+/// These drive a real [`Database`] (one owned connection on its actor thread)
+/// over an in-memory connection carrying the synthetic test schema, so tests
+/// exercise the engine through the same path production does.
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, CStr, CString};
-use std::ptr;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use libsqlite3_sys as ffi;
+use rusqlite::{Connection, OptionalExtension};
 
+use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::sync::apply::apply_changeset_lww;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
 };
-use crate::sync::session::{SyncSession, SyncedTable};
+use crate::sync::session::SyncedTable;
 use crate::sync::storage::{DeviceHead, StorageError, SyncStorage};
-
-/// Open an in-memory sqlite3 database via libsqlite3-sys directly.
-pub unsafe fn open_memory_db() -> *mut ffi::sqlite3 {
-    let mut db: *mut ffi::sqlite3 = ptr::null_mut();
-    let rc = ffi::sqlite3_open(c":memory:".as_ptr(), &mut db);
-    assert_eq!(rc, ffi::SQLITE_OK as c_int, "Failed to open in-memory DB");
-    db
-}
-
-/// Execute a SQL statement on a raw connection.
-pub unsafe fn exec(db: *mut ffi::sqlite3, sql: &str) {
-    let c_sql = CString::new(sql).unwrap();
-    let rc = ffi::sqlite3_exec(db, c_sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut());
-    assert_eq!(rc, ffi::SQLITE_OK as c_int, "exec failed for: {sql}");
-}
-
-/// Query a single integer value.
-pub unsafe fn query_int(db: *mut ffi::sqlite3, sql: &str) -> i64 {
-    let c_sql = CString::new(sql).unwrap();
-    let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-    let rc = ffi::sqlite3_prepare_v2(db, c_sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
-    assert_eq!(rc, ffi::SQLITE_OK as c_int, "prepare failed for: {sql}");
-
-    let step = ffi::sqlite3_step(stmt);
-    assert_eq!(step, ffi::SQLITE_ROW as c_int, "expected a row for: {sql}");
-
-    let val = ffi::sqlite3_column_int64(stmt, 0);
-    ffi::sqlite3_finalize(stmt);
-    val
-}
-
-/// Query a single text value.
-pub unsafe fn query_text(db: *mut ffi::sqlite3, sql: &str) -> String {
-    let c_sql = CString::new(sql).unwrap();
-    let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-    let rc = ffi::sqlite3_prepare_v2(db, c_sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
-    assert_eq!(rc, ffi::SQLITE_OK as c_int, "prepare failed for: {sql}");
-
-    let step = ffi::sqlite3_step(stmt);
-    assert_eq!(step, ffi::SQLITE_ROW as c_int, "expected a row for: {sql}");
-
-    let ptr = ffi::sqlite3_column_text(stmt, 0);
-    let val = CStr::from_ptr(ptr as *const c_char)
-        .to_string_lossy()
-        .into_owned();
-    ffi::sqlite3_finalize(stmt);
-    val
-}
-
-/// Query whether a row exists.
-pub unsafe fn row_exists(db: *mut ffi::sqlite3, sql: &str) -> bool {
-    let c_sql = CString::new(sql).unwrap();
-    let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-    let rc = ffi::sqlite3_prepare_v2(db, c_sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
-    assert_eq!(rc, ffi::SQLITE_OK as c_int, "prepare failed for: {sql}");
-    let step = ffi::sqlite3_step(stmt);
-    ffi::sqlite3_finalize(stmt);
-    step == ffi::SQLITE_ROW as c_int
-}
 
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a *gated root* (`notes`,
@@ -91,20 +34,10 @@ pub fn test_synced_tables() -> Vec<SyncedTable> {
     ]
 }
 
-/// Declare [`test_synced_tables`] as the synced set (idempotent; first call wins).
-pub fn init_synced_tables() {
-    crate::sync::session::set_synced_tables(&test_synced_tables());
-}
-
-pub unsafe fn create_synced_schema(db: *mut ffi::sqlite3) {
-    // The synced set is process-global; register it here so any test that
-    // builds this schema (and then snapshots) has a synced set to scope by.
-    // `create_snapshot` requires one and refuses to emit an all-cleared blob
-    // otherwise.
-    init_synced_tables();
-    exec(db, "PRAGMA foreign_keys = ON");
-    exec(
-        db,
+/// Create the synthetic test schema on a connection. Used as the host `migrate`
+/// closure for [`open_test_db`].
+pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
+    conn.execute_batch(
         "CREATE TABLE notes (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -112,44 +45,135 @@ pub unsafe fn create_synced_schema(db: *mut ffi::sqlite3) {
             shared INTEGER NOT NULL DEFAULT 0,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL
-        )",
-    );
-    exec(
-        db,
-        "CREATE TABLE note_tags (
+        );
+        CREATE TABLE note_tags (
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
             tag TEXT NOT NULL,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-        )",
-    );
-    exec(
-        db,
-        "CREATE TABLE note_photos (
+        );
+        CREATE TABLE note_photos (
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
             kind TEXT NOT NULL,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-        )",
-    );
+        );",
+    )
+    .map_err(DbError::from)
 }
 
-/// Capture a changeset's bytes after running `stmts` against `db`.
-pub unsafe fn capture_bytes(db: *mut ffi::sqlite3, stmts: &[&str]) -> Vec<u8> {
-    let session = SyncSession::start(db).expect("start session");
+/// Open a [`Database`] over a fresh in-memory connection with the synthetic test
+/// schema and the [`test_synced_tables`] synced set. The returned stamper is
+/// dropped (tests stamp `_updated_at` literally in their SQL).
+pub fn open_test_db() -> Database {
+    open_test_db_with(test_synced_tables())
+}
+
+/// Like [`open_test_db`] but with an explicit synced set and schema builder, for
+/// tests that exercise a different schema (gate tests).
+pub fn open_test_db_schema(
+    tables: Vec<SyncedTable>,
+    migrate: impl FnOnce(&Connection) -> Result<(), DbError>,
+) -> Database {
+    // `:memory:` is unique per connection; the Database owns exactly one.
+    let (db, _stamper) = Database::open(
+        std::path::Path::new(":memory:"),
+        tables,
+        "test-device".to_string(),
+        migrate,
+    )
+    .expect("open test database");
+    db
+}
+
+fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
+    open_test_db_schema(tables, create_synced_schema)
+}
+
+/// Open a test [`Database`] over the synthetic schema with a caller-supplied
+/// register clock (so a test can control the wall clock), plus an extra `seed`
+/// step run after the schema is created (to plant `sync_state` rows or seeded
+/// `notes` rows before `Database::open` reads its floor).
+pub fn open_test_db_with_hlc(
+    hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
+    seed: impl FnOnce(&Connection) -> Result<(), DbError>,
+) -> Database {
+    let (db, _stamper) = Database::open_with_hlc(
+        std::path::Path::new(":memory:"),
+        test_synced_tables(),
+        hlc,
+        |conn| {
+            create_synced_schema(conn)?;
+            seed(conn)
+        },
+    )
+    .expect("open test database with hlc");
+    db
+}
+
+/// Run a write statement on the test database (blocking on the current runtime).
+pub async fn exec(db: &Database, sql: &str) {
+    let sql = sql.to_string();
+    db.call(move |conn| conn.execute_batch(&sql).map_err(DbError::from))
+        .await
+        .unwrap_or_else(|e| panic!("exec failed: {e}"));
+}
+
+/// Query a single text value from the test database.
+pub async fn query_text(db: &Database, sql: &str) -> String {
+    let sql = sql.to_string();
+    db.call(move |conn| {
+        conn.query_row(&sql, [], |r| r.get::<_, String>(0))
+            .map_err(DbError::from)
+    })
+    .await
+    .unwrap_or_else(|e| panic!("query_text failed: {e}"))
+}
+
+/// Whether a row exists for `sql` (a `SELECT 1 ...`).
+pub async fn row_exists(db: &Database, sql: &str) -> bool {
+    let sql = sql.to_string();
+    db.call(move |conn| {
+        conn.query_row(&sql, [], |_| Ok(()))
+            .optional()
+            .map(|o| o.is_some())
+            .map_err(DbError::from)
+    })
+    .await
+    .unwrap_or_else(|e| panic!("row_exists failed: {e}"))
+}
+
+/// Run `stmts` against the test database, then capture and return the recorded
+/// changeset bytes, re-attaching the capture session for the next capture.
+pub async fn capture_bytes(db: &Database, stmts: &[&str]) -> Vec<u8> {
     for s in stmts {
-        exec(db, s);
+        exec(db, s).await;
     }
-    session
-        .changeset()
-        .expect("changeset")
-        .expect("non-empty")
-        .as_bytes()
-        .to_vec()
+    let bytes = db
+        .take_changeset_and_suspend()
+        .await
+        .expect("capture changeset");
+    db.resume_session().await.expect("resume session");
+    bytes
+}
+
+/// Apply a changeset to the test database with the production LWW path, scoped to
+/// `tables`. Suspends the capture session around the apply so the applied rows
+/// are not re-recorded (mirrors the cycle's lifecycle).
+pub async fn apply_to_db(db: &Database, bytes: &[u8], tables: &[SyncedTable]) {
+    db.take_changeset_and_suspend()
+        .await
+        .expect("suspend before apply");
+    let bytes = bytes.to_vec();
+    let tables = tables.to_vec();
+    db.call(move |conn| apply_changeset_lww(conn, &bytes, &tables).map(|_| ()))
+        .await
+        .expect("apply changeset");
+    db.resume_session().await.expect("resume after apply");
 }
 
 /// A temp dir plus a [`LibraryDir`] rooted at it. The returned `TempDir` must be

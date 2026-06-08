@@ -9,57 +9,45 @@
 //! symmetric key to each member.
 //!
 //! Integration contract for the host:
+//! - coven OWNS the SQLite connection. The host opens it once with
+//!   [`database::Database::open`]`(path, synced_tables, device_id, migrate)`:
+//!   coven runs its own bookkeeping migration, then the host's `migrate` closure
+//!   for the app's tables, seeds the register clock off the rows on disk,
+//!   attaches the capture session, and spawns the connection thread. The host
+//!   runs all of its own SQL through [`database::Database::call`]`(|conn| …)`;
+//!   coven captures those writes through the attached session.
 //! - Every synced table has an `id` text primary key at column 0 and an
 //!   `_updated_at TEXT NOT NULL` column, and is declared as a
-//!   [`sync::session::SyncedTable`]. `_updated_at` is coven's last-writer-
-//!   wins register, an opaque Hybrid Logical Clock stamp the host mints with an
-//!   [`UpdatedAtStamper`] and binds into every synced-row write. The host obtains
-//!   the stamper from a [`sync::register_clock::RegisterClock`] (see the startup
-//!   sequence below) and injects it into its database write path. The host must
-//!   not parse or compare the stamp as a wall-clock time; coven advances the
-//!   clock past pulled rows so a later local write always sorts causally after
-//!   them, which a wall clock cannot guarantee under skew. Changeset envelopes
-//!   and membership entries also carry an HLC stamp for ordering/debuggability,
-//!   but it is not authorization-load-bearing — pull authorizes by signature and
-//!   current write-capable membership, and revocation is enforced by key
-//!   rotation.
-//! - The host applies [`db::MIGRATION_SQL`] to create coven's bookkeeping tables
-//!   and implements [`db::SyncBookkeeping`] + [`db::RawDbHandle`].
-//! - Startup sequence, in order:
-//!   1. Register the synced-table list via [`sync::session::set_synced_tables`],
-//!      passing a [`sync::session::SyncedTable`] per table (required —
-//!      [`sync::cycle::init_sync`] aborts if it's empty). A plain
-//!      [`sync::session::SyncedTable::new`] table syncs unconditionally;
-//!      [`sync::session::SyncedTable::gated_by`] marks a *gated root* whose
-//!      boolean gate column decides, per row, whether that row and its declared
-//!      FK-descendants are shared. See [`sync::gate`] for the gating semantics.
-//!   2. Open the register clock:
-//!      [`sync::register_clock::RegisterClock::open`]`(device_id, &db)`. It scans
-//!      `MAX(_updated_at)` across the registered synced tables (via the raw write
-//!      handle) and reads the persisted high-water mark to seed the register
-//!      floor — so a restart cannot mint a stamp behind a row already on disk,
-//!      including one whose stamp never reached the flushed high-water mark
-//!      between cycles. Registration must precede this so the scan sees the
-//!      tables. coven derives the floor itself; the host implements no
-//!      `MAX(_updated_at)` query.
-//!   3. Inject the clock's [`sync::register_clock::RegisterClock::updated_at_stamper`]
-//!      into the database write path, before any synced-row write.
-//!   4. When (and only when) a cloud provider is connected, build the
-//!      [`sync::sync_manager::SyncManager`] lazily, passing it the same
-//!      `RegisterClock` (it borrows the clock's `Arc<Hlc>`, so the host's stamps
-//!      and coven's advance-on-pull share one register). `SyncManager::new` is
-//!      synchronous and infallible — all seeding happened in step 2. The host
-//!      also supplies a [`blob::BlobPlan`] and an optional
-//!      [`blob::BlobUploadObserver`].
+//!   [`sync::session::SyncedTable`] in the set passed to `Database::open`. A plain
+//!   [`sync::session::SyncedTable::new`] table syncs unconditionally;
+//!   [`sync::session::SyncedTable::gated_by`] marks a *gated root* whose boolean
+//!   gate column decides, per row, whether that row and its declared
+//!   FK-descendants are shared. See [`sync::gate`] for the gating semantics.
+//! - `_updated_at` is coven's last-writer-wins register, an opaque Hybrid Logical
+//!   Clock stamp the host mints with the [`UpdatedAtStamper`] that
+//!   `Database::open` returns (non-optional, already seeded) and binds into every
+//!   synced-row write. The host must not parse or compare the stamp as a
+//!   wall-clock time; coven advances the clock past pulled rows so a later local
+//!   write always sorts causally after them, which a wall clock cannot guarantee
+//!   under skew. Changeset envelopes and membership entries also carry an HLC
+//!   stamp for ordering/debuggability, but it is not authorization-load-bearing —
+//!   pull authorizes by signature and current write-capable membership, and
+//!   revocation is enforced by key rotation.
+//! - When (and only when) a cloud provider is connected, the host builds the
+//!   [`sync::sync_manager::SyncManager`] lazily, passing it the same `Database`
+//!   handle and synced-table set. `SyncManager::new` is synchronous and
+//!   infallible — all seeding happened in `Database::open`. The host also
+//!   supplies a [`blob::BlobPlan`] and an optional [`blob::BlobUploadObserver`].
 //!
-//!   A local-only library that never connects a provider stops after step 3: it
-//!   stamps and writes rows without ever building a `SyncManager`, an
-//!   `EncryptionService`, or a cloud config.
+//!   A local-only library that never connects a provider simply stamps and
+//!   writes rows through `Database::call` without ever building a `SyncManager`,
+//!   an `EncryptionService`, or a cloud config.
 
 pub mod blob;
 pub mod changeset;
 pub mod clock;
 pub mod config;
+pub mod database;
 pub mod db;
 pub mod encryption;
 pub mod id_provider;
@@ -70,5 +58,12 @@ pub mod oauth;
 pub mod storage;
 pub mod sync;
 
+pub use database::Database;
 pub use sync::hlc::UpdatedAtStamper;
-pub use sync::register_clock::RegisterClock;
+
+/// The exact `rusqlite` coven owns the connection through. The host runs its app
+/// SQL via [`Database::call`]`(|conn| …)` against this same crate — use
+/// `coven::rusqlite::{params, Row, …}` rather than depending on `rusqlite`
+/// directly, so the host can never drift onto a `libsqlite3-sys` version that
+/// conflicts with coven's.
+pub use rusqlite;

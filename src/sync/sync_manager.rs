@@ -12,13 +12,12 @@ use tracing::info;
 use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::clock::ClockRef;
 use crate::config::Config;
-use crate::db::SyncDb;
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
 use crate::storage::cloud::CloudHome;
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::MemberRole;
-use crate::sync::register_clock::RegisterClock;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_loop::SyncLoopHandle;
 
@@ -35,15 +34,14 @@ pub struct SyncManager {
     config_provider: ConfigProvider,
     key_service: KeyService,
     encryption_service: EncryptionService,
-    db: Arc<dyn SyncDb>,
+    db: Database,
     clock: ClockRef,
     blob_plan: Arc<dyn BlobPlan>,
     observer: Option<Arc<dyn BlobUploadObserver>>,
 
-    /// coven's `_updated_at` register, sourced from the [`RegisterClock`] the
-    /// host built and seeded before the manager. The sync loop borrows this
-    /// instance — advancing it past pulled rows and stamping envelopes off it —
-    /// so it shares the clock the host stamps rows from.
+    /// coven's `_updated_at` register, the same `Arc<Hlc>` the owned [`Database`]
+    /// holds. The sync loop advances it past pulled rows and stamps envelopes off
+    /// it, so it shares the clock the host stamps rows from.
     hlc: Arc<Hlc>,
 
     // Mutable sync state — updated when providers are connected/disconnected
@@ -70,26 +68,24 @@ pub struct SyncStatus {
 }
 
 impl SyncManager {
-    /// Build the manager off an already-seeded [`RegisterClock`]. The clock is
-    /// the host's own register — built from a device id and the database, seeded
-    /// past every value on disk — and the manager borrows its `Arc<Hlc>` so the
-    /// sync loop's advance-on-pull and envelope stamps share the instance the
-    /// host stamps rows from.
+    /// Build the manager off the owned [`Database`]. The database already seeded
+    /// its register clock past every value on disk at `open`; the manager shares
+    /// that `Arc<Hlc>` so the sync loop's advance-on-pull and envelope stamps use
+    /// the same instance the host stamps rows from.
     ///
-    /// Construction is infallible and synchronous: seeding (the only async/
-    /// fallible step) now lives in [`RegisterClock::open`], which the host runs
-    /// before connecting a provider. The manager is built lazily, only once a
-    /// provider is connected.
+    /// Construction is infallible and synchronous: seeding happened in
+    /// `Database::open`. The manager is built lazily, only once a provider is
+    /// connected.
     pub fn new(
         config_provider: ConfigProvider,
         key_service: KeyService,
         encryption_service: EncryptionService,
-        db: Arc<dyn SyncDb>,
+        db: Database,
         clock: ClockRef,
-        register_clock: &RegisterClock,
         blob_plan: Arc<dyn BlobPlan>,
         observer: Option<Arc<dyn BlobUploadObserver>>,
     ) -> Self {
+        let hlc = db.hlc();
         Self {
             config_provider,
             key_service,
@@ -98,7 +94,7 @@ impl SyncManager {
             clock,
             blob_plan,
             observer,
-            hlc: register_clock.hlc(),
+            hlc,
             sync_loop_handle: RwLock::new(None),
             cloud_home: RwLock::new(None),
         }
@@ -146,11 +142,12 @@ impl SyncManager {
             return;
         }
 
-        // Initialize sync loop
+        // Initialize sync loop. The synced-table set is owned by the Database, so
+        // init_sync reads it from there rather than from a separately-held copy.
         let sync_loop = crate::sync::cycle::init_sync(
             &config,
             &self.key_service,
-            self.db.as_ref(),
+            &self.db,
             self.clock.clone(),
             &self.encryption_service,
             self.hlc.clone(),

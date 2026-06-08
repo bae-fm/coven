@@ -1,24 +1,14 @@
-//! Host database integration for sync bookkeeping.
+//! coven's bookkeeping schema and the cloud-outbox row types.
 //!
 //! coven owns three bookkeeping tables — `sync_cursors`, `sync_state`,
-//! `cloud_outbox` — created by applying [`MIGRATION_SQL`] to the host's
-//! database. The host implements [`SyncBookkeeping`] (coven calls these during
-//! a sync cycle) and [`RawDbHandle`] (the session extension attaches to the
-//! host's write connection). coven imposes no SQLite driver this way.
+//! `cloud_outbox` — created by `MIGRATION_SQL`, which [`crate::database::Database::open`]
+//! runs against the connection coven owns. The host no longer implements any of
+//! this; it runs its own SQL through [`crate::database::Database::call`] and
+//! reads/writes the outbox through the [`crate::database::Database`] API.
 
-use std::collections::HashMap;
-
-use async_trait::async_trait;
-
-/// SQL that creates coven's bookkeeping tables. The host applies this alongside
-/// its own schema migration. Idempotent (`IF NOT EXISTS`).
-///
-/// `IF NOT EXISTS` only guarantees the *fresh-table* shape: a host whose
-/// `cloud_outbox` already exists from an earlier coven version will not gain
-/// columns added here (e.g. `attempt_count`, `last_error`, `last_attempt_at`).
-/// Such hosts must add the new columns through their own `ALTER TABLE`
-/// migration path.
-pub const MIGRATION_SQL: &str = "\
+/// SQL that creates coven's bookkeeping tables, run by `Database::open` before
+/// the host's own migration. Idempotent (`IF NOT EXISTS`).
+pub(crate) const MIGRATION_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS sync_cursors (
     device_id TEXT PRIMARY KEY,
     last_seq INTEGER NOT NULL
@@ -43,11 +33,6 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     UNIQUE(operation, cloud_key)
 );
 ";
-
-/// An error from the host's bookkeeping implementation.
-#[derive(Debug, thiserror::Error)]
-#[error("sync bookkeeping error: {0}")]
-pub struct DbError(pub String);
 
 /// A pending cloud blob operation from the `cloud_outbox` table.
 #[derive(Debug, Clone)]
@@ -90,60 +75,3 @@ impl OutboxOperation {
         }
     }
 }
-
-/// Bookkeeping the host's database performs against coven's tables. coven calls
-/// these during a sync cycle; the host's implementation runs the SQL.
-#[async_trait]
-pub trait SyncBookkeeping: Send + Sync {
-    /// Read a value from `sync_state` by key.
-    async fn get_sync_state(&self, key: &str) -> Result<Option<String>, DbError>;
-
-    /// Write a value to `sync_state`.
-    async fn set_sync_state(&self, key: &str, value: &str) -> Result<(), DbError>;
-
-    /// All per-device cursors from `sync_cursors` as `device_id -> last_seq`.
-    async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError>;
-
-    /// Upsert a single device cursor.
-    async fn set_sync_cursor(&self, device_id: &str, seq: u64) -> Result<(), DbError>;
-
-    /// Pending `upload` entries from `cloud_outbox`, oldest first.
-    async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError>;
-
-    /// Pending `delete` entries from `cloud_outbox`.
-    async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError>;
-
-    /// Whether any `upload` entries remain (gates changeset push).
-    async fn has_pending_cloud_uploads(&self) -> Result<bool, DbError>;
-
-    /// Remove a `cloud_outbox` entry by id.
-    async fn remove_cloud_outbox_entry(&self, id: i64) -> Result<(), DbError>;
-
-    /// Record a failed upload attempt for an entry: increment its
-    /// `attempt_count` and set `last_error` and `last_attempt_at`. The entry
-    /// stays queued for retry.
-    async fn record_cloud_upload_failure(
-        &self,
-        id: i64,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError>;
-}
-
-/// Access to the host's raw write connection, which the session extension
-/// attaches to. The same connection the host writes through.
-#[async_trait]
-pub trait RawDbHandle: Send + Sync {
-    /// Acquire the raw sqlite3 write connection pointer the session extension
-    /// attaches to. The same connection the host writes through.
-    ///
-    /// # Safety
-    /// The pointer must outlive all sync sessions; the caller serializes session
-    /// operations on it.
-    async fn raw_write_handle(&self) -> Result<*mut libsqlite3_sys::sqlite3, DbError>;
-}
-
-/// The full database surface coven needs from the host: bookkeeping plus the
-/// raw write handle. Blanket-implemented for any type providing both.
-pub trait SyncDb: SyncBookkeeping + RawDbHandle {}
-impl<T: SyncBookkeeping + RawDbHandle> SyncDb for T {}

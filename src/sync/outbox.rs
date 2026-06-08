@@ -12,7 +12,7 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::blob::BlobUploadObserver;
-use crate::db::SyncBookkeeping;
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::CloudHome;
 
@@ -98,7 +98,7 @@ pub(super) fn backoff_window(attempt_count: i64) -> chrono::Duration {
 /// Record a failed upload attempt and notify the observer. The entry is left
 /// queued; it becomes eligible for retry again after [`backoff_window`].
 async fn record_failure(
-    db: &dyn SyncBookkeeping,
+    db: &Database,
     entry: &crate::db::OutboxEntry,
     error: &str,
     now: chrono::DateTime<chrono::Utc>,
@@ -126,7 +126,7 @@ async fn record_failure(
 /// re-attempted every cycle. The `observer` (if any) is notified as each
 /// attempt starts, succeeds, or fails.
 pub async fn process_uploads(
-    db: &dyn SyncBookkeeping,
+    db: &Database,
     cloud_home: &dyn CloudHome,
     encryption: &std::sync::RwLock<EncryptionService>,
     library_dir: &Path,
@@ -229,7 +229,7 @@ pub async fn process_uploads(
 /// A delete is only safe when all known device heads have advanced past the
 /// entry's `min_seq`. Returns the number of successful deletes.
 pub async fn process_deletes(
-    db: &dyn SyncBookkeeping,
+    db: &Database,
     cloud_home: &dyn CloudHome,
     device_head_seqs: &[u64],
 ) -> Result<usize, String> {

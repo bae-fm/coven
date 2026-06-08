@@ -11,40 +11,22 @@
 /// are retried once -- the parent rows should now exist from other devices'
 /// changesets applied in the same batch.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
-use super::apply::apply_changeset_lww;
+use super::apply::apply_changeset_lww_with_schema;
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
 use super::membership::MembershipChain;
 use super::push::SCHEMA_VERSION;
-use super::session_ext::Changeset;
+use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
 use crate::blob::BlobPlan;
 use crate::changeset::RowChange;
+use crate::database::Database;
 use crate::library_dir::LibraryDir;
-
-/// A raw sqlite connection pointer wrapped to be `Send`, so a pull future can
-/// run on a multi-thread runtime and migrate across worker threads between its
-/// network awaits. Mirrors the `unsafe impl Send for SyncLoopInner` pattern in
-/// `sync_loop`.
-///
-/// # Safety
-/// Sound because the bundled SQLite is serialized-mode (`SQLITE_THREADSAFE=1`,
-/// the libsqlite3-sys default — no override in this crate), so a connection may
-/// be used from any thread, and the pull protocol holds the connection
-/// exclusively (`pull_changes` requires no active session and no concurrent
-/// use). Access is therefore only ever sequential, from whichever worker polls
-/// the future at the time. Holders must uphold the same pointer-validity
-/// contract as the raw `*mut sqlite3` it wraps.
-#[derive(Clone, Copy)]
-pub struct SendDbPtr(pub *mut libsqlite3_sys::sqlite3);
-
-// SAFETY: see the type doc — serialized-mode SQLite plus exclusive, sequential
-// access make moving the connection pointer across worker threads sound.
-unsafe impl Send for SendDbPtr {}
 
 /// Cursor value meaning "we have applied no changesets from this device".
 /// Per the sync protocol, device sequence numbers start at 1 (the first
@@ -96,25 +78,25 @@ pub struct PullResult {
 struct DeferredChangeset {
     device_id: String,
     seq: u64,
-    changeset: Changeset,
+    changeset: Vec<u8>,
 }
 
 /// Pull and apply all new changesets from the sync storage.
 ///
-/// `db` is a raw sqlite3 connection pointer. The caller MUST ensure no
-/// SyncSession is active -- the protocol requires ending the session before
-/// pulling to avoid contaminating the next outgoing changeset.
+/// `db` is the owned connection handle; all apply and schema reads run through
+/// it on the connection thread. The caller MUST have suspended the capture
+/// session before calling — the protocol requires ending capture before pulling
+/// so the applied rows are not re-recorded into the next outgoing changeset.
 ///
-/// `cursors` maps device_id -> last_seq we've applied from that device.
+/// `tables` is the host's declared synced set (for the `_updated_at` index map
+/// and apply conflict resolution). `cursors` maps device_id -> last_seq we've
+/// applied from that device.
 ///
 /// Returns the updated cursors map and a summary of what was applied.
-///
-/// # Safety
-/// `db.0` must be a valid, open sqlite3 connection pointer. It is wrapped in
-/// [`SendDbPtr`] so this future is `Send` and can run on a multi-thread runtime
-/// (see that type's safety note).
-pub async unsafe fn pull_changes(
-    db: SendDbPtr,
+#[allow(clippy::too_many_arguments)]
+pub async fn pull_changes(
+    db: &Database,
+    tables: &[SyncedTable],
     storage: &dyn SyncStorage,
     our_device_id: &str,
     cursors: &HashMap<String, u64>,
@@ -159,12 +141,22 @@ pub async unsafe fn pull_changes(
         }
     };
 
-    // Per-table `_updated_at` column index, used to advance the HLC past every
-    // applied row's stamp. Built once from the live schema so column additions
-    // stay safe.
-    let synced = super::session::synced_tables();
-    let table_refs: Vec<&str> = synced.iter().map(|t| t.name()).collect();
-    let schema = TableSchema::from_db(db.0, &table_refs);
+    // Per-table `_updated_at` column index map. Built once from the live schema
+    // (so column additions stay safe) and shared by both the apply — every
+    // changeset in this pull reuses it instead of re-querying `PRAGMA table_info`
+    // — and the HLC advance over applied rows. `Arc` so it moves into each apply's
+    // `'static` conflict closure without re-deriving it.
+    let schema: Arc<TableSchema> = {
+        let tables = tables.to_vec();
+        Arc::new(
+            db.call(move |conn| {
+                let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
+                TableSchema::from_db(conn, &table_refs)
+            })
+            .await
+            .map_err(|e| PullError::Apply(e.0))?,
+        )
+    };
 
     let mut updated_cursors = cursors.clone();
     let mut result = PullResult {
@@ -293,8 +285,13 @@ pub async unsafe fn pull_changes(
                 continue;
             }
 
-            let cs = Changeset::from_bytes(&changeset_bytes);
-            let apply_result = apply_changeset_lww(db.0, &cs).map_err(PullError::Apply)?;
+            let apply_result = {
+                let schema = schema.clone();
+                let bytes = changeset_bytes.clone();
+                db.call(move |conn| apply_changeset_lww_with_schema(conn, &bytes, schema))
+                    .await
+                    .map_err(|e| PullError::Apply(e.0))?
+            };
 
             // Walk the applied changeset once: it drives blob downloads and is
             // surfaced to the host for domain-event mapping.
@@ -314,7 +311,7 @@ pub async unsafe fn pull_changes(
                 deferred.push(DeferredChangeset {
                     device_id: head.device_id.clone(),
                     seq,
-                    changeset: Changeset::from_bytes(&changeset_bytes),
+                    changeset: changeset_bytes.clone(),
                 });
             }
 
@@ -349,7 +346,13 @@ pub async unsafe fn pull_changes(
         );
 
         for d in &deferred {
-            let retry_result = apply_changeset_lww(db.0, &d.changeset).map_err(PullError::Apply)?;
+            let retry_result = {
+                let schema = schema.clone();
+                let bytes = d.changeset.clone();
+                db.call(move |conn| apply_changeset_lww_with_schema(conn, &bytes, schema))
+                    .await
+                    .map_err(|e| PullError::Apply(e.0))?
+            };
 
             if retry_result.had_fk_violations {
                 warn!(
@@ -373,7 +376,17 @@ fn advance_max_updated_at(
     schema: &TableSchema,
 ) {
     for change in changes {
-        let idx = schema.get(&change.table).updated_at;
+        let Some(cols) = schema.get(&change.table) else {
+            // A table not in this device's synced set (a newer peer's schema): the
+            // apply omitted its rows, so there is no applied `_updated_at` here to
+            // advance the clock past.
+            debug!(
+                table = %change.table,
+                "applied changeset references a table absent from the synced set, not advancing HLC"
+            );
+            continue;
+        };
+        let idx = cols.updated_at;
         let Some(raw) = change.col(idx) else {
             // A DELETE carries no new-state columns, and an absent value at the
             // schema's `_updated_at` index means this row change has no stamp to
@@ -447,7 +460,7 @@ async fn download_changeset_blobs(
 pub enum PullError {
     Storage(super::storage::StorageError),
     InvalidEnvelope(super::envelope::UnpackError),
-    Apply(super::session::SyncError),
+    Apply(String),
     /// The sync storage requires a schema version newer than ours.
     /// The client must upgrade before syncing.
     SchemaVersionTooOld {

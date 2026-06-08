@@ -1,12 +1,11 @@
 //! Tests for outbox upload processing: record-and-continue, per-entry backoff,
 //! and the upload lifecycle observer callbacks.
 //!
-//! These drive the real `process_uploads` against in-memory fakes of its
-//! dependencies — a `MockBookkeeping` (the host DB), a `RecordingObserver`, and
+//! These drive the real `process_uploads` against a real [`crate::database::Database`]
+//! (carrying the `cloud_outbox` bookkeeping table), a `RecordingObserver`, and
 //! `InMemoryCloudHome` / `FailingCloudHome` (the cloud backend). The unit under
-//! test is `process_uploads` itself; only its dependencies are faked.
+//! test is `process_uploads` itself; only the cloud backend and observer are fakes.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
@@ -15,7 +14,7 @@ use chrono::Duration;
 use super::outbox::{backoff_window, process_uploads};
 use crate::blob::BlobUploadObserver;
 use crate::clock::{Clock, FixedClock};
-use crate::db::{DbError, OutboxEntry, OutboxOperation, SyncBookkeeping};
+use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -25,98 +24,74 @@ use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
 };
 use crate::sync::test_helpers::MockSyncStorage;
+use rusqlite::OptionalExtension;
 
-// --- Fakes -----------------------------------------------------------------
+// --- Database under test ----------------------------------------------------
 
-/// In-memory `SyncBookkeeping`: backs `cloud_outbox` with a Vec. Only the
-/// outbox methods `process_uploads` calls are implemented.
-struct MockBookkeeping {
-    entries: Mutex<Vec<OutboxEntry>>,
+/// A `Database` over an in-memory connection with just the bookkeeping tables —
+/// no synced tables (the outbox doesn't need them). The outbox lives in coven's
+/// `cloud_outbox` migration table, created by `Database::open`.
+fn open_outbox_db() -> Database {
+    let (db, _stamper) = Database::open(
+        std::path::Path::new(":memory:"),
+        Vec::new(),
+        "test-device".to_string(),
+        |_conn| Ok(()),
+    )
+    .expect("open outbox database");
+    db
 }
 
-impl MockBookkeeping {
-    fn with_uploads(entries: Vec<OutboxEntry>) -> Self {
-        Self {
-            entries: Mutex::new(entries),
-        }
-    }
-
-    fn get(&self, id: i64) -> Option<OutboxEntry> {
-        self.entries
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|e| e.id == id)
-            .cloned()
-    }
+/// Insert a fully-specified `cloud_outbox` upload row.
+async fn insert_upload(
+    db: &Database,
+    id: i64,
+    file_id: &str,
+    cloud_key: &str,
+    source_path: Option<String>,
+    attempt_count: i64,
+    last_attempt_at: Option<String>,
+) {
+    let (file_id, cloud_key) = (file_id.to_string(), cloud_key.to_string());
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO cloud_outbox \
+             (id, operation, file_id, cloud_key, source_path, created_at, \
+              attempt_count, last_attempt_at) \
+             VALUES (?1, 'upload', ?2, ?3, ?4, '2024-01-01T00:00:00Z', ?5, ?6)",
+            rusqlite::params![
+                id,
+                file_id,
+                cloud_key,
+                source_path,
+                attempt_count,
+                last_attempt_at
+            ],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("insert outbox upload");
 }
 
-#[async_trait::async_trait]
-impl SyncBookkeeping for MockBookkeeping {
-    async fn get_sync_state(&self, _key: &str) -> Result<Option<String>, DbError> {
-        unimplemented!("not exercised by process_uploads")
-    }
-    async fn set_sync_state(&self, _key: &str, _value: &str) -> Result<(), DbError> {
-        unimplemented!("not exercised by process_uploads")
-    }
-    async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {
-        unimplemented!("not exercised by process_uploads")
-    }
-    async fn set_sync_cursor(&self, _device_id: &str, _seq: u64) -> Result<(), DbError> {
-        unimplemented!("not exercised by process_uploads")
-    }
-
-    async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        Ok(self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|e| e.operation == OutboxOperation::Upload)
-            .cloned()
-            .collect())
-    }
-
-    async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        Ok(self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|e| e.operation == OutboxOperation::Delete)
-            .cloned()
-            .collect())
-    }
-
-    async fn has_pending_cloud_uploads(&self) -> Result<bool, DbError> {
-        Ok(self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| e.operation == OutboxOperation::Upload))
-    }
-
-    async fn remove_cloud_outbox_entry(&self, id: i64) -> Result<(), DbError> {
-        self.entries.lock().unwrap().retain(|e| e.id != id);
-        Ok(())
-    }
-
-    async fn record_cloud_upload_failure(
-        &self,
-        id: i64,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        let mut entries = self.entries.lock().unwrap();
-        if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
-            e.attempt_count += 1;
-            e.last_error = Some(error.to_string());
-            e.last_attempt_at = Some(attempted_at.to_string());
-        }
-        Ok(())
-    }
+/// Read back `(attempt_count, last_error, last_attempt_at)` for an entry, or
+/// `None` if it was removed.
+async fn get_upload(db: &Database, id: i64) -> Option<(i64, Option<String>, Option<String>)> {
+    db.call(move |conn| {
+        conn.query_row(
+            "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("query outbox entry")
 }
+
+// --- Fakes ------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 enum ObsEvent {
@@ -172,8 +147,7 @@ impl BlobUploadObserver for RecordingObserver {
 }
 
 /// A cloud backend whose `write` always fails. Counts write attempts so a test
-/// can assert that a backed-off entry was not attempted. `process_uploads`
-/// calls only `write`, so the rest is unreachable.
+/// can assert that a backed-off entry was not attempted.
 struct FailingCloudHome {
     write_calls: AtomicUsize,
 }
@@ -230,8 +204,7 @@ impl CloudHome for FailingCloudHome {
 
 /// A cloud backend whose `write` reports progress one chunk at a time with a
 /// delay between chunks, so the upload spans several of `process_uploads`'
-/// coalescing ticks. Lets a test assert that mid-upload progress reaches the
-/// observer (not just the terminal forward).
+/// coalescing ticks.
 struct SlowChunkedCloudHome {
     chunk: usize,
     per_chunk_delay: std::time::Duration,
@@ -405,10 +378,9 @@ async fn bad_item_does_not_block_good_later_item() {
     let good_path = write_temp_file(tmp.path(), "good.bin", b"good-bytes");
     let missing_path = tmp.path().join("missing.bin").to_string_lossy().to_string();
 
-    let db = MockBookkeeping::with_uploads(vec![
-        upload_entry(1, "fa", "key-a", Some(missing_path)), // read fails
-        upload_entry(2, "fb", "key-b", Some(good_path)),    // uploads fine
-    ]);
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "fa", "key-a", Some(missing_path), 0, None).await; // read fails
+    insert_upload(&db, 2, "fb", "key-b", Some(good_path), 0, None).await; // uploads fine
     let cloud = InMemoryCloudHome::new();
     let observer = RecordingObserver::new();
     let clock = fixed_clock(T0);
@@ -421,14 +393,13 @@ async fn bad_item_does_not_block_good_later_item() {
     assert!(cloud.get("key-b").is_some(), "good blob landed in cloud");
     assert!(cloud.get("key-a").is_none(), "failed blob did not land");
 
-    let a = db.get(1).expect("failed entry stays queued");
-    assert_eq!(a.attempt_count, 1);
-    assert!(a.last_error.is_some());
-    let recorded =
-        chrono::DateTime::parse_from_rfc3339(a.last_attempt_at.as_deref().unwrap()).unwrap();
+    let (attempt, err, last) = get_upload(&db, 1).await.expect("failed entry stays queued");
+    assert_eq!(attempt, 1);
+    assert!(err.is_some());
+    let recorded = chrono::DateTime::parse_from_rfc3339(last.as_deref().unwrap()).unwrap();
     assert_eq!(recorded.with_timezone(&chrono::Utc), clock.now());
 
-    assert!(db.get(2).is_none(), "uploaded entry removed");
+    assert!(get_upload(&db, 2).await.is_none(), "uploaded entry removed");
 }
 
 /// A failed attempt persists attempt_count + last_error, and a later cycle past
@@ -437,19 +408,16 @@ async fn bad_item_does_not_block_good_later_item() {
 async fn failure_persists_attempt_count_and_last_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = MockBookkeeping::with_uploads(vec![upload_entry(1, "f1", "k1", Some(path))]);
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "f1", "k1", Some(path), 0, None).await;
     let cloud = FailingCloudHome::new();
 
     process_uploads(&db, &cloud, &enc(), tmp.path(), &fixed_clock(T0), None)
         .await
         .unwrap();
-    let e = db.get(1).unwrap();
-    assert_eq!(e.attempt_count, 1);
-    assert!(e
-        .last_error
-        .as_deref()
-        .unwrap()
-        .contains("cloud write failed"));
+    let (attempt, err, _) = get_upload(&db, 1).await.unwrap();
+    assert_eq!(attempt, 1);
+    assert!(err.as_deref().unwrap().contains("cloud write failed"));
 
     // 31s later — past the 30s window for attempt_count==1 → retried.
     process_uploads(
@@ -462,7 +430,7 @@ async fn failure_persists_attempt_count_and_last_error() {
     )
     .await
     .unwrap();
-    assert_eq!(db.get(1).unwrap().attempt_count, 2);
+    assert_eq!(get_upload(&db, 1).await.unwrap().0, 2);
     assert_eq!(cloud.write_calls(), 2);
 }
 
@@ -473,10 +441,8 @@ async fn failure_persists_attempt_count_and_last_error() {
 async fn backoff_skips_item_inside_window() {
     let tmp = tempfile::tempdir().unwrap();
     let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let mut entry = upload_entry(1, "f1", "k1", Some(path));
-    entry.attempt_count = 1;
-    entry.last_attempt_at = Some(T0.to_string());
-    let db = MockBookkeeping::with_uploads(vec![entry]);
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "f1", "k1", Some(path), 1, Some(T0.to_string())).await;
     let cloud = FailingCloudHome::new();
     let observer = RecordingObserver::new();
 
@@ -502,7 +468,7 @@ async fn backoff_skips_item_inside_window() {
         "no started event for skipped entry"
     );
     assert_eq!(
-        db.get(1).unwrap().attempt_count,
+        get_upload(&db, 1).await.unwrap().0,
         1,
         "attempt_count unchanged"
     );
@@ -523,14 +489,15 @@ async fn backoff_skips_item_inside_window() {
         1,
         "write attempted past backoff window"
     );
-    assert_eq!(db.get(1).unwrap().attempt_count, 2);
+    assert_eq!(get_upload(&db, 1).await.unwrap().0, 2);
 }
 
 #[tokio::test]
 async fn observer_fires_started_then_uploaded_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = MockBookkeeping::with_uploads(vec![upload_entry(1, "fid", "k1", Some(path))]);
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
     let cloud = InMemoryCloudHome::new();
     let observer = RecordingObserver::new();
 
@@ -545,11 +512,9 @@ async fn observer_fires_started_then_uploaded_on_success() {
     .await
     .unwrap();
 
-    // A small file uploads instantly, so the coalescing ticker never fires;
-    // the terminal progress forward on success still emits one full-size
-    // Progress between Started and Uploaded. The byte count is of the encrypted
-    // payload (5 plaintext bytes + the encryption overhead), which is what the
-    // backend actually transfers.
+    // A small file uploads instantly, so the coalescing ticker never fires; the
+    // terminal progress forward on success still emits one full-size Progress
+    // between Started and Uploaded.
     let events = observer.events();
     assert_eq!(events.len(), 3);
     assert_eq!(events[0], ObsEvent::Started("fid".into()));
@@ -568,7 +533,8 @@ async fn observer_fires_started_then_uploaded_on_success() {
 async fn observer_fires_started_then_failed_on_failure() {
     let tmp = tempfile::tempdir().unwrap();
     let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = MockBookkeeping::with_uploads(vec![upload_entry(1, "fid", "k1", Some(path))]);
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
     let cloud = FailingCloudHome::new();
     let observer = RecordingObserver::new();
 
@@ -596,17 +562,15 @@ async fn observer_fires_started_then_failed_on_failure() {
 }
 
 /// A slow, chunked upload reports mid-file progress: the coalescing ticker
-/// forwards an advancing byte count to the observer between Started and
-/// Uploaded, and the final forwarded value equals the total. Uses tokio's
-/// paused clock so the per-chunk sleeps and the 300ms tick are deterministic.
+/// forwards an advancing byte count to the observer between Started and Uploaded,
+/// and the final forwarded value equals the total.
 #[tokio::test(start_paused = true)]
 async fn observer_receives_advancing_midfile_progress() {
     let tmp = tempfile::tempdir().unwrap();
-    // 10 chunks of 1000 bytes; one chunk per 500ms, so the upload spans many
-    // 300ms coalescing ticks.
     let total = 10_000usize;
     let path = write_temp_file(tmp.path(), "big.bin", &vec![7u8; total]);
-    let db = MockBookkeeping::with_uploads(vec![upload_entry(1, "fid", "k1", Some(path))]);
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
     let cloud = SlowChunkedCloudHome {
         chunk: 1000,
         per_chunk_delay: std::time::Duration::from_millis(500),
@@ -628,10 +592,6 @@ async fn observer_receives_advancing_midfile_progress() {
     assert_eq!(events.first(), Some(&ObsEvent::Started("fid".into())));
     assert_eq!(events.last(), Some(&ObsEvent::Uploaded("fid".into())));
 
-    // The encrypted payload is a few bytes larger than the plaintext, so assert
-    // on the shape rather than exact byte counts: progress values strictly
-    // advance, more than one mid-file tick lands, and the final value (the
-    // terminal forward) reports done == total.
     let progress: Vec<(u64, u64)> = events
         .iter()
         .filter_map(|e| match e {

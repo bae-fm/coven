@@ -46,12 +46,50 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 
 use libsqlite3_sys as ffi;
+use rusqlite::Connection;
 use tracing::{debug, warn};
 
-use crate::changeset::{extract_new_value, extract_old_value};
+use super::session::{quote_ident, SyncedTable};
 
-use super::session::{synced_tables, SyncedTable};
-use super::session_ext::{quote_ident, Changeset, Session};
+/// Read a changeset/sqlite value as a text string, or `None` for NULL. Mirrors
+/// `sqlite3_value_text` so gate reads match the rest of the engine.
+unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
+    let vtype = ffi::sqlite3_value_type(val);
+    if vtype == ffi::SQLITE_NULL as c_int {
+        return None;
+    }
+    let text = ffi::sqlite3_value_text(val);
+    if text.is_null() {
+        return None;
+    }
+    Some(
+        CStr::from_ptr(text as *const c_char)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// The new value at `col` for the change at the iterator's current position
+/// (`None` if absent — e.g. an unchanged column in an update — or NULL).
+unsafe fn extract_new_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
+    let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
+    let rc = ffi::sqlite3changeset_new(iter, col, &mut val);
+    if rc != ffi::SQLITE_OK as c_int || val.is_null() {
+        return None;
+    }
+    value_to_string(val)
+}
+
+/// The old value at `col` for the change at the iterator's current position
+/// (`None` if absent — e.g. an unchanged column in an update — or NULL).
+unsafe fn extract_old_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
+    let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
+    let rc = ffi::sqlite3changeset_old(iter, col, &mut val);
+    if rc != ffi::SQLITE_OK as c_int || val.is_null() {
+        return None;
+    }
+    value_to_string(val)
+}
 
 /// A changegroup: accumulates changes (by iterator position or whole changeset)
 /// and concatenates/dedups them into one output changeset.
@@ -95,25 +133,24 @@ impl Changegroup {
         Ok(())
     }
 
-    /// Concatenate everything added so far into one changeset.
-    fn output(&self) -> Result<Changeset, GateError> {
+    /// Concatenate everything added so far into one changeset's bytes.
+    fn output(&self) -> Result<Vec<u8>, GateError> {
         let mut len: c_int = 0;
         let mut buf: *mut c_void = ptr::null_mut();
         let rc = unsafe { ffi::sqlite3changegroup_output(self.raw, &mut len, &mut buf) };
         if rc != ffi::SQLITE_OK as c_int {
             return Err(GateError::Ffi("sqlite3changegroup_output", rc));
         }
-        // `output` hands us sqlite3-managed memory; wrap it so Drop frees it.
+        // `output` hands us sqlite3-managed memory; copy it out then free it.
         let bytes = if buf.is_null() || len == 0 {
-            &[][..]
+            Vec::new()
         } else {
-            unsafe { std::slice::from_raw_parts(buf as *const u8, len as usize) }
+            unsafe { std::slice::from_raw_parts(buf as *const u8, len as usize).to_vec() }
         };
-        let cs = Changeset::from_bytes(bytes);
         if !buf.is_null() {
             unsafe { ffi::sqlite3_free(buf) };
         }
-        Ok(cs)
+        Ok(bytes)
     }
 }
 
@@ -123,22 +160,42 @@ impl Drop for Changegroup {
     }
 }
 
-impl Session {
-    /// Record into this session the changes that would transform table `tbl` in
-    /// the attached database `from_db` into `tbl` in this session's `main`.
-    ///
-    /// With an empty `from_db.tbl`, the recorded changeset is a full-state INSERT
-    /// for every current row of `main.tbl`.
-    ///
-    /// # Safety
-    /// `from_db` must name a database attached to this session's connection, and
-    /// `from_db.tbl` must have a schema identical to `main.tbl`.
-    pub unsafe fn diff(&self, from_db: &str, tbl: &str) -> Result<(), GateError> {
+/// A raw-FFI session wrapper used only by [`full_state_changeset`]'s re-emit
+/// diff, which runs entirely against the raw `*mut sqlite3` the gate already
+/// holds (alongside the changegroup, also raw FFI). The capture session that
+/// records host writes lives in [`crate::database`] on `rusqlite::session`; this
+/// is a throwaway diff session, not that one.
+struct DiffSession {
+    raw: *mut ffi::sqlite3_session,
+}
+
+impl DiffSession {
+    unsafe fn new(db: *mut ffi::sqlite3) -> Result<Self, GateError> {
+        let db_name = CString::new("main").unwrap();
+        let mut raw: *mut ffi::sqlite3_session = ptr::null_mut();
+        let rc = ffi::sqlite3session_create(db, db_name.as_ptr(), &mut raw);
+        if rc != ffi::SQLITE_OK as c_int {
+            return Err(GateError::SessionCreate(rc));
+        }
+        Ok(DiffSession { raw })
+    }
+
+    unsafe fn attach(&self, table: &str) -> Result<(), GateError> {
+        let c_table = CString::new(table).unwrap();
+        let rc = ffi::sqlite3session_attach(self.raw, c_table.as_ptr());
+        if rc != ffi::SQLITE_OK as c_int {
+            return Err(GateError::SessionCreate(rc));
+        }
+        Ok(())
+    }
+
+    /// Record the changes that would transform `from_db.tbl` into `main.tbl`.
+    /// With an empty `from_db.tbl`, that is a full-state INSERT per current row.
+    unsafe fn diff(&self, from_db: &str, tbl: &str) -> Result<(), GateError> {
         let from = CString::new(from_db).unwrap();
         let table = CString::new(tbl).unwrap();
         let mut errmsg: *mut c_char = ptr::null_mut();
-        let rc =
-            ffi::sqlite3session_diff(self.raw_ptr(), from.as_ptr(), table.as_ptr(), &mut errmsg);
+        let rc = ffi::sqlite3session_diff(self.raw, from.as_ptr(), table.as_ptr(), &mut errmsg);
         if rc != ffi::SQLITE_OK as c_int {
             let detail = if errmsg.is_null() {
                 None
@@ -150,6 +207,31 @@ impl Session {
             return Err(GateError::Diff(tbl.to_string(), rc, detail));
         }
         Ok(())
+    }
+
+    /// Extract the recorded changeset bytes.
+    unsafe fn changeset(&self) -> Result<Vec<u8>, GateError> {
+        let mut len: c_int = 0;
+        let mut buf: *mut c_void = ptr::null_mut();
+        let rc = ffi::sqlite3session_changeset(self.raw, &mut len, &mut buf);
+        if rc != ffi::SQLITE_OK as c_int {
+            return Err(GateError::ChangesetExtract(rc));
+        }
+        let bytes = if buf.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(buf as *const u8, len as usize).to_vec()
+        };
+        if !buf.is_null() {
+            ffi::sqlite3_free(buf);
+        }
+        Ok(bytes)
+    }
+}
+
+impl Drop for DiffSession {
+    fn drop(&mut self) {
+        unsafe { ffi::sqlite3session_delete(self.raw) };
     }
 }
 
@@ -181,18 +263,15 @@ impl Gates {
     /// schema (`PRAGMA table_info` for gate-column indices, `PRAGMA
     /// foreign_key_list` for FK edges).
     ///
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    pub unsafe fn from_db(db: *mut ffi::sqlite3) -> Result<Self, GateError> {
-        Self::from_tables(db, synced_tables())
+    /// Runs on the connection coven owns; the session FFI the gate uses needs the
+    /// raw handle, so this borrows it once via [`Connection::handle`].
+    pub fn from_tables(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, GateError> {
+        unsafe { Self::from_tables_raw(conn.handle(), tables) }
     }
 
-    /// Build from an explicit table set (the production path passes
-    /// [`synced_tables`]; tests pass their own).
-    ///
     /// # Safety
     /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    pub unsafe fn from_tables(
+    unsafe fn from_tables_raw(
         db: *mut ffi::sqlite3,
         tables: &[SyncedTable],
     ) -> Result<Self, GateError> {
@@ -331,14 +410,23 @@ impl Gates {
     /// (never deleted), so deleting gated-false rows can never flip a kept row to
     /// not-kept. The final row set is therefore independent of deletion order.
     ///
+    /// Runs on the snapshot copy's owned connection; borrows the raw handle once
+    /// for the FK-walk SQL.
+    pub fn delete_gated_false(&self, conn: &Connection) -> Result<(), GateError> {
+        unsafe { self.delete_gated_false_raw(conn.handle()) }
+    }
+
     /// # Safety
     /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    pub unsafe fn delete_gated_false(&self, db: *mut ffi::sqlite3) -> Result<(), GateError> {
-        // The final row set is order-independent (the prune is monotonic, above),
-        // but the DELETEs run under `foreign_keys=ON`: a parent FK without
-        // `ON DELETE CASCADE` rejects deleting a parent while a child still
-        // references it. So delete child-first — the reverse of the FK-topological
-        // apply order — which is safe regardless of whether the schema cascades.
+    unsafe fn delete_gated_false_raw(&self, db: *mut ffi::sqlite3) -> Result<(), GateError> {
+        // The final row set is order-independent (the prune is monotonic, above).
+        // The only caller is the snapshot scope, whose copy connection opens with
+        // `foreign_keys` OFF, so no FK would reject deleting a parent before its
+        // child here. We still delete child-first — the reverse of the
+        // FK-topological apply order — so this stays correct under
+        // `foreign_keys=ON` too: a parent FK without `ON DELETE CASCADE` would
+        // otherwise reject deleting a parent a child still references. Child-first
+        // is order-safe regardless of the copy's FK setting.
         let mut order = self.gated_tables_parent_first(db)?;
         order.reverse();
         for tbl in order {
@@ -612,14 +700,25 @@ unsafe fn fk_topological_order(
 /// descendants), and re-emit the full subtree of any root that flipped
 /// false→true this cycle.
 ///
+/// Runs on the connection coven owns, with the capture session already suspended
+/// (gating reads current row state from the live tables). The changegroup and
+/// changeset-iteration FFI need the raw handle, borrowed once here.
+pub fn gate_outbound(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+) -> Result<Vec<u8>, GateError> {
+    unsafe { gate_outbound_raw(conn.handle(), changeset, gates) }
+}
+
 /// # Safety
 /// `db` must be the valid, open connection the changeset was captured on, with
 /// no live session attached (gating reads current row state from it).
-pub unsafe fn gate_outbound(
+unsafe fn gate_outbound_raw(
     db: *mut ffi::sqlite3,
-    changeset: &Changeset,
+    changeset: &[u8],
     gates: &Gates,
-) -> Result<Changeset, GateError> {
+) -> Result<Vec<u8>, GateError> {
     let group = Changegroup::new()?;
     group.set_schema(db)?;
 
@@ -629,7 +728,7 @@ pub unsafe fn gate_outbound(
     let mut flipped_roots: HashSet<(String, String)> = HashSet::new();
 
     // Pass 1: walk the captured changeset, keep gated-true rows, note flips.
-    let bytes = changeset.as_bytes();
+    let bytes = changeset;
     if !bytes.is_empty() {
         let mut iter: *mut ffi::sqlite3_changeset_iter = ptr::null_mut();
         let rc = ffi::sqlite3changeset_start(
@@ -724,17 +823,16 @@ unsafe fn reemit_subtrees(
     // the same diff.
     let reemit_ids = connected_kept_component(db, gates, flipped_roots)?;
 
-    let diff_cs = full_state_changeset(db, gates)?;
-    let bytes = diff_cs.as_bytes();
-    if bytes.is_empty() {
+    let diff_bytes = full_state_changeset(db, gates)?;
+    if diff_bytes.is_empty() {
         return Ok(());
     }
 
     let mut iter: *mut ffi::sqlite3_changeset_iter = ptr::null_mut();
     let rc = ffi::sqlite3changeset_start(
         &mut iter,
-        bytes.len() as c_int,
-        bytes.as_ptr() as *mut c_void,
+        diff_bytes.len() as c_int,
+        diff_bytes.as_ptr() as *mut c_void,
     );
     if rc != ffi::SQLITE_OK as c_int {
         return Err(GateError::Ffi("sqlite3changeset_start", rc));
@@ -863,10 +961,7 @@ unsafe fn rows_referencing(
 
 /// Diff every gated table (`main`) against an empty schema-identical clone,
 /// producing full-state INSERTs for all currently-present rows of those tables.
-unsafe fn full_state_changeset(
-    db: *mut ffi::sqlite3,
-    gates: &Gates,
-) -> Result<Changeset, GateError> {
+unsafe fn full_state_changeset(db: *mut ffi::sqlite3, gates: &Gates) -> Result<Vec<u8>, GateError> {
     // Attach a fresh empty in-memory db and recreate each gated table's schema
     // in it, copied verbatim from sqlite_master so the diff sees identical
     // tables. A unique alias avoids colliding with any host-attached db.
@@ -884,14 +979,12 @@ unsafe fn full_state_changeset(
             exec_sql(db, &in_alias)?;
         }
 
-        let session = Session::new(db).map_err(GateError::SessionCreate)?;
+        let session = DiffSession::new(db)?;
         for tbl in &tables {
-            session
-                .attach(Some(tbl))
-                .map_err(GateError::SessionCreate)?;
+            session.attach(tbl)?;
             session.diff(alias, tbl)?;
         }
-        session.changeset().map_err(GateError::ChangesetExtract)
+        session.changeset()
     })();
 
     // Always detach, even on error. A failed detach leaves the clone attached
@@ -1622,24 +1715,98 @@ mod tests {
     use super::*;
     use crate::changeset::{walk, ChangeOp};
     use crate::sync::apply::apply_changeset_lww;
-    use crate::sync::session::SyncSession;
-    use crate::sync::session_ext::Changeset;
-    use crate::sync::test_helpers::*;
+    use rusqlite::session::Session as RqSession;
 
-    /// Capture a changeset over `stmts`, then gate it against the test schema's
-    /// gate model. Returns the gated output changeset.
-    unsafe fn capture_and_gate(db: *mut ffi::sqlite3, stmts: &[&str]) -> Changeset {
-        let session = SyncSession::start(db).expect("start session");
-        for s in stmts {
-            exec(db, s);
+    /// A throwaway in-memory connection with `foreign_keys=ON`, for the gate
+    /// tests' bespoke schemas. The gate's public API takes `&Connection`.
+    fn conn() -> Connection {
+        let c = Connection::open_in_memory().expect("open in-memory");
+        c.execute_batch("PRAGMA foreign_keys = ON").expect("fk on");
+        c
+    }
+
+    fn exec(c: &Connection, sql: &str) {
+        c.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("exec failed for {sql}: {e}"));
+    }
+
+    fn query_text(c: &Connection, sql: &str) -> String {
+        c.query_row(sql, [], |r| r.get::<_, String>(0))
+            .unwrap_or_else(|e| panic!("query_text failed for {sql}: {e}"))
+    }
+
+    fn query_int(c: &Connection, sql: &str) -> i64 {
+        c.query_row(sql, [], |r| r.get::<_, i64>(0))
+            .unwrap_or_else(|e| panic!("query_int failed for {sql}: {e}"))
+    }
+
+    fn row_exists(c: &Connection, sql: &str) -> bool {
+        use rusqlite::OptionalExtension;
+        c.query_row(sql, [], |_| Ok(()))
+            .optional()
+            .unwrap_or_else(|e| panic!("row_exists failed for {sql}: {e}"))
+            .is_some()
+    }
+
+    /// Capture a changeset over `tables` while running `stmts`. Returns the
+    /// recorded changeset bytes.
+    fn capture(c: &Connection, tables: &[SyncedTable], stmts: &[&str]) -> Vec<u8> {
+        let mut session = RqSession::new(c).expect("session");
+        for t in tables {
+            session.attach(Some(t.name())).expect("attach");
         }
-        let cs = session
-            .changeset()
-            .expect("changeset")
-            .expect("non-empty changeset");
-        drop(session);
-        let gates = Gates::from_tables(db, &test_synced_tables()).expect("build gates");
-        gate_outbound(db, &cs, &gates).expect("gate outbound")
+        for s in stmts {
+            exec(c, s);
+        }
+        let mut buf = Vec::new();
+        session.changeset_strm(&mut buf).expect("changeset");
+        buf
+    }
+
+    /// Capture, then gate against `tables`' gate model. Returns gated bytes.
+    fn capture_and_gate(c: &Connection, tables: &[SyncedTable], stmts: &[&str]) -> Vec<u8> {
+        let bytes = capture(c, tables, stmts);
+        let gates = Gates::from_tables(c, tables).expect("build gates");
+        gate_outbound(c, &bytes, &gates).expect("gate outbound")
+    }
+
+    fn test_synced_tables() -> Vec<SyncedTable> {
+        vec![
+            SyncedTable::new("notes").gated_by("shared"),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos"),
+        ]
+    }
+
+    /// The synthetic notes/note_tags/note_photos schema, built directly on `c`.
+    fn create_synced_schema(c: &Connection) {
+        exec(
+            c,
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT,
+                shared INTEGER NOT NULL DEFAULT 0,
+                _updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE note_tags (
+                id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
+            );
+            CREATE TABLE note_photos (
+                id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
+            );",
+        );
     }
 
     fn has_row(changes: &[crate::changeset::RowChange], table: &str, pk: &str) -> bool {
@@ -1650,431 +1817,339 @@ mod tests {
 
     #[test]
     fn gated_false_root_is_cut() {
-        unsafe {
-            init_synced_tables();
-            let db = open_memory_db();
-            create_synced_schema(db);
-
-            let out = capture_and_gate(
-                db,
-                &[
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Private', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
-                ],
-            );
-
-            let changes = walk(out.as_bytes()).expect("walk");
-            assert!(
-                !has_row(&changes, "notes", "n1"),
-                "a gated-false root must be cut from the outbound changeset"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        let c = conn();
+        create_synced_schema(&c);
+        let out = capture_and_gate(
+            &c,
+            &test_synced_tables(),
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+               VALUES ('n1', 'Private', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(
+            !has_row(&changes, "notes", "n1"),
+            "a gated-false root must be cut from the outbound changeset"
+        );
     }
 
     #[test]
     fn gated_true_root_passes_through() {
-        unsafe {
-            init_synced_tables();
-            let db = open_memory_db();
-            create_synced_schema(db);
-
-            let out = capture_and_gate(
-                db,
-                &[
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Public', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-                ],
-            );
-
-            let changes = walk(out.as_bytes()).expect("walk");
-            assert!(
-                has_row(&changes, "notes", "n1"),
-                "a gated-true root must pass through"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        let c = conn();
+        create_synced_schema(&c);
+        let out = capture_and_gate(
+            &c,
+            &test_synced_tables(),
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+               VALUES ('n1', 'Public', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(
+            has_row(&changes, "notes", "n1"),
+            "a gated-true root must pass through"
+        );
     }
 
     #[test]
     fn child_cut_because_parent_gated_false() {
-        unsafe {
-            init_synced_tables();
-            let db = open_memory_db();
-            create_synced_schema(db);
-
-            let out = capture_and_gate(
-                db,
-                &[
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Private', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
-                    "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-                     VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
-                ],
-            );
-
-            let changes = walk(out.as_bytes()).expect("walk");
-            assert!(!has_row(&changes, "notes", "n1"), "parent cut");
-            assert!(
-                !has_row(&changes, "note_tags", "t1"),
-                "child must be cut because its parent is gated-false"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        let c = conn();
+        create_synced_schema(&c);
+        let out = capture_and_gate(
+            &c,
+            &test_synced_tables(),
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Private', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(!has_row(&changes, "notes", "n1"), "parent cut");
+        assert!(
+            !has_row(&changes, "note_tags", "t1"),
+            "child must be cut because its parent is gated-false"
+        );
     }
 
     #[test]
     fn child_passes_when_parent_gated_true() {
-        unsafe {
-            init_synced_tables();
-            let db = open_memory_db();
-            create_synced_schema(db);
-
-            let out = capture_and_gate(
-                db,
-                &[
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Public', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-                    "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-                     VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
-                    "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-                     VALUES ('p1', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
-                ],
-            );
-
-            let changes = walk(out.as_bytes()).expect("walk");
-            assert!(has_row(&changes, "notes", "n1"));
-            assert!(
-                has_row(&changes, "note_tags", "t1"),
-                "child inherits parent's true gate"
-            );
-            assert!(
-                has_row(&changes, "note_photos", "p1"),
-                "FK child inherits parent's true gate"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        let c = conn();
+        create_synced_schema(&c);
+        let out = capture_and_gate(
+            &c,
+            &test_synced_tables(),
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Public', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+                 VALUES ('p1', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(has_row(&changes, "notes", "n1"));
+        assert!(
+            has_row(&changes, "note_tags", "t1"),
+            "child inherits parent's true gate"
+        );
+        assert!(
+            has_row(&changes, "note_photos", "p1"),
+            "FK child inherits parent's true gate"
+        );
     }
 
     #[test]
     fn ungated_table_always_passes() {
-        // A synced table that is neither gated nor an FK-descendant of a gated
-        // root always syncs, regardless of any gate state.
-        unsafe {
-            let db = open_memory_db();
-            exec(db, "PRAGMA foreign_keys = ON");
-            exec(
-                db,
-                "CREATE TABLE notes (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
-                 _updated_at TEXT NOT NULL)",
-            );
-            exec(
-                db,
-                "CREATE TABLE settings (id TEXT PRIMARY KEY, val TEXT, _updated_at TEXT NOT NULL)",
-            );
-
-            let tables = vec![
-                SyncedTable::new("notes").gated_by("shared"),
-                SyncedTable::new("settings"),
-            ];
-
-            let session = Session::new(db).expect("session");
-            session.attach(Some("notes")).expect("attach notes");
-            session.attach(Some("settings")).expect("attach settings");
-            exec(
-                db,
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE notes (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
+             _updated_at TEXT NOT NULL)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE settings (id TEXT PRIMARY KEY, val TEXT, _updated_at TEXT NOT NULL)",
+        );
+        let tables = vec![
+            SyncedTable::new("notes").gated_by("shared"),
+            SyncedTable::new("settings"),
+        ];
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &[
                 "INSERT INTO notes (id, shared, _updated_at) VALUES ('n1', 0, '0000000001000-0000-dev1')",
-            );
-            exec(
-                db,
                 "INSERT INTO settings (id, val, _updated_at) VALUES ('s1', 'x', '0000000001000-0000-dev1')",
-            );
-            let cs = session.changeset().expect("cs");
-            drop(session);
-
-            let gates = Gates::from_tables(db, &tables).expect("gates");
-            let out = gate_outbound(db, &cs, &gates).expect("gate");
-            let changes = walk(out.as_bytes()).expect("walk");
-
-            assert!(!has_row(&changes, "notes", "n1"), "gated-false note is cut");
-            assert!(
-                has_row(&changes, "settings", "s1"),
-                "ungated table always passes through"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(!has_row(&changes, "notes", "n1"), "gated-false note is cut");
+        assert!(
+            has_row(&changes, "settings", "s1"),
+            "ungated table always passes through"
+        );
     }
 
     #[test]
     fn flip_false_to_true_reemits_full_subtree() {
-        unsafe {
-            init_synced_tables();
-            let db = open_memory_db();
-            create_synced_schema(db);
+        let c = conn();
+        create_synced_schema(&c);
+        let tables = test_synced_tables();
 
-            // Cycle 1: create a private note with children. All cut.
-            let out1 = capture_and_gate(
-                db,
-                &[
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Private', 'b', 0, '0000000001000-0000-dev1', '2026-01-01')",
-                    "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-                     VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
-                    "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-                     VALUES ('p1', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
-                ],
-            );
-            let c1 = walk(out1.as_bytes()).expect("walk");
-            assert!(c1.is_empty(), "cycle 1 emits nothing while private");
+        // Cycle 1: create a private note with children. All cut.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Private', 'b', 0, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+                 VALUES ('p1', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+        assert!(
+            walk(&out1).expect("walk").is_empty(),
+            "cycle 1 emits nothing while private"
+        );
 
-            // Cycle 2: flip the gate true. The note row itself is the UPDATE in
-            // this changeset; the children are NOT (they were inserted earlier).
-            let out2 = capture_and_gate(
-                db,
-                &[
-                    "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-dev1' \
-                     WHERE id = 'n1'",
-                ],
-            );
-            let c2 = walk(out2.as_bytes()).expect("walk");
-            assert!(has_row(&c2, "notes", "n1"), "promoted note is emitted");
-            assert!(
-                has_row(&c2, "note_tags", "t1"),
-                "re-emit includes the pre-existing tag child"
-            );
-            assert!(
-                has_row(&c2, "note_photos", "p1"),
-                "re-emit includes the pre-existing photo child"
-            );
+        // Cycle 2: flip the gate true. Only the note UPDATE is captured; the
+        // children are re-emitted by the flip logic.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
+        );
+        let c2 = walk(&out2).expect("walk");
+        assert!(has_row(&c2, "notes", "n1"), "promoted note is emitted");
+        assert!(
+            has_row(&c2, "note_tags", "t1"),
+            "re-emit includes the pre-existing tag child"
+        );
+        assert!(
+            has_row(&c2, "note_photos", "p1"),
+            "re-emit includes the pre-existing photo child"
+        );
 
-            // Apply cycle 2's output to a fresh peer: it must land as a complete
-            // consistent subtree.
-            let peer = open_memory_db();
-            create_synced_schema(peer);
-            apply_changeset_lww(peer, &out2).expect("apply to peer");
-
-            assert!(
-                row_exists(peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
-                "peer has the note"
-            );
-            assert_eq!(
-                query_text(peer, "SELECT title FROM notes WHERE id = 'n1'"),
-                "Private"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM note_tags WHERE id = 't1'"),
-                "peer has the tag"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM note_photos WHERE id = 'p1'"),
-                "peer has the photo"
-            );
-
-            ffi::sqlite3_close(db);
-            ffi::sqlite3_close(peer);
-        }
+        // Apply cycle 2's output to a fresh peer: complete consistent subtree.
+        let peer = conn();
+        create_synced_schema(&peer);
+        apply_changeset_lww(&peer, &out2, &tables).expect("apply to peer");
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
+            "peer has the note"
+        );
+        assert_eq!(
+            query_text(&peer, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Private"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"),
+            "peer has the tag"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM note_photos WHERE id = 'p1'"),
+            "peer has the photo"
+        );
     }
 
     #[test]
     fn post_promotion_edit_is_single_update_not_reemit() {
-        unsafe {
-            init_synced_tables();
-            let db = open_memory_db();
-            create_synced_schema(db);
+        let c = conn();
+        create_synced_schema(&c);
+        let tables = test_synced_tables();
 
-            // Create + promote in cycle 1 (note shared=1 immediately).
-            let _ = capture_and_gate(
-                db,
-                &[
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-                     VALUES ('n1', 'Public', 'b', 1, '0000000001000-0000-dev1', '2026-01-01')",
-                    "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
-                     VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
-                ],
-            );
+        // Create + promote in cycle 1 (note shared=1 immediately).
+        let _ = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Public', 'b', 1, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
 
-            // Cycle 2: an ordinary edit to the already-shared note. Not a flip,
-            // so it must emit exactly one UPDATE for the note and nothing else.
-            let out = capture_and_gate(
-                db,
-                &[
-                    "UPDATE notes SET title = 'Renamed', _updated_at = '0000000002000-0000-dev1' \
-                     WHERE id = 'n1'",
-                ],
-            );
-            let changes = walk(out.as_bytes()).expect("walk");
-            assert_eq!(changes.len(), 1, "exactly one change");
-            assert_eq!(changes[0].table, "notes");
-            assert_eq!(changes[0].op, ChangeOp::Update);
-            assert_eq!(changes[0].pk(), Some("n1"));
-
-            ffi::sqlite3_close(db);
-        }
+        // Cycle 2: an ordinary edit to the already-shared note. Not a flip, so it
+        // must emit exactly one UPDATE for the note and nothing else.
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE notes SET title = 'Renamed', _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
+        );
+        let changes = walk(&out).expect("walk");
+        assert_eq!(changes.len(), 1, "exactly one change");
+        assert_eq!(changes[0].table, "notes");
+        assert_eq!(changes[0].op, ChangeOp::Update);
+        assert_eq!(changes[0].pk(), Some("n1"));
     }
 
     #[test]
     fn multi_hop_fk_inheritance() {
         // grandchild -> child -> root(gated). The gate must flow two hops.
-        unsafe {
-            let db = open_memory_db();
-            exec(db, "PRAGMA foreign_keys = ON");
-            exec(
-                db,
-                "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
-                 _updated_at TEXT NOT NULL)",
-            );
-            exec(
-                db,
-                "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
-                 _updated_at TEXT NOT NULL, \
-                 FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
-            );
-            exec(
-                db,
-                "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
-                 _updated_at TEXT NOT NULL, \
-                 FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE)",
-            );
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
+             _updated_at TEXT NOT NULL)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE)",
+        );
+        let tables = vec![
+            SyncedTable::new("albums").gated_by("shared"),
+            SyncedTable::new("photos"),
+            SyncedTable::new("comments"),
+        ];
 
-            let tables = vec![
-                SyncedTable::new("albums").gated_by("shared"),
-                SyncedTable::new("photos"),
-                SyncedTable::new("comments"),
-            ];
+        // Private album with a 2-level subtree: all cut.
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO albums (id, shared, _updated_at) VALUES ('a1', 0, '0000000001000-0000-dev1')",
+                "INSERT INTO photos (id, album_id, _updated_at) VALUES ('p1', 'a1', '0000000001000-0000-dev1')",
+                "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('c1', 'p1', '0000000001000-0000-dev1')",
+            ],
+        );
+        assert!(
+            walk(&out).expect("walk").is_empty(),
+            "private 2-level subtree fully cut"
+        );
 
-            let attach = |db: *mut ffi::sqlite3| {
-                let s = Session::new(db).expect("session");
-                s.attach(Some("albums")).unwrap();
-                s.attach(Some("photos")).unwrap();
-                s.attach(Some("comments")).unwrap();
-                s
-            };
-
-            // Private album with a 2-level subtree: all cut.
-            let s = attach(db);
-            exec(db, "INSERT INTO albums (id, shared, _updated_at) VALUES ('a1', 0, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('p1', 'a1', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('c1', 'p1', '0000000001000-0000-dev1')");
-            let cs = s.changeset().expect("cs");
-            drop(s);
-            let gates = Gates::from_tables(db, &tables).expect("gates");
-            let out = gate_outbound(db, &cs, &gates).expect("gate");
-            let changes = walk(out.as_bytes()).expect("walk");
-            assert!(changes.is_empty(), "private 2-level subtree fully cut");
-
-            // Flip the album true: re-emit must reach the grandchild comment.
-            let s = attach(db);
-            exec(db, "UPDATE albums SET shared = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'a1'");
-            let cs = s.changeset().expect("cs");
-            drop(s);
-            let out = gate_outbound(db, &cs, &gates).expect("gate");
-            let changes = walk(out.as_bytes()).expect("walk");
-            assert!(has_row(&changes, "albums", "a1"));
-            assert!(
-                has_row(&changes, "photos", "p1"),
-                "one-hop child re-emitted"
-            );
-            assert!(
-                has_row(&changes, "comments", "c1"),
-                "two-hop grandchild re-emitted via multi-hop FK inheritance"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        // Flip the album true: re-emit must reach the grandchild comment.
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE albums SET shared = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'a1'"],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(has_row(&changes, "albums", "a1"));
+        assert!(
+            has_row(&changes, "photos", "p1"),
+            "one-hop child re-emitted"
+        );
+        assert!(
+            has_row(&changes, "comments", "c1"),
+            "two-hop grandchild re-emitted"
+        );
     }
 
     #[test]
     fn delete_gated_false_strips_private_subtrees_in_place() {
-        // The snapshot path: `delete_gated_false` removes gated-false roots and
-        // their FK-descendants from a live DB, keeping gated-true subtrees and
-        // ungated tables. Exercises a two-hop FK chain (root → child →
-        // grandchild) so the recursive keep-clause walk is tested across more
-        // than one hop.
-        unsafe {
-            let db = open_memory_db();
-            exec(db, "PRAGMA foreign_keys = ON");
-            exec(
-                db,
-                "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
-                 _updated_at TEXT NOT NULL)",
-            );
-            exec(
-                db,
-                "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
-                 _updated_at TEXT NOT NULL, \
-                 FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
-            );
-            exec(
-                db,
-                "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
-                 _updated_at TEXT NOT NULL, \
-                 FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE)",
-            );
-            exec(
-                db,
-                "CREATE TABLE settings (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
-            );
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
+             _updated_at TEXT NOT NULL)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE settings (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
+        );
+        let tables = vec![
+            SyncedTable::new("albums").gated_by("shared"),
+            SyncedTable::new("photos"),
+            SyncedTable::new("comments"),
+            SyncedTable::new("settings"),
+        ];
 
-            let tables = vec![
-                SyncedTable::new("albums").gated_by("shared"),
-                SyncedTable::new("photos"),
-                SyncedTable::new("comments"),
-                SyncedTable::new("settings"),
-            ];
+        exec(&c, "INSERT INTO albums (id, shared, _updated_at) VALUES ('priv', 0, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('priv_p', 'priv', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('priv_c', 'priv_p', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO albums (id, shared, _updated_at) VALUES ('pub', 1, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('pub_p', 'pub', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('pub_c', 'pub_p', '0000000001000-0000-dev1')");
+        exec(
+            &c,
+            "INSERT INTO settings (id, _updated_at) VALUES ('s1', '0000000001000-0000-dev1')",
+        );
 
-            // A private album with a 2-level subtree, a shared album with its
-            // own subtree, and an ungated settings row.
-            exec(db, "INSERT INTO albums (id, shared, _updated_at) VALUES ('priv', 0, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('priv_p', 'priv', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('priv_c', 'priv_p', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO albums (id, shared, _updated_at) VALUES ('pub', 1, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO photos (id, album_id, _updated_at) VALUES ('pub_p', 'pub', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO comments (id, photo_id, _updated_at) VALUES ('pub_c', 'pub_p', '0000000001000-0000-dev1')");
-            exec(
-                db,
-                "INSERT INTO settings (id, _updated_at) VALUES ('s1', '0000000001000-0000-dev1')",
-            );
+        let gates = Gates::from_tables(&c, &tables).expect("gates");
+        gates.delete_gated_false(&c).expect("delete gated-false");
 
-            let gates = Gates::from_tables(db, &tables).expect("gates");
-            gates.delete_gated_false(db).expect("delete gated-false");
-
-            // Private subtree gone at every level.
-            assert!(!row_exists(db, "SELECT 1 FROM albums WHERE id = 'priv'"));
-            assert!(!row_exists(db, "SELECT 1 FROM photos WHERE id = 'priv_p'"));
-            assert!(!row_exists(
-                db,
-                "SELECT 1 FROM comments WHERE id = 'priv_c'"
-            ));
-
-            // Shared subtree intact at every level.
-            assert!(row_exists(db, "SELECT 1 FROM albums WHERE id = 'pub'"));
-            assert!(row_exists(db, "SELECT 1 FROM photos WHERE id = 'pub_p'"));
-            assert!(row_exists(db, "SELECT 1 FROM comments WHERE id = 'pub_c'"));
-
-            // Ungated table untouched.
-            assert!(row_exists(db, "SELECT 1 FROM settings WHERE id = 's1'"));
-
-            ffi::sqlite3_close(db);
-        }
+        assert!(!row_exists(&c, "SELECT 1 FROM albums WHERE id = 'priv'"));
+        assert!(!row_exists(&c, "SELECT 1 FROM photos WHERE id = 'priv_p'"));
+        assert!(!row_exists(
+            &c,
+            "SELECT 1 FROM comments WHERE id = 'priv_c'"
+        ));
+        assert!(row_exists(&c, "SELECT 1 FROM albums WHERE id = 'pub'"));
+        assert!(row_exists(&c, "SELECT 1 FROM photos WHERE id = 'pub_p'"));
+        assert!(row_exists(&c, "SELECT 1 FROM comments WHERE id = 'pub_c'"));
+        assert!(row_exists(&c, "SELECT 1 FROM settings WHERE id = 's1'"));
     }
 
     // ---- upward gate (gated_by_descendants) ----------------------------------
-    //
-    // Synthetic schema exercising an always-shared ancestor (`albums`) kept alive
-    // by its gated subtree (`releases` gated by `managed`), a two-level ancestor
-    // (`artists`, kept by albums and album_artists), and a multi-parent join row
-    // (`album_artists` → albums AND artists) whose downward gate-parent must be
-    // inferred as the more-specific ancestor (albums), not artists. The gate
-    // flows up: an album/artist whose gated subtree is empty is cut.
 
-    /// Declared synced set for the upward-gate tests. `albums` and `artists` are
-    /// ancestors (no child list — children are inferred); `album_artists` and
-    /// `tracks` are plain and inherit their gate downward.
     fn album_tables() -> Vec<SyncedTable> {
         vec![
             SyncedTable::new("releases").gated_by("managed"),
@@ -2085,74 +2160,55 @@ mod tests {
         ]
     }
 
-    /// Build the album/artist schema on `db`. `album_artists` declares its
-    /// `album_id` FK *before* its `artist_id` FK on purpose: SQLite numbers FKs
-    /// in reverse, so `PRAGMA foreign_key_list` lists `artists` first — the case
-    /// that breaks a naive "first FK wins" parent selection.
-    unsafe fn create_album_schema(db: *mut ffi::sqlite3) {
-        exec(db, "PRAGMA foreign_keys = ON");
+    fn create_album_schema(c: &Connection) {
         exec(
-            db,
-            "CREATE TABLE artists (id TEXT PRIMARY KEY, name TEXT, \
-             _updated_at TEXT NOT NULL)",
+            c,
+            "CREATE TABLE artists (id TEXT PRIMARY KEY, name TEXT, _updated_at TEXT NOT NULL)",
         );
         exec(
-            db,
+            c,
             "CREATE TABLE albums (id TEXT PRIMARY KEY, artist_id TEXT, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (artist_id) REFERENCES artists (id))",
         );
         exec(
-            db,
+            c,
             "CREATE TABLE album_artists (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              artist_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE, \
              FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE)",
         );
         exec(
-            db,
+            c,
             "CREATE TABLE releases (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              managed INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
         );
         exec(
-            db,
+            c,
             "CREATE TABLE tracks (id TEXT PRIMARY KEY, release_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
              FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE)",
         );
     }
 
-    /// Attach a session over every album-schema table.
-    unsafe fn album_session(db: *mut ffi::sqlite3) -> Session {
-        let s = Session::new(db).expect("session");
-        for t in album_tables() {
-            s.attach(Some(t.name())).expect("attach");
-        }
-        s
+    /// Apply a changeset with the production LWW path, scoped to the album set.
+    fn apply_album(c: &Connection, bytes: &[u8]) {
+        apply_changeset_lww(c, bytes, &album_tables()).expect("apply album changeset");
     }
 
-    /// Apply a changeset with the production LWW path, scoped to the album table
-    /// set rather than the process-global synced tables (which the other tests fix
-    /// to the notes schema). Calls the real `apply_changeset_lww_for`, so the
-    /// conflict handler is exercised, not re-implemented.
-    unsafe fn apply_album(db: *mut ffi::sqlite3, cs: &Changeset) {
-        crate::sync::apply::apply_changeset_lww_for(db, cs, &album_tables())
-            .expect("apply album changeset");
-    }
-
-    /// The inferred keep-children of `tbl` as `(child table, fk column name)`
-    /// pairs, sorted — for asserting the inferred gate map.
-    unsafe fn inferred_children(
-        db: *mut ffi::sqlite3,
-        gates: &Gates,
-        tbl: &str,
-    ) -> Vec<(String, String)> {
+    /// The inferred keep-children of `tbl`, as `(child, fk column name)`, sorted.
+    fn inferred_children(c: &Connection, gates: &Gates, tbl: &str) -> Vec<(String, String)> {
         match gates.tables.get(tbl) {
             Some(TableGate::Parent { children }) => {
                 let mut out: Vec<(String, String)> = children
                     .iter()
-                    .map(|(c, idx)| (c.clone(), nth_column_name(db, c, *idx).expect("fk col")))
+                    .map(|(ch, idx)| {
+                        (
+                            ch.clone(),
+                            unsafe { nth_column_name(c.handle(), ch, *idx) }.expect("fk col"),
+                        )
+                    })
                     .collect();
                 out.sort();
                 out
@@ -2162,14 +2218,13 @@ mod tests {
         }
     }
 
-    /// The downward gate-parent `from_tables` chose for `tbl`, as `(parent,
-    /// child's FK column name)`, read out of the resulting gate map. Panics if
-    /// `tbl` is not modeled as an inheriting `Child`.
-    unsafe fn downward_parent(db: *mut ffi::sqlite3, gates: &Gates, tbl: &str) -> (String, String) {
+    /// The downward gate-parent `from_tables` chose for `tbl`, as `(parent, fk
+    /// column name)`. Panics if `tbl` is not modeled as an inheriting `Child`.
+    fn downward_parent(c: &Connection, gates: &Gates, tbl: &str) -> (String, String) {
         match gates.tables.get(tbl) {
             Some(TableGate::Child { fk_col, parent }) => (
                 parent.clone(),
-                nth_column_name(db, tbl, *fk_col).expect("fk col"),
+                unsafe { nth_column_name(c.handle(), tbl, *fk_col) }.expect("fk col"),
             ),
             other => panic!(
                 "{tbl} must be an inheriting Child, got present={}",
@@ -2180,486 +2235,381 @@ mod tests {
 
     #[test]
     fn inference_resolves_children_and_join_parent() {
-        // The crux. From the schema alone (no declared child lists), assert the
-        // inferred gate map `from_tables` produces: albums.children = [releases];
-        // artists.children = [albums, album_artists] (album_artists IS a
-        // keep-child of artists because its downward parent is albums, not
-        // artists); and album_artists's downward gate-parent resolves to albums
-        // (not artists) with the album_id FK, regardless of FK declaration order.
-        unsafe {
-            let db = open_memory_db();
-            create_album_schema(db);
-            let gates = Gates::from_tables(db, &album_tables()).expect("gates");
+        let c = conn();
+        create_album_schema(&c);
+        let gates = Gates::from_tables(&c, &album_tables()).expect("gates");
 
-            assert_eq!(
-                inferred_children(db, &gates, "albums"),
-                vec![("releases".to_string(), "album_id".to_string())],
-                "albums is kept only by releases (the album_artists back-edge is excluded)"
-            );
-            assert_eq!(
-                inferred_children(db, &gates, "artists"),
-                vec![
-                    ("album_artists".to_string(), "artist_id".to_string()),
-                    ("albums".to_string(), "artist_id".to_string()),
-                ],
-                "artists is kept by albums OR album_artists"
-            );
-
-            // The join row inherits downward from the more-specific ancestor
-            // (albums) via its album_id FK, independent of which FK PRAGMA lists
-            // first — observed through the gate map `from_tables` built, not a
-            // private selection call.
-            assert_eq!(
-                downward_parent(db, &gates, "album_artists"),
-                ("albums".to_string(), "album_id".to_string()),
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        assert_eq!(
+            inferred_children(&c, &gates, "albums"),
+            vec![("releases".to_string(), "album_id".to_string())],
+            "albums is kept only by releases (the album_artists back-edge is excluded)"
+        );
+        assert_eq!(
+            inferred_children(&c, &gates, "artists"),
+            vec![
+                ("album_artists".to_string(), "artist_id".to_string()),
+                ("albums".to_string(), "artist_id".to_string()),
+            ],
+            "artists is kept by albums OR album_artists"
+        );
+        assert_eq!(
+            downward_parent(&c, &gates, "album_artists"),
+            ("albums".to_string(), "album_id".to_string()),
+        );
     }
 
     #[test]
     fn downward_parent_is_most_specific_not_lexicographic() {
-        // Isolate the "most-specific ancestor" rule (`ancestor_depth`) from the
-        // lexicographic fallback by making them DISAGREE: a join row references two
-        // ancestors where the more-specific (deeper) one sorts lexicographically
-        // LATER. `zinner` is an FK-descendant of `aouter` (depth 1 vs 0), so it is
-        // the most-specific parent — yet "aouter" < "zinner", so a lexicographic
-        // tie-break alone would pick `aouter`. Only the depth signal yields the
-        // right answer, driven through `from_tables` and read out of the gate map
-        // (the album-schema test above can't catch this: there `albums` wins both
-        // rules). Each ancestor is given its own gated descendant (`zgated` under
-        // `zinner`; `zinner`/`joiner` under `aouter`) so `from_tables` accepts the
-        // schema rather than rejecting an empty-keep ancestor.
-        unsafe {
-            let db = open_memory_db();
-            exec(db, "PRAGMA foreign_keys = ON");
-            exec(
-                db,
-                "CREATE TABLE aouter (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
-            );
-            exec(
-                db,
-                "CREATE TABLE zinner (id TEXT PRIMARY KEY, aouter_id TEXT, \
-                 _updated_at TEXT NOT NULL, \
-                 FOREIGN KEY (aouter_id) REFERENCES aouter (id))",
-            );
-            // A gated root under `zinner`, so `zinner` has a kept descendant.
-            exec(
-                db,
-                "CREATE TABLE zgated (id TEXT PRIMARY KEY, zinner_id TEXT NOT NULL, \
-                 shared INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
-                 FOREIGN KEY (zinner_id) REFERENCES zinner (id))",
-            );
-            // The join row declares its FK to `aouter` first, so PRAGMA lists the
-            // `zinner` FK first — independent of the chosen ranking.
-            exec(
-                db,
-                "CREATE TABLE joiner (id TEXT PRIMARY KEY, aouter_id TEXT NOT NULL, \
-                 zinner_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
-                 FOREIGN KEY (aouter_id) REFERENCES aouter (id), \
-                 FOREIGN KEY (zinner_id) REFERENCES zinner (id))",
-            );
-
-            let tables = vec![
-                SyncedTable::new("aouter").gated_by_descendants(),
-                SyncedTable::new("zinner").gated_by_descendants(),
-                SyncedTable::new("zgated").gated_by("shared"),
-                SyncedTable::new("joiner"),
-            ];
-            let gates = Gates::from_tables(db, &tables).expect("gates");
-
-            assert_eq!(
-                downward_parent(db, &gates, "joiner"),
-                ("zinner".to_string(), "zinner_id".to_string()),
-                "the most-specific (deeper) ancestor wins even though it sorts \
-                 lexicographically later than `aouter`"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE aouter (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE zinner (id TEXT PRIMARY KEY, aouter_id TEXT, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (aouter_id) REFERENCES aouter (id))",
+        );
+        exec(
+            &c,
+            "CREATE TABLE zgated (id TEXT PRIMARY KEY, zinner_id TEXT NOT NULL, \
+             shared INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (zinner_id) REFERENCES zinner (id))",
+        );
+        exec(
+            &c,
+            "CREATE TABLE joiner (id TEXT PRIMARY KEY, aouter_id TEXT NOT NULL, \
+             zinner_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (aouter_id) REFERENCES aouter (id), \
+             FOREIGN KEY (zinner_id) REFERENCES zinner (id))",
+        );
+        let tables = vec![
+            SyncedTable::new("aouter").gated_by_descendants(),
+            SyncedTable::new("zinner").gated_by_descendants(),
+            SyncedTable::new("zgated").gated_by("shared"),
+            SyncedTable::new("joiner"),
+        ];
+        let gates = Gates::from_tables(&c, &tables).expect("gates");
+        assert_eq!(
+            downward_parent(&c, &gates, "joiner"),
+            ("zinner".to_string(), "zinner_id".to_string()),
+            "the most-specific (deeper) ancestor wins even though it sorts \
+             lexicographically later than `aouter`"
+        );
     }
 
     #[test]
     fn fk_topological_order_is_parent_first() {
-        // The re-emit apply order must place every table after every gated table
-        // it has an FK to: artists, albums, album_artists, releases, tracks.
-        unsafe {
-            let db = open_memory_db();
-            create_album_schema(db);
-            let gates = Gates::from_tables(db, &album_tables()).expect("gates");
-            let order = gates.gated_tables_parent_first(db).expect("topo order");
-            let pos = |t: &str| order.iter().position(|x| *x == t).unwrap();
-
-            assert!(pos("artists") < pos("albums"), "artist before album");
-            assert!(pos("albums") < pos("releases"), "album before release");
-            assert!(pos("releases") < pos("tracks"), "release before track");
-            assert!(
-                pos("albums") < pos("album_artists"),
-                "album before album_artists"
-            );
-            assert!(
-                pos("artists") < pos("album_artists"),
-                "artist before album_artists"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        let c = conn();
+        create_album_schema(&c);
+        let gates = Gates::from_tables(&c, &album_tables()).expect("gates");
+        let order = unsafe { gates.gated_tables_parent_first(c.handle()) }.expect("topo order");
+        let pos = |t: &str| order.iter().position(|x| *x == t).unwrap();
+        assert!(pos("artists") < pos("albums"), "artist before album");
+        assert!(pos("albums") < pos("releases"), "album before release");
+        assert!(pos("releases") < pos("tracks"), "release before track");
+        assert!(
+            pos("albums") < pos("album_artists"),
+            "album before album_artists"
+        );
+        assert!(
+            pos("artists") < pos("album_artists"),
+            "artist before album_artists"
+        );
     }
 
     #[test]
     fn delete_gated_false_prunes_empty_ancestors() {
-        // An album whose only release is unmanaged is deleted (orphan ancestor
-        // pruned); an album with a managed release survives with only the managed
-        // release; an artist kept only via a deleted album is deleted; an artist
-        // kept via a surviving album survives.
-        unsafe {
-            let db = open_memory_db();
-            create_album_schema(db);
+        let c = conn();
+        create_album_schema(&c);
 
-            // Artist A1: album AL_EMPTY with one unmanaged release -> all gone.
-            // Artist A2: album AL_MIXED (one managed + one unmanaged release) and
-            //            an album_artists row -> survives with only the managed.
-            exec(
-                db,
-                "INSERT INTO artists (id, _updated_at) VALUES ('A1', '0000000001000-0000-dev1')",
-            );
-            exec(
-                db,
-                "INSERT INTO artists (id, _updated_at) VALUES ('A2', '0000000001000-0000-dev1')",
-            );
-            exec(db, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_MIXED', 'A2', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_EMPTY', 'AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_MIXED', 'AL_MIXED', 'A2', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN', 'AL_EMPTY', 0, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_MAN', 'AL_MIXED', 1, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN2', 'AL_MIXED', 0, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_UNMAN', 'R_UNMAN', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_MAN', 'R_MAN', '0000000001000-0000-dev1')");
+        exec(
+            &c,
+            "INSERT INTO artists (id, _updated_at) VALUES ('A1', '0000000001000-0000-dev1')",
+        );
+        exec(
+            &c,
+            "INSERT INTO artists (id, _updated_at) VALUES ('A2', '0000000001000-0000-dev1')",
+        );
+        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL_MIXED', 'A2', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_EMPTY', 'AL_EMPTY', 'A1', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA_MIXED', 'AL_MIXED', 'A2', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN', 'AL_EMPTY', 0, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_MAN', 'AL_MIXED', 1, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R_UNMAN2', 'AL_MIXED', 0, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_UNMAN', 'R_UNMAN', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T_MAN', 'R_MAN', '0000000001000-0000-dev1')");
 
-            let gates = Gates::from_tables(db, &album_tables()).expect("gates");
-            gates.delete_gated_false(db).expect("delete gated-false");
+        let gates = Gates::from_tables(&c, &album_tables()).expect("gates");
+        gates.delete_gated_false(&c).expect("delete gated-false");
 
-            // Empty album (only an unmanaged release) and its whole subtree gone.
-            assert!(
-                !row_exists(db, "SELECT 1 FROM albums WHERE id = 'AL_EMPTY'"),
-                "empty album pruned"
-            );
-            assert!(
-                !row_exists(db, "SELECT 1 FROM releases WHERE id = 'R_UNMAN'"),
-                "unmanaged release gone"
-            );
-            assert!(
-                !row_exists(db, "SELECT 1 FROM tracks WHERE id = 'T_UNMAN'"),
-                "track of unmanaged release gone"
-            );
-            assert!(
-                !row_exists(db, "SELECT 1 FROM album_artists WHERE id = 'AA_EMPTY'"),
-                "album_artists of pruned album gone"
-            );
-            assert!(
-                !row_exists(db, "SELECT 1 FROM artists WHERE id = 'A1'"),
-                "artist with no kept album pruned"
-            );
-
-            // Mixed album survives with ONLY the managed release.
-            assert!(
-                row_exists(db, "SELECT 1 FROM albums WHERE id = 'AL_MIXED'"),
-                "mixed album survives"
-            );
-            assert!(
-                row_exists(db, "SELECT 1 FROM releases WHERE id = 'R_MAN'"),
-                "managed release survives"
-            );
-            assert!(
-                row_exists(db, "SELECT 1 FROM tracks WHERE id = 'T_MAN'"),
-                "track of managed release survives"
-            );
-            assert!(
-                !row_exists(db, "SELECT 1 FROM releases WHERE id = 'R_UNMAN2'"),
-                "the unmanaged sibling release is still cut"
-            );
-            assert!(
-                row_exists(db, "SELECT 1 FROM album_artists WHERE id = 'AA_MIXED'"),
-                "album_artists of surviving album kept"
-            );
-            assert!(
-                row_exists(db, "SELECT 1 FROM artists WHERE id = 'A2'"),
-                "artist kept via a surviving album"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM albums WHERE id = 'AL_EMPTY'"),
+            "empty album pruned"
+        );
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM releases WHERE id = 'R_UNMAN'"),
+            "unmanaged release gone"
+        );
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM tracks WHERE id = 'T_UNMAN'"),
+            "track of unmanaged release gone"
+        );
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM album_artists WHERE id = 'AA_EMPTY'"),
+            "album_artists of pruned album gone"
+        );
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM artists WHERE id = 'A1'"),
+            "artist with no kept album pruned"
+        );
+        assert!(
+            row_exists(&c, "SELECT 1 FROM albums WHERE id = 'AL_MIXED'"),
+            "mixed album survives"
+        );
+        assert!(
+            row_exists(&c, "SELECT 1 FROM releases WHERE id = 'R_MAN'"),
+            "managed release survives"
+        );
+        assert!(
+            row_exists(&c, "SELECT 1 FROM tracks WHERE id = 'T_MAN'"),
+            "track of managed release survives"
+        );
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM releases WHERE id = 'R_UNMAN2'"),
+            "the unmanaged sibling release is still cut"
+        );
+        assert!(
+            row_exists(&c, "SELECT 1 FROM album_artists WHERE id = 'AA_MIXED'"),
+            "album_artists of surviving album kept"
+        );
+        assert!(
+            row_exists(&c, "SELECT 1 FROM artists WHERE id = 'A2'"),
+            "artist kept via a surviving album"
+        );
     }
 
     #[test]
     fn changeset_cut_drops_orphan_ancestor() {
-        // A changeset inserting an album + an unmanaged release + its tracks
-        // emits NONE of them — the album is cut because it has no kept child.
-        unsafe {
-            let db = open_memory_db();
-            create_album_schema(db);
-
-            let s = album_session(db);
-            exec(
-                db,
+        let c = conn();
+        create_album_schema(&c);
+        let out = capture_and_gate(
+            &c,
+            &album_tables(),
+            &[
                 "INSERT INTO albums (id, _updated_at) VALUES ('AL', '0000000001000-0000-dev1')",
-            );
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')");
-            let cs = s.changeset().expect("cs");
-            drop(s);
-
-            let gates = Gates::from_tables(db, &album_tables()).expect("gates");
-            let out = gate_outbound(db, &cs, &gates).expect("gate");
-            let changes = walk(out.as_bytes()).expect("walk");
-
-            assert!(
-                !has_row(&changes, "albums", "AL"),
-                "orphan album cut (no kept release)"
-            );
-            assert!(!has_row(&changes, "releases", "R"), "unmanaged release cut");
-            assert!(
-                !has_row(&changes, "tracks", "T"),
-                "track of unmanaged release cut"
-            );
-
-            ffi::sqlite3_close(db);
-        }
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')",
+                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')",
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(
+            !has_row(&changes, "albums", "AL"),
+            "orphan album cut (no kept release)"
+        );
+        assert!(!has_row(&changes, "releases", "R"), "unmanaged release cut");
+        assert!(
+            !has_row(&changes, "tracks", "T"),
+            "track of unmanaged release cut"
+        );
     }
 
     #[test]
     fn flip_reemits_whole_connected_component_to_peer() {
-        // An album with an unmanaged release lives locally (never synced).
-        // Flipping the release managed false->true must re-emit the WHOLE
-        // connected component — album, release, tracks, album_artists, artist —
-        // so a fresh peer materializes the complete graph.
-        //
-        // This tests COMPLETENESS (every component row reaches the peer), not the
-        // FK-topological apply order: `sqlite3changeset_apply` defers foreign-key
-        // enforcement to the end of its internal savepoint, so the changeset's
-        // table order does not gate the apply (a child row may precede its parent
-        // and still land). The apply order is guarded structurally by
-        // `fk_topological_order_is_parent_first`, not by this peer-apply check.
-        unsafe {
-            let db = open_memory_db();
-            create_album_schema(db);
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
 
-            // Cycle 1: build the private graph. Nothing should escape.
-            let s = album_session(db);
-            exec(db, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')");
-            let cs1 = s.changeset().expect("cs");
-            drop(s);
-            let gates = Gates::from_tables(db, &album_tables()).expect("gates");
-            let out1 = gate_outbound(db, &cs1, &gates).expect("gate");
-            assert!(
-                walk(out1.as_bytes()).expect("walk").is_empty(),
-                "private graph emits nothing"
-            );
+        // Cycle 1: build the private graph. Nothing should escape.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')",
+                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1')",
+            ],
+        );
+        assert!(
+            walk(&out1).expect("walk").is_empty(),
+            "private graph emits nothing"
+        );
 
-            // Cycle 2: flip the release managed. Re-emit the whole component.
-            let s = album_session(db);
-            exec(db, "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'");
-            let cs2 = s.changeset().expect("cs");
-            drop(s);
-            let out2 = gate_outbound(db, &cs2, &gates).expect("gate");
-            let changes = walk(out2.as_bytes()).expect("walk");
-            assert!(
-                has_row(&changes, "releases", "R"),
-                "promoted release emitted"
-            );
-            assert!(
-                has_row(&changes, "albums", "AL"),
-                "ancestor album re-emitted"
-            );
-            assert!(
-                has_row(&changes, "artists", "AR"),
-                "ancestor artist re-emitted"
-            );
-            assert!(
-                has_row(&changes, "tracks", "T"),
-                "descendant track re-emitted"
-            );
-            assert!(
-                has_row(&changes, "album_artists", "AA"),
-                "kept child of ancestor re-emitted"
-            );
+        // Cycle 2: flip the release managed. Re-emit the whole component.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
+        );
+        let changes = walk(&out2).expect("walk");
+        assert!(
+            has_row(&changes, "releases", "R"),
+            "promoted release emitted"
+        );
+        assert!(
+            has_row(&changes, "albums", "AL"),
+            "ancestor album re-emitted"
+        );
+        assert!(
+            has_row(&changes, "artists", "AR"),
+            "ancestor artist re-emitted"
+        );
+        assert!(
+            has_row(&changes, "tracks", "T"),
+            "descendant track re-emitted"
+        );
+        assert!(
+            has_row(&changes, "album_artists", "AA"),
+            "kept child of ancestor re-emitted"
+        );
 
-            // Apply to a fresh peer (foreign_keys = ON): the whole graph lands.
-            // (Completeness only — the apply defers FK checks to its savepoint
-            // end, so this does not exercise the re-emit table order.)
-            let peer = open_memory_db();
-            create_album_schema(peer);
-            apply_album(peer, &out2);
-            assert!(
-                row_exists(peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
-                "peer has artist"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
-                "peer has album"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
-                "peer has album_artists"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM releases WHERE id = 'R'"),
-                "peer has release"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM tracks WHERE id = 'T'"),
-                "peer has track"
-            );
-
-            ffi::sqlite3_close(db);
-            ffi::sqlite3_close(peer);
-        }
+        let peer = conn();
+        create_album_schema(&peer);
+        apply_album(&peer, &out2);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            "peer has artist"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "peer has album"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            "peer has album_artists"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R'"),
+            "peer has release"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T'"),
+            "peer has track"
+        );
     }
 
     #[test]
     fn flip_reemits_sideways_featured_artist() {
-        // The flip re-emit must close over the FULL connected kept component, not
-        // just the flipped row's own lineage. A featured artist (AR2) credited via
-        // album_artists who does NOT own the album sits *sideways* off the
-        // release→album→owner walk: the upward walk reaches the owner (AR1), never
-        // AR2. Only the transitive closure — walking the kept join row's own
-        // ancestors up — pulls AR2 and AA in, matching the snapshot prune
-        // (`keep_clause(artists)` keeps AR2 via the album_artists disjunct).
-        unsafe {
-            let db = open_memory_db();
-            create_album_schema(db);
-            let gates = Gates::from_tables(db, &album_tables()).expect("gates");
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
 
-            // AR1 owns AL1; AR2 is featured via AA; release R1 unmanaged.
-            let s = album_session(db);
-            exec(db, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR1', 'Owner', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR2', 'Featured', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL1', 'AR1', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL1', 'AR2', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL1', 0, '0000000001000-0000-dev1')");
-            let cs1 = s.changeset().expect("cs");
-            drop(s);
-            assert!(
-                walk(gate_outbound(db, &cs1, &gates).expect("gate").as_bytes())
-                    .expect("walk")
-                    .is_empty(),
-                "private graph emits nothing"
-            );
+        // AR1 owns AL1; AR2 is featured via AA; release R1 unmanaged.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR1', 'Owner', '0000000001000-0000-dev1')",
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR2', 'Featured', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL1', 'AR1', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL1', 'AR2', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL1', 0, '0000000001000-0000-dev1')",
+            ],
+        );
+        assert!(
+            walk(&out1).expect("walk").is_empty(),
+            "private graph emits nothing"
+        );
 
-            // Flip R1 managed.
-            let s = album_session(db);
-            exec(db, "UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'");
-            let cs2 = s.changeset().expect("cs");
-            drop(s);
-            let out2 = gate_outbound(db, &cs2, &gates).expect("gate");
-            let changes = walk(out2.as_bytes()).expect("walk");
+        // Flip R1 managed.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+        );
+        let changes = walk(&out2).expect("walk");
+        assert!(
+            has_row(&changes, "album_artists", "AA"),
+            "featured join row re-emitted"
+        );
+        assert!(
+            has_row(&changes, "artists", "AR2"),
+            "featured artist re-emitted"
+        );
 
-            assert!(
-                has_row(&changes, "album_artists", "AA"),
-                "featured join row re-emitted"
-            );
-            assert!(
-                has_row(&changes, "artists", "AR2"),
-                "featured artist re-emitted"
-            );
-
-            let peer = open_memory_db();
-            create_album_schema(peer);
-            apply_album(peer, &out2);
-            assert!(
-                row_exists(peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
-                "peer has join row"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM artists WHERE id = 'AR2'"),
-                "peer has featured artist"
-            );
-
-            ffi::sqlite3_close(db);
-            ffi::sqlite3_close(peer);
-        }
+        let peer = conn();
+        create_album_schema(&peer);
+        apply_album(&peer, &out2);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            "peer has join row"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR2'"),
+            "peer has featured artist"
+        );
     }
 
     #[test]
     fn second_flip_is_idempotent_under_lww() {
-        // An album already visible on a peer (one managed release synced)
-        // flips a SECOND release managed. The re-emit re-sends the album INSERT
-        // the peer already has; LWW resolves the duplicate-PK INSERT without
-        // error and the peer stays consistent.
-        unsafe {
-            let db = open_memory_db();
-            create_album_schema(db);
-            let gates = Gates::from_tables(db, &album_tables()).expect("gates");
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
 
-            // Cycle 1: an album with one managed release, synced to the peer.
-            let s = album_session(db);
-            exec(db, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')");
-            let cs1 = s.changeset().expect("cs");
-            drop(s);
-            let out1 = gate_outbound(db, &cs1, &gates).expect("gate");
+        // Cycle 1: an album with one managed release, synced to the peer.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+            ],
+        );
 
-            let peer = open_memory_db();
-            create_album_schema(peer);
-            apply_album(peer, &out1);
-            assert!(
-                row_exists(peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
-                "peer has the album after cycle 1"
-            );
+        let peer = conn();
+        create_album_schema(&peer);
+        apply_album(&peer, &out1);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "peer has the album after cycle 1"
+        );
 
-            // Cycle 2a: insert a second release unmanaged (stays private, cut).
-            let s = album_session(db);
-            exec(db, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R2', 'AL', 0, '0000000002000-0000-dev1')");
-            let cs2a = s.changeset().expect("cs");
-            drop(s);
-            let _ = gate_outbound(db, &cs2a, &gates).expect("gate");
+        // Cycle 2a: insert a second release unmanaged (stays private, cut).
+        let _ = capture_and_gate(
+            &c,
+            &tables,
+            &["INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R2', 'AL', 0, '0000000002000-0000-dev1')"],
+        );
 
-            // Cycle 2b: flip the second release managed. Re-emit re-sends the
-            // album the peer already has (over-emit), plus the new release.
-            let s = album_session(db);
-            exec(db, "UPDATE releases SET managed = 1, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R2'");
-            let cs2b = s.changeset().expect("cs");
-            drop(s);
-            let out2 = gate_outbound(db, &cs2b, &gates).expect("gate");
-            let changes = walk(out2.as_bytes()).expect("walk");
-            assert!(
-                has_row(&changes, "albums", "AL"),
-                "album re-emitted on the second flip"
-            );
-            assert!(
-                has_row(&changes, "releases", "R2"),
-                "second release emitted"
-            );
+        // Cycle 2b: flip the second release managed. Re-emit re-sends the album.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R2'"],
+        );
+        let changes = walk(&out2).expect("walk");
+        assert!(
+            has_row(&changes, "albums", "AL"),
+            "album re-emitted on the second flip"
+        );
+        assert!(
+            has_row(&changes, "releases", "R2"),
+            "second release emitted"
+        );
 
-            // Applying the duplicate album INSERT must not error; peer consistent.
-            apply_album(peer, &out2);
-            assert!(
-                row_exists(peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
-                "album still present"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
-                "first release still present"
-            );
-            assert!(
-                row_exists(peer, "SELECT 1 FROM releases WHERE id = 'R2'"),
-                "second release now present"
-            );
-            assert_eq!(
-                query_int(peer, "SELECT COUNT(*) FROM albums WHERE id = 'AL'"),
-                1,
-                "the duplicate INSERT did not create a second album row"
-            );
-
-            ffi::sqlite3_close(db);
-            ffi::sqlite3_close(peer);
-        }
+        // Applying the duplicate album INSERT must not error; peer consistent.
+        apply_album(&peer, &out2);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "album still present"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "first release still present"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R2'"),
+            "second release now present"
+        );
+        assert_eq!(
+            query_int(&peer, "SELECT COUNT(*) FROM albums WHERE id = 'AL'"),
+            1,
+            "the duplicate INSERT did not create a second album row"
+        );
     }
 }

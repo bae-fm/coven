@@ -3,7 +3,6 @@
 //! Shared across all platforms (macOS, iOS, CLI).
 
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,6 +10,7 @@ use tracing::info;
 
 use crate::blob::BlobPlan;
 use crate::config::{CloudProvider, Config, ConfigError};
+use crate::database::Database;
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::join_code::InviteCode;
 use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
@@ -19,7 +19,8 @@ use crate::oauth::OAuthError;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
 use crate::sync::invite::{unwrap_library_key, InviteError};
-use crate::sync::pull::{pull_changes, PullError, SendDbPtr};
+use crate::sync::pull::{pull_changes, PullError};
+use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
 use crate::sync::storage::SyncStorage;
 
@@ -161,9 +162,11 @@ async fn build_cloud_home_for_join(
 ///
 /// Handles everything: decode invite, get keypair, build cloud home (including
 /// OAuth flows), run the join protocol, and set as active library.
+#[allow(clippy::too_many_arguments)]
 pub async fn join_from_invite_code(
     invite_code_str: &str,
     app_dir: &Path,
+    synced_tables: &[SyncedTable],
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: crate::clock::ClockRef,
@@ -191,6 +194,7 @@ pub async fn join_from_invite_code(
     let config = join_library(
         app_dir,
         code,
+        synced_tables,
         &global_ks,
         cloud_home,
         ids.as_ref(),
@@ -209,9 +213,11 @@ pub async fn join_from_invite_code(
 /// Prefer `join_from_invite_code` for the full flow.
 ///
 /// `on_status` is called with progress messages for UI feedback.
+#[allow(clippy::too_many_arguments)]
 pub async fn join_library(
     data_dir: &Path,
     code: InviteCode,
+    synced_tables: &[SyncedTable],
     key_service: &KeyService,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
@@ -253,6 +259,7 @@ pub async fn join_library(
         &library_dir,
         &library_id,
         &device_id,
+        synced_tables,
         &code.join_info,
         &code.library_name,
         &new_key_service,
@@ -269,6 +276,7 @@ pub async fn join_library(
 }
 
 /// Inner bootstrap + save logic, separated so the caller can clean up on failure.
+#[allow(clippy::too_many_arguments)]
 async fn bootstrap_and_save(
     storage: &EncryptedSyncStorage,
     encryption: &EncryptionService,
@@ -276,6 +284,7 @@ async fn bootstrap_and_save(
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
+    synced_tables: &[SyncedTable],
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
     key_service: &KeyService,
@@ -298,8 +307,9 @@ async fn bootstrap_and_save(
 
     let changesets_applied = open_db_and_pull(
         &db_path,
-        bucket_dyn,
+        synced_tables,
         device_id,
+        bucket_dyn,
         &cursors,
         library_dir,
         blob_plan,
@@ -334,48 +344,51 @@ async fn bootstrap_and_save(
     Ok(config)
 }
 
-/// Open the database, pull changes, close the database.
+/// Open a [`Database`] over the bootstrapped db file and pull changesets since
+/// the snapshot.
+///
+/// The snapshot the bootstrap wrote already carries the full schema (the host's
+/// tables and coven's bookkeeping), so `Database::open`'s bookkeeping migration
+/// is idempotent and the host migrate is a no-op here. The fresh capture session
+/// is suspended before pulling — a just-bootstrapped library has no local
+/// changes to capture, and pull must apply with no session active.
 pub(crate) async fn open_db_and_pull(
     db_path: &Path,
-    storage: &dyn SyncStorage,
+    synced_tables: &[SyncedTable],
     device_id: &str,
+    storage: &dyn SyncStorage,
     cursors: &HashMap<String, u64>,
     library_dir: &LibraryDir,
     blob_plan: &dyn BlobPlan,
 ) -> Result<u64, JoinError> {
-    unsafe {
-        // Open in a tight scope so the raw `*mut sqlite3` is dropped before the
-        // pull await — only the Send wrapper crosses the await, which is what
-        // keeps this future Send. (A raw pointer left in an outer scope stays in
-        // the async state machine across the await even when its last use is
-        // before it.)
-        let db = {
-            let c_path = CString::new(db_path.to_str().unwrap()).unwrap();
-            let mut raw: *mut libsqlite3_sys::sqlite3 = std::ptr::null_mut();
-            let rc = libsqlite3_sys::sqlite3_open(c_path.as_ptr(), &mut raw);
-            if rc != libsqlite3_sys::SQLITE_OK {
-                return Err(JoinError::Database(
-                    "Failed to open database for changeset application".to_string(),
-                ));
-            }
-            SendDbPtr(raw)
-        };
+    let (db, _stamper) = Database::open(
+        db_path,
+        synced_tables.to_vec(),
+        device_id.to_string(),
+        |_conn| Ok(()),
+    )
+    .map_err(|e| {
+        JoinError::Database(format!("Failed to open database for changeset apply: {e}"))
+    })?;
 
-        let result =
-            match pull_changes(db, storage, device_id, cursors, library_dir, blob_plan).await {
-                Ok((_updated_cursors, pull_result)) => Ok(pull_result.changesets_applied),
-                Err(e) => {
-                    libsqlite3_sys::sqlite3_close(db.0);
-                    Err(JoinError::Pull(e))
-                }
-            };
+    // Suspend the capture session so the apply during pull is not re-recorded.
+    db.take_changeset_and_suspend()
+        .await
+        .map_err(|e| JoinError::Database(format!("Failed to suspend capture session: {e}")))?;
 
-        if result.is_ok() {
-            libsqlite3_sys::sqlite3_close(db.0);
-        }
+    let (_updated_cursors, pull_result) = pull_changes(
+        &db,
+        synced_tables,
+        storage,
+        device_id,
+        cursors,
+        library_dir,
+        blob_plan,
+    )
+    .await
+    .map_err(JoinError::Pull)?;
 
-        result
-    }
+    Ok(pull_result.changesets_applied)
 }
 
 /// Derive the CloudHomeCredentials to persist from the JoinInfo.

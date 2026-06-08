@@ -1,28 +1,30 @@
-/// Full sync orchestrator: push local changes, pull remote changes.
-///
-/// Protocol:
-/// 1. Grab changeset from the current session.
-/// 2. End the session (so incoming applies don't contaminate outgoing).
-/// 3. Push our changeset to S3 (handled by push module, stubbed here).
-/// 4. Pull incoming changesets (NO session active -- critical).
-/// 5. Apply incoming with conflict handler.
-/// 6. Start a new session for the next round.
-///
-/// The SyncService holds the configuration for a sync cycle but does NOT own
-/// the session or the raw sqlite3 handle. Those are passed in by the caller
-/// because session lifetime is tied to the write connection lock.
+//! Full sync orchestrator: gate + push local changes, pull remote changes.
+//!
+//! Protocol within a cycle:
+//! 1. The caller captured the outgoing changeset and suspended the capture
+//!    session (so incoming applies are not re-recorded). The bytes are passed in.
+//! 2. Gate the captured changeset (cut gated-false rows, re-emit on flip).
+//! 3. Push our changeset's blobs, then build the signed envelope to push.
+//! 4. Pull incoming changesets and apply them (session still suspended).
+//! 5. The caller resumes the capture session and runs snapshot policy.
+//!
+//! All connection access goes through the owned [`Database`]; the session
+//! lifecycle (suspend/resume) is the caller's, since it spans the network steps.
+
 use std::collections::HashMap;
 
 use tracing::{info, warn};
 
 use crate::blob::BlobPlan;
+use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::sync::session::SyncedTable;
 
 use super::envelope::{self, sign_envelope, ChangesetEnvelope};
+use super::gate;
 use super::pull::{self, PullResult};
 use super::push::{OutgoingChangeset, SCHEMA_VERSION};
-use super::session::SyncSession;
 use super::storage::SyncStorage;
 
 /// Configuration for a sync service.
@@ -30,9 +32,9 @@ pub struct SyncService {
     pub device_id: String,
 }
 
-/// Everything the caller needs after a sync cycle.
+/// Everything the caller needs after the gate + push-prep + pull steps.
 pub struct SyncResult {
-    /// The outgoing changeset bytes (if any local changes existed).
+    /// The outgoing changeset bytes (if any local changes survived the gate).
     /// The caller is responsible for pushing this to the storage.
     pub outgoing: Option<OutgoingChangeset>,
     /// Pull results (how many incoming changesets were applied).
@@ -46,28 +48,18 @@ impl SyncService {
         SyncService { device_id }
     }
 
-    /// Run a full sync cycle.
+    /// Gate the captured `outgoing` changeset, prepare its push envelope, and
+    /// pull remote changes.
     ///
-    /// This takes the current session, grabs its changeset, drops the session,
-    /// pulls remote changes, and returns what the caller needs to push and
-    /// to start a new session.
-    ///
-    /// The `message` parameter is a human-readable description of what changed
-    /// (e.g., "Imported Album One"). Callers derive this from the app event
-    /// that triggered the sync.
-    ///
-    /// The caller should:
-    /// 1. Push `outgoing` to the storage (if Some).
-    /// 2. Persist `updated_cursors` to the sync_cursors table.
-    /// 3. Start a new SyncSession on the write connection.
-    ///
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection pointer.
-    /// The session must have been created on this same connection.
-    pub async unsafe fn sync(
+    /// `outgoing` is the changeset the caller captured via
+    /// `Database::take_changeset_and_suspend`; the capture session is suspended
+    /// for the duration, so the apply inside `pull` is not re-recorded.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn sync(
         &self,
-        db: *mut libsqlite3_sys::sqlite3,
-        session: SyncSession,
+        db: &Database,
+        tables: &[SyncedTable],
+        outgoing: Vec<u8>,
         local_seq: u64,
         cursors: &HashMap<String, u64>,
         storage: &dyn SyncStorage,
@@ -79,36 +71,35 @@ impl SyncService {
     ) -> Result<SyncResult, SyncCycleError> {
         let _ = library_dir;
 
-        // Step 1: grab outgoing changeset from the session.
-        let captured_cs = session.changeset().map_err(SyncCycleError::Session)?;
-
-        // Step 2: end the session (drop it) — gating below opens its own session
-        // for the re-emit diff, and the next round's session starts after sync.
-        drop(session);
-
-        // Apply row-level sync gating. Cut gated-false rows (and their
+        // Step 2: apply row-level sync gating. Cut gated-false rows (and their
         // FK-descendants) so they stay local; re-emit a root's full subtree when
-        // its gate flips false→true. Done before the blob scan so blob upload
-        // sees the gated set, not the cut rows.
-        let outgoing_cs = match captured_cs {
-            Some(cs) => {
-                let gates = super::gate::Gates::from_db(db).map_err(SyncCycleError::Gate)?;
-                let gated =
-                    super::gate::gate_outbound(db, &cs, &gates).map_err(SyncCycleError::Gate)?;
-                if gated.is_empty() {
-                    None
-                } else {
-                    Some(gated)
-                }
+        // its gate flips false→true. Runs on the owned connection with the capture
+        // session already suspended. Done before the blob scan so blob upload sees
+        // the gated set, not the cut rows.
+        let outgoing_cs: Option<Vec<u8>> = if outgoing.is_empty() {
+            None
+        } else {
+            let tables = tables.to_vec();
+            let gated = db
+                .call(move |conn| {
+                    let gates = gate::Gates::from_tables(conn, &tables)
+                        .map_err(|e| crate::database::DbError(format!("gate build: {e}")))?;
+                    gate::gate_outbound(conn, &outgoing, &gates)
+                        .map_err(|e| crate::database::DbError(format!("gate outbound: {e}")))
+                })
+                .await
+                .map_err(|e| SyncCycleError::Gate(e.0))?;
+            if gated.is_empty() {
+                None
+            } else {
+                Some(gated)
             }
-            None => None,
         };
 
         // Step 3: upload blobs the outgoing changeset references, before the
         // envelope, so pullers can fetch them as soon as they see the change.
         if let Some(ref cs) = outgoing_cs {
-            let changes =
-                crate::changeset::walk(cs.as_bytes()).map_err(SyncCycleError::AssetScan)?;
+            let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
             for blob in blob_plan.blobs_to_push(&changes) {
                 if !blob.local_path.exists() {
                     warn!(id = %blob.id, "blob file not found locally, skipping upload");
@@ -136,17 +127,18 @@ impl SyncService {
                 author_pubkey: None,
                 signature: None,
             };
-            sign_envelope(&mut env, keypair, cs.as_bytes());
-            let packed = envelope::pack(&env, cs.as_bytes());
+            sign_envelope(&mut env, keypair, &cs);
+            let packed = envelope::pack(&env, &cs);
             OutgoingChangeset {
                 packed,
                 seq: next_seq,
             }
         });
 
-        // Step 4 + 5: pull incoming changesets (no session active).
+        // Step 4 + 5: pull incoming changesets and apply them (session suspended).
         let (updated_cursors, pull_result) = pull::pull_changes(
-            pull::SendDbPtr(db),
+            db,
+            tables,
             storage,
             &self.device_id,
             cursors,
@@ -164,8 +156,6 @@ impl SyncService {
             );
         }
 
-        // Step 6: the caller starts a new session after this returns.
-
         Ok(SyncResult {
             outgoing,
             pull: pull_result,
@@ -176,8 +166,7 @@ impl SyncService {
 
 #[derive(Debug)]
 pub enum SyncCycleError {
-    Session(super::session::SyncError),
-    Gate(super::gate::GateError),
+    Gate(String),
     Pull(pull::PullError),
     AssetScan(String),
     AssetUpload(String),
@@ -186,7 +175,6 @@ pub enum SyncCycleError {
 impl std::fmt::Display for SyncCycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncCycleError::Session(e) => write!(f, "session error: {e}"),
             SyncCycleError::Gate(e) => write!(f, "gate error: {e}"),
             SyncCycleError::Pull(e) => write!(f, "pull error: {e}"),
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
