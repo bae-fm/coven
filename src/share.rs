@@ -19,9 +19,9 @@
 //! authorizes *fetch*; the wrapped item key authorizes *decrypt* — independent,
 //! so a foreign blob ref in a manifest leaks only undecryptable ciphertext.
 
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+use crate::blob::BlobId;
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError};
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
@@ -87,41 +87,57 @@ impl std::fmt::Debug for ShareToken {
 /// coven's `{namespace}/{ab}/{cd}/{id}` layout.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareManifest {
-    /// Each authorized `(namespace, id)` pair.
-    pub blobs: Vec<(String, String)>,
+    /// Each authorized blob's logical `(namespace, id)` reference.
+    pub blobs: Vec<BlobId>,
 }
 
 impl ShareManifest {
     /// Whether `cloud_key` is one of the authorized blobs. The proxy resolves a
     /// requested object to its cloud key and asks coven; coven hashes each
-    /// authorized `(namespace, id)` ref to its cloud key with the same layout the
-    /// storage layer uses ([`EncryptedSyncStorage::blob_key`]) and matches. The
-    /// proxy therefore never learns coven's `{ab}/{cd}` partitioning.
+    /// authorized [`BlobId`] to its cloud key with the same layout the storage
+    /// layer uses ([`EncryptedSyncStorage::blob_key`]) and matches. The proxy
+    /// therefore never learns coven's `{ab}/{cd}` partitioning.
     pub fn allows(&self, cloud_key: &str) -> bool {
-        self.blobs
-            .iter()
-            .any(|(namespace, id)| EncryptedSyncStorage::blob_key(namespace, id) == cloud_key)
+        self.blobs.iter().any(|b| {
+            // `blob_key` → `hashed_path` indexes `&hex[..2]`/`&hex[2..4]` on the
+            // dash-stripped id and panics if it is under 4 chars or splits a
+            // multi-byte char. This runs on the unauthenticated proxy gate
+            // against host-supplied refs read from a manifest that may have been
+            // tampered with in the cloud, so a panic here is a denial of service.
+            // A real coven cloud key always has at least two leading byte-pairs,
+            // so a ref that can't be indexed there can never match one — treat it
+            // as a clean no-match instead of hashing it.
+            let hex = b.id.replace('-', "");
+            hex.is_char_boundary(2)
+                && hex.is_char_boundary(4)
+                && EncryptedSyncStorage::blob_key(&b.namespace, &b.id) == cloud_key
+        })
     }
 }
 
-/// Cloud object key for a share's wrapped item key.
-fn key_enc_path(share_id: &str) -> String {
-    format!("shares/{share_id}/key.enc")
+/// Prefix under which every share's objects live: `shares/{share_id}/...`.
+const SHARE_PREFIX: &str = "shares";
+
+/// The item key wrapped under the per-share secret.
+const KEY_ENC_FILE: &str = "key.enc";
+
+/// The authorized-blobs manifest.
+const MANIFEST_FILE: &str = "manifest.json";
+
+/// Cloud object key for one of a share's objects, e.g.
+/// `shares/{share_id}/key.enc`. The single home for the share layout, so
+/// `create_share` and `revoke_share` name the same objects.
+fn share_object_path(share_id: &str, filename: &str) -> String {
+    format!("{SHARE_PREFIX}/{share_id}/{filename}")
 }
 
-/// Cloud object key for a share's manifest.
-fn manifest_path(share_id: &str) -> String {
-    format!("shares/{share_id}/manifest.json")
-}
-
-/// Generate a high-entropy, unguessable `share_id`: 16 random bytes (128 bits,
-/// above the 122-bit floor the unauthenticated-proxy threat model requires),
-/// hex-encoded. coven owns this id — it is not a host sequential row id, which
-/// would be guessable and would couple the share to the host's id scheme.
+/// Generate a high-entropy, unguessable `share_id`: 32 random bytes (256 bits,
+/// well above the 122-bit floor the unauthenticated-proxy threat model
+/// requires), hex-encoded. coven owns this id — it is not a host sequential row
+/// id, which would be guessable and would couple the share to the host's id
+/// scheme.
 fn new_share_id() -> String {
-    let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
+    hex::encode(crate::encryption::generate_random_key())
 }
 
 /// Export `item_id` as a share: wrap its item key under a fresh per-share secret
@@ -139,7 +155,7 @@ pub async fn create_share(
     db: &Database,
     cloud_home: &dyn CloudHome,
     item_id: &str,
-    blobs: Vec<(String, String)>,
+    blobs: Vec<BlobId>,
 ) -> Result<ShareToken, ShareError> {
     let item_key = db
         .item_key(item_id)
@@ -158,10 +174,18 @@ pub async fn create_share(
     let manifest_json = serde_json::to_vec(&manifest)?;
 
     cloud_home
-        .write(&key_enc_path(&share_id), key_enc, &no_progress())
+        .write(
+            &share_object_path(&share_id, KEY_ENC_FILE),
+            key_enc,
+            &no_progress(),
+        )
         .await?;
     cloud_home
-        .write(&manifest_path(&share_id), manifest_json, &no_progress())
+        .write(
+            &share_object_path(&share_id, MANIFEST_FILE),
+            manifest_json,
+            &no_progress(),
+        )
         .await?;
 
     Ok(ShareToken { share_id, secret })
@@ -200,8 +224,12 @@ pub fn open_share(secret: &[u8; 32], key_enc: &[u8]) -> Result<[u8; 32], ShareEr
 /// envelope model) — claw-back-before-download needs item-key rotation, a
 /// separate capability.
 pub async fn revoke_share(cloud_home: &dyn CloudHome, share_id: &str) -> Result<(), ShareError> {
-    cloud_home.delete(&key_enc_path(share_id)).await?;
-    cloud_home.delete(&manifest_path(share_id)).await?;
+    cloud_home
+        .delete(&share_object_path(share_id, KEY_ENC_FILE))
+        .await?;
+    cloud_home
+        .delete(&share_object_path(share_id, MANIFEST_FILE))
+        .await?;
     Ok(())
 }
 
@@ -236,12 +264,15 @@ mod tests {
             &db,
             &home,
             "item-1",
-            vec![("audio".to_string(), "blob-1".to_string())],
+            vec![BlobId {
+                namespace: "audio".to_string(),
+                id: "blob-1".to_string(),
+            }],
         )
         .await
         .expect("create share");
 
-        let key_enc = read_cloud(&home, &key_enc_path(&token.share_id)).await;
+        let key_enc = read_cloud(&home, &share_object_path(&token.share_id, KEY_ENC_FILE)).await;
         let recovered = open_share(&token.secret, &key_enc).expect("open share");
 
         assert_eq!(recovered, item_key, "open_share recovers the item key");
@@ -280,24 +311,70 @@ mod tests {
     fn manifest_allows_listed_blob_only() {
         let manifest = ShareManifest {
             blobs: vec![
-                ("audio".to_string(), "blob-1".to_string()),
-                ("images".to_string(), "cover-1".to_string()),
+                BlobId {
+                    namespace: "audio".to_string(),
+                    id: "blob-1".to_string(),
+                },
+                BlobId {
+                    namespace: "images".to_string(),
+                    id: "cover-1".to_string(),
+                },
             ],
         };
 
-        let listed = EncryptedSyncStorage::blob_key("audio", "blob-1");
+        // The authorized cloud key, hardcoded as the real `{namespace}/{ab}/{cd}/{id}`
+        // layout: the dash-stripped id `blob1` partitions to `bl`/`ob`. Asserting
+        // against the literal (not against `blob_key`'s own output) makes a
+        // regression in the path layout fail this test instead of moving in
+        // lockstep with it.
         assert!(
-            manifest.allows(&listed),
-            "a listed (namespace, id) resolves to an authorized cloud key"
+            manifest.allows("audio/bl/ob/blob-1"),
+            "a listed (namespace, id) resolves to its authorized cloud key"
         );
 
-        let unlisted = EncryptedSyncStorage::blob_key("audio", "blob-2");
         assert!(
-            !manifest.allows(&unlisted),
+            !manifest.allows("audio/bl/ob/blob-2"),
             "an unlisted (namespace, id) is rejected"
         );
         // A bare id with no layout is not a cloud key and never matches.
         assert!(!manifest.allows("blob-1"));
+    }
+
+    /// A manifest ref whose dash-stripped id is too short to partition (`{ab}/{cd}`
+    /// needs four hex chars) must not panic the unauthenticated `allows` gate: a
+    /// tampered cloud manifest could carry such a ref, and a panic on the proxy is
+    /// a denial of service. It can never match a real cloud key, so `allows`
+    /// reports a clean no-match.
+    #[test]
+    fn manifest_allows_does_not_panic_on_unindexable_ref() {
+        let manifest = ShareManifest {
+            blobs: vec![BlobId {
+                namespace: "audio".to_string(),
+                id: "ab".to_string(),
+            }],
+        };
+        assert!(
+            !manifest.allows("audio/ab/ab/ab"),
+            "a ref too short to partition never matches and never panics"
+        );
+    }
+
+    /// Pin `ShareManifest`'s serialized JSON shape. The proxy is a separate
+    /// component that deserializes this manifest from the cloud, so the wire format
+    /// is a cross-component contract: a field rename or a tuple-vs-struct change
+    /// here would silently break the proxy. This catches such a drift.
+    #[test]
+    fn manifest_json_shape_is_pinned() {
+        let manifest = ShareManifest {
+            blobs: vec![BlobId {
+                namespace: "audio".to_string(),
+                id: "blob-1".to_string(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&manifest).expect("serialize manifest"),
+            serde_json::json!({ "blobs": [{ "namespace": "audio", "id": "blob-1" }] }),
+        );
     }
 
     /// After `revoke_share`, the proxy can no longer read either share object:
@@ -313,8 +390,12 @@ mod tests {
             .expect("create share");
 
         // Both objects exist before revocation.
-        assert!(home.get(&key_enc_path(&token.share_id)).is_some());
-        assert!(home.get(&manifest_path(&token.share_id)).is_some());
+        assert!(home
+            .get(&share_object_path(&token.share_id, KEY_ENC_FILE))
+            .is_some());
+        assert!(home
+            .get(&share_object_path(&token.share_id, MANIFEST_FILE))
+            .is_some());
 
         revoke_share(&home, &token.share_id)
             .await
@@ -322,14 +403,16 @@ mod tests {
 
         assert!(
             matches!(
-                home.read(&key_enc_path(&token.share_id)).await,
+                home.read(&share_object_path(&token.share_id, KEY_ENC_FILE))
+                    .await,
                 Err(CloudHomeError::NotFound(_))
             ),
             "key.enc is gone after revocation"
         );
         assert!(
             matches!(
-                home.read(&manifest_path(&token.share_id)).await,
+                home.read(&share_object_path(&token.share_id, MANIFEST_FILE))
+                    .await,
                 Err(CloudHomeError::NotFound(_))
             ),
             "manifest.json is gone after revocation"
@@ -359,12 +442,15 @@ mod tests {
             &db,
             &home,
             "item-1",
-            vec![("audio".to_string(), "item-2-blob".to_string())],
+            vec![BlobId {
+                namespace: "audio".to_string(),
+                id: "item-2-blob".to_string(),
+            }],
         )
         .await
         .expect("create share of item-1");
 
-        let key_enc = read_cloud(&home, &key_enc_path(&token.share_id)).await;
+        let key_enc = read_cloud(&home, &share_object_path(&token.share_id, KEY_ENC_FILE)).await;
         let recovered = open_share(&token.secret, &key_enc).expect("open share");
         assert_eq!(recovered, key_1, "the share yields item-1's key");
 

@@ -7,7 +7,23 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::changeset::RowChange;
+
+/// A blob's logical cloud reference: just its `(namespace, id)`, with none of the
+/// local-disk or encryption-scope detail a [`BlobRef`] carries. This is the
+/// shape that may cross into a cloud manifest — a share authorizes blobs by their
+/// logical id, and coven hashes each to its `{namespace}/{ab}/{cd}/{id}` cloud
+/// key internally. A `BlobRef`'s `local_path`/`scope` must never reach the cloud,
+/// so the manifest references this lean type instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobId {
+    /// Cloud namespace, e.g. `"audio"`.
+    pub namespace: String,
+    /// Blob id (typically the id of the blob-bearing row).
+    pub id: String,
+}
 
 /// Which key encrypts a blob, as a host names it on a [`BlobRef`].
 ///
