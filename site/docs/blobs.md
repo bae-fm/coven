@@ -61,9 +61,9 @@ encrypted under:
   synced `item_keys` table (so it reaches every member and survives snapshots),
   and resolves by `item_id` on both push and pull. The host names the item; coven
   holds the key, so the host never handles raw key bytes. Unlike `Derived`, an
-  item key is *not* a function of the master, so it can be rotated independently
-  and **exported to a non-member** without exposing the master — that export is a
-  share. See [Item keys and sharing](sharing.md#item-keys).
+  item key is *not* a function of the master, so coven can **export it to a
+  non-member** without handing over the master — that export is a share. See
+  [Item keys and sharing](sharing.md#item-keys).
 
 The derivation is deterministic: the same `scope_id` always yields the same key,
 on push and on pull alike. That is what lets a puller decrypt: it passes the same
@@ -76,12 +76,13 @@ Use `Master` when every member should read the blob, which is the common case �
 it needs no key management at all. `Derived` gives a finer split among members
 with a key that is still a deterministic function of the master. Reach for `Item`
 only when a blob belongs to a unit you want to **share with someone outside the
-library** or **rotate on its own**: the item key is independent of the master and
-coven manages its lifecycle (mint, sync, share, revoke).
+library**: the item key is independent of the master, so coven can hand it to an
+outsider without exposing the library, and coven manages its lifecycle (mint,
+sync, share, revoke).
 
-Item keys are opt-in. An app that never shares to non-members and never rotates
-per-item simply never emits `Item` — it stays on `Master`/`Derived`, the
-`item_keys` table stays empty, and none of the share machinery runs.
+Item keys are opt-in. An app that never shares to non-members simply never emits
+`Item` — it stays on `Master`/`Derived`, the `item_keys` table stays empty, and
+none of the share machinery runs.
 
 ## How a blob moves out
 

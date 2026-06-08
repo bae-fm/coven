@@ -253,20 +253,18 @@ never sees raw key bytes: it tags a blob with
 [Blobs](blobs.md#encryption-scope)), and coven resolves the id to the key when it
 encrypts on push and decrypts on pull.
 
-**Why an item key and not `Master` or `Derived`?** Two properties the others lack:
-
-- It is **independent of the master** (not derived from it), so it can be
-  **rotated on its own** to cut access to one item without re-keying the whole
-  library.
-- It can be **handed to a non-member** — a share — without handing over the
-  master, so an outsider reads exactly one item and nothing else.
+**Why an item key and not `Master` or `Derived`?** Because it is **independent of
+the master** — not derived from it — coven can **hand it to a non-member** without
+handing over the master. That is a share: an outsider given the item key reads
+exactly one item and nothing else, while the library key and every other item stay
+out of reach.
 
 A *member* can read every item key (each rides the master-encrypted changeset, and
 a member holds the master), so an item key does not hide an item *from members*. It
-exists so one item can be rotated or shared *outward* on its own.
+exists so one item can be shared *outward* on its own.
 
 **Don't need sharing?** Then don't use item keys. An app that never shares to
-outsiders and never rotates per-item simply never emits `BlobScope::Item` and never
+outsiders simply never emits `BlobScope::Item` and never
 calls `mint_item_key`: it stays on `Master`/`Derived`, the `item_keys` table stays
 empty, and the share machinery below never runs. Item keys are a layer you opt
 into, not a tax every app pays.
@@ -320,6 +318,4 @@ the server never sees it), and `share_id` is unguessable (so the unauthenticated
 deletes the `shares/{share_id}/` objects. The server can no longer read the
 manifest, so it stops serving the share and the URL goes dead. Bytes the recipient
 already downloaded are not clawed back — the same envelope model coven uses for
-membership revocation. To cut off a recipient who has the URL but hasn't downloaded
-yet, rotate the item key (re-encrypt the item's blobs under a fresh key), which is
-independent of the master and of every other item.
+membership revocation.
