@@ -1,10 +1,10 @@
 # Overview
 
-coven syncs apps that keep their data in SQLite. You keep your schema and your
-database driver. coven
-[captures](https://www.sqlite.org/sessionintro.html) each change with SQLite's
-session extension, encrypts and signs it, moves it through storage you already
-control, and applies remote changes back into SQLite. No coordination server.
+coven syncs apps that keep their data in SQLite. You keep your schema; coven owns
+the connection and runs your queries through it, so it can
+[capture](https://www.sqlite.org/sessionintro.html) each change with SQLite's
+session extension, encrypt and sign it, move it through storage you already
+control, and apply remote changes back into SQLite. No coordination server.
 
 ## The round trip
 
