@@ -63,21 +63,18 @@ CREATE TABLE IF NOT EXISTS item_keys (
 ";
 
 /// A pending cloud blob operation from the `cloud_outbox` table.
+///
+/// The fields the two operations share live here; the operation-specific ones
+/// live in [`OutboxOperation`]. The `cloud_outbox` table is flat (every
+/// operation-specific column is nullable), but a row reads back as one variant
+/// or the other, so a drain matches on `operation` and never sees a column that
+/// doesn't belong to it (no upload-only `scope` on a delete, no delete-only
+/// `min_seq` on an upload).
 #[derive(Debug, Clone)]
 pub struct OutboxEntry {
     pub id: i64,
-    pub operation: OutboxOperation,
-    pub file_id: String,
     pub cloud_key: String,
-    pub source_path: Option<String>,
-    /// The blob's encryption scope, named by the host at enqueue, for an upload
-    /// entry. `process_uploads` resolves it to a key at drain (looking up
-    /// `item_keys` for a [`crate::blob::BlobScope::Item`] scope), since the upload
-    /// runs long after the enqueue site is gone. `None` for a delete entry — a
-    /// delete touches no key, so it stores no scope.
-    pub scope: Option<crate::blob::BlobScope>,
     pub created_at: String,
-    pub min_seq: Option<u64>,
     /// How many times an upload of this entry has failed. `0` for a freshly
     /// queued entry.
     pub attempt_count: i64,
@@ -86,21 +83,31 @@ pub struct OutboxEntry {
     /// RFC 3339 timestamp of the most recent attempt, if any. Drives retry
     /// backoff.
     pub last_attempt_at: Option<String>,
+    /// The operation and its operation-specific fields.
+    pub operation: OutboxOperation,
 }
 
-/// Type of cloud blob operation.
+/// A cloud blob operation and the fields only that operation carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboxOperation {
-    Upload,
-    Delete,
-}
-
-impl OutboxOperation {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "upload" => Some(OutboxOperation::Upload),
-            "delete" => Some(OutboxOperation::Delete),
-            _ => None,
-        }
-    }
+    /// Upload a local blob. Carries the local source, the host-named encryption
+    /// scope (resolved to a key at drain — looking up `item_keys` for a
+    /// [`crate::blob::BlobScope::Item`] scope, since the upload runs long after
+    /// the enqueue site is gone), and the `file_id` the upload reports progress
+    /// under.
+    Upload {
+        file_id: String,
+        /// Local plaintext source. `None` means the blob lives at coven's
+        /// default storage path for `file_id`.
+        source_path: Option<String>,
+        /// The blob's encryption scope, named by the host at enqueue. An upload
+        /// always has one — a delete, which touches no key, has none.
+        scope: crate::blob::BlobScope,
+    },
+    /// Delete a cloud blob once every peer has synced past `min_seq`.
+    Delete {
+        /// The seq floor below which the delete is unsafe (a peer might still
+        /// reference the blob). `None` means delete unconditionally.
+        min_seq: Option<u64>,
+    },
 }

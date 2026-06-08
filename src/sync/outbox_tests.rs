@@ -276,34 +276,42 @@ fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String
 
 // --- Tests -----------------------------------------------------------------
 
-/// Record-and-continue: a failing entry no longer stops the drain, so a good
-/// entry queued behind it still uploads in the same cycle.
-/// An upload entry carries its scope (`Some`); a delete entry stores no scope
-/// (`None`) — a delete touches no key, so the nullable `scope` column stays NULL
-/// rather than holding a meaningless placeholder.
+/// An upload row reads back as an `Upload` carrying its scope; a delete row
+/// reads back as a `Delete` carrying its seq floor. The operation-specific
+/// fields live in the variant, so a delete has no scope to be `None` and an
+/// upload has no `min_seq` — the flat row's unused columns are simply unread.
 #[tokio::test]
-async fn upload_carries_scope_delete_carries_none() {
+async fn upload_carries_scope_delete_carries_min_seq() {
     use crate::blob::BlobScope;
+    use crate::db::OutboxOperation;
 
     let db = open_outbox_db();
     db.enqueue_upload("f1", "k-up", None, BlobScope::Master, T0)
         .await
         .expect("enqueue upload");
-    db.enqueue_delete("k-del", 0, T0)
+    db.enqueue_delete("k-del", 7, T0)
         .await
         .expect("enqueue delete");
 
     let uploads = db.get_pending_cloud_uploads().await.expect("uploads");
     assert_eq!(uploads.len(), 1);
     assert_eq!(
-        uploads[0].scope,
-        Some(BlobScope::Master),
-        "an upload entry carries its scope"
+        uploads[0].operation,
+        OutboxOperation::Upload {
+            file_id: "f1".to_string(),
+            source_path: None,
+            scope: BlobScope::Master,
+        },
+        "an upload entry carries its scope in the variant"
     );
 
     let deletes = db.get_pending_cloud_deletes().await.expect("deletes");
     assert_eq!(deletes.len(), 1);
-    assert_eq!(deletes[0].scope, None, "a delete entry stores no scope");
+    assert_eq!(
+        deletes[0].operation,
+        OutboxOperation::Delete { min_seq: Some(7) },
+        "a delete entry carries its seq floor in the variant"
+    );
 }
 
 #[tokio::test]

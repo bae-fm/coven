@@ -127,8 +127,11 @@ impl Database {
         // needs, so coven — not the host — declares it synced. Injecting it here
         // is the single point that puts it on every path that reads the set: the
         // capture session attaches it, the snapshot preserves it, and the gate
-        // and apply operate over it. The host never sees or declares it.
-        let synced_tables = with_item_keys(synced_tables);
+        // and apply operate over it. The host never sees or declares it. A
+        // coven-reserved table name the host cannot declare, so this appends
+        // unconditionally.
+        let mut synced_tables = synced_tables;
+        synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
 
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
@@ -457,19 +460,15 @@ impl Database {
     /// Pending upload entries, oldest first. The host reads these to drive its
     /// own upload-status UI; coven's sync loop reads them to do the uploads.
     pub async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        self.pending_outbox(OutboxOperation::Upload).await
+        self.pending_outbox("upload").await
     }
 
     /// Pending delete entries, oldest first.
     pub async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        self.pending_outbox(OutboxOperation::Delete).await
+        self.pending_outbox("delete").await
     }
 
-    async fn pending_outbox(&self, op: OutboxOperation) -> Result<Vec<OutboxEntry>, DbError> {
-        let op_str = match op {
-            OutboxOperation::Upload => "upload",
-            OutboxOperation::Delete => "delete",
-        };
+    async fn pending_outbox(&self, op_str: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
         self.call(move |conn| {
             let mut stmt = conn
                 .prepare(
@@ -599,39 +598,39 @@ fn read_item_key(conn: &Connection, item_id: &str) -> Result<Option<[u8; 32]>, D
 }
 
 /// Map a `cloud_outbox` row to an [`OutboxEntry`]. Column order matches the
-/// SELECT in [`Database::pending_outbox`].
+/// SELECT in [`Database::pending_outbox`]. The flat row reads back as one
+/// [`OutboxOperation`] variant or the other, built from the columns that belong
+/// to that operation — the rest are NULL and unread.
 fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
+    let op_tag: String = r.get(1)?;
+    let operation = match op_tag.as_str() {
+        "upload" => {
+            // A present scope must parse — a present-but-unparseable scope is a
+            // corrupt row. An upload always wrote one (the column is non-NULL
+            // for an upload), so its absence is also corruption.
+            let scope_str: String = r.get(5)?;
+            let scope = crate::blob::BlobScope::from_outbox_str(&scope_str)
+                .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {scope_str:?}"));
+            OutboxOperation::Upload {
+                file_id: r.get(2)?,
+                source_path: r.get(4)?,
+                scope,
+            }
+        }
+        "delete" => OutboxOperation::Delete {
+            min_seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+        },
+        other => panic!("invalid cloud_outbox.operation: {other:?}"),
+    };
     Ok(OutboxEntry {
         id: r.get(0)?,
-        operation: OutboxOperation::parse(&r.get::<_, String>(1)?)
-            .expect("invalid outbox operation in DB"),
-        file_id: r.get(2)?,
         cloud_key: r.get(3)?,
-        source_path: r.get(4)?,
-        scope: {
-            // NULL for a delete entry (no key); a present value must parse — a
-            // present-but-unparseable scope is a corrupt row.
-            let s: Option<String> = r.get(5)?;
-            s.map(|s| {
-                crate::blob::BlobScope::from_outbox_str(&s)
-                    .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {s:?}"))
-            })
-        },
         created_at: r.get(6)?,
-        min_seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
         attempt_count: r.get(8)?,
         last_error: r.get(9)?,
         last_attempt_at: r.get(10)?,
+        operation,
     })
-}
-
-/// Append coven's own `item_keys` synced table to the host's declared set. Plain
-/// (ungated, syncs unconditionally): every member needs every item key.
-fn with_item_keys(mut synced_tables: Vec<SyncedTable>) -> Vec<SyncedTable> {
-    // `item_keys` is a coven-reserved table name the host cannot declare, so this
-    // appends unconditionally.
-    synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
-    synced_tables
 }
 
 /// Seed the register clock from one candidate floor, if present. A present but

@@ -96,10 +96,13 @@ pub(super) fn backoff_window(attempt_count: i64) -> chrono::Duration {
 }
 
 /// Record a failed upload attempt and notify the observer. The entry is left
-/// queued; it becomes eligible for retry again after [`backoff_window`].
+/// queued; it becomes eligible for retry again after [`backoff_window`]. Only
+/// uploads fail this way (a delete failure just retries next cycle), so the
+/// caller passes the upload's `file_id` for the observer notification.
 async fn record_failure(
     db: &Database,
     entry: &crate::db::OutboxEntry,
+    file_id: &str,
     error: &str,
     now: chrono::DateTime<chrono::Utc>,
     observer: Option<&dyn BlobUploadObserver>,
@@ -114,8 +117,34 @@ async fn record_failure(
         );
     }
     if let Some(obs) = observer {
-        obs.on_blob_upload_failed(&entry.file_id, error).await;
+        obs.on_blob_upload_failed(file_id, error).await;
     }
+}
+
+/// Read an upload's local plaintext, resolve its scope to a key, and encrypt.
+///
+/// The two failure modes — the local file can't be read, the scope can't be
+/// resolved to a key (a missing `item_keys` row) — both surface as an `Err`
+/// carrying a host-readable message, so the upload loop has one failure path
+/// (warn + record + skip) instead of one per step. The scope is resolved at
+/// drain (not enqueue) because the key may be minted/synced after the blob was
+/// queued, and an `Item` scope reads `item_keys` here, holding `db`.
+async fn resolve_and_encrypt(
+    db: &Database,
+    encryption: &std::sync::RwLock<EncryptionService>,
+    file_path: &Path,
+    scope: crate::blob::BlobScope,
+) -> Result<Vec<u8>, String> {
+    let data = tokio::fs::read(file_path)
+        .await
+        .map_err(|e| format!("cannot read local file {}: {e}", file_path.display()))?;
+    let resolved = db
+        .resolve_blob_scope(scope)
+        .await
+        .map_err(|e| format!("cannot resolve blob scope: {e}"))?;
+    let enc =
+        crate::sync::encrypted_storage::encryption_for_scope(resolved, &encryption.read().unwrap());
+    Ok(enc.encrypt(&data))
 }
 
 /// Process pending uploads: read local file, encrypt, write to cloud.
@@ -169,63 +198,41 @@ pub async fn process_uploads(
             }
         }
 
-        if let Some(obs) = observer {
-            obs.on_blob_upload_started(&entry.file_id).await;
-        }
-
-        let file_path = match &entry.source_path {
-            Some(p) => std::path::PathBuf::from(p),
-            None => library_dir.join(crate::storage::local::storage_path(&entry.file_id)),
-        };
-
-        let data = match tokio::fs::read(&file_path).await {
-            Ok(d) => d,
-            Err(e) => {
-                let msg = format!("cannot read local file {}: {e}", file_path.display());
-                warn!("Upload failed: {msg}");
-                record_failure(db, &entry, &msg, now, observer).await;
-                continue;
-            }
-        };
-
-        // An upload entry must carry a scope (a delete entry stores NULL — it
-        // touches no key). A `None` here is a bug in how the row was enqueued;
-        // surface it rather than guessing a key.
-        let Some(scope) = entry.scope.clone() else {
-            let msg = "upload outbox entry has no scope".to_string();
-            warn!("Upload failed for {}: {msg}", entry.cloud_key);
-            record_failure(db, &entry, &msg, now, observer).await;
+        // Every row from `get_pending_cloud_uploads` is an `Upload`; destructure
+        // the upload-only fields (a delete carries none of these).
+        let crate::db::OutboxOperation::Upload {
+            file_id,
+            source_path,
+            scope,
+        } = &entry.operation
+        else {
             continue;
         };
 
-        // Resolve the entry's public scope to a key at drain — an `Item(id)`
-        // scope reads `item_keys` here, holding `db`. A missing key is a host
-        // bug; record it as a failure rather than silently encrypting under the
-        // master key (which no share recipient could read).
-        let encrypted = match db.resolve_blob_scope(scope).await {
-            Ok(resolved) => {
-                let enc = crate::sync::encrypted_storage::encryption_for_scope(
-                    resolved,
-                    &encryption.read().unwrap(),
-                );
-                enc.encrypt(&data)
-            }
-            Err(e) => {
-                let msg = format!("cannot resolve blob scope: {e}");
+        if let Some(obs) = observer {
+            obs.on_blob_upload_started(file_id).await;
+        }
+
+        let file_path = match source_path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => library_dir.join(crate::storage::local::storage_path(file_id)),
+        };
+
+        // Read the local plaintext, resolve the scope to a key (an `Item` scope
+        // reads `item_keys` here, holding `db`), and encrypt — all in one step
+        // with a single failure path. A missing key is a host bug; record it as
+        // a failure rather than silently encrypting under the master key (which
+        // no share recipient could read).
+        let encrypted = match resolve_and_encrypt(db, encryption, &file_path, scope.clone()).await {
+            Ok(bytes) => bytes,
+            Err(msg) => {
                 warn!("Upload failed for {}: {msg}", entry.cloud_key);
-                record_failure(db, &entry, &msg, now, observer).await;
+                record_failure(db, &entry, file_id, &msg, now, observer).await;
                 continue;
             }
         };
 
-        match upload_with_progress(
-            cloud_home,
-            &entry.cloud_key,
-            &entry.file_id,
-            encrypted,
-            observer,
-        )
-        .await
+        match upload_with_progress(cloud_home, &entry.cloud_key, file_id, encrypted, observer).await
         {
             Ok(()) => {
                 if let Err(e) = db.remove_cloud_outbox_entry(entry.id).await {
@@ -234,13 +241,13 @@ pub async fn process_uploads(
                 count += 1;
 
                 if let Some(obs) = observer {
-                    obs.on_blob_uploaded(&entry.file_id).await;
+                    obs.on_blob_uploaded(file_id).await;
                 }
             }
             Err(e) => {
                 let msg = format!("cloud write failed: {e}");
                 warn!("Upload failed for {}: {msg}", entry.cloud_key);
-                record_failure(db, &entry, &msg, now, observer).await;
+                record_failure(db, &entry, file_id, &msg, now, observer).await;
                 continue;
             }
         }
@@ -271,9 +278,14 @@ pub async fn process_deletes(
 
     let mut count = 0;
     for entry in deletes {
-        if let Some(min_seq) = entry.min_seq {
+        // Every row from `get_pending_cloud_deletes` is a `Delete`; read its
+        // seq floor (an upload carries no `min_seq`).
+        let crate::db::OutboxOperation::Delete { min_seq } = &entry.operation else {
+            continue;
+        };
+        if let Some(min_seq) = min_seq {
             if let Some(head) = min_head {
-                if head <= min_seq {
+                if head <= *min_seq {
                     continue;
                 }
             }
