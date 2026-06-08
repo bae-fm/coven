@@ -31,6 +31,6 @@ pub mod storage;
 pub mod sync_loop;
 pub mod sync_manager;
 #[cfg(test)]
-mod test_helpers;
+pub(crate) mod test_helpers;
 #[cfg(test)]
 mod tests;
