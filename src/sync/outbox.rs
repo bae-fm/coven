@@ -188,17 +188,27 @@ pub async fn process_uploads(
             }
         };
 
+        // An upload entry must carry a scope (a delete entry stores NULL — it
+        // touches no key). A `None` here is a bug in how the row was enqueued;
+        // surface it rather than guessing a key.
+        let Some(scope) = entry.scope.clone() else {
+            let msg = "upload outbox entry has no scope".to_string();
+            warn!("Upload failed for {}: {msg}", entry.cloud_key);
+            record_failure(db, &entry, &msg, now, observer).await;
+            continue;
+        };
+
         // Resolve the entry's public scope to a key at drain — an `Item(id)`
         // scope reads `item_keys` here, holding `db`. A missing key is a host
         // bug; record it as a failure rather than silently encrypting under the
         // master key (which no share recipient could read).
-        let encrypted = match db.resolve_blob_scope(entry.scope.clone()).await {
-            Ok(crate::blob::ResolvedScope::Master) => encryption.read().unwrap().encrypt(&data),
-            Ok(crate::blob::ResolvedScope::Derived(s)) => {
-                encryption.read().unwrap().derive_scoped(&s).encrypt(&data)
-            }
-            Ok(crate::blob::ResolvedScope::Key(key)) => {
-                EncryptionService::from_key(key).encrypt(&data)
+        let encrypted = match db.resolve_blob_scope(scope).await {
+            Ok(resolved) => {
+                let enc = crate::sync::encrypted_storage::encryption_for_scope(
+                    resolved,
+                    &encryption.read().unwrap(),
+                );
+                enc.encrypt(&data)
             }
             Err(e) => {
                 let msg = format!("cannot resolve blob scope: {e}");

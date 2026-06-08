@@ -278,6 +278,34 @@ fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String
 
 /// Record-and-continue: a failing entry no longer stops the drain, so a good
 /// entry queued behind it still uploads in the same cycle.
+/// An upload entry carries its scope (`Some`); a delete entry stores no scope
+/// (`None`) — a delete touches no key, so the nullable `scope` column stays NULL
+/// rather than holding a meaningless placeholder.
+#[tokio::test]
+async fn upload_carries_scope_delete_carries_none() {
+    use crate::blob::BlobScope;
+
+    let db = open_outbox_db();
+    db.enqueue_upload("f1", "k-up", None, BlobScope::Master, T0)
+        .await
+        .expect("enqueue upload");
+    db.enqueue_delete("k-del", 0, T0)
+        .await
+        .expect("enqueue delete");
+
+    let uploads = db.get_pending_cloud_uploads().await.expect("uploads");
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        uploads[0].scope,
+        Some(BlobScope::Master),
+        "an upload entry carries its scope"
+    );
+
+    let deletes = db.get_pending_cloud_deletes().await.expect("deletes");
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0].scope, None, "a delete entry stores no scope");
+}
+
 #[tokio::test]
 async fn bad_item_does_not_block_good_later_item() {
     let tmp = tempfile::tempdir().unwrap();

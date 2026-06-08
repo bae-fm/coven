@@ -309,6 +309,13 @@ impl Database {
     /// `item_keys` is in the synced set, the row also survives a snapshot
     /// bootstrap. Returns the item's key (the freshly minted one, or the existing
     /// one if it was already present).
+    ///
+    /// `item_id` must be unique at creation. coven does not coordinate two devices
+    /// independently minting the SAME `item_id` while offline: they would generate
+    /// different random keys, last-writer-wins on the `item_keys` row keeps one,
+    /// and any blobs the loser already encrypted under its key become
+    /// undecryptable. Hosts avoid this by minting at item-creation time, where the
+    /// id is freshly allocated and the item does not yet exist on another device.
     pub async fn mint_item_key(&self, item_id: &str) -> Result<[u8; 32], DbError> {
         let item_id = item_id.to_string();
         let new_key = crate::encryption::generate_random_key();
@@ -409,15 +416,14 @@ impl Database {
         created_at: &str,
     ) -> Result<(), DbError> {
         let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
-        // A delete touches no key; `scope` is NOT NULL, so write the master
-        // placeholder. The delete drain never reads it.
-        let scope = crate::blob::BlobScope::Master.to_outbox_str();
+        // A delete touches no key, so it carries no scope — the column is
+        // nullable and a delete row leaves it NULL.
         self.call(move |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO cloud_outbox \
                  (operation, file_id, cloud_key, scope, created_at, min_seq) \
-                 VALUES ('delete', '', ?1, ?2, ?3, ?4)",
-                (cloud_key, scope, created_at, min_seq as i64),
+                 VALUES ('delete', '', ?1, NULL, ?2, ?3)",
+                (cloud_key, created_at, min_seq as i64),
             )
             .map(|_| ())
             .map_err(DbError::from)
@@ -567,23 +573,29 @@ impl Database {
 }
 
 /// Read the 32-byte content key for `item_id` from `item_keys`, or `None` if no
-/// row exists. A stored key of the wrong length is a corrupt row and panics —
-/// `mint_item_key` only ever writes 32 bytes.
+/// row exists. A stored key of the wrong length is a corrupt DB and surfaces as a
+/// [`DbError`] — `mint_item_key` only ever writes 32 bytes, so this names the
+/// offending row rather than failing later as an opaque decrypt error.
 fn read_item_key(conn: &Connection, item_id: &str) -> Result<Option<[u8; 32]>, DbError> {
-    conn.query_row(
-        "SELECT key FROM item_keys WHERE item_id = ?1",
-        [item_id],
-        |r| r.get::<_, Vec<u8>>(0),
-    )
-    .optional()
-    .map_err(DbError::from)
-    .map(|opt| {
-        opt.map(|v| {
-            v.try_into().unwrap_or_else(|v: Vec<u8>| {
-                panic!("item_keys.key must be 32 bytes, got {}", v.len())
+    let stored: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT key FROM item_keys WHERE item_id = ?1",
+            [item_id],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    match stored {
+        None => Ok(None),
+        Some(bytes) => {
+            let len = bytes.len();
+            bytes.try_into().map(Some).map_err(|_| {
+                DbError(format!(
+                    "item_keys.key for {item_id} is {len} bytes, not 32"
+                ))
             })
-        })
-    })
+        }
+    }
 }
 
 /// Map a `cloud_outbox` row to an [`OutboxEntry`]. Column order matches the
@@ -597,9 +609,13 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
         cloud_key: r.get(3)?,
         source_path: r.get(4)?,
         scope: {
-            let s: String = r.get(5)?;
-            crate::blob::BlobScope::from_outbox_str(&s)
-                .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {s:?}"))
+            // NULL for a delete entry (no key); a present value must parse — a
+            // present-but-unparseable scope is a corrupt row.
+            let s: Option<String> = r.get(5)?;
+            s.map(|s| {
+                crate::blob::BlobScope::from_outbox_str(&s)
+                    .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {s:?}"))
+            })
         },
         created_at: r.get(6)?,
         min_seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
@@ -610,16 +626,11 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
 }
 
 /// Append coven's own `item_keys` synced table to the host's declared set. Plain
-/// (ungated, syncs unconditionally): every member needs every item key. Skips the
-/// append if the host already declared a table by that name — `item_keys` is a
-/// coven-reserved name, but a defensive no-op beats a duplicate attach.
+/// (ungated, syncs unconditionally): every member needs every item key.
 fn with_item_keys(mut synced_tables: Vec<SyncedTable>) -> Vec<SyncedTable> {
-    if !synced_tables
-        .iter()
-        .any(|t| t.name() == crate::db::ITEM_KEYS_TABLE)
-    {
-        synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
-    }
+    // `item_keys` is a coven-reserved table name the host cannot declare, so this
+    // appends unconditionally.
+    synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
     synced_tables
 }
 

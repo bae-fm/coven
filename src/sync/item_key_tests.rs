@@ -10,15 +10,21 @@
 //! snapshot bootstrap — while the library master key (which every member holds)
 //! cannot read it.
 
-use crate::blob::{BlobScope, ResolvedScope};
+use std::collections::HashMap;
+
+use crate::blob::{BlobPlan, BlobRef, BlobScope, ResolvedScope};
+use crate::changeset::{ChangeOp, RowChange};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::sync::apply::apply_changeset_lww;
+use crate::sync::cycle::push_changeset;
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
+use crate::sync::envelope::{self, ChangesetEnvelope};
+use crate::sync::pull::pull_changes;
+use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot, push_snapshot};
 use crate::sync::storage::SyncStorage;
-use crate::sync::test_helpers::{create_synced_schema, test_synced_tables};
+use crate::sync::test_helpers::{create_synced_schema, exec, temp_library_dir, test_synced_tables};
 
 /// A fixed master key, distinct from any minted item key, so "the master cannot
 /// read item content" is a real assertion.
@@ -53,21 +59,6 @@ async fn capture(db: &Database) -> Vec<u8> {
         .expect("capture changeset");
     db.resume_session().await.expect("resume session");
     bytes
-}
-
-/// Apply `bytes` to `db` over its full synced set (host tables plus coven's
-/// injected `item_keys`), suspending the session around the apply as the cycle
-/// does.
-async fn apply(db: &Database, bytes: &[u8]) {
-    db.take_changeset_and_suspend()
-        .await
-        .expect("suspend before apply");
-    let bytes = bytes.to_vec();
-    let tables = db.synced_tables().to_vec();
-    db.call(move |conn| apply_changeset_lww(conn, &bytes, &tables).map(|_| ()))
-        .await
-        .expect("apply changeset");
-    db.resume_session().await.expect("resume after apply");
 }
 
 /// An `Item`-scoped blob is encrypted under the minted item key: it round-trips
@@ -150,71 +141,205 @@ async fn mint_item_key_is_idempotent() {
     );
 }
 
-/// Changeset-replay multi-device join: device A mints an item key and creates an
-/// `Item`-scoped blob, then syncs (the item key rides the changeset). Device B
-/// pulls CHANGESETS ONLY (no snapshot), resolves `Item(id)` from the replayed
-/// `item_keys` row, and decrypts the blob. This is the path a member that joined
-/// before any snapshot exists takes.
+/// A stored `item_keys.key` that is not 32 bytes is a corrupt DB. Reading it
+/// surfaces a [`DbError`] naming the item and the wrong length — not a panic, and
+/// not an opaque "actor dropped" error from a panicked db thread. (`mint_item_key`
+/// only ever writes 32 bytes, so a short key can arise only from corruption.)
+#[tokio::test]
+async fn reading_a_wrong_length_item_key_errors() {
+    let db = open_db("dev-a");
+    db.call(|conn| {
+        conn.execute(
+            "INSERT INTO item_keys (item_id, key, _updated_at) \
+             VALUES ('item-1', ?1, '0000000001000-0000-dev-a')",
+            [vec![0u8; 16]],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("plant a 16-byte key");
+
+    let DbError(msg) = db
+        .item_key("item-1")
+        .await
+        .expect_err("a 16-byte stored key must error, not panic");
+    assert!(
+        msg.contains("item-1") && msg.contains("16") && msg.contains("32"),
+        "the error names the item and both lengths: {msg}"
+    );
+}
+
+/// A blob plan that maps each `note_photos` row to an `Item`-scoped blob keyed by
+/// the row's `note_id` — the public scope a sharing host emits, the one whose
+/// resolution `download_changeset_blobs` performs. The blob lives at `dir/{id}`,
+/// the namespace is `audio` (the bulk share payload bae moves this way).
+struct ItemPhotoBlobPlan {
+    dir: std::path::PathBuf,
+}
+
+impl ItemPhotoBlobPlan {
+    fn refs(&self, changes: &[RowChange]) -> Vec<BlobRef> {
+        changes
+            .iter()
+            .filter(|c| c.table == "note_photos" && c.op != ChangeOp::Delete)
+            .filter_map(|c| {
+                let id = c.pk()?.to_string();
+                let note_id = c.col(1)?.to_string();
+                Some(BlobRef {
+                    namespace: "audio".to_string(),
+                    local_path: self.dir.join(&id),
+                    id,
+                    scope: BlobScope::Item(note_id),
+                })
+            })
+            .collect()
+    }
+}
+
+impl BlobPlan for ItemPhotoBlobPlan {
+    fn blobs_to_push(&self, changes: &[RowChange]) -> Vec<BlobRef> {
+        self.refs(changes)
+    }
+    fn blobs_to_pull(&self, changes: &[RowChange]) -> Vec<BlobRef> {
+        self.refs(changes)
+    }
+}
+
+/// Capture `db_a`'s pending writes and publish them to `storage` as device A's
+/// changeset seq 1: pack an unsigned envelope (no membership chain in this test,
+/// so unsigned is accepted) and push it, which also advances A's head. This is
+/// what the cycle's push does, minus the gate (the rows here are already
+/// shareable) — enough for a real `pull_changes` to fetch and apply.
+async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
+    let changeset = capture(db_a).await;
+    assert!(
+        !changeset.is_empty(),
+        "device A's writes (note rows + the item_keys row) must enter the changeset"
+    );
+    let env = ChangesetEnvelope {
+        device_id: "dev-a".to_string(),
+        seq: 1,
+        schema_version: SCHEMA_VERSION,
+        message: String::new(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        changeset_size: changeset.len(),
+        author_pubkey: None,
+        signature: None,
+    };
+    let packed = envelope::pack(&env, &changeset);
+    push_changeset(storage, "dev-a", 1, packed, None, "2026-01-01T00:00:00Z")
+        .await
+        .expect("publish device A's changeset");
+}
+
+/// Changeset-replay multi-device join, through the REAL pull path: device A mints
+/// an item key, writes a shareable note + its blob-bearing child row, and uploads
+/// the `Item`-scoped blob; then publishes the changeset (carrying the `item_keys`
+/// row). Device B runs the production [`pull_changes`] — which applies the
+/// changeset and then calls `download_changeset_blobs`, the function this PR
+/// taught to resolve `Item(id)` via the freshly-applied `item_keys` row — so the
+/// blob lands on B's disk already decrypted. This catches a regression where the
+/// pull-side resolution is dropped: B would fail to decrypt and the blob would
+/// not land. Members that join before any snapshot exists take this path.
 #[tokio::test]
 async fn changeset_replay_join_resolves_item_and_decrypts() {
-    let home = InMemoryCloudHome::new();
-    let storage = storage_over(home);
+    let storage = EncryptedSyncStorage::new(
+        Box::new(InMemoryCloudHome::new()),
+        EncryptionService::new_with_key(&MASTER_KEY),
+    );
 
-    // --- Device A: mint the item key, upload an Item-scoped blob, capture the
-    // changeset carrying the item_keys row. ---
+    // --- Device A: mint the item key, write a shareable note + a blob-bearing
+    // child row, upload the Item-scoped blob, publish the changeset. ---
     let db_a = open_db("dev-a");
-    let item_key = db_a.mint_item_key("item-1").await.expect("mint on A");
+    let item_key = db_a.mint_item_key("note-1").await.expect("mint on A");
 
-    let plaintext = b"AUDIO-BYTES-for-item-1".to_vec();
+    exec(
+        &db_a,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('note-1', 'Shared', NULL, 1, '0000000001000-0000-dev-a', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db_a,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('blob-1', 'note-1', 'cover', '0000000001000-0000-dev-a', '2026-01-01')",
+    )
+    .await;
+
+    let plaintext = b"AUDIO-BYTES-for-note-1".to_vec();
     let resolved_a = db_a
-        .resolve_blob_scope(BlobScope::Item("item-1".to_string()))
+        .resolve_blob_scope(BlobScope::Item("note-1".to_string()))
         .await
         .expect("resolve on A");
     storage
-        .put_blob("audio", "item-1", resolved_a, plaintext.clone())
+        .put_blob("audio", "blob-1", resolved_a, plaintext.clone())
         .await
         .expect("A uploads the item-scoped blob");
 
-    let changeset = capture(&db_a).await;
-    assert!(
-        !changeset.is_empty(),
-        "minting an item key must enter the changeset (it is a synced table)"
-    );
+    publish_changeset(&db_a, &storage).await;
 
-    // --- Device B: a brand-new device that has NOT bootstrapped a snapshot.
-    // It applies A's changeset only, then must resolve and decrypt. ---
+    // --- Device B: a brand-new device that has NOT bootstrapped a snapshot. It
+    // pulls A's changeset through the real pull path; resolution + download run
+    // inside `pull_changes`. ---
     let db_b = open_db("dev-b");
     assert_eq!(
-        db_b.item_key("item-1").await.expect("B pre-apply read"),
+        db_b.item_key("note-1").await.expect("B pre-pull read"),
         None,
-        "device B has no item key before replaying A's changeset"
+        "device B has no item key before pulling A's changeset"
     );
 
-    apply(&db_b, &changeset).await;
+    let dst = tempfile::tempdir().expect("B blob dir");
+    let plan = ItemPhotoBlobPlan {
+        dir: dst.path().to_path_buf(),
+    };
+    let (_tmp_lib, ld) = temp_library_dir();
 
+    db_b.take_changeset_and_suspend()
+        .await
+        .expect("suspend B before pull");
+    let (cursors, result) = pull_changes(
+        &db_b,
+        db_b.synced_tables(),
+        &storage,
+        "dev-b",
+        &HashMap::new(),
+        &ld,
+        &plan,
+    )
+    .await
+    .expect("device B pulls A's changeset");
+    db_b.resume_session().await.expect("resume B after pull");
+
+    assert_eq!(result.changesets_applied, 1, "B applied A's changeset");
+    assert!(
+        !result.asset_downloads_failed,
+        "the Item-scoped blob resolved and downloaded inside pull_changes"
+    );
     assert_eq!(
-        db_b.item_key("item-1").await.expect("B post-apply read"),
+        cursors.get("dev-a"),
+        Some(&1),
+        "B's cursor advanced past the changeset whose blob downloaded"
+    );
+
+    // The item key replayed via the changeset, and the production
+    // `download_changeset_blobs` resolved it and wrote the decrypted blob to B.
+    assert_eq!(
+        db_b.item_key("note-1").await.expect("B post-pull read"),
         Some(item_key),
         "the item key replayed to device B via the changeset"
     );
-
-    let resolved_b = db_b
-        .resolve_blob_scope(BlobScope::Item("item-1".to_string()))
-        .await
-        .expect("resolve on B");
-    let recovered = storage
-        .get_blob("audio", "item-1", resolved_b)
-        .await
-        .expect("B downloads + decrypts the item-scoped blob");
+    let landed =
+        std::fs::read(dst.path().join("blob-1")).expect("the pull wrote the blob to B's disk");
     assert_eq!(
-        recovered, plaintext,
-        "device B recovers the original audio via the replayed item key"
+        landed, plaintext,
+        "device B recovers the original audio — the pull resolved Item(id) and decrypted with the replayed item key"
     );
 
     // The master key alone (membership) does not unlock it.
     assert!(
         storage
-            .get_blob("audio", "item-1", ResolvedScope::Master)
+            .get_blob("audio", "blob-1", ResolvedScope::Master)
             .await
             .is_err(),
         "membership alone (the master key) does not unlock item content"

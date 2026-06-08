@@ -44,8 +44,9 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     source_path TEXT,
     -- The blob's encryption scope (master / derived / item), serialized so the
     -- async drain resolves it to a key long after the enqueue site is gone.
-    -- Local bookkeeping; this table does not sync.
-    scope TEXT NOT NULL,
+    -- NULL for a delete entry, which touches no key. Local bookkeeping; this
+    -- table does not sync.
+    scope TEXT,
     created_at TEXT NOT NULL,
     min_seq INTEGER,
     attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -69,12 +70,12 @@ pub struct OutboxEntry {
     pub file_id: String,
     pub cloud_key: String,
     pub source_path: Option<String>,
-    /// The blob's encryption scope, named by the host at enqueue. `process_uploads`
-    /// resolves it to a key at drain (looking up `item_keys` for a
-    /// [`crate::blob::BlobScope::Item`] scope), since the upload runs long after
-    /// the enqueue site is gone. Delete entries carry [`crate::blob::BlobScope::Master`]
-    /// as a placeholder — a delete touches no key.
-    pub scope: crate::blob::BlobScope,
+    /// The blob's encryption scope, named by the host at enqueue, for an upload
+    /// entry. `process_uploads` resolves it to a key at drain (looking up
+    /// `item_keys` for a [`crate::blob::BlobScope::Item`] scope), since the upload
+    /// runs long after the enqueue site is gone. `None` for a delete entry — a
+    /// delete touches no key, so it stores no scope.
+    pub scope: Option<crate::blob::BlobScope>,
     pub created_at: String,
     pub min_seq: Option<u64>,
     /// How many times an upload of this entry has failed. `0` for a freshly

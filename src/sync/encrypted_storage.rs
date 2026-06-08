@@ -60,21 +60,32 @@ impl EncryptedSyncStorage {
         self.encryption.read().unwrap()
     }
 
-    /// The `EncryptionService` a blob's resolved `scope` selects: the library
-    /// master, a per-scope key derived from it, or an explicit key (a resolved
-    /// item key). Push and pull resolve the scope the same way, so they share
-    /// this.
+    /// The `EncryptionService` a blob's resolved `scope` selects, against this
+    /// storage's master key. Delegates to [`encryption_for_scope`], the single
+    /// mapping shared with the outbox drain.
     fn enc_for_scope(&self, scope: crate::blob::ResolvedScope) -> EncryptionService {
-        match scope {
-            crate::blob::ResolvedScope::Master => self.enc().clone(),
-            crate::blob::ResolvedScope::Derived(s) => self.enc().derive_scoped(&s),
-            crate::blob::ResolvedScope::Key(k) => EncryptionService::from_key(k),
-        }
+        encryption_for_scope(scope, &self.enc())
     }
 
     /// Blob key: `{namespace}/{ab}/{cd}/{id}`.
     pub fn blob_key(namespace: &str, id: &str) -> String {
         crate::library_dir::LibraryDir::hashed_path(namespace, id)
+    }
+}
+
+/// The `EncryptionService` a blob's resolved `scope` selects, against `master`:
+/// the library master itself, a per-scope key derived from it, or an explicit
+/// key (a resolved item key). The blob storage methods and the outbox drain both
+/// turn a [`crate::blob::ResolvedScope`] into a key the same way, so they share
+/// this one mapping.
+pub(crate) fn encryption_for_scope(
+    scope: crate::blob::ResolvedScope,
+    master: &EncryptionService,
+) -> EncryptionService {
+    match scope {
+        crate::blob::ResolvedScope::Master => master.clone(),
+        crate::blob::ResolvedScope::Derived(s) => master.derive_scoped(&s),
+        crate::blob::ResolvedScope::Key(k) => EncryptionService::from_key(k),
     }
 }
 

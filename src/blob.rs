@@ -37,6 +37,14 @@ pub enum BlobScope {
 /// `item_keys` row. [`SyncStorage`](crate::sync::storage::SyncStorage) blob
 /// methods take this internal form — the public `Item` scope never reaches
 /// storage or encryption.
+///
+/// Internal to coven, though `pub` by necessity: it appears in the `SyncStorage`
+/// trait, which a tree of `pub` sync entry points (the cycle, pull, snapshot, and
+/// membership functions a host reaches only through `SyncManager`) references in
+/// turn, so narrowing it would force that whole tree private. A host never names
+/// this type — it tags a blob with the public [`BlobScope`] and coven resolves it
+/// here — so the raw-key `Key([u8; 32])` variant stays a coven concern in
+/// practice even while the type is reachable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedScope {
     /// The library master key.
