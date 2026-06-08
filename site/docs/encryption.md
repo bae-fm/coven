@@ -89,23 +89,24 @@ public keys in the paths are opaque tokens, not user records.
 
 ## Where the library key lives
 
-coven does not persist the library key in any database it controls. In production
-the key lives in the operating system keyring, behind the system's own access
-control; in dev mode it is read from an environment variable so tests can supply
-a fixed key.
-[`KeyService`](rustdoc:struct:coven::keys::KeyService) reads and writes it,
-scoped per library so two libraries never share a key.
+coven does not persist the library key in any database it controls. The key lives
+in the operating system keyring, behind the system's own access control. There is
+no environment-variable or file fallback: the keyring is the only place coven
+reads it from. [`KeyService`](rustdoc:struct:coven::keys::KeyService) reads and
+writes it, scoped per library so two libraries never share a key.
 [`KeyService::new`](rustdoc:method:coven::keys::KeyService::new) does no I/O: keyring
 reads happen lazily inside the getters, because reading the protected keyring can
 trigger a system password prompt. `get_or_create_encryption_key` returns the
 existing key or mints and stores a new one; the `get_or_create` name is
-deliberate, because the keyring (or env var) is the only copy. Lose both the
-keyring entry and every member's wrapped copy and the encrypted data is
-unrecoverable.
+deliberate, because the keyring is the only copy. Lose both the keyring entry and
+every member's wrapped copy and the encrypted data is unrecoverable.
 
-The host names itself in the keyring once at startup with `set_keyring_service`,
-which becomes the first component of every keyring account; without it the
-service name defaults to `coven`.
+The host names itself in the keyring once at startup with
+[`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service), passing its
+own app identity. That name becomes the first component of every keyring account,
+so two coven-based apps on one machine never read or overwrite each other's keys.
+It is required, not defaulted: a getter called before the host sets it panics
+rather than fall back to a shared name.
 
 ## Chunked encryption
 

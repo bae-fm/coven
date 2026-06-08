@@ -20,20 +20,21 @@ in one pass:
 
 1. `VACUUM INTO` writes a clean, defragmented copy of the live database to a temp
    file. This copy still holds every table, including ones that never sync.
-2. Local-only tables (any table the host did not register with
-   [`set_synced_tables`](rustdoc:fn:coven::sync::session::set_synced_tables),
-   plus coven's own `sync_cursors`, `sync_state`, and `cloud_outbox`) have their
-   rows deleted. Their schema stays, so the restored database opens without a
-   re-migration, but a device-local row (say a `device_settings` table holding a
-   filesystem path) never rides along to a peer. The migration ledger
-   `_sqlx_migrations` is the one exception: its rows are preserved so the restored
-   database knows what schema it is at.
+2. Local-only tables (any table the host did not pass to
+   [`Database::open`](rustdoc:method:coven::database::Database::open) as a
+   [`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable), plus coven's
+   own `sync_cursors`, `sync_state`, and `cloud_outbox`) have their rows deleted.
+   Their schema stays, so the restored database opens against the same schema it
+   was snapshotted at, but a device-local row (say a `device_settings` table
+   holding a filesystem path) never rides along to a peer. coven keeps no
+   migration ledger: the snapshot bytes carry every table's schema, so a restored
+   database is already at the schema the snapshotting device ran.
 3. Row-level gating is applied: gated-false roots and their foreign-key
    descendants are deleted. A private list (`shared = 0`) and the todos under it
-   are removed from the copy. This reuses the same `crate::sync::gate::Gates`
-   model the outbound changeset filter uses, so the snapshot carries the exact
-   same set of rows the changeset path would have sent. See
-   [Local data](local-data.md) for the gate.
+   are removed from the copy. This reuses the same
+   [`Gates`](rustdoc:struct:coven::sync::gate::Gates) model the outbound
+   changeset filter uses, so the snapshot carries the exact same set of rows the
+   changeset path would have sent. See [Local data](local-data.md) for the gate.
 4. A second `VACUUM` reclaims the pages freed by those deletes, then the bytes are
    read and encrypted with the library key.
 
@@ -41,13 +42,14 @@ Because the snapshot and the changeset path share one gate, a device that
 bootstraps from a snapshot and a device that applied live changesets converge on
 the same rows. A private subtree cannot leak through the snapshot channel.
 
-If no synced tables are registered,
+If the synced set is empty,
 [`create_snapshot`](rustdoc:fn:coven::sync::snapshot::create_snapshot) returns
 [`SnapshotError::NoSyncedTables`](rustdoc:enum:coven::sync::snapshot::SnapshotError)
-rather than emit a snapshot. With an empty synced set it could not tell which
-tables are shareable: it would either clear the whole database or leak every
-local-only table. Refusing here catches a host that forgot to call
-`set_synced_tables` before sync started.
+rather than emit a snapshot. With no synced tables it could not tell which tables
+are shareable: it would either clear the whole database or leak every local-only
+table. (Sync as a whole refuses an empty set earlier, when
+[`init_sync`](rustdoc:fn:coven::sync::cycle::init_sync) checks the set the host
+passed to [`Database::open`](rustdoc:method:coven::database::Database::open).)
 
 ## Snapshot policy
 
@@ -111,15 +113,34 @@ the restore flow (the owner recovering the library on new hardware). Both call
    [`BootstrapResult`](rustdoc:struct:coven::sync::snapshot::BootstrapResult)
    carrying the per-device cursors from the metadata.
 
-The join flow then opens that database and pulls every changeset newer than the
-bootstrap cursors, so the device catches up on anything written between the
-snapshot and now. The bootstrap cursors are passed straight into the pull as the
-starting point; the pull returns advanced cursors as it applies changesets.
+The device then opens the bootstrapped file with
+[`Database::open`](rustdoc:method:coven::database::Database::open) and pulls every
+changeset newer than the bootstrap cursors, so it catches up on anything written
+between the snapshot and now. coven owns the connection from this point: there is
+no host reopen step. The snapshot already carries the full schema (the host's
+tables and coven's bookkeeping), so `Database::open`'s bookkeeping migration
+finds its `IF NOT EXISTS` tables already present and the host's `migrate` closure
+is a no-op here. There is no migration ordering for the host to get wrong; coven
+runs both migrations against the connection it owns.
+
+The bootstrap cursors are passed straight into the pull as the starting point;
+the pull returns advanced cursors as it applies changesets. Just after
+`Database::open`, the fresh capture session is suspended: a just-bootstrapped
+library has no local changes to capture, and the pull's apply must run with no
+session active so the applied rows are not re-recorded as local writes.
 
 ```rust
 let bootstrap_result = bootstrap_from_snapshot(storage, encryption, &db_path).await?;
-let changesets_applied = open_db_and_pull(
+let (db, _stamper) = Database::open(
     &db_path,
+    synced_tables.to_vec(),
+    device_id.to_string(),
+    |_conn| Ok(()), // schema already in the snapshot; nothing to migrate
+)?;
+db.take_changeset_and_suspend().await?;
+let (_cursors, pull_result) = pull_changes(
+    &db,
+    synced_tables,
     storage,
     device_id,
     &bootstrap_result.cursors,

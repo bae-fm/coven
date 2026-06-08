@@ -77,27 +77,29 @@ A blob reaches the cloud one of two ways. A `BlobRef` returned from
 envelope: coven reads `local_path`, encrypts under the ref's `scope` (master or
 derived), and writes to `{namespace}/{ab}/{cd}/{id}`. That path is synchronous
 and reports no progress. The `cloud_outbox` queue described below is the
-separate, durable path, with retry and progress. It carries no `BlobScope`;
-instead each entry carries an optional `content_key`, and encrypts under that
-key when present, falling back to the master key when it is `None`.
+separate, durable path, with retry and progress, and it does not read `scope`:
+it encrypts under the master key only.
 
-For the queue, the host writes the plaintext file to `local_path`, then enqueues
-an upload in the `cloud_outbox` table. That table is one of coven's bookkeeping
-tables, created by [`MIGRATION_SQL`](rustdoc:const:coven::db::MIGRATION_SQL). An entry is
-an [`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) with
-[`OutboxOperation::Upload`](rustdoc:variant:coven::db::OutboxOperation::Upload): it carries
-the `file_id`, the `cloud_key` (the blob's cloud path), an optional
-`source_path` that overrides where the plaintext is read from when the file lives
-outside the library directory, and an optional `content_key` — the 32-byte key
-this blob is encrypted under (`None` means encrypt with the master key). The host
-supplies the key at enqueue time and persists it on the row, since the async
-upload runs long after the enqueue site is gone.
+For the queue, the host writes the plaintext file to `local_path`, then calls
+`db.enqueue_upload(file_id, cloud_key, source_path, created_at)`. `cloud_key` is
+the blob's cloud path; `source_path` is optional and overrides where the
+plaintext is read from when the file lives outside the library directory. The
+matching call for a removal is `db.enqueue_delete(cloud_key, min_seq,
+created_at)`, where `min_seq` is the sync sequence the delete becomes safe past.
+
+The `cloud_outbox` table these write to is coven's, not the host's. coven
+creates it during `Database::open`, alongside its other bookkeeping tables, and
+the host never touches it directly: it enqueues through the `Database` methods
+and lets coven own the rows. Each row is an
+[`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) carrying its
+[`OutboxOperation`](rustdoc:variant:coven::db::OutboxOperation::Upload), `file_id`,
+`cloud_key`, `source_path`, and the retry bookkeeping below.
 
 The queue is the durable record of upload intent. Nothing uploads at enqueue
-time; the next sync cycle drains the queue in `process_uploads`. For each entry
-it reads the local file, encrypts it under the entry's `content_key` (or the
-library master key when the entry carries none), writes the encrypted bytes to
-the cloud at the entry's `cloud_key`, and removes the entry on success.
+time; the next sync cycle drains it. coven reads the pending entries, and for
+each one reads the local file, encrypts it under the library master key, writes
+the encrypted bytes to the cloud at the entry's `cloud_key`, and removes the
+entry on success.
 
 Uploads run before the changeset push, and the cycle will not publish a changeset
 while uploads are still pending. A peer therefore never pulls a changeset that

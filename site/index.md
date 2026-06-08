@@ -20,7 +20,7 @@ features:
     - title: Keep your schema
       details: 'coven syncs the tables you choose, and leaves your data model to you.'
     - title: Write as usual
-      details: 'Your app writes to SQLite normally; coven captures and syncs changes underneath.'
+      details: 'Run your own SQL through the connection coven opens; it captures and syncs changes underneath.'
     - title: Files sync too
       details: 'Images, audio, anything a row references travels with it, encrypted.'
     - title: Edit anywhere

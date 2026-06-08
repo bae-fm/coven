@@ -179,9 +179,11 @@ places a provider deviates from "write opaque bytes by key".
 
 [`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home) reads
 the selected provider from `Config` and the matching credentials from the OS
-keyring (or the environment in dev mode), and returns a `Box<dyn CloudHome>`. A
+keyring the host installs at startup, and returns a `Box<dyn CloudHome>`. A
 missing setting fails with a `Storage` error naming the field
-("S3 bucket not configured", "Google Drive folder ID not configured").
+("S3 bucket not configured", "Google Drive folder ID not configured"); missing
+credentials fail the same way ("S3 credentials not in keyring", "Google Drive
+OAuth token not in keyring").
 
 ## OAuth token refresh
 

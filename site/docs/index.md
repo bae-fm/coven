@@ -63,23 +63,40 @@ or who is allowed to write.
 
 ## In your code
 
-**Declare what syncs.** Everything else stays local to the device.
+**Open the database.** coven owns the connection. Hand it a path, the tables
+that sync, and your schema; it returns the handle and a stamper for the
+last-writer-wins clock. Tables you don't list stay local to the device.
 
 ```rust
-coven::sync::session::set_synced_tables(&["todos", "todo_attachments"]);
+use coven::Database;
+use coven::sync::session::SyncedTable;
+
+let (db, stamper) = Database::open(
+    &db_path,
+    vec![SyncedTable::new("todos"), SyncedTable::new("todo_attachments")],
+    device_id,
+    |conn| { conn.execute_batch(MY_SCHEMA)?; Ok(()) },
+)?;
 ```
 
-**Start the manager.** Construct a `SyncManager` and start it.
+**Write normally, through coven's connection.** coven captures the change.
+Synced rows carry an `_updated_at` you mint with the stamper.
+
+```rust
+db.call(move |conn| {
+    conn.execute(
+        "INSERT INTO todos (id, title, _updated_at) VALUES (?1, ?2, ?3)",
+        coven::rusqlite::params![id, title, stamper.stamp()],
+    )?;
+    Ok(())
+}).await?;
+```
+
+**Start the manager** once a cloud provider is connected.
 
 ```rust
 let manager = SyncManager::new(/* config, keys, encryption, db, clock, blob_plan */);
 manager.start_sync().await;
-```
-
-**Write normally.** coven captures the change and pushes it.
-
-```rust
-db.execute("INSERT INTO todos (id, title, _updated_at) VALUES (?, ?, ?)", row)?;
 manager.trigger_sync();
 ```
 
@@ -103,8 +120,10 @@ let code = manager.invite_member(teammate_pubkey, MemberRole::Member).await?;
 
 ## Who owns what
 
-coven owns the sync layer:
+coven owns the sync layer and the database connection:
 
+- The one SQLite connection. coven opens it, runs the change-capture session on
+  it, and keeps its own bookkeeping there. You run your queries through it.
 - Capturing local changes and applying remote ones.
 - Encrypting, signing, and verifying everything that leaves the device.
 - Moving rows and files through your storage.
@@ -112,7 +131,7 @@ coven owns the sync layer:
 
 You own the app:
 
-- Your schema, migrations, and SQLite driver.
+- Your schema and your queries, run through coven's connection.
 - Which tables sync and which stay local.
 - Where blob files live on disk.
 - Provider configuration and credentials.
@@ -120,8 +139,8 @@ You own the app:
 
 ## Topics
 
-- [Example](/docs/example): the tables and traits you implement, the startup
-  order.
+- [Example](/docs/example): opening the database, declaring the synced tables,
+  writing through the connection.
 - [Sync](/docs/sync-model): change capture, the cycle, conflict resolution,
   schema versions.
 - [Local data](/docs/local-data): gating, what stays on one device.

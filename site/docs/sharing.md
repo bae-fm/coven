@@ -102,7 +102,7 @@ matching private key can open it.
 
 Inviting a member writes two things: the signed `Add` entry, and the library
 key wrapped to that member at `keys/{pubkey}.enc`. The new member downloads and
-unwraps their copy on first sync with
+unwraps their copy when they join with
 [`unwrap_library_key`](rustdoc:fn:coven::sync::invite::unwrap_library_key),
 decrypting it with their X25519 private key.
 
@@ -177,9 +177,10 @@ with that public key and a role. Under it,
 [`create_invitation`](rustdoc:fn:coven::sync::invite::create_invitation) grants
 the joiner cloud access, wraps the library key to their X25519 key, signs and
 validates an `Add` entry against the local chain *before* writing anything, then
-uploads the wrapped key and the entry. It returns an
-[`InviteCode`](rustdoc:struct:coven::join_code::InviteCode) (library id, name,
-cloud connection details, owner pubkey), which the owner sends back.
+uploads the wrapped key and the entry. It returns the cloud connection details,
+which `invite_member` packs together with the library id, name, and owner pubkey
+into an [`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner
+sends that back.
 
 The joiner pastes the invite code into
 [`join_from_invite_code`](rustdoc:fn:coven::sync::join::join_from_invite_code),

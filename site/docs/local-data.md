@@ -3,9 +3,10 @@
 By default, every row of a synced table reaches every device that shares the
 library. To keep some rows on one device, never synced, the host *gates* the
 table: a row syncs only while a condition holds. The host declares the gate per
-table in
-[`set_synced_tables`](rustdoc:fn:coven::sync::session::set_synced_tables), and
-coven enforces it on both paths a row can take to another device: the per-cycle
+table on the [`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable)
+values it passes to
+[`Database::open`](rustdoc:method:coven::database::Database::open), and coven
+enforces it on both paths a row can take to another device: the per-cycle
 changeset and the bootstrap snapshot.
 
 The examples use a todos app: a `workspace` holds `lists`, and a `list` holds

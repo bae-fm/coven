@@ -17,23 +17,26 @@ bootstrap from a snapshot has its own page, [Bootstrap](/docs/bootstrap).
 
 ## Change capture
 
-The host declares the synced tables once at startup with
-[`set_synced_tables`](rustdoc:fn:coven::sync::session::set_synced_tables),
-passing [`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable) values.
-Every synced table must have a text `id` primary key at column 0 and an
-`_updated_at TEXT NOT NULL` column. A table not listed here is local-only and
-never leaves the device.
+coven owns the SQLite connection. The host opens it once through
+[`Database::open`](rustdoc:method:coven::database::Database::open), passing the
+synced tables as [`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable)
+values. Every synced table must have a text `id` primary key at column 0 and an
+`_updated_at TEXT NOT NULL` column. A table not in the set is local-only and
+never leaves the device. From then on the host runs all its SQL through
+[`Database::call`](rustdoc:method:coven::database::Database::call); coven
+re-exports rusqlite, so the closure works against `&coven::rusqlite::Connection`
+and the host never depends on rusqlite directly.
 
-A [`SyncSession`](rustdoc:struct:coven::sync::session::SyncSession) attaches the
-SQLite session extension to each declared table on the write connection. From
-then on the connection records every insert, update, and delete to those tables
-into an in-memory changeset. The host writes through the connection as usual;
-capture is passive.
+The connection lives on one dedicated thread (an actor). Capture is the SQLite
+session extension, attached over `rusqlite::session` to every declared table on
+that owned connection. Each insert, update, and delete to a synced table is
+recorded into an in-memory changeset. The host writes as usual; capture is
+passive, and there is no host-lent pointer to a connection coven does not own.
 
-The registration is a required integration step, not a tuning knob. With no
-tables registered the session attaches nothing and produces empty changesets
-forever, so [`init_sync`](rustdoc:fn:coven::sync::cycle::init_sync) treats an
-empty set as a hard error and refuses to start.
+The set is not a tuning knob. With no tables declared the session attaches
+nothing and produces empty changesets forever, so
+[`init_sync`](rustdoc:fn:coven::sync::cycle::init_sync) treats an empty set as a
+hard error and refuses to start.
 
 ## The sync cycle
 
@@ -42,22 +45,29 @@ A background loop runs one cycle at a time.
 loads the persisted sync state each cycle (rather than holding it across calls)
 and drives these steps:
 
-1. Capture the outgoing changeset from the active session
-   (`SyncSession::changeset`, `None` if nothing changed).
-2. End the session by dropping it. This must happen before pulling: a still-open
-   session would record the rows an incoming changeset applies and re-emit them
-   as spurious local changes next cycle.
-3. Apply row-level gating to the captured changeset, cutting rows that should
+1. Capture the outgoing changeset and suspend the capture session
+   (`take_changeset_and_suspend`). Suspending is what makes the rest of the cycle
+   safe: while the session is off, the rows an incoming changeset applies are not
+   recorded, so they are not re-emitted as spurious local changes next cycle.
+2. Apply row-level gating to the captured changeset, cutting rows that should
    stay local (see [Local data](/docs/local-data)).
-4. Upload any blobs the outgoing changeset references, so a puller can fetch them
+3. Upload any blobs the outgoing changeset references, so a puller can fetch them
    the moment it sees the change (see [Blobs](/docs/blobs)).
-5. Sign the envelope, stage the packed bytes to disk, and push them to storage
+4. Sign the envelope, stage the packed bytes to disk, and push them to storage
    under the device's next sequence number; on success advance `local_seq`.
-6. Pull every remote changeset past the device's cursor, validate it, and apply
+5. Pull every remote changeset past the device's cursor, validate it, and apply
    it with last-writer-wins.
-7. Advance the clock past every applied row's `_updated_at`.
-8. Persist the updated cursors and flush the clock's high-water mark.
-9. Start a new session for the next cycle, then check snapshot policy.
+6. Advance the clock past every applied row's `_updated_at`.
+7. Persist the updated cursors and flush the clock's high-water mark.
+8. Resume the capture session, then check snapshot policy.
+
+The suspend in step 1 and the resume in step 8 are one matched pair. Because the
+[`Database`](rustdoc:struct:coven::database::Database) actor outlives the loop, a
+span that exited without resuming would leave capture off permanently, which is
+silent total sync loss. So gating, push, pull, and bookkeeping all run inside one
+guarded block, and the resume runs once afterward whether that block succeeded or
+failed. Every gate, apply, and bookkeeping read in between goes through
+`Database::call` against the owned connection.
 
 When Alice edits a todo title, her next cycle captures the update to `todos`,
 signs and encrypts it, and writes it to storage at `changes/<alice-device>/<seq>`.
@@ -65,11 +75,11 @@ Bob's device, on its own cycle, lists the device heads, sees Alice's sequence
 number is past his cursor for her device, fetches the changeset, and applies it.
 
 [`SyncService::sync`](rustdoc:method:coven::sync::service::SyncService::sync)
-captures and ends the session, gates the changeset, uploads blobs, signs the
-envelope, and pulls (steps 1 through 4 and 6, plus the signing in step 5); it
-returns the packed envelope and the pull result. The surrounding cycle function
-stages and pushes that envelope, advances `local_seq`, persists cursors,
-advances the clock, flushes the high-water mark, and checks snapshot policy.
+takes the captured changeset, gates it, uploads blobs, signs the envelope, and
+pulls (steps 2 through 5, minus the staging and push). The surrounding cycle
+function captures and suspends before it, then stages and pushes the returned
+envelope, advances `local_seq`, persists cursors, advances the clock, resumes the
+session, and checks snapshot policy.
 
 ### Push
 
@@ -96,7 +106,8 @@ order. For each one it:
   ([`verify_changeset_signature`](rustdoc:fn:coven::sync::envelope::verify_changeset_signature));
 - if the library has a membership chain, checks the author can write *now*
   (a removed member or a read-only Follower is rejected);
-- applies the changeset with last-writer-wins;
+- applies the changeset with last-writer-wins (`apply_strm` on the owned
+  connection, the session still suspended);
 - downloads any blobs it references.
 
 The cursor for that device advances to a sequence number only after the
@@ -121,20 +132,19 @@ The clock is an [`Hlc`](rustdoc:struct:coven::sync::hlc::Hlc).
 [`Hlc::now`](rustdoc:method:coven::sync::hlc::Hlc::now) mints the next stamp: if
 wall-clock millis moved forward it adopts them and resets the counter, otherwise
 it bumps the counter, so each stamp is strictly greater than the last. The host
-never calls this directly; it holds an
-[`UpdatedAtStamper`](rustdoc:struct:coven::sync::hlc::UpdatedAtStamper) and calls
+never calls this directly. It holds the
+[`UpdatedAtStamper`](rustdoc:struct:coven::sync::hlc::UpdatedAtStamper) that
+`Database::open` returns and calls
 [`stamp`](rustdoc:method:coven::sync::hlc::UpdatedAtStamper::stamp) in its write
-path. The stamper and the sync layer share one `Arc<Hlc>`.
+path, binding the result into every synced-row write. The stamper and the sync
+layer share one `Arc<Hlc>`.
 
-The host opens the clock through a
-[`RegisterClock`](rustdoc:struct:coven::sync::register_clock::RegisterClock)
-before the first synced write.
-[`RegisterClock::open`](rustdoc:method:coven::sync::register_clock::RegisterClock::open)
-seeds the in-memory state to a floor of `max(persisted high-water mark,
-max(_updated_at) scanned across every synced table)`, so a restart cannot mint a
-stamp behind a value already on disk. The on-disk scan is the authoritative
-source: the high-water mark is flushed only at cycle end and lags any local row
-stamp minted between cycles.
+`Database::open` seeds that clock before it returns, so the stamper the host gets
+back is already non-optional and past every value on disk. The floor is
+`max(persisted high-water mark, max(_updated_at) scanned across every synced
+table)`, so a restart cannot mint a stamp behind a value already written. The
+on-disk scan is the authoritative source: the high-water mark is flushed only at
+cycle end and lags any local row stamp minted between cycles.
 
 ### Advancing past pulled rows
 
@@ -159,11 +169,12 @@ Both devices converge on Bob's version.
 
 ## Last-writer-wins conflict resolution
 
-Applying a changeset can collide with local state. SQLite reports each collision
-to a conflict handler;
+Conflict resolution is row-level last-writer-wins on `_updated_at`. Applying a
+changeset can collide with local state; SQLite reports each collision to a
+conflict handler, and
 [`lww_conflict_handler`](rustdoc:fn:coven::sync::conflict::lww_conflict_handler)
-decides what to do by comparing `_updated_at` strings. The column index is read
-from `PRAGMA table_info` at apply time
+decides what to do by comparing the two `_updated_at` strings. The column index
+is read from `PRAGMA table_info` at apply time
 ([`TableSchema`](rustdoc:struct:coven::sync::conflict::TableSchema)), so adding
 columns to the end of a table stays safe. The five conflict types:
 
@@ -191,50 +202,6 @@ once after the first pass over all devices completes, by which point the parent
 rows exist. If a changeset still violates a foreign key after the retry, it is
 logged and skipped.
 
-## SyncManager lifecycle
-
-[`SyncManager`](rustdoc:struct:coven::sync::sync_manager::SyncManager) owns the
-sync lifecycle. The host builds it once with
-[`new`](rustdoc:method:coven::sync::sync_manager::SyncManager::new), passing the
-already-opened `RegisterClock` so the manager borrows the same clock the host
-stamps rows from. Construction is synchronous and infallible; the seeding it used
-to do now lives in `RegisterClock::open`.
-
-[`start_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::start_sync)
-builds the cloud home from the current config and, if sync is enabled, spawns the
-loop.
-[`stop_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::stop_sync)
-drops the loop handle and cloud home. The pair runs when a provider is connected
-or disconnected, with no app restart.
-[`is_sync_ready`](rustdoc:method:coven::sync::sync_manager::SyncManager::is_sync_ready)
-reports whether the loop thread is running, and
-[`trigger_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::trigger_sync)
-asks the loop to run a cycle now.
-
-The loop runs on a dedicated OS thread with its own current-thread tokio runtime,
-because the session holds a raw `sqlite3` pointer that is not `Send` across task
-boundaries. After each cycle it emits a
-[`SyncLoopStatus`](rustdoc:struct:coven::sync::sync_loop::SyncLoopStatus) over a
-broadcast channel; the host observes the stream with
-[`SyncLoopHandle::subscribe`](rustdoc:method:coven::sync::sync_loop::SyncLoopHandle::subscribe):
-
-```rust
-pub struct SyncLoopStatus {
-    pub configured: bool,
-    pub syncing: bool,
-    pub last_sync_time: Option<String>,
-    pub error: Option<String>,
-    pub device_count: u32,
-    pub data_changed: bool,
-    pub row_changes: Option<Vec<RowChange>>,
-}
-```
-
-`error` carries a user-facing message when a cycle hit a hard failure, a
-schema-too-old floor, asset-download failures, or schema skips. `data_changed`
-is true when any changeset applied, and `row_changes` then carries those changes
-for the host to map to its own domain events.
-
 ## Schema versioning
 
 Every outgoing changeset carries the local
@@ -254,18 +221,66 @@ differently:
   surfaced once through `SyncLoopStatus::error` and cleared next cycle. Once the
   user upgrades, a fresh snapshot reconciles the rows that were skipped.
 
+## Lifecycle
+
+[`SyncManager`](rustdoc:struct:coven::sync::sync_manager::SyncManager) owns the
+sync lifecycle. The host builds it once with
+[`new`](rustdoc:method:coven::sync::sync_manager::SyncManager::new), passing the
+owned `Database`; the manager reads the shared `Arc<Hlc>` from it, so it advances
+the same clock the host stamps rows from. Construction is synchronous and
+infallible, because the clock was already seeded in `Database::open`.
+
+[`start_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::start_sync)
+builds the cloud home from the current config and, if sync is enabled, spawns the
+loop.
+[`stop_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::stop_sync)
+drops the loop handle and cloud home. The pair runs when a provider is connected
+or disconnected, with no app restart.
+[`is_sync_ready`](rustdoc:method:coven::sync::sync_manager::SyncManager::is_sync_ready)
+reports whether the loop thread is running, and
+[`trigger_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::trigger_sync)
+asks the loop to run a cycle now.
+
+The keys the loop signs and encrypts with come from the OS keyring. The host
+installs the keyring service and identity at startup with
+[`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service); there is no
+environment-variable or dev-mode key path.
+
+The loop runs on a dedicated OS thread with its own current-thread tokio runtime.
+The connection itself lives on the `Database` actor thread, reached only through
+async calls, so the loop holds nothing tied to a thread; the dedicated thread is
+for stack size (aws-sdk-s3's endpoint resolution recurses deeply enough to
+overflow the default secondary-thread stack in debug builds). After each cycle it
+emits a [`SyncLoopStatus`](rustdoc:struct:coven::sync::sync_loop::SyncLoopStatus)
+over a broadcast channel; the host observes the stream with
+[`SyncLoopHandle::subscribe`](rustdoc:method:coven::sync::sync_loop::SyncLoopHandle::subscribe):
+
+```rust
+pub struct SyncLoopStatus {
+    pub configured: bool,
+    pub syncing: bool,
+    pub last_sync_time: Option<String>,
+    pub error: Option<String>,
+    pub device_count: u32,
+    pub data_changed: bool,
+    pub row_changes: Option<Vec<RowChange>>,
+}
+```
+
+`error` carries a user-facing message when a cycle hit a hard failure, a
+schema-too-old floor, asset-download failures, or schema skips. `data_changed`
+is true when any changeset applied, and `row_changes` then carries those changes
+([`RowChange`](rustdoc:struct:coven::changeset::RowChange)) for the host to map
+to its own domain events.
+
 ## Backoff
 
-One exponential formula (`backoff_secs`, `30s · 2^n`) drives two waits with
-different caps. At the cycle level a successful cycle waits the base 30 seconds
-before the next run; each consecutive failure doubles the wait (60s, 120s, 240s),
-capped at 300 seconds. A success resets the count, and a manual `trigger_sync`
-preempts the wait. At the item level, a failing blob upload's retry window grows
-the same way, capped at one hour, so one stuck file does not block the others.
+One exponential formula (`30s · 2^n`) drives the cycle wait. A successful cycle
+waits the base 30 seconds before the next run; each consecutive failure doubles
+the wait (60s, 120s, 240s), capped at 300 seconds. A success resets the count,
+and a manual `trigger_sync` preempts the wait.
 
 Most cycle errors are transient (network, a failed blob download) and recover on
-the next cycle; the cycle does its best to recover and reuse the session across
-them
-([`SyncCycleOutcome::ErrWithSession`](rustdoc:enum:coven::sync::cycle::SyncCycleOutcome)).
-Two are permanent: the schema-too-old floor (the user must upgrade) and a
-membership rejection (the device is no longer a write-capable member).
+the next cycle. Two are permanent: the schema-too-old floor (the user must
+upgrade) and a membership rejection (the device is no longer a write-capable
+member).
