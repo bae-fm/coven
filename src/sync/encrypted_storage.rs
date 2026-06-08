@@ -60,6 +60,17 @@ impl EncryptedSyncStorage {
         self.encryption.read().unwrap()
     }
 
+    /// The `EncryptionService` a blob's `scope` selects: the library master, a
+    /// per-scope key derived from it, or an explicit host-supplied key. Push
+    /// and pull resolve the scope the same way, so they share this.
+    fn enc_for_scope(&self, scope: crate::blob::BlobScope) -> EncryptionService {
+        match scope {
+            crate::blob::BlobScope::Master => self.enc().clone(),
+            crate::blob::BlobScope::Derived(s) => self.enc().derive_scoped(&s),
+            crate::blob::BlobScope::Key(k) => EncryptionService::from_key(k),
+        }
+    }
+
     /// Blob key: `{namespace}/{ab}/{cd}/{id}`.
     pub fn blob_key(namespace: &str, id: &str) -> String {
         crate::library_dir::LibraryDir::hashed_path(namespace, id)
@@ -151,11 +162,7 @@ impl SyncStorage for EncryptedSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = Self::blob_key(namespace, id);
-        let enc = match scope {
-            crate::blob::BlobScope::Master => self.enc().clone(),
-            crate::blob::BlobScope::Derived(s) => self.enc().derive_scoped(&s),
-            crate::blob::BlobScope::Key(k) => EncryptionService::from_key(k),
-        };
+        let enc = self.enc_for_scope(scope);
         let encrypted = enc.encrypt(&data);
         self.home
             .write(&key, encrypted, &crate::storage::cloud::no_progress())
@@ -171,11 +178,7 @@ impl SyncStorage for EncryptedSyncStorage {
     ) -> Result<Vec<u8>, StorageError> {
         let key = Self::blob_key(namespace, id);
         let encrypted = self.home.read(&key).await?;
-        let enc = match scope {
-            crate::blob::BlobScope::Master => self.enc().clone(),
-            crate::blob::BlobScope::Derived(s) => self.enc().derive_scoped(&s),
-            crate::blob::BlobScope::Key(k) => EncryptionService::from_key(k),
-        };
+        let enc = self.enc_for_scope(scope);
         enc.decrypt(&encrypted)
             .map_err(|e| StorageError::Decryption(format!("blob {namespace}/{id}: {e}")))
     }
