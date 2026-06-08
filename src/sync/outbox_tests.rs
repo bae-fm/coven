@@ -20,10 +20,8 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::invite::{create_invitation, unwrap_library_key};
-use crate::sync::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
-};
-use crate::sync::test_helpers::MockSyncStorage;
+use crate::sync::membership::MemberRole;
+use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
 use rusqlite::OptionalExtension;
 
 // --- Database under test ----------------------------------------------------
@@ -254,56 +252,6 @@ impl CloudHome for SlowChunkedCloudHome {
     }
 }
 
-/// A `CloudHome` that only answers `grant_access` (with a dummy S3 join info),
-/// which is all `create_invitation` reads from the cloud home. The rest is
-/// unreachable in these tests.
-struct GrantingCloudHome;
-
-#[async_trait::async_trait]
-impl CloudHome for GrantingCloudHome {
-    async fn write(
-        &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        unimplemented!("not exercised by create_invitation")
-    }
-    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by create_invitation")
-    }
-    async fn read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-    ) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by create_invitation")
-    }
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        unimplemented!("not exercised by create_invitation")
-    }
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        unimplemented!("not exercised by create_invitation")
-    }
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        unimplemented!("not exercised by create_invitation")
-    }
-    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Ok(CloudHomeJoinInfo::S3 {
-            bucket: "test-bucket".to_string(),
-            region: "us-east-1".to_string(),
-            endpoint: None,
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
-            key_prefix: None,
-        })
-    }
-    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
-        unimplemented!("not exercised by create_invitation")
-    }
-}
-
 // --- Helpers ---------------------------------------------------------------
 
 const T0: &str = "2024-06-01T00:00:00Z";
@@ -324,27 +272,6 @@ fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String
     let p = dir.join(name);
     std::fs::write(&p, contents).unwrap();
     p.to_string_lossy().to_string()
-}
-
-fn pubkey_hex(kp: &UserKeypair) -> String {
-    hex::encode(kp.public_key)
-}
-
-/// A membership chain seeded with `owner` as the founding owner.
-fn bootstrap_chain(owner: &UserKeypair) -> MembershipChain {
-    let pk_hex = pubkey_hex(owner);
-    let mut entry = MembershipEntry {
-        action: MembershipAction::Add,
-        user_pubkey: pk_hex.clone(),
-        role: MemberRole::Owner,
-        timestamp: "0000000001000-0000-dev1".to_string(),
-        author_pubkey: pk_hex,
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, owner);
-    let mut chain = MembershipChain::new();
-    chain.add_entry(entry).unwrap();
-    chain
 }
 
 // --- Tests -----------------------------------------------------------------
@@ -635,7 +562,7 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     // signed membership entry.
     create_invitation(
         &membership,
-        &GrantingCloudHome,
+        &membership,
         &mut chain,
         &owner,
         &pubkey_hex(&joiner),

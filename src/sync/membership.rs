@@ -273,14 +273,10 @@ impl MembershipChain {
 mod tests {
     use super::*;
     use crate::keys::UserKeypair;
-    use crate::sync::test_helpers::{founder_entry, make_entry};
+    use crate::sync::test_helpers::{founder_entry, make_entry, pubkey_hex};
 
     fn gen_keypair() -> UserKeypair {
         UserKeypair::generate()
-    }
-
-    fn pubkey_hex(kp: &UserKeypair) -> String {
-        hex::encode(kp.public_key)
     }
 
     #[test]

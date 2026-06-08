@@ -226,7 +226,7 @@ mod tests {
     use super::*;
     use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
     use crate::sync::membership::MemberRole;
-    use crate::sync::test_helpers::MockSyncStorage;
+    use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
     use async_trait::async_trait;
 
     /// Minimal CloudHome mock that returns a dummy S3 JoinInfo.
@@ -282,28 +282,6 @@ mod tests {
 
     fn gen_keypair() -> UserKeypair {
         UserKeypair::generate()
-    }
-
-    fn pubkey_hex(kp: &UserKeypair) -> String {
-        hex::encode(kp.public_key)
-    }
-
-    /// Bootstrap a chain with a founder entry.
-    fn bootstrap_chain(owner: &UserKeypair) -> MembershipChain {
-        let pk_hex = pubkey_hex(owner);
-        let mut entry = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: pk_hex.clone(),
-            role: MemberRole::Owner,
-            timestamp: "0000000001000-0000-dev1".to_string(),
-            author_pubkey: pk_hex,
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut entry, owner);
-
-        let mut chain = MembershipChain::new();
-        chain.add_entry(entry).unwrap();
-        chain
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::apply::apply_changeset_lww;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipEntry,
+    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
 };
 use crate::sync::session::SyncedTable;
 use crate::sync::storage::{DeviceHead, StorageError, SyncStorage};
@@ -184,9 +184,26 @@ pub fn temp_library_dir() -> (tempfile::TempDir, LibraryDir) {
     (tmp, dir)
 }
 
+/// Hex-encoded ed25519 public key, as membership entries and the wrapped-key
+/// store identify a member.
+pub fn pubkey_hex(kp: &UserKeypair) -> String {
+    hex::encode(kp.public_key)
+}
+
+/// A fresh membership chain whose only member is `owner`, the founding owner,
+/// stamped at the standard test founding time. A test that needs a different
+/// founding timestamp builds the chain from `founder_entry` directly.
+pub fn bootstrap_chain(owner: &UserKeypair) -> MembershipChain {
+    let mut chain = MembershipChain::new();
+    chain
+        .add_entry(founder_entry(owner, "0000000001000-0000-dev1"))
+        .unwrap();
+    chain
+}
+
 /// A signed founder (first) membership entry for `kp`.
 pub fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
-    let pk_hex = hex::encode(kp.public_key);
+    let pk_hex = pubkey_hex(kp);
     let mut entry = MembershipEntry {
         action: MembershipAction::Add,
         user_pubkey: pk_hex.clone(),
@@ -209,10 +226,10 @@ pub fn make_entry(
 ) -> MembershipEntry {
     let mut entry = MembershipEntry {
         action,
-        user_pubkey: hex::encode(subject.public_key),
+        user_pubkey: pubkey_hex(subject),
         role,
         timestamp: timestamp.to_string(),
-        author_pubkey: hex::encode(author.public_key),
+        author_pubkey: pubkey_hex(author),
         signature: String::new(),
     };
     sign_membership_entry(&mut entry, author);
