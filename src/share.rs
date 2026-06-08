@@ -22,6 +22,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::blob::BlobId;
+use tracing::warn;
+
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError};
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
@@ -105,12 +107,17 @@ impl ShareManifest {
             // against host-supplied refs read from a manifest that may have been
             // tampered with in the cloud, so a panic here is a denial of service.
             // A real coven cloud key always has at least two leading byte-pairs,
-            // so a ref that can't be indexed there can never match one — treat it
-            // as a clean no-match instead of hashing it.
+            // so a ref that can't be indexed there can never match one.
             let hex = b.id.replace('-', "");
-            hex.is_char_boundary(2)
-                && hex.is_char_boundary(4)
-                && EncryptedSyncStorage::blob_key(&b.namespace, &b.id) == cloud_key
+            if !(hex.is_char_boundary(2) && hex.is_char_boundary(4)) {
+                warn!(
+                    namespace = %b.namespace,
+                    id = %b.id,
+                    "share manifest ref is not an indexable coven blob id; skipping"
+                );
+                return false;
+            }
+            EncryptedSyncStorage::blob_key(&b.namespace, &b.id) == cloud_key
         })
     }
 }
@@ -173,20 +180,15 @@ pub async fn create_share(
     let manifest = ShareManifest { blobs };
     let manifest_json = serde_json::to_vec(&manifest)?;
 
-    cloud_home
-        .write(
-            &share_object_path(&share_id, KEY_ENC_FILE),
-            key_enc,
-            &no_progress(),
-        )
-        .await?;
-    cloud_home
-        .write(
-            &share_object_path(&share_id, MANIFEST_FILE),
-            manifest_json,
-            &no_progress(),
-        )
-        .await?;
+    for (filename, data) in [(KEY_ENC_FILE, key_enc), (MANIFEST_FILE, manifest_json)] {
+        cloud_home
+            .write(
+                &share_object_path(&share_id, filename),
+                data,
+                &no_progress(),
+            )
+            .await?;
+    }
 
     Ok(ShareToken { share_id, secret })
 }
@@ -224,12 +226,11 @@ pub fn open_share(secret: &[u8; 32], key_enc: &[u8]) -> Result<[u8; 32], ShareEr
 /// envelope model) — claw-back-before-download needs item-key rotation, a
 /// separate capability.
 pub async fn revoke_share(cloud_home: &dyn CloudHome, share_id: &str) -> Result<(), ShareError> {
-    cloud_home
-        .delete(&share_object_path(share_id, KEY_ENC_FILE))
-        .await?;
-    cloud_home
-        .delete(&share_object_path(share_id, MANIFEST_FILE))
-        .await?;
+    for filename in [KEY_ENC_FILE, MANIFEST_FILE] {
+        cloud_home
+            .delete(&share_object_path(share_id, filename))
+            .await?;
+    }
     Ok(())
 }
 
@@ -344,7 +345,7 @@ mod tests {
     /// needs four hex chars) must not panic the unauthenticated `allows` gate: a
     /// tampered cloud manifest could carry such a ref, and a panic on the proxy is
     /// a denial of service. It can never match a real cloud key, so `allows`
-    /// reports a clean no-match.
+    /// reports a no-match.
     #[test]
     fn manifest_allows_does_not_panic_on_unindexable_ref() {
         let manifest = ShareManifest {
