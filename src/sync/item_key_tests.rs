@@ -24,7 +24,9 @@ use crate::sync::pull::pull_changes;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot, push_snapshot};
 use crate::sync::storage::SyncStorage;
-use crate::sync::test_helpers::{create_synced_schema, exec, temp_library_dir, test_synced_tables};
+use crate::sync::test_helpers::{
+    capture_bytes, create_synced_schema, exec, temp_library_dir, test_synced_tables,
+};
 
 /// A fixed master key, distinct from any minted item key, so "the master cannot
 /// read item content" is a real assertion.
@@ -48,17 +50,6 @@ fn open_db(device_id: &str) -> Database {
 /// blob's actual encryption key is selected by the resolved scope, not this.
 fn storage_over(home: InMemoryCloudHome) -> EncryptedSyncStorage {
     EncryptedSyncStorage::new(Box::new(home), EncryptionService::new_with_key(&MASTER_KEY))
-}
-
-/// Capture the outgoing changeset from `db` (the rows written since the last
-/// capture), re-attaching the session so the db stays usable.
-async fn capture(db: &Database) -> Vec<u8> {
-    let bytes = db
-        .take_changeset_and_suspend()
-        .await
-        .expect("capture changeset");
-    db.resume_session().await.expect("resume session");
-    bytes
 }
 
 /// An `Item`-scoped blob is encrypted under the minted item key: it round-trips
@@ -201,7 +192,7 @@ impl BlobPlan for ItemPhotoBlobPlan {
 /// what the cycle's push does, minus the gate (the rows here are already
 /// shareable) — enough for a real `pull_changes` to fetch and apply.
 async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
-    let changeset = capture(db_a).await;
+    let changeset = capture_bytes(db_a, &[]).await;
     assert!(
         !changeset.is_empty(),
         "device A's writes (note rows + the item_keys row) must enter the changeset"
