@@ -154,6 +154,7 @@ impl SyncStorage for EncryptedSyncStorage {
         let enc = match scope {
             crate::blob::BlobScope::Master => self.enc().clone(),
             crate::blob::BlobScope::Derived(s) => self.enc().derive_scoped(&s),
+            crate::blob::BlobScope::Key(k) => EncryptionService::from_key(k),
         };
         let encrypted = enc.encrypt(&data);
         self.home
@@ -173,6 +174,7 @@ impl SyncStorage for EncryptedSyncStorage {
         let enc = match scope {
             crate::blob::BlobScope::Master => self.enc().clone(),
             crate::blob::BlobScope::Derived(s) => self.enc().derive_scoped(&s),
+            crate::blob::BlobScope::Key(k) => EncryptionService::from_key(k),
         };
         enc.decrypt(&encrypted)
             .map_err(|e| StorageError::Decryption(format!("blob {namespace}/{id}: {e}")))
@@ -346,5 +348,56 @@ impl SyncStorage for EncryptedSyncStorage {
         self.enc()
             .decrypt(&encrypted)
             .map_err(|e| StorageError::Decryption(format!("snapshot_meta: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blob::BlobScope;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
+
+    /// A `BlobScope::Key` blob is encrypted under the host's explicit key, not
+    /// the master: it round-trips with that key and the master key cannot read
+    /// it. This is what lets a host scope a blob to a random per-item key it
+    /// owns (e.g. bae's per-release content key for cover images).
+    #[tokio::test]
+    async fn key_scoped_blob_round_trips_and_master_cannot_read_it() {
+        let master = EncryptionService::new_with_key(&[7u8; 32]);
+        let storage = EncryptedSyncStorage::new(Box::new(InMemoryCloudHome::new()), master);
+
+        let content_key = [9u8; 32];
+        let plaintext = b"per-item content bytes".to_vec();
+        storage
+            .put_blob(
+                "images",
+                "item-1",
+                BlobScope::Key(content_key),
+                plaintext.clone(),
+            )
+            .await
+            .expect("put_blob with Key scope");
+
+        // At rest it is ciphertext.
+        let at_rest = storage
+            .cloud_home()
+            .read(&EncryptedSyncStorage::blob_key("images", "item-1"))
+            .await
+            .expect("blob present");
+        assert_ne!(at_rest, plaintext, "blob is encrypted at rest");
+
+        // The explicit key reads it back; the master key does not.
+        let got = storage
+            .get_blob("images", "item-1", BlobScope::Key(content_key))
+            .await
+            .expect("get_blob with the same Key");
+        assert_eq!(got, plaintext);
+        assert!(
+            storage
+                .get_blob("images", "item-1", BlobScope::Master)
+                .await
+                .is_err(),
+            "the master key must not decrypt a Key-scoped blob"
+        );
     }
 }
