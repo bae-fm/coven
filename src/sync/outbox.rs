@@ -198,15 +198,16 @@ pub async fn process_uploads(
             }
         }
 
-        // Every row from `get_pending_cloud_uploads` is an `Upload`; destructure
-        // the upload-only fields (a delete carries none of these).
+        // Every row from `get_pending_cloud_uploads` is an `Upload` (the query
+        // filters `operation = 'upload'`); destructure the upload-only fields. A
+        // `Delete` here would be a broken query invariant, not a skippable row.
         let crate::db::OutboxOperation::Upload {
             file_id,
             source_path,
             scope,
         } = &entry.operation
         else {
-            continue;
+            unreachable!("get_pending_cloud_uploads returns only Upload rows");
         };
 
         if let Some(obs) = observer {
@@ -278,16 +279,17 @@ pub async fn process_deletes(
 
     let mut count = 0;
     for entry in deletes {
-        // Every row from `get_pending_cloud_deletes` is a `Delete`; read its
-        // seq floor (an upload carries no `min_seq`).
+        // Every row from `get_pending_cloud_deletes` is a `Delete` (the query
+        // filters `operation = 'delete'`); read its seq floor. An `Upload` here
+        // would be a broken query invariant, not a skippable row.
         let crate::db::OutboxOperation::Delete { min_seq } = &entry.operation else {
-            continue;
+            unreachable!("get_pending_cloud_deletes returns only Delete rows");
         };
-        if let Some(min_seq) = min_seq {
-            if let Some(head) = min_head {
-                if head <= *min_seq {
-                    continue;
-                }
+        // Defer the delete until every known peer head has advanced past the
+        // seq the deletion was recorded at.
+        if let Some(head) = min_head {
+            if head <= *min_seq {
+                continue;
             }
         }
 

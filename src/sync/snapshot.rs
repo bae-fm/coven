@@ -992,8 +992,11 @@ mod tests {
         );
         exec(
             &db_a,
-            "INSERT INTO cloud_outbox (operation, file_id, cloud_key, scope, created_at) \
-             VALUES ('upload', 'f1', 'blobs/f1', 'master', '2026-01-01')",
+            &format!(
+                "INSERT INTO cloud_outbox (operation, file_id, cloud_key, scope, created_at) \
+                 VALUES ('upload', 'f1', 'blobs/f1', '{}', '2026-01-01')",
+                crate::blob::BlobScope::Master.to_outbox_str()
+            ),
         );
         // A synced row that SHOULD cross, to prove the snapshot still carries data.
         exec(

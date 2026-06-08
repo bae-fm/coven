@@ -618,7 +618,10 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
             }
         }
         "delete" => OutboxOperation::Delete {
-            min_seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            // A delete row always wrote a `min_seq` (the column is non-NULL for a
+            // delete); reading it as a required `i64` surfaces a NULL as a corrupt
+            // row rather than a silent `None`.
+            min_seq: r.get::<_, i64>(7)? as u64,
         },
         other => panic!("invalid cloud_outbox.operation: {other:?}"),
     };

@@ -51,12 +51,15 @@ async fn insert_upload(
     last_attempt_at: Option<String>,
 ) {
     let (file_id, cloud_key) = (file_id.to_string(), cloud_key.to_string());
+    let scope = crate::blob::BlobScope::Master.to_outbox_str();
     db.call(move |conn| {
         conn.execute(
-            "INSERT INTO cloud_outbox \
-             (id, operation, file_id, cloud_key, source_path, scope, created_at, \
-              attempt_count, last_attempt_at) \
-             VALUES (?1, 'upload', ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z', ?5, ?6)",
+            &format!(
+                "INSERT INTO cloud_outbox \
+                 (id, operation, file_id, cloud_key, source_path, scope, created_at, \
+                  attempt_count, last_attempt_at) \
+                 VALUES (?1, 'upload', ?2, ?3, ?4, '{scope}', '2024-01-01T00:00:00Z', ?5, ?6)"
+            ),
             rusqlite::params![
                 id,
                 file_id,
@@ -309,7 +312,7 @@ async fn upload_carries_scope_delete_carries_min_seq() {
     assert_eq!(deletes.len(), 1);
     assert_eq!(
         deletes[0].operation,
-        OutboxOperation::Delete { min_seq: Some(7) },
+        OutboxOperation::Delete { min_seq: 7 },
         "a delete entry carries its seq floor in the variant"
     );
 }

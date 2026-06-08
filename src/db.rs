@@ -107,7 +107,8 @@ pub enum OutboxOperation {
     /// Delete a cloud blob once every peer has synced past `min_seq`.
     Delete {
         /// The seq floor below which the delete is unsafe (a peer might still
-        /// reference the blob). `None` means delete unconditionally.
-        min_seq: Option<u64>,
+        /// reference the blob). Always set — `enqueue_delete` records the
+        /// device's local seq at deletion time.
+        min_seq: u64,
     },
 }
