@@ -16,6 +16,10 @@ pub enum BlobScope {
     Master,
     /// A per-scope key derived from the master key (e.g. one key per item).
     Derived(String),
+    /// An explicit 32-byte key the host supplies and stores itself (e.g. a
+    /// random per-item content key it syncs on its own rows). Unlike `Derived`,
+    /// it isn't derived from the master, so the host can rotate it independently.
+    Key([u8; 32]),
 }
 
 /// A blob referenced by a changeset: its cloud identity plus the local file.

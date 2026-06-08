@@ -35,7 +35,7 @@ pub struct BlobRef {
     pub namespace: String,   // cloud namespace, e.g. "attachments"
     pub id: String,          // blob id, typically the attachment row's id
     pub local_path: PathBuf, // source on push, destination on pull
-    pub scope: BlobScope,    // Master | Derived(scope_id)
+    pub scope: BlobScope,    // Master | Derived(scope_id) | Key(bytes)
 }
 ```
 
@@ -55,6 +55,11 @@ encrypted under:
   [`derive_scoped`](rustdoc:method:coven::encryption::EncryptionService::derive_scoped),
   one distinct key per `scope_id`. A blob scoped to `Derived("todo-42")` is
   encrypted under a different key from one scoped to `Derived("todo-99")`.
+- `BlobScope::Key(bytes)` encrypts with an explicit 32-byte key the host supplies
+  directly. Unlike `Derived`, it isn't a function of the master, so the host can
+  rotate it independently — at the cost of storing and syncing the key itself
+  (typically a column on the blob-bearing row). The host must pass the same key
+  back through `blobs_to_pull` for the puller to decrypt.
 
 The derivation is deterministic: the same `scope_id` always yields the same key,
 on push and on pull alike. That is what lets a puller decrypt: it passes the same
