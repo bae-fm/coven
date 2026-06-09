@@ -727,6 +727,12 @@ unsafe fn gate_outbound_raw(
     // always-shared ancestors. Keyed by `(root table, root id)`.
     let mut flipped_roots: HashSet<(String, String)> = HashSet::new();
 
+    // Gated parents a kept row's UPDATE repoints an FK onto. The new parent may
+    // be a subtree peers never received (cut until this reparent made it
+    // relevant), so it seeds the re-emit alongside the flipped roots. Without it,
+    // a peer applies the bare FK-change against a parent it doesn't have.
+    let mut reparent_seeds: HashSet<(String, String)> = HashSet::new();
+
     // Pass 1: walk the captured changeset, keep gated-true rows, note flips.
     let bytes = changeset;
     if !bytes.is_empty() {
@@ -777,6 +783,9 @@ unsafe fn gate_outbound_raw(
 
             if effective_gate(db, gates, &row)? {
                 group.add_change(iter)?;
+                // A kept row that repoints an FK onto a gated parent drags that
+                // parent's (possibly never-shared) subtree into visibility.
+                reparent_seeds.extend(reparent_targets(db, gates, &row)?);
             }
         }
 
@@ -786,12 +795,54 @@ unsafe fn gate_outbound_raw(
         }
     }
 
-    // Pass 2: re-emit full subtrees for flipped roots, if any.
-    if !flipped_roots.is_empty() {
-        reemit_subtrees(db, gates, &flipped_roots, &group)?;
+    // Pass 2: re-emit full subtrees for flipped roots and reparent targets.
+    if !flipped_roots.is_empty() || !reparent_seeds.is_empty() {
+        reemit_subtrees(db, gates, &flipped_roots, &reparent_seeds, &group)?;
     }
 
     group.output()
+}
+
+/// New gated parents a kept row's UPDATE repoints a foreign key onto. When a kept
+/// row's FK to a gated table changes (e.g. a managed release moves to another
+/// album that had no managed release before, so peers never saw it), the new
+/// parent's subtree must be re-emitted or the peer applies the FK change against
+/// a missing parent. Returns `(parent_table, new_parent_id)` per changed FK to a
+/// gated table; the caller seeds the re-emit with them.
+///
+/// # Safety
+/// `db` must be the valid, open connection the changeset was captured on.
+unsafe fn reparent_targets(
+    db: *mut ffi::sqlite3,
+    gates: &Gates,
+    row: &ChangeRow,
+) -> Result<Vec<(String, String)>, GateError> {
+    // Only an UPDATE repoints an existing row's FK. An INSERT of a managed root is
+    // already re-emitted via the gate flip; a new child under an already-shared
+    // parent needs nothing extra.
+    if row.op != ffi::SQLITE_UPDATE {
+        return Ok(Vec::new());
+    }
+    let cols = column_names(db, &row.table)?;
+    let mut out = Vec::new();
+    for (fk_col, parent) in foreign_keys(db, &row.table)? {
+        if parent == row.table || !gates.tables.contains_key(&parent) {
+            continue;
+        }
+        let Some(idx) = cols.iter().position(|c| c == &fk_col) else {
+            continue;
+        };
+        // A session UPDATE records a column only when it changed, so an old AND a
+        // new value both present means this FK was repointed this cycle.
+        let old = row.old.get(idx).and_then(|v| v.as_deref());
+        let new = row.new.get(idx).and_then(|v| v.as_deref());
+        if let (Some(old), Some(new)) = (old, new) {
+            if old != new {
+                out.push((parent, new.to_string()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Re-emit the whole connected component of currently-kept gated rows reachable
@@ -812,6 +863,7 @@ unsafe fn reemit_subtrees(
     db: *mut ffi::sqlite3,
     gates: &Gates,
     flipped_roots: &HashSet<(String, String)>,
+    reparent_seeds: &HashSet<(String, String)>,
     group: &Changegroup,
 ) -> Result<(), GateError> {
     // Compute the whole connected kept component of every flipped root: its
@@ -820,8 +872,11 @@ unsafe fn reemit_subtrees(
     // those kept children (a featured artist credited via a join row) and so on.
     // These are re-emitted by explicit `(table, id)` membership; the flipped
     // root's own descendants are re-emitted by the scoping test below. Both feed
-    // the same diff.
-    let reemit_ids = connected_kept_component(db, gates, flipped_roots)?;
+    // the same diff. The reparent targets seed the walk too, so a newly-referenced
+    // parent's whole kept component lands on peers.
+    let mut seeds = flipped_roots.clone();
+    seeds.extend(reparent_seeds.iter().cloned());
+    let reemit_ids = connected_kept_component(db, gates, &seeds)?;
 
     let diff_bytes = full_state_changeset(db, gates)?;
     if diff_bytes.is_empty() {
@@ -2489,6 +2544,71 @@ mod tests {
         assert!(
             row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T'"),
             "peer has track"
+        );
+    }
+
+    #[test]
+    fn reparent_onto_a_cut_ancestor_reemits_it_to_peer() {
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
+
+        // Cycle 1: an artist, two albums under it, and a managed release under
+        // AL1. AL2 has no managed release, so the gate cuts it — the peer never
+        // receives it.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL1', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL2', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL1', 1, '0000000001000-0000-dev1')",
+            ],
+        );
+        let peer = conn();
+        create_album_schema(&peer);
+        apply_album(&peer, &out1);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL1'"),
+            "peer has the shared album AL1"
+        );
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL2'"),
+            "AL2 was cut (no managed release) — the peer never received it"
+        );
+
+        // Cycle 2: reparent the managed release onto AL2 (previously cut). The
+        // gate must re-emit AL2 (and its component), or the peer applies the bare
+        // FK change against a missing album and is left with a dangling release.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET album_id = 'AL2', _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+        );
+        let changes = walk(&out2).expect("walk");
+        assert!(
+            has_row(&changes, "albums", "AL2"),
+            "the newly-referenced album AL2 must be re-emitted"
+        );
+
+        apply_album(&peer, &out2);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL2'"),
+            "peer now has AL2"
+        );
+        assert_eq!(
+            query_text(&peer, "SELECT album_id FROM releases WHERE id = 'R1'"),
+            "AL2",
+            "R1 now points at AL2 on the peer"
+        );
+        assert!(
+            !row_exists(
+                &peer,
+                "SELECT 1 FROM releases r WHERE NOT EXISTS \
+                 (SELECT 1 FROM albums a WHERE a.id = r.album_id)"
+            ),
+            "no release on the peer points at a missing album"
         );
     }
 
