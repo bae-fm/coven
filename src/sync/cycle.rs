@@ -20,7 +20,9 @@ use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
 
 use super::encrypted_storage::EncryptedSyncStorage;
+use super::envelope::{self, sign_envelope, ChangesetEnvelope};
 use super::hlc::Hlc;
+use super::push::SCHEMA_VERSION;
 use super::service::SyncService;
 use super::storage::SyncStorage;
 
@@ -78,6 +80,104 @@ pub fn read_staged_changeset(library_dir: &LibraryDir) -> Option<Vec<u8>> {
     } else {
         None
     }
+}
+
+/// Concatenate two changesets into one, deduping by primary key via a
+/// changegroup using `db`'s schema. Successive changesets deferred while cloud
+/// uploads are pending are merged into one staged blob this way, so no captured
+/// changeset is dropped when more edits arrive before the uploads finish.
+async fn concat_changesets(db: &Database, a: Vec<u8>, b: Vec<u8>) -> Result<Vec<u8>, String> {
+    db.call(move |conn| {
+        let handle = unsafe { conn.handle() };
+        unsafe { concat_changesets_raw(handle, &a, &b) }.map_err(crate::database::DbError)
+    })
+    .await
+    .map_err(|e| format!("Failed to accumulate deferred changeset: {e}"))
+}
+
+/// Merge a freshly-gated changeset into an already-staged one while uploads are
+/// pending. Both are signed envelopes; unpack each to its raw changeset,
+/// concatenate the raw changesets, and re-sign the merged result at `seq`. The
+/// merged envelope re-signs because its changeset bytes changed.
+async fn merge_deferred_changesets(
+    db: &Database,
+    staged: &[u8],
+    incoming: &[u8],
+    device_id: &str,
+    seq: u64,
+    keypair: &UserKeypair,
+    timestamp: &str,
+) -> Result<Vec<u8>, String> {
+    let (_, staged_raw) =
+        envelope::unpack(staged).map_err(|e| format!("Failed to unpack staged changeset: {e}"))?;
+    let (_, incoming_raw) = envelope::unpack(incoming)
+        .map_err(|e| format!("Failed to unpack incoming changeset: {e}"))?;
+    let merged = concat_changesets(db, staged_raw, incoming_raw).await?;
+    let mut env = ChangesetEnvelope {
+        device_id: device_id.to_string(),
+        seq,
+        schema_version: SCHEMA_VERSION,
+        message: "background sync".to_string(),
+        timestamp: timestamp.to_string(),
+        changeset_size: merged.len(),
+        author_pubkey: None,
+        signature: None,
+    };
+    sign_envelope(&mut env, keypair, &merged);
+    Ok(envelope::pack(&env, &merged))
+}
+
+/// # Safety
+/// `db` must be a valid, open sqlite3 connection holding the synced schema (so
+/// the changegroup can resolve each changeset's table primary keys for dedup).
+unsafe fn concat_changesets_raw(
+    db: *mut libsqlite3_sys::sqlite3,
+    a: &[u8],
+    b: &[u8],
+) -> Result<Vec<u8>, String> {
+    use libsqlite3_sys as ffi;
+    use std::ffi::{c_int, c_void, CString};
+    use std::ptr;
+
+    let mut grp: *mut ffi::sqlite3_changegroup = ptr::null_mut();
+    let rc = ffi::sqlite3changegroup_new(&mut grp);
+    if rc != ffi::SQLITE_OK as c_int {
+        return Err(format!("sqlite3changegroup_new failed: {rc}"));
+    }
+    let result = (|| {
+        let main = CString::new("main").unwrap();
+        let rc = ffi::sqlite3changegroup_schema(grp, db, main.as_ptr());
+        if rc != ffi::SQLITE_OK as c_int {
+            return Err(format!("sqlite3changegroup_schema failed: {rc}"));
+        }
+        for cs in [a, b] {
+            if cs.is_empty() {
+                continue;
+            }
+            let rc =
+                ffi::sqlite3changegroup_add(grp, cs.len() as c_int, cs.as_ptr() as *mut c_void);
+            if rc != ffi::SQLITE_OK as c_int {
+                return Err(format!("sqlite3changegroup_add failed: {rc}"));
+            }
+        }
+        let mut len: c_int = 0;
+        let mut buf: *mut c_void = ptr::null_mut();
+        let rc = ffi::sqlite3changegroup_output(grp, &mut len, &mut buf);
+        if rc != ffi::SQLITE_OK as c_int {
+            return Err(format!("sqlite3changegroup_output failed: {rc}"));
+        }
+        let bytes = if buf.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(buf as *const u8, len as usize).to_vec()
+        };
+        if !buf.is_null() {
+            ffi::sqlite3_free(buf);
+        }
+        Ok(bytes)
+    })();
+    ffi::sqlite3changegroup_delete(grp);
+    result
 }
 
 /// Push a changeset to the sync storage and update the device head.
@@ -162,46 +262,9 @@ pub async fn run_single_sync_cycle(
         Err(e) => return Err(format!("Failed to read staged_seq: {e}")),
     };
 
-    // Retry any staged changeset from a previous failed push.
-    if let Some(seq) = staged_seq {
-        if let Some(staged_data) = read_staged_changeset(library_dir) {
-            let timestamp = hlc.now().to_string();
-            info!(seq, "Retrying staged changeset push");
-
-            match push_changeset(
-                storage,
-                device_id,
-                seq,
-                staged_data,
-                snapshot_seq,
-                &timestamp,
-            )
-            .await
-            {
-                Ok(()) => {
-                    info!(seq, "Staged changeset push succeeded");
-                    clear_staged_changeset(library_dir);
-                    local_seq = seq;
-
-                    db.set_sync_state("local_seq", &seq.to_string())
-                        .await
-                        .map_err(|e| {
-                            format!("Failed to persist local_seq after staged push: {e}")
-                        })?;
-                    db.set_sync_state("staged_seq", "").await.map_err(|e| {
-                        format!("Failed to clear staged_seq after staged push: {e}")
-                    })?;
-                }
-                Err(e) => return Err(format!("Staged changeset push failed: {e}")),
-            }
-        } else {
-            db.set_sync_state("staged_seq", "")
-                .await
-                .map_err(|e| format!("Failed to clear stale staged_seq: {e}"))?;
-        }
-    }
-
-    // Process outbox uploads (files must be in cloud before changeset references them).
+    // Process outbox uploads (files must be in cloud before any changeset or
+    // snapshot references them). Run BEFORE the staged-push decisions below, so a
+    // changeset whose blobs just finished uploading this cycle can push now.
     if let Some(ch) = cloud_home {
         match super::outbox::process_uploads(
             db,
@@ -219,11 +282,67 @@ pub async fn run_single_sync_cycle(
         }
     }
 
-    // Whether to gate changeset push on pending uploads.
+    // Whether to gate changeset/snapshot propagation on pending uploads: remote
+    // devices must not learn about rows whose blobs (audio) aren't in cloud yet.
     let has_pending_uploads = db
         .has_pending_cloud_uploads()
         .await
         .map_err(|e| format!("Failed to check pending cloud uploads: {e}"))?;
+
+    // Push the staged changeset (deferred for pending uploads in an earlier
+    // cycle, or surviving a failed push) — but only once its blobs are in the
+    // cloud. While uploads remain pending it stays staged and this cycle's
+    // capture accumulates into it in the span below.
+    if let Some(seq) = staged_seq {
+        if has_pending_uploads {
+            info!(
+                seq,
+                "Holding staged changeset: pending cloud uploads remain"
+            );
+        } else if let Some(staged_data) = read_staged_changeset(library_dir) {
+            let timestamp = hlc.now().to_string();
+            info!(seq, "Retrying staged changeset push");
+
+            match push_changeset(
+                storage,
+                device_id,
+                seq,
+                staged_data,
+                snapshot_seq,
+                &timestamp,
+            )
+            .await
+            {
+                Ok(()) => {
+                    info!(seq, "Staged changeset push succeeded");
+                    // Persist local_seq BEFORE destroying the recovery evidence
+                    // (staged_seq, then the file). A crash between these leaves
+                    // the staged file + staged_seq for an idempotent re-push at
+                    // the same seq, and local_seq is already advanced so no later
+                    // changeset can reuse `seq` and overwrite it on the remote.
+                    local_seq = seq;
+                    db.set_sync_state("local_seq", &seq.to_string())
+                        .await
+                        .map_err(|e| {
+                            format!("Failed to persist local_seq after staged push: {e}")
+                        })?;
+                    db.set_sync_state("staged_seq", "").await.map_err(|e| {
+                        format!("Failed to clear staged_seq after staged push: {e}")
+                    })?;
+                    clear_staged_changeset(library_dir);
+                }
+                Err(e) => return Err(format!("Staged changeset push failed: {e}")),
+            }
+        } else {
+            // staged_seq set but the file is absent: the stage write failed and
+            // the push never committed (the success path persists local_seq
+            // before clearing the file, so it can't produce this state). The seq
+            // was never consumed on the remote — drop the marker, keep local_seq.
+            db.set_sync_state("staged_seq", "")
+                .await
+                .map_err(|e| format!("Failed to clear stale staged_seq: {e}"))?;
+        }
+    }
 
     let cursors = db
         .get_all_sync_cursors()
@@ -272,61 +391,87 @@ pub async fn run_single_sync_cycle(
             .await
             .map_err(|e| format!("Sync cycle error: {e}"))?;
 
-        // Handle outgoing changeset (push). Skip push if there are still pending
-        // cloud uploads — remote devices should not learn about releases whose
-        // audio files aren't in cloud yet.
-        if has_pending_uploads {
-            if sync_result.outgoing.is_some() {
-                info!("Deferring changeset push: pending cloud uploads remain");
-            }
-        } else if let Some(outgoing) = &sync_result.outgoing {
+        // Propagate the captured changeset. While cloud uploads are still
+        // pending we must NOT make the rows visible to peers (their blobs aren't
+        // in the cloud yet), but we must NOT drop the captured changeset either —
+        // the capture already consumed it from the session, so dropping it loses
+        // those rows forever. Stage it instead, accumulating into any
+        // already-staged changeset, and let the gated retry above push it once
+        // the uploads finish.
+        if let Some(outgoing) = &sync_result.outgoing {
             let seq = outgoing.seq;
 
-            // Stage before pushing so bytes survive a push failure.
-            stage_changeset(library_dir, &outgoing.packed);
+            if has_pending_uploads {
+                let staged = match read_staged_changeset(library_dir) {
+                    Some(existing) => {
+                        merge_deferred_changesets(
+                            db,
+                            &existing,
+                            &outgoing.packed,
+                            device_id,
+                            seq,
+                            user_keypair,
+                            &timestamp,
+                        )
+                        .await?
+                    }
+                    None => outgoing.packed.clone(),
+                };
+                stage_changeset(library_dir, &staged);
+                db.set_sync_state("staged_seq", &seq.to_string())
+                    .await
+                    .map_err(|e| format!("Failed to persist staged_seq while deferring: {e}"))?;
+                info!(
+                    seq,
+                    "Deferred changeset staged: pending cloud uploads remain"
+                );
+            } else {
+                // Stage before pushing so the bytes survive a push failure.
+                stage_changeset(library_dir, &outgoing.packed);
+                db.set_sync_state("staged_seq", &seq.to_string())
+                    .await
+                    .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
 
-            db.set_sync_state("staged_seq", &seq.to_string())
+                match push_changeset(
+                    storage,
+                    device_id,
+                    seq,
+                    outgoing.packed.clone(),
+                    snapshot_seq,
+                    &timestamp,
+                )
                 .await
-                .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
-
-            match push_changeset(
-                storage,
-                device_id,
-                seq,
-                outgoing.packed.clone(),
-                snapshot_seq,
-                &timestamp,
-            )
-            .await
-            {
-                Ok(()) => {
-                    clear_staged_changeset(library_dir);
-                    local_seq = seq;
-
-                    db.set_sync_state("local_seq", &seq.to_string())
-                        .await
-                        .map_err(|e| format!("Failed to persist local_seq after push: {e}"))?;
-                    db.set_sync_state("staged_seq", "")
-                        .await
-                        .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
-
-                    info!(seq, "Pushed changeset");
-                }
-                Err(e) => {
-                    warn!(seq, "Push failed, changeset staged for retry: {e}");
+                {
+                    Ok(()) => {
+                        // Persist local_seq before clearing the staged file — see
+                        // the staged-retry arm above for why the order matters.
+                        local_seq = seq;
+                        db.set_sync_state("local_seq", &seq.to_string())
+                            .await
+                            .map_err(|e| format!("Failed to persist local_seq after push: {e}"))?;
+                        db.set_sync_state("staged_seq", "")
+                            .await
+                            .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
+                        clear_staged_changeset(library_dir);
+                        info!(seq, "Pushed changeset");
+                    }
+                    Err(e) => {
+                        warn!(seq, "Push failed, changeset staged for retry: {e}");
+                    }
                 }
             }
         }
 
-        // Persist updated cursors.
+        // Persist updated cursors. A failure here aborts the cycle like the
+        // sibling bookkeeping persists (local_seq, staged_seq, HLC high-water):
+        // leaving a cursor behind the rows already applied this cycle would
+        // silently desync this device and mask a real DB error.
         for (cursor_device_id, cursor_seq) in &sync_result.updated_cursors {
-            if let Err(e) = db.set_sync_cursor(cursor_device_id, *cursor_seq).await {
-                warn!(
-                    device_id = cursor_device_id,
-                    seq = cursor_seq,
-                    "Failed to persist sync cursor: {e}"
-                );
-            }
+            db.set_sync_cursor(cursor_device_id, *cursor_seq)
+                .await
+                .map_err(|e| {
+                    format!("Failed to persist sync cursor for {cursor_device_id}: {e}")
+                })?;
         }
 
         // Advance the HLC past every applied row's `_updated_at`, so the next
@@ -403,8 +548,13 @@ pub async fn run_single_sync_cycle(
     let is_initial_sync =
         local_seq == 0 && snapshot_seq.is_none() && sync_result.outgoing.is_none();
 
-    if is_initial_sync
-        || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since)
+    // The snapshot is the second channel that propagates rows to peers, so it
+    // honors the same blob-before-row gate as the changeset push: defer it while
+    // uploads are pending, otherwise a bootstrapping peer would materialize a row
+    // whose audio isn't in the cloud yet.
+    if !has_pending_uploads
+        && (is_initial_sync
+            || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since))
     {
         if is_initial_sync {
             info!("Initial sync: pushing snapshot of existing library data");

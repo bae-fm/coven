@@ -2,6 +2,8 @@ pub mod apply;
 mod backoff;
 pub mod conflict;
 pub mod cycle;
+#[cfg(test)]
+mod cycle_tests;
 pub mod encrypted_storage;
 pub mod envelope;
 pub mod gate;
