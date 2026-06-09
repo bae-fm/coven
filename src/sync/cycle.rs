@@ -235,6 +235,19 @@ pub async fn run_single_sync_cycle(
         Err(e) => return Err(format!("Failed to read staged_seq: {e}")),
     };
 
+    // A snapshot bootstrap that could not land every blob it references records a
+    // pending flag (an empty/absent value means caught up). While it is set, the
+    // reconciliation below re-runs each cycle until every blob is local; a clear
+    // flag skips the scan entirely, so a caught-up library pays nothing.
+    let snapshot_blob_backfill_pending = match db
+        .get_sync_state(super::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING)
+        .await
+    {
+        Ok(Some(v)) => !v.is_empty(),
+        Ok(None) => false,
+        Err(e) => return Err(format!("Failed to read snapshot blob backfill flag: {e}")),
+    };
+
     // Process outbox uploads (files must be in cloud before any changeset or
     // snapshot references them). Run BEFORE the staged-push decisions below, so a
     // changeset whose blobs just finished uploading this cycle can push now.
@@ -491,6 +504,34 @@ pub async fn run_single_sync_cycle(
     }
 
     let (sync_result, local_seq) = span?;
+
+    // Reconcile the blob files a snapshot bootstrap could not land. Runs only
+    // while the pending flag is set, and after the pull's span resumed capture so
+    // any blob whose `item_keys` row arrived this cycle now resolves its key. The
+    // reconciliation is read-only (it downloads files, writes no rows), so it does
+    // not need the suspended span. On the first run that lands every referenced
+    // blob the flag clears and no later cycle scans.
+    if snapshot_blob_backfill_pending {
+        match super::snapshot::reconcile_snapshot_blobs(
+            db,
+            &library_dir.db_path(),
+            storage,
+            blob_plan,
+        )
+        .await
+        {
+            Ok(true) => {
+                db.set_sync_state(super::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING, "")
+                    .await
+                    .map_err(|e| format!("Failed to clear snapshot blob backfill flag: {e}"))?;
+                info!("Snapshot blob backfill reconciled; flag cleared");
+            }
+            Ok(false) => {
+                info!("Snapshot blob backfill still incomplete; will retry next cycle");
+            }
+            Err(e) => warn!("Snapshot blob reconciliation error: {e}"),
+        }
+    }
 
     // Check snapshot policy.
     let hours_since = last_snapshot_time.map(|t| {

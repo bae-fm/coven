@@ -420,37 +420,47 @@ pub async fn bootstrap_from_snapshot(
     Ok(BootstrapResult { cursors })
 }
 
-/// Download the blob files the bootstrapped DB's rows reference but the snapshot
-/// did not carry.
+/// `sync_state` key holding `"1"` while the snapshot blob reconciliation has not
+/// yet fully succeeded for this library, absent once it has. A bootstrap sets it;
+/// each sync cycle runs the reconciliation while it is set and clears it on the
+/// first run that lands every referenced blob. See [`reconcile_snapshot_blobs`].
+pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_pending";
+
+/// Download the blob files the DB at `db_path` references but whose local file is
+/// absent, returning true once every referenced blob is on local disk.
 ///
 /// `bootstrap_from_snapshot` writes only the catalog DB; the incremental pull
 /// that follows starts past the snapshot's per-device cursors, so the original
 /// INSERT changesets that carried each row's image/torrent blob (seq <= cursor)
 /// are never re-walked and the per-changeset blob download never fires for them.
-/// Without this backfill a bootstrapped device has the rows but none of the
+/// Without this reconciliation a bootstrapped device has the rows but none of the
 /// files they point at (a synced album shows a placeholder cover). Audio is
 /// unaffected: a host's [`crate::blob::BlobPlan`] excludes audio from the blobs
 /// it wants local (it streams on demand), so `blobs_in_db` does not list it.
 ///
-/// Reads the blobs the host's plan finds in the bootstrapped DB at `db_path`,
-/// then downloads each via the same [`crate::sync::pull::download_blobs`] path
-/// the incremental pull uses (skipping any whose local file already exists). A
-/// failed download is logged there; this does not abort the bootstrap, so a
-/// transient blob fetch failure leaves the device with the catalog and retries
-/// the missing files on a later sync cycle's pull.
+/// Reads the blobs the host's plan finds in the DB at `db_path`, then downloads
+/// each via the same [`crate::sync::pull::download_blobs`] path the incremental
+/// pull uses (skipping any whose local file already exists). A failed download is
+/// logged there and reflected in the returned flag; the bootstrap that calls this
+/// records the not-yet-complete state in [`SNAPSHOT_BLOB_BACKFILL_PENDING`], and
+/// each subsequent sync cycle re-runs this until it returns true, so a blob whose
+/// object was not yet in the cloud (or whose download hit a transient error) at
+/// bootstrap is fetched on a later cycle rather than lost. A clear flag means no
+/// cycle runs this, so a caught-up library pays nothing.
 ///
 /// `blobs_in_db` is a read-only enumeration the host's plan runs against a
-/// short-lived connection to the same on-disk DB the `db` actor owns. It is the
-/// single read of that DB at this point in the bootstrap — capture is suspended
-/// and the incremental pull has not started — so it does not race the actor.
-/// `db` is still needed: `download_blobs` resolves each blob's scope through it
-/// (an `Item`-scoped blob reads its key from the bootstrapped `item_keys` rows).
-pub(crate) async fn backfill_snapshot_blobs(
+/// short-lived connection to the same on-disk DB the `db` actor owns; `db` is
+/// still needed because `download_blobs` resolves each blob's scope through it
+/// (an `Item`-scoped blob reads its key from the `item_keys` rows). At bootstrap
+/// capture is suspended and the pull has not started; in a cycle this runs after
+/// the pull's span has resumed capture, and is read-only either way, so it does
+/// not re-record rows or race the actor.
+pub(crate) async fn reconcile_snapshot_blobs(
     db: &crate::database::Database,
     db_path: &Path,
     storage: &dyn SyncStorage,
     blob_plan: &dyn crate::blob::BlobPlan,
-) -> Result<(), crate::database::DbError> {
+) -> Result<bool, crate::database::DbError> {
     let blobs = {
         let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
         blob_plan
@@ -459,20 +469,20 @@ pub(crate) async fn backfill_snapshot_blobs(
     };
 
     if blobs.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
 
     let total = blobs.len();
     let all_ok = crate::sync::pull::download_blobs(db, blobs, storage).await;
     if all_ok {
-        info!(total, "backfilled snapshot blob files");
+        info!(total, "snapshot blob reconciliation complete");
     } else {
         warn!(
             total,
-            "some snapshot blob files failed to backfill; a later sync cycle's pull will retry them"
+            "some snapshot blob files are not yet local; a later sync cycle reconciles them"
         );
     }
-    Ok(())
+    Ok(all_ok)
 }
 
 #[cfg(test)]

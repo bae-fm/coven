@@ -589,12 +589,15 @@ pub fn note_photo_ref(
     }
 }
 
-/// Map every non-Delete `note_photos` row-change to a [`crate::blob::BlobRef`]
-/// under `dir` in `namespace`, scoping each via `scope_for(kind, note_id)`. The
+/// Map every `note_photos` INSERT row-change to a [`crate::blob::BlobRef`] under
+/// `dir` in `namespace`, scoping each via `scope_for(kind, note_id)`. The
 /// changeset-driven analogue of [`note_photos_refs_from_db`]; both build each ref
-/// through [`note_photo_ref`]. A row that survives the `note_photos` filter must
-/// have a primary key and a `note_id` at column 1; their absence is a malformed
-/// test fixture, surfaced loudly rather than silently skipped.
+/// through [`note_photo_ref`]. Filtered to INSERTs (matching bae's real
+/// `BlobPlan`): a blob's bytes never change on update, so only an INSERT carries
+/// one, and an INSERT records every column — so `id`/`note_id`/`kind` are always
+/// present, where a partial UPDATE could leave `kind` absent. Their absence on an
+/// INSERT is a malformed test fixture, surfaced loudly rather than silently
+/// skipped.
 pub fn note_photos_refs(
     changes: &[crate::changeset::RowChange],
     dir: &std::path::Path,
@@ -604,7 +607,7 @@ pub fn note_photos_refs(
     use crate::changeset::ChangeOp;
     changes
         .iter()
-        .filter(|c| c.table == "note_photos" && c.op != ChangeOp::Delete)
+        .filter(|c| c.table == "note_photos" && c.op == ChangeOp::Insert)
         .map(|c| {
             let id = c.pk().expect("note_photos row has a primary key");
             let note_id = c.col(1).expect("note_photos row has a note_id at column 1");
