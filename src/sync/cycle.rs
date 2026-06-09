@@ -5,6 +5,7 @@
 //! goes through the owned [`Database`]; the capture session is suspended for the
 //! gate/pull span and resumed before the snapshot.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tracing::{error, info, warn};
@@ -180,18 +181,21 @@ unsafe fn concat_changesets_raw(
     result
 }
 
-/// Push a changeset to the sync storage and update the device head.
+/// Push a changeset to the sync storage and update the device head. `head_cursors`
+/// is this device's pull cursors, published in the head so peers can gate blob
+/// deletes on every peer having pulled past the deletion.
 pub async fn push_changeset(
     storage: &dyn SyncStorage,
     device_id: &str,
     seq: u64,
     packed: Vec<u8>,
     snapshot_seq: Option<u64>,
+    head_cursors: &HashMap<String, u64>,
     timestamp: &str,
 ) -> Result<(), super::storage::StorageError> {
     storage.put_changeset(device_id, seq, packed).await?;
     storage
-        .put_head(device_id, seq, snapshot_seq, timestamp)
+        .put_head(device_id, seq, snapshot_seq, head_cursors, timestamp)
         .await?;
     Ok(())
 }
@@ -289,6 +293,13 @@ pub async fn run_single_sync_cycle(
         .await
         .map_err(|e| format!("Failed to check pending cloud uploads: {e}"))?;
 
+    // This device's pull cursors: where the pull starts from, and what we publish
+    // in our head so peers know how far we've consumed each of them.
+    let cursors = db
+        .get_all_sync_cursors()
+        .await
+        .map_err(|e| format!("Failed to load sync cursors: {e}"))?;
+
     // Push the staged changeset (deferred for pending uploads in an earlier
     // cycle, or surviving a failed push) — but only once its blobs are in the
     // cloud. While uploads remain pending it stays staged and this cycle's
@@ -309,6 +320,7 @@ pub async fn run_single_sync_cycle(
                 seq,
                 staged_data,
                 snapshot_seq,
+                &cursors,
                 &timestamp,
             )
             .await
@@ -343,11 +355,6 @@ pub async fn run_single_sync_cycle(
                 .map_err(|e| format!("Failed to clear stale staged_seq: {e}"))?;
         }
     }
-
-    let cursors = db
-        .get_all_sync_cursors()
-        .await
-        .map_err(|e| format!("Failed to load sync cursors: {e}"))?;
 
     let timestamp = hlc.now().to_string();
 
@@ -438,6 +445,7 @@ pub async fn run_single_sync_cycle(
                     seq,
                     outgoing.packed.clone(),
                     snapshot_seq,
+                    &cursors,
                     &timestamp,
                 )
                 .await
@@ -497,16 +505,13 @@ pub async fn run_single_sync_cycle(
         .await
         .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
-        // Process outbox deletes (safe after all devices synced past the deletion).
+        // Process outbox deletes (safe once every peer has pulled past the
+        // deletion — process_deletes reads each peer's cursor-for-us from the
+        // pulled heads).
         if let Some(ch) = cloud_home {
-            let device_head_seqs: Vec<u64> = sync_result
-                .pull
-                .remote_heads
-                .iter()
-                .map(|h| h.seq)
-                .collect();
-
-            match super::outbox::process_deletes(db, ch, &device_head_seqs).await {
+            match super::outbox::process_deletes(db, ch, device_id, &sync_result.pull.remote_heads)
+                .await
+            {
                 Ok(n) if n > 0 => info!(count = n, "Processed outbox deletes"),
                 Err(e) => warn!("Outbox delete processing error: {e}"),
                 _ => {}

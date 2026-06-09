@@ -238,11 +238,14 @@ pub fn make_entry(
 
 /// In-memory mock of SyncStorage for tests.
 /// Stores changesets as plaintext (no encryption in tests).
+/// A mock head: the device's latest seq plus its pull cursors for other devices.
+type MockHead = (u64, HashMap<String, u64>);
+
 pub struct MockSyncStorage {
     /// Changesets: key = "changes/{device_id}/{seq}" -> packed envelope bytes.
     objects: Mutex<HashMap<String, Vec<u8>>>,
-    /// Heads: device_id -> seq.
-    heads: Mutex<HashMap<String, u64>>,
+    /// Heads: device_id -> (seq, this device's pull cursors for other devices).
+    heads: Mutex<HashMap<String, MockHead>>,
     /// The single shared snapshot blob (`snapshot.db.enc`).
     snapshot: Mutex<Option<Vec<u8>>>,
     /// The snapshot's per-device cursor metadata (`snapshot_meta.json.enc`).
@@ -296,10 +299,8 @@ impl MockSyncStorage {
     fn store_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
         let key = format!("changes/{device_id}/{seq}");
         self.objects.lock().unwrap().insert(key, packed);
-        self.heads
-            .lock()
-            .unwrap()
-            .insert(device_id.to_string(), seq);
+        let mut heads = self.heads.lock().unwrap();
+        heads.entry(device_id.to_string()).or_default().0 = seq;
     }
 }
 
@@ -309,11 +310,12 @@ impl SyncStorage for MockSyncStorage {
         let heads = self.heads.lock().unwrap();
         Ok(heads
             .iter()
-            .map(|(id, &seq)| DeviceHead {
+            .map(|(id, (seq, cursors))| DeviceHead {
                 device_id: id.clone(),
-                seq,
+                seq: *seq,
                 snapshot_seq: None,
                 last_sync: None,
+                cursors: cursors.clone(),
             })
             .collect())
     }
@@ -343,12 +345,13 @@ impl SyncStorage for MockSyncStorage {
         device_id: &str,
         seq: u64,
         _snapshot_seq: Option<u64>,
+        cursors: &HashMap<String, u64>,
         _timestamp: &str,
     ) -> Result<(), StorageError> {
         self.heads
             .lock()
             .unwrap()
-            .insert(device_id.to_string(), seq);
+            .insert(device_id.to_string(), (seq, cursors.clone()));
         Ok(())
     }
 

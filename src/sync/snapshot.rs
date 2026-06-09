@@ -227,7 +227,7 @@ pub async fn push_snapshot(
     cursors.insert(device_id.to_string(), current_seq);
 
     let meta = SnapshotMeta {
-        cursors,
+        cursors: cursors.clone(),
         created_at: timestamp.clone(),
     };
     let meta_json =
@@ -235,9 +235,16 @@ pub async fn push_snapshot(
 
     storage.put_snapshot_meta(meta_json).await?;
 
-    // Update head with snapshot_seq.
+    // Update head with snapshot_seq and our pull cursors (peers read their own id
+    // out of it to gate blob deletes).
     storage
-        .put_head(device_id, current_seq, Some(current_seq), &timestamp)
+        .put_head(
+            device_id,
+            current_seq,
+            Some(current_seq),
+            &cursors,
+            &timestamp,
+        )
         .await?;
 
     info!(
@@ -567,6 +574,7 @@ mod tests {
                     seq: *seq,
                     snapshot_seq: *snap,
                     last_sync: None,
+                    cursors: HashMap::new(),
                 })
                 .collect())
         }
@@ -593,6 +601,7 @@ mod tests {
             device_id: &str,
             seq: u64,
             snapshot_seq: Option<u64>,
+            _cursors: &HashMap<String, u64>,
             _timestamp: &str,
         ) -> Result<(), StorageError> {
             let mut heads = self.heads.lock().unwrap();
@@ -1460,7 +1469,13 @@ mod tests {
         let storage = MockSyncStorage::new();
         storage.put_snapshot(encrypted).await.unwrap();
         storage
-            .put_head("dev-1", 20, Some(15), "2026-02-10T00:00:00Z")
+            .put_head(
+                "dev-1",
+                20,
+                Some(15),
+                &HashMap::new(),
+                "2026-02-10T00:00:00Z",
+            )
             .await
             .unwrap();
 

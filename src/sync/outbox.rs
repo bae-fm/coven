@@ -15,6 +15,7 @@ use crate::blob::BlobUploadObserver;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::CloudHome;
+use crate::sync::storage::DeviceHead;
 
 /// How often the upload pipeline forwards a mid-file byte count to the
 /// observer. coven's `write` reports per chunk (every few MiB), which on a fast
@@ -259,12 +260,17 @@ pub async fn process_uploads(
 
 /// Process pending deletes: remove cloud files whose deletion has been synced.
 ///
-/// A delete is only safe when all known device heads have advanced past the
-/// entry's `min_seq`. Returns the number of successful deletes.
+/// A blob delete's `min_seq` is OUR `local_seq` at deletion time; the deletion
+/// becomes visible to a peer once that peer has applied our changeset past it.
+/// So a delete is safe only when EVERY peer's pull cursor *for us* has advanced
+/// past `min_seq` — read out of each peer's published head (`head.cursors[us]`).
+/// A peer that still trails would otherwise pull the row that references the
+/// blob and find the blob gone. Returns the number of successful deletes.
 pub async fn process_deletes(
     db: &Database,
     cloud_home: &dyn CloudHome,
-    device_head_seqs: &[u64],
+    our_device_id: &str,
+    heads: &[DeviceHead],
 ) -> Result<usize, String> {
     let deletes = db
         .get_pending_cloud_deletes()
@@ -275,7 +281,22 @@ pub async fn process_deletes(
         return Ok(0);
     }
 
-    let min_head = device_head_seqs.iter().copied().min();
+    // Guard against a torn/empty head listing: our own head is always published,
+    // so its absence means we can't see the real peer set — defer rather than
+    // risk deleting a blob a peer we didn't see still needs.
+    if !heads.iter().any(|h| h.device_id == our_device_id) {
+        warn!("skipping deletes: own head absent from listing (torn read?)");
+        return Ok(0);
+    }
+
+    // Each peer's pull cursor FOR US: how far that device has applied our
+    // changesets. With no peers, nobody references the blob, so deletes are
+    // immediately safe (the `all` over an empty set is true).
+    let peer_cursors_for_us: Vec<u64> = heads
+        .iter()
+        .filter(|h| h.device_id != our_device_id)
+        .map(|h| h.cursors.get(our_device_id).copied().unwrap_or(0))
+        .collect();
 
     let mut count = 0;
     for entry in deletes {
@@ -285,12 +306,10 @@ pub async fn process_deletes(
         let crate::db::OutboxOperation::Delete { min_seq } = &entry.operation else {
             unreachable!("get_pending_cloud_deletes returns only Delete rows");
         };
-        // Defer the delete until every known peer head has advanced past the
-        // seq the deletion was recorded at.
-        if let Some(head) = min_head {
-            if head <= *min_seq {
-                continue;
-            }
+        // Safe only once every peer has pulled PAST the seq the deletion was
+        // recorded at. A peer still at or before it holds the referencing row.
+        if !peer_cursors_for_us.iter().all(|&c| c > *min_seq) {
+            continue;
         }
 
         match cloud_home.delete(&entry.cloud_key).await {

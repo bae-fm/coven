@@ -11,7 +11,7 @@ use std::sync::{Mutex, RwLock};
 
 use chrono::Duration;
 
-use super::outbox::{backoff_window, process_uploads};
+use super::outbox::{backoff_window, process_deletes, process_uploads};
 use crate::blob::BlobUploadObserver;
 use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
@@ -21,8 +21,10 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::invite::{create_invitation, unwrap_library_key};
 use crate::sync::membership::MemberRole;
+use crate::sync::storage::DeviceHead;
 use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
 use rusqlite::OptionalExtension;
+use std::collections::HashMap;
 
 // --- Database under test ----------------------------------------------------
 
@@ -687,4 +689,82 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         .decrypt(&fetched)
         .expect("device B decrypts the content with the per-release key");
     assert_eq!(recovered, plaintext, "device B recovers the original audio");
+}
+
+/// Helper: a peer head with `seq` of its own production and a pull cursor for us.
+fn head_with_cursor(device_id: &str, seq: u64, our_id: &str, cursor_for_us: u64) -> DeviceHead {
+    DeviceHead {
+        device_id: device_id.to_string(),
+        seq,
+        snapshot_seq: None,
+        last_sync: None,
+        cursors: HashMap::from([(our_id.to_string(), cursor_for_us)]),
+    }
+}
+
+fn bare_head(device_id: &str, seq: u64) -> DeviceHead {
+    DeviceHead {
+        device_id: device_id.to_string(),
+        seq,
+        snapshot_seq: None,
+        last_sync: None,
+        cursors: HashMap::new(),
+    }
+}
+
+/// A blob delete must wait until every peer's pull cursor FOR US has advanced
+/// past the deletion's min_seq — not until peers' own production counts have.
+/// A prolific peer (high own head.seq) that still trails in pulling us must NOT
+/// trigger the delete, or it would later fetch the still-referencing row and
+/// find the blob gone.
+#[tokio::test]
+async fn delete_waits_for_every_peer_to_pull_past_min_seq() {
+    let db = open_outbox_db();
+    let cloud = InMemoryCloudHome::new();
+    let our_id = "M";
+
+    db.enqueue_delete("k-del", 7, T0)
+        .await
+        .expect("enqueue delete");
+
+    // Peer P has produced 90 of its OWN changesets but has only pulled us up to
+    // seq 5 — behind the deletion at 7. The old gate compared P's own head.seq
+    // (90) to 7 and would delete; the cursor gate must defer.
+    let heads = vec![bare_head(our_id, 7), head_with_cursor("P", 90, our_id, 5)];
+    let n = process_deletes(&db, &cloud, our_id, &heads)
+        .await
+        .expect("deletes");
+    assert_eq!(
+        n, 0,
+        "deferred while a peer hasn't pulled past the deletion"
+    );
+    assert!(
+        cloud.deletes_seen().is_empty(),
+        "the blob must not be deleted yet",
+    );
+
+    // P pulls us past the deletion.
+    let heads = vec![bare_head(our_id, 7), head_with_cursor("P", 90, our_id, 8)];
+    let n = process_deletes(&db, &cloud, our_id, &heads)
+        .await
+        .expect("deletes");
+    assert_eq!(n, 1, "safe once every peer pulled past the deletion");
+    assert_eq!(cloud.deletes_seen(), vec!["k-del".to_string()]);
+}
+
+/// A torn/empty head listing (our own head missing) must defer deletes, never
+/// fire them as if there were no peers.
+#[tokio::test]
+async fn delete_deferred_when_head_listing_is_torn() {
+    let db = open_outbox_db();
+    let cloud = InMemoryCloudHome::new();
+    db.enqueue_delete("k-del", 7, T0)
+        .await
+        .expect("enqueue delete");
+
+    let n = process_deletes(&db, &cloud, "M", &[])
+        .await
+        .expect("deletes");
+    assert_eq!(n, 0, "an empty listing (no own head) defers deletes");
+    assert!(cloud.deletes_seen().is_empty());
 }
