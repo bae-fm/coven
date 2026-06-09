@@ -238,14 +238,11 @@ pub fn make_entry(
 
 /// In-memory mock of SyncStorage for tests.
 /// Stores changesets as plaintext (no encryption in tests).
-/// A mock head: the device's latest seq plus its pull cursors for other devices.
-type MockHead = (u64, HashMap<String, u64>);
-
 pub struct MockSyncStorage {
     /// Changesets: key = "changes/{device_id}/{seq}" -> packed envelope bytes.
     objects: Mutex<HashMap<String, Vec<u8>>>,
-    /// Heads: device_id -> (seq, this device's pull cursors for other devices).
-    heads: Mutex<HashMap<String, MockHead>>,
+    /// Published device heads, keyed by device_id.
+    heads: Mutex<HashMap<String, DeviceHead>>,
     /// The single shared snapshot blob (`snapshot.db.enc`).
     snapshot: Mutex<Option<Vec<u8>>>,
     /// The snapshot's per-device cursor metadata (`snapshot_meta.json.enc`).
@@ -300,24 +297,23 @@ impl MockSyncStorage {
         let key = format!("changes/{device_id}/{seq}");
         self.objects.lock().unwrap().insert(key, packed);
         let mut heads = self.heads.lock().unwrap();
-        heads.entry(device_id.to_string()).or_default().0 = seq;
+        heads
+            .entry(device_id.to_string())
+            .or_insert_with(|| DeviceHead {
+                device_id: device_id.to_string(),
+                seq,
+                snapshot_seq: None,
+                last_sync: None,
+                cursors: HashMap::new(),
+            })
+            .seq = seq;
     }
 }
 
 #[async_trait]
 impl SyncStorage for MockSyncStorage {
     async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
-        let heads = self.heads.lock().unwrap();
-        Ok(heads
-            .iter()
-            .map(|(id, (seq, cursors))| DeviceHead {
-                device_id: id.clone(),
-                seq: *seq,
-                snapshot_seq: None,
-                last_sync: None,
-                cursors: cursors.clone(),
-            })
-            .collect())
+        Ok(self.heads.lock().unwrap().values().cloned().collect())
     }
 
     async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
@@ -348,10 +344,16 @@ impl SyncStorage for MockSyncStorage {
         cursors: &HashMap<String, u64>,
         _timestamp: &str,
     ) -> Result<(), StorageError> {
-        self.heads
-            .lock()
-            .unwrap()
-            .insert(device_id.to_string(), (seq, cursors.clone()));
+        self.heads.lock().unwrap().insert(
+            device_id.to_string(),
+            DeviceHead {
+                device_id: device_id.to_string(),
+                seq,
+                snapshot_seq: None,
+                last_sync: None,
+                cursors: cursors.clone(),
+            },
+        );
         Ok(())
     }
 

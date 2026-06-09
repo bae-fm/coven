@@ -100,6 +100,14 @@ async fn concat_changesets(db: &Database, a: Vec<u8>, b: Vec<u8>) -> Result<Vec<
 /// pending. Both are signed envelopes; unpack each to its raw changeset,
 /// concatenate the raw changesets, and re-sign the merged result at `seq`. The
 /// merged envelope re-signs because its changeset bytes changed.
+///
+/// This merge exists because the cycle must suspend the capture session before
+/// the pull (so the apply isn't re-recorded), and the only suspend primitive —
+/// `take_changeset_and_suspend` — *consumes* the changeset. A capture-level
+/// "peek, don't consume" would dissolve this merge, but it would also have to
+/// keep the session enabled across the pull's apply (re-recording remote rows as
+/// local) or break the span's single unconditional resume; both are worse than
+/// staging the already-captured bytes and concatenating subsequent ones here.
 async fn merge_deferred_changesets(
     db: &Database,
     staged: &[u8],
@@ -153,6 +161,10 @@ unsafe fn concat_changesets_raw(
         }
         for cs in [a, b] {
             if cs.is_empty() {
+                // Both inputs come from unpacking a signed envelope a real capture
+                // session produced, so an empty raw changeset here is abnormal —
+                // surface it rather than silently contribute nothing.
+                warn!("concat_changesets: skipping an unexpectedly empty changeset");
                 continue;
             }
             let rc =
@@ -197,6 +209,30 @@ pub async fn push_changeset(
     storage
         .put_head(device_id, seq, snapshot_seq, head_cursors, timestamp)
         .await?;
+    Ok(())
+}
+
+/// Commit a successful changeset push: advance `local_seq`, then clear the
+/// staging record. The order matters — `local_seq` is persisted BEFORE the
+/// staged_seq marker and the staged file are cleared, so a crash between them
+/// leaves the staged changeset for an idempotent re-push at the same seq while
+/// `local_seq` is already advanced, so no later changeset can reuse it and
+/// overwrite the pushed one on the remote. Shared by the staged-retry and
+/// direct-push arms so the ordering can't drift between them.
+async fn commit_push_success(
+    db: &Database,
+    library_dir: &LibraryDir,
+    seq: u64,
+    local_seq: &mut u64,
+) -> Result<(), String> {
+    *local_seq = seq;
+    db.set_sync_state("local_seq", &seq.to_string())
+        .await
+        .map_err(|e| format!("Failed to persist local_seq after push: {e}"))?;
+    db.set_sync_state("staged_seq", "")
+        .await
+        .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
+    clear_staged_changeset(library_dir);
     Ok(())
 }
 
@@ -327,21 +363,7 @@ pub async fn run_single_sync_cycle(
             {
                 Ok(()) => {
                     info!(seq, "Staged changeset push succeeded");
-                    // Persist local_seq BEFORE destroying the recovery evidence
-                    // (staged_seq, then the file). A crash between these leaves
-                    // the staged file + staged_seq for an idempotent re-push at
-                    // the same seq, and local_seq is already advanced so no later
-                    // changeset can reuse `seq` and overwrite it on the remote.
-                    local_seq = seq;
-                    db.set_sync_state("local_seq", &seq.to_string())
-                        .await
-                        .map_err(|e| {
-                            format!("Failed to persist local_seq after staged push: {e}")
-                        })?;
-                    db.set_sync_state("staged_seq", "").await.map_err(|e| {
-                        format!("Failed to clear staged_seq after staged push: {e}")
-                    })?;
-                    clear_staged_changeset(library_dir);
+                    commit_push_success(db, library_dir, seq, &mut local_seq).await?;
                 }
                 Err(e) => return Err(format!("Staged changeset push failed: {e}")),
             }
@@ -451,16 +473,7 @@ pub async fn run_single_sync_cycle(
                 .await
                 {
                     Ok(()) => {
-                        // Persist local_seq before clearing the staged file — see
-                        // the staged-retry arm above for why the order matters.
-                        local_seq = seq;
-                        db.set_sync_state("local_seq", &seq.to_string())
-                            .await
-                            .map_err(|e| format!("Failed to persist local_seq after push: {e}"))?;
-                        db.set_sync_state("staged_seq", "")
-                            .await
-                            .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
-                        clear_staged_changeset(library_dir);
+                        commit_push_success(db, library_dir, seq, &mut local_seq).await?;
                         info!(seq, "Pushed changeset");
                     }
                     Err(e) => {
@@ -567,7 +580,11 @@ pub async fn run_single_sync_cycle(
             info!("Snapshot policy triggered, creating snapshot");
         }
 
-        let temp_dir = std::env::temp_dir();
+        // Scratch the snapshot copy in the library dir, not the shared system
+        // temp dir: create_snapshot writes a fixed `snapshot.db` filename, so two
+        // libraries syncing concurrently (or parallel tests) would otherwise race
+        // on one `/tmp/snapshot.db`. A library's own cycles run serially.
+        let temp_dir = library_dir.as_ref().to_path_buf();
         let snapshot_result = {
             let enc = encryption.read().unwrap().clone();
             let tables = tables.to_vec();

@@ -161,9 +161,8 @@ async fn deferred_changesets_accumulate_across_cycles_then_all_reach_a_peer() {
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
 
     // A SECOND shared note while uploads are still pending. It must ACCUMULATE
-    // into the staged changeset, not overwrite the first — otherwise n1 is lost,
-    // exactly the empty-catalog failure (manage one album, edit another, the
-    // first never syncs).
+    // into the staged changeset, not overwrite the first — otherwise the first
+    // deferred change is lost when more edits arrive before the upload finishes.
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -208,5 +207,40 @@ async fn deferred_changesets_accumulate_across_cycles_then_all_reach_a_peer() {
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n2'").await,
         "Two",
         "the second deferred note must also reach the peer",
+    );
+}
+
+/// The snapshot is the second channel that propagates rows to peers, so it must
+/// honor the same blob-before-row gate as the changeset push: while a cloud
+/// upload is pending, the snapshot is withheld and only pushed once uploads
+/// finish.
+#[tokio::test]
+async fn snapshot_is_withheld_while_uploads_are_pending() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(EncryptionService::new_with_key(&[9u8; 32]));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    // local_seq past 0 with no snapshot yet → the snapshot policy would fire this
+    // cycle. A pending upload must gate it.
+    db.set_sync_state("local_seq", "1")
+        .await
+        .expect("seed local_seq");
+    seed_pending_upload(&db).await;
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        SyncStorage::get_snapshot(&storage).await.is_err(),
+        "the snapshot must be withheld while uploads are pending",
+    );
+
+    // Uploads finish.
+    exec(&db, "DELETE FROM cloud_outbox WHERE operation = 'upload'").await;
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        SyncStorage::get_snapshot(&storage).await.is_ok(),
+        "the snapshot is pushed once uploads complete",
     );
 }

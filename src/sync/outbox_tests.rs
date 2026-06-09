@@ -691,24 +691,15 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     assert_eq!(recovered, plaintext, "device B recovers the original audio");
 }
 
-/// Helper: a peer head with `seq` of its own production and a pull cursor for us.
-fn head_with_cursor(device_id: &str, seq: u64, our_id: &str, cursor_for_us: u64) -> DeviceHead {
+/// A head for `device_id` at its own production `seq`, publishing `cursors` as its
+/// pull positions for other devices.
+fn head(device_id: &str, seq: u64, cursors: HashMap<String, u64>) -> DeviceHead {
     DeviceHead {
         device_id: device_id.to_string(),
         seq,
         snapshot_seq: None,
         last_sync: None,
-        cursors: HashMap::from([(our_id.to_string(), cursor_for_us)]),
-    }
-}
-
-fn bare_head(device_id: &str, seq: u64) -> DeviceHead {
-    DeviceHead {
-        device_id: device_id.to_string(),
-        seq,
-        snapshot_seq: None,
-        last_sync: None,
-        cursors: HashMap::new(),
+        cursors,
     }
 }
 
@@ -728,9 +719,12 @@ async fn delete_waits_for_every_peer_to_pull_past_min_seq() {
         .expect("enqueue delete");
 
     // Peer P has produced 90 of its OWN changesets but has only pulled us up to
-    // seq 5 — behind the deletion at 7. The old gate compared P's own head.seq
-    // (90) to 7 and would delete; the cursor gate must defer.
-    let heads = vec![bare_head(our_id, 7), head_with_cursor("P", 90, our_id, 5)];
+    // seq 5 — behind the deletion's floor of 7. The gate must compare P's pull
+    // cursor for us (5), not its own production count (90), so the delete defers.
+    let heads = vec![
+        head(our_id, 7, HashMap::new()),
+        head("P", 90, HashMap::from([(our_id.to_string(), 5)])),
+    ];
     let n = process_deletes(&db, &cloud, our_id, &heads)
         .await
         .expect("deletes");
@@ -744,7 +738,10 @@ async fn delete_waits_for_every_peer_to_pull_past_min_seq() {
     );
 
     // P pulls us past the deletion.
-    let heads = vec![bare_head(our_id, 7), head_with_cursor("P", 90, our_id, 8)];
+    let heads = vec![
+        head(our_id, 7, HashMap::new()),
+        head("P", 90, HashMap::from([(our_id.to_string(), 8)])),
+    ];
     let n = process_deletes(&db, &cloud, our_id, &heads)
         .await
         .expect("deletes");

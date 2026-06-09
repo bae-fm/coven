@@ -289,13 +289,11 @@ pub async fn process_deletes(
         return Ok(0);
     }
 
-    // Each peer's pull cursor FOR US: how far that device has applied our
-    // changesets. With no peers, nobody references the blob, so deletes are
-    // immediately safe (the `all` over an empty set is true).
-    let peer_cursors_for_us: Vec<u64> = heads
+    // Every peer (each device that isn't us). With no peers nobody references the
+    // blob, so deletes are immediately safe (the `all` over an empty set is true).
+    let peers: Vec<&DeviceHead> = heads
         .iter()
         .filter(|h| h.device_id != our_device_id)
-        .map(|h| h.cursors.get(our_device_id).copied().unwrap_or(0))
         .collect();
 
     let mut count = 0;
@@ -306,9 +304,14 @@ pub async fn process_deletes(
         let crate::db::OutboxOperation::Delete { min_seq } = &entry.operation else {
             unreachable!("get_pending_cloud_deletes returns only Delete rows");
         };
-        // Safe only once every peer has pulled PAST the seq the deletion was
-        // recorded at. A peer still at or before it holds the referencing row.
-        if !peer_cursors_for_us.iter().all(|&c| c > *min_seq) {
+        // Safe only once EVERY peer's published cursor FOR US proves it has pulled
+        // past the deletion's seq. A peer that publishes no cursor for us is
+        // unknown, not zero — treat it as not-yet-pulled and defer (a peer still
+        // at or before the deletion holds the referencing row).
+        let all_pulled_past = peers
+            .iter()
+            .all(|h| h.cursors.get(our_device_id).is_some_and(|&c| c > *min_seq));
+        if !all_pulled_past {
             continue;
         }
 
