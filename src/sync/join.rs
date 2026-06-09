@@ -378,7 +378,7 @@ pub(crate) async fn open_db_and_pull(
 
     // Pull over the set `Database::open` owns (the host's tables plus coven's
     // injected `item_keys`), not the raw host list — one source of truth.
-    let (_updated_cursors, pull_result) = pull_changes(
+    let (updated_cursors, pull_result) = pull_changes(
         &db,
         db.synced_tables(),
         storage,
@@ -389,6 +389,35 @@ pub(crate) async fn open_db_and_pull(
     )
     .await
     .map_err(JoinError::Pull)?;
+
+    // Persist the post-bootstrap sync bookkeeping so the first real sync cycle
+    // treats this device as a joiner, not a brand-new library. `bootstrap_from_snapshot`
+    // restores the snapshot's data but writes no `sync_state`, and `pull_changes`
+    // returns the advanced cursors for the caller to persist. Without both, the
+    // first cycle sees an empty `sync_state` (`snapshot_seq = None`, no cursors),
+    // trips `is_initial_sync`, and republishes this device's snapshot over the
+    // shared one — overwriting the owner's catalog with whatever this device
+    // happens to hold.
+    //
+    // Cursors begin at the snapshot's per-device positions and advance by whatever
+    // the pull applied; persist the merged map so the next cycle does not re-pull
+    // from zero.
+    let mut persisted_cursors = cursors.clone();
+    persisted_cursors.extend(updated_cursors);
+    for (cursor_device, seq) in &persisted_cursors {
+        db.set_sync_cursor(cursor_device, *seq).await.map_err(|e| {
+            JoinError::Database(format!(
+                "Failed to persist sync cursor for {cursor_device}: {e}"
+            ))
+        })?;
+    }
+
+    // This device bootstrapped from a snapshot; its snapshot basis is its current
+    // `local_seq` (0 — it has pushed no changesets of its own). Recording it is
+    // what keeps the first cycle's initial-sync path from firing.
+    db.set_sync_state("snapshot_seq", "0")
+        .await
+        .map_err(|e| JoinError::Database(format!("Failed to persist snapshot_seq: {e}")))?;
 
     Ok(pull_result.changesets_applied)
 }
