@@ -718,11 +718,14 @@ async fn delete_waits_for_every_peer_to_pull_past_min_seq() {
         .await
         .expect("enqueue delete");
 
-    // Peer P has produced 90 of its OWN changesets but has only pulled us up to
-    // seq 5 — behind the deletion's floor of 7. The gate must compare P's pull
-    // cursor for us (5), not its own production count (90), so the delete defers.
+    // Our own head is at seq 8 (we kept working past the deletion at 7), and peer
+    // P has produced 90 of its OWN changesets — but P has only pulled us up to
+    // seq 5, behind the deletion. The old gate took min over the devices' own
+    // production seqs (min(8, 90) = 8 > 7) and would DELETE; the correct gate
+    // compares P's pull cursor FOR US (5 <= 7) and defers. Our own seq being past
+    // the floor is what makes this case distinguish the two gates.
     let heads = vec![
-        head(our_id, 7, HashMap::new()),
+        head(our_id, 8, HashMap::new()),
         head("P", 90, HashMap::from([(our_id.to_string(), 5)])),
     ];
     let n = process_deletes(&db, &cloud, our_id, &heads)
@@ -739,7 +742,7 @@ async fn delete_waits_for_every_peer_to_pull_past_min_seq() {
 
     // P pulls us past the deletion.
     let heads = vec![
-        head(our_id, 7, HashMap::new()),
+        head(our_id, 8, HashMap::new()),
         head("P", 90, HashMap::from([(our_id.to_string(), 8)])),
     ];
     let n = process_deletes(&db, &cloud, our_id, &heads)
