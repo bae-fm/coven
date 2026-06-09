@@ -21,7 +21,7 @@ use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::sync::session::SyncedTable;
 
-use super::envelope::{self, sign_envelope, ChangesetEnvelope};
+use super::envelope;
 use super::gate;
 use super::pull::{self, PullResult};
 use super::push::{OutgoingChangeset, SCHEMA_VERSION};
@@ -124,18 +124,15 @@ impl SyncService {
 
         let outgoing = outgoing_cs.map(|cs| {
             let next_seq = local_seq + 1;
-            let mut env = ChangesetEnvelope {
-                device_id: self.device_id.clone(),
-                seq: next_seq,
-                schema_version: SCHEMA_VERSION,
-                message: message.to_string(),
-                timestamp: timestamp.to_string(),
-                changeset_size: cs.len(),
-                author_pubkey: None,
-                signature: None,
-            };
-            sign_envelope(&mut env, keypair, &cs);
-            let packed = envelope::pack(&env, &cs);
+            let packed = envelope::pack_signed(
+                &self.device_id,
+                next_seq,
+                SCHEMA_VERSION,
+                message,
+                timestamp,
+                keypair,
+                &cs,
+            );
             OutgoingChangeset {
                 packed,
                 seq: next_seq,

@@ -21,7 +21,7 @@ use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
 
 use super::encrypted_storage::EncryptedSyncStorage;
-use super::envelope::{self, sign_envelope, ChangesetEnvelope};
+use super::envelope;
 use super::hlc::Hlc;
 use super::push::SCHEMA_VERSION;
 use super::service::SyncService;
@@ -115,18 +115,15 @@ async fn merge_deferred_changesets(
         })
         .await
         .map_err(|e| format!("Failed to accumulate deferred changeset: {e}"))?;
-    let mut env = ChangesetEnvelope {
-        device_id: device_id.to_string(),
+    Ok(envelope::pack_signed(
+        device_id,
         seq,
-        schema_version: SCHEMA_VERSION,
-        message: "background sync".to_string(),
-        timestamp: timestamp.to_string(),
-        changeset_size: merged.len(),
-        author_pubkey: None,
-        signature: None,
-    };
-    sign_envelope(&mut env, keypair, &merged);
-    Ok(envelope::pack(&env, &merged))
+        SCHEMA_VERSION,
+        "background sync",
+        timestamp,
+        keypair,
+        &merged,
+    ))
 }
 
 /// Push a changeset to the sync storage and update the device head. `head_cursors`
@@ -308,6 +305,11 @@ pub async fn run_single_sync_cycle(
             // the push never committed (the success path persists local_seq
             // before clearing the file, so it can't produce this state). The seq
             // was never consumed on the remote — drop the marker, keep local_seq.
+            // Abnormal: the changeset those bytes held is gone, so surface it.
+            warn!(
+                seq,
+                "Stale staged_seq with no staged file; dropping the marker"
+            );
             db.set_sync_state("staged_seq", "")
                 .await
                 .map_err(|e| format!("Failed to clear stale staged_seq: {e}"))?;

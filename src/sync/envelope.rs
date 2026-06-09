@@ -103,6 +103,34 @@ pub fn verify_changeset_signature(env: &ChangesetEnvelope, changeset_bytes: &[u8
     keys::verify_signature(&sig, &signing_payload(env, changeset_bytes), &pk)
 }
 
+/// Build a signed envelope over `changeset` and pack it into the wire format.
+/// The single place that constructs an unsigned `ChangesetEnvelope` and fills in
+/// the signature via [`sign_envelope`] — both the cycle's outgoing push and the
+/// deferred-changeset merge go through here so the signing/packing can't drift.
+#[allow(clippy::too_many_arguments)]
+pub fn pack_signed(
+    device_id: &str,
+    seq: u64,
+    schema_version: u32,
+    message: &str,
+    timestamp: &str,
+    keypair: &UserKeypair,
+    changeset: &[u8],
+) -> Vec<u8> {
+    let mut env = ChangesetEnvelope {
+        device_id: device_id.to_string(),
+        seq,
+        schema_version,
+        message: message.to_string(),
+        timestamp: timestamp.to_string(),
+        changeset_size: changeset.len(),
+        author_pubkey: None,
+        signature: None,
+    };
+    sign_envelope(&mut env, keypair, changeset);
+    pack(&env, changeset)
+}
+
 /// Pack an envelope and changeset into the wire format.
 ///
 /// Layout: `[envelope JSON] \0 [changeset bytes]`
