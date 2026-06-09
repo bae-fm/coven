@@ -91,21 +91,7 @@ async fn changeset_deferred_for_pending_uploads_is_not_lost() {
 
     // Cycle 1: the upload is still pending, so the push is deferred — nothing in
     // the cloud yet.
-    run_single_sync_cycle(
-        &storage,
-        "M",
-        &hlc,
-        &SystemClock,
-        &db,
-        &enc,
-        &keypair,
-        &ld,
-        None,
-        &NoopBlobPlan,
-        None,
-    )
-    .await
-    .expect("cycle 1");
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         storage.get_changeset("M", 1).await.is_err(),
         "while uploads are pending the changeset push must be deferred",
@@ -117,21 +103,7 @@ async fn changeset_deferred_for_pending_uploads_is_not_lost() {
     // Cycle 2: no pending uploads, and no *new* local changes — the only thing to
     // push is the change captured in cycle 1. It must reach the cloud, not have
     // been dropped with cycle 1's capture session.
-    run_single_sync_cycle(
-        &storage,
-        "M",
-        &hlc,
-        &SystemClock,
-        &db,
-        &enc,
-        &keypair,
-        &ld,
-        None,
-        &NoopBlobPlan,
-        None,
-    )
-    .await
-    .expect("cycle 2");
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         storage.get_changeset("M", 1).await.is_ok(),
         "a changeset deferred for pending uploads must be pushed once uploads \

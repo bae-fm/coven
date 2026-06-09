@@ -83,23 +83,10 @@ pub fn read_staged_changeset(library_dir: &LibraryDir) -> Option<Vec<u8>> {
     }
 }
 
-/// Concatenate two changesets into one, deduping by primary key via a
-/// changegroup using `db`'s schema. Successive changesets deferred while cloud
-/// uploads are pending are merged into one staged blob this way, so no captured
-/// changeset is dropped when more edits arrive before the uploads finish.
-async fn concat_changesets(db: &Database, a: Vec<u8>, b: Vec<u8>) -> Result<Vec<u8>, String> {
-    db.call(move |conn| {
-        let handle = unsafe { conn.handle() };
-        unsafe { concat_changesets_raw(handle, &a, &b) }.map_err(crate::database::DbError)
-    })
-    .await
-    .map_err(|e| format!("Failed to accumulate deferred changeset: {e}"))
-}
-
 /// Merge a freshly-gated changeset into an already-staged one while uploads are
 /// pending. Both are signed envelopes; unpack each to its raw changeset,
-/// concatenate the raw changesets, and re-sign the merged result at `seq`. The
-/// merged envelope re-signs because its changeset bytes changed.
+/// concatenate the raw changesets (via the gate's changegroup), and re-sign the
+/// merged result at `seq` (the bytes changed, so the signature must too).
 ///
 /// This merge exists because the cycle must suspend the capture session before
 /// the pull (so the apply isn't re-recorded), and the only suspend primitive —
@@ -121,7 +108,13 @@ async fn merge_deferred_changesets(
         envelope::unpack(staged).map_err(|e| format!("Failed to unpack staged changeset: {e}"))?;
     let (_, incoming_raw) = envelope::unpack(incoming)
         .map_err(|e| format!("Failed to unpack incoming changeset: {e}"))?;
-    let merged = concat_changesets(db, staged_raw, incoming_raw).await?;
+    let merged = db
+        .call(move |conn| {
+            super::gate::concat_changesets(conn, &staged_raw, &incoming_raw)
+                .map_err(|e| crate::database::DbError(e.to_string()))
+        })
+        .await
+        .map_err(|e| format!("Failed to accumulate deferred changeset: {e}"))?;
     let mut env = ChangesetEnvelope {
         device_id: device_id.to_string(),
         seq,
@@ -134,63 +127,6 @@ async fn merge_deferred_changesets(
     };
     sign_envelope(&mut env, keypair, &merged);
     Ok(envelope::pack(&env, &merged))
-}
-
-/// # Safety
-/// `db` must be a valid, open sqlite3 connection holding the synced schema (so
-/// the changegroup can resolve each changeset's table primary keys for dedup).
-unsafe fn concat_changesets_raw(
-    db: *mut libsqlite3_sys::sqlite3,
-    a: &[u8],
-    b: &[u8],
-) -> Result<Vec<u8>, String> {
-    use libsqlite3_sys as ffi;
-    use std::ffi::{c_int, c_void, CString};
-    use std::ptr;
-
-    let mut grp: *mut ffi::sqlite3_changegroup = ptr::null_mut();
-    let rc = ffi::sqlite3changegroup_new(&mut grp);
-    if rc != ffi::SQLITE_OK as c_int {
-        return Err(format!("sqlite3changegroup_new failed: {rc}"));
-    }
-    let result = (|| {
-        let main = CString::new("main").unwrap();
-        let rc = ffi::sqlite3changegroup_schema(grp, db, main.as_ptr());
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(format!("sqlite3changegroup_schema failed: {rc}"));
-        }
-        for cs in [a, b] {
-            if cs.is_empty() {
-                // Both inputs come from unpacking a signed envelope a real capture
-                // session produced, so an empty raw changeset here is abnormal —
-                // surface it rather than silently contribute nothing.
-                warn!("concat_changesets: skipping an unexpectedly empty changeset");
-                continue;
-            }
-            let rc =
-                ffi::sqlite3changegroup_add(grp, cs.len() as c_int, cs.as_ptr() as *mut c_void);
-            if rc != ffi::SQLITE_OK as c_int {
-                return Err(format!("sqlite3changegroup_add failed: {rc}"));
-            }
-        }
-        let mut len: c_int = 0;
-        let mut buf: *mut c_void = ptr::null_mut();
-        let rc = ffi::sqlite3changegroup_output(grp, &mut len, &mut buf);
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(format!("sqlite3changegroup_output failed: {rc}"));
-        }
-        let bytes = if buf.is_null() || len == 0 {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(buf as *const u8, len as usize).to_vec()
-        };
-        if !buf.is_null() {
-            ffi::sqlite3_free(buf);
-        }
-        Ok(bytes)
-    })();
-    ffi::sqlite3changegroup_delete(grp);
-    result
 }
 
 /// Push a changeset to the sync storage and update the device head. `head_cursors`

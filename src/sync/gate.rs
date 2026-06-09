@@ -133,6 +133,21 @@ impl Changegroup {
         Ok(())
     }
 
+    /// Append a whole changeset blob.
+    fn add_changeset(&self, changeset: &[u8]) -> Result<(), GateError> {
+        let rc = unsafe {
+            ffi::sqlite3changegroup_add(
+                self.raw,
+                changeset.len() as c_int,
+                changeset.as_ptr() as *mut c_void,
+            )
+        };
+        if rc != ffi::SQLITE_OK as c_int {
+            return Err(GateError::Ffi("sqlite3changegroup_add", rc));
+        }
+        Ok(())
+    }
+
     /// Concatenate everything added so far into one changeset's bytes.
     fn output(&self) -> Result<Vec<u8>, GateError> {
         let mut len: c_int = 0;
@@ -711,6 +726,17 @@ pub fn gate_outbound(
     unsafe { gate_outbound_raw(conn.handle(), changeset, gates) }
 }
 
+/// Concatenate two changesets into one, deduping by primary key against `conn`'s
+/// schema (a row touched by both collapses to its net change). Reuses the
+/// changegroup the gate already owns rather than a parallel FFI lifecycle.
+pub fn concat_changesets(conn: &Connection, a: &[u8], b: &[u8]) -> Result<Vec<u8>, GateError> {
+    let group = Changegroup::new()?;
+    unsafe { group.set_schema(conn.handle())? };
+    group.add_changeset(a)?;
+    group.add_changeset(b)?;
+    group.output()
+}
+
 /// # Safety
 /// `db` must be the valid, open connection the changeset was captured on, with
 /// no live session attached (gating reads current row state from it).
@@ -830,6 +856,11 @@ unsafe fn reparent_targets(
             continue;
         }
         let Some(idx) = cols.iter().position(|c| c == &fk_col) else {
+            warn!(
+                table = %row.table,
+                fk_col,
+                "reparent_targets: FK column absent from table columns; skipping"
+            );
             continue;
         };
         // A session UPDATE records a column only when it changed, so an old AND a

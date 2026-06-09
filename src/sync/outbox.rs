@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::blob::BlobUploadObserver;
 use crate::database::Database;
@@ -312,6 +312,11 @@ pub async fn process_deletes(
             .iter()
             .all(|h| h.cursors.get(our_device_id).is_some_and(|&c| c > *min_seq));
         if !all_pulled_past {
+            debug!(
+                cloud_key = %entry.cloud_key,
+                min_seq = *min_seq,
+                "deferring blob delete: not every peer has pulled past min_seq"
+            );
             continue;
         }
 
