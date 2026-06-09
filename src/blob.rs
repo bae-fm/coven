@@ -122,6 +122,22 @@ pub trait BlobPlan: Send + Sync {
 
     /// Blobs to download after applying an incoming changeset.
     fn blobs_to_pull(&self, changes: &[RowChange]) -> Vec<BlobRef>;
+
+    /// Every blob the rows currently in `conn` reference that must be present on
+    /// local disk — the snapshot-bootstrap analogue of [`Self::blobs_to_pull`].
+    ///
+    /// A device that bootstraps from a snapshot receives the catalog rows but no
+    /// per-row blob files: the snapshot is a whole-DB image, and the incremental
+    /// pull that follows starts past the snapshot's cursors, so the original
+    /// INSERT changesets that carried those blobs are never re-walked. coven
+    /// reads the bootstrapped DB through this method to download the blobs those
+    /// rows reference (skipping any whose local file already exists).
+    ///
+    /// No default impl: a default returning empty would silently reintroduce the
+    /// blanks-after-bootstrap bug for any host that forgot to implement it. The
+    /// host enumerates the same blob-bearing tables `blobs_to_pull` recognizes,
+    /// reading them from the DB instead of from a [`RowChange`] stream.
+    fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>>;
 }
 
 /// Notified about the lifecycle of a blob upload, for host-specific

@@ -420,6 +420,61 @@ pub async fn bootstrap_from_snapshot(
     Ok(BootstrapResult { cursors })
 }
 
+/// Download the blob files the bootstrapped DB's rows reference but the snapshot
+/// did not carry.
+///
+/// `bootstrap_from_snapshot` writes only the catalog DB; the incremental pull
+/// that follows starts past the snapshot's per-device cursors, so the original
+/// INSERT changesets that carried each row's image/torrent blob (seq <= cursor)
+/// are never re-walked and the per-changeset blob download never fires for them.
+/// Without this backfill a bootstrapped device has the rows but none of the
+/// files they point at (a synced album shows a placeholder cover). Audio is
+/// unaffected: a host's [`crate::blob::BlobPlan`] excludes audio from the blobs
+/// it wants local (it streams on demand), so `blobs_in_db` does not list it.
+///
+/// Reads the blobs the host's plan finds in the bootstrapped DB at `db_path`,
+/// then downloads each via the same [`crate::sync::pull::download_blobs`] path
+/// the incremental pull uses (skipping any whose local file already exists). A
+/// failed download is logged there; this does not abort the bootstrap, so a
+/// transient blob fetch failure leaves the device with the catalog and retries
+/// the missing files on a later sync cycle's pull.
+///
+/// `blobs_in_db` is a read-only enumeration the host's plan runs against a
+/// short-lived connection to the same on-disk DB the `db` actor owns. It is the
+/// single read of that DB at this point in the bootstrap — capture is suspended
+/// and the incremental pull has not started — so it does not race the actor.
+/// `db` is still needed: `download_blobs` resolves each blob's scope through it
+/// (an `Item`-scoped blob reads its key from the bootstrapped `item_keys` rows).
+pub(crate) async fn backfill_snapshot_blobs(
+    db: &crate::database::Database,
+    db_path: &Path,
+    storage: &dyn SyncStorage,
+    blob_plan: &dyn crate::blob::BlobPlan,
+) -> Result<(), crate::database::DbError> {
+    let blobs = {
+        let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
+        blob_plan
+            .blobs_in_db(&conn)
+            .map_err(crate::database::DbError::from)?
+    };
+
+    if blobs.is_empty() {
+        return Ok(());
+    }
+
+    let total = blobs.len();
+    let all_ok = crate::sync::pull::download_blobs(db, blobs, storage).await;
+    if all_ok {
+        info!(total, "backfilled snapshot blob files");
+    } else {
+        warn!(
+            total,
+            "some snapshot blob files failed to backfill; a later sync cycle's pull will retry them"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

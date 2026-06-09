@@ -119,3 +119,94 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         "a just-joined device's first cycle must not republish/clobber the shared snapshot",
     );
 }
+
+/// A device that bootstraps from a snapshot must receive not just the catalog
+/// rows but the blob *files* those rows reference. The snapshot is a whole-DB
+/// image carrying a `note_photos` row, but no per-row blob file; the pull that
+/// follows starts past the snapshot's cursors, so the INSERT changeset that first
+/// carried the photo (seq <= cursor) is never re-walked and the per-changeset
+/// blob download never fires for it. Without the bootstrap backfill, the
+/// bootstrapped device has the photo row but the file at its `local_path` is
+/// absent — a synced album renders a placeholder cover. Asserts the file lands.
+#[tokio::test]
+async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
+    let enc = EncryptionService::new_with_key(&[9u8; 32]);
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+
+    // Owner A: a shared note with a cover photo, both captured into the snapshot.
+    let db_a = open_test_db();
+    exec(
+        &db_a,
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album', 1, '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db_a,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('photo1', 'n1', 'cover', '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let (tables_c, enc_c) = (tables.clone(), enc.clone());
+    let snapshot = db_a
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c, &enc_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(&storage, snapshot, "A", HashMap::new(), 1, &SystemClock)
+        .await
+        .expect("push snapshot");
+
+    // The cover blob exists in the cloud (uploaded when A first imported the
+    // album), keyed `photos/photo1` as `PhotoBlobPlan` maps a cover row. The
+    // mock ignores the scope, so any resolved scope seeds it.
+    storage
+        .put_blob(
+            "photos",
+            "photo1",
+            crate::blob::ResolvedScope::Derived("n1".to_string()),
+            b"cover-bytes".to_vec(),
+        )
+        .await
+        .expect("seed cover blob");
+
+    // Device B bootstraps from the snapshot, then runs the real bootstrap path
+    // with a plan that maps `note_photos` rows to blobs under B's library dir.
+    let (_tmp_b, lib_b) = temp_library_dir();
+    let blob_dir = lib_b.join("photos");
+    let plan = PhotoBlobPlan {
+        dir: blob_dir.clone(),
+    };
+    let expected_blob = blob_dir.join("photo1");
+
+    let boot = bootstrap_from_snapshot(&storage, &enc, &lib_b.db_path())
+        .await
+        .expect("B bootstrap");
+    open_db_and_pull(
+        &lib_b.db_path(),
+        &tables,
+        "B",
+        &storage,
+        &boot.cursors,
+        &lib_b,
+        &plan,
+    )
+    .await
+    .expect("B open_db_and_pull");
+
+    assert!(
+        expected_blob.exists(),
+        "the cover blob file must be backfilled to {} after bootstrap",
+        expected_blob.display(),
+    );
+    assert_eq!(
+        std::fs::read(&expected_blob).expect("read backfilled blob"),
+        b"cover-bytes",
+        "the backfilled file must hold the blob's plaintext bytes",
+    );
+}

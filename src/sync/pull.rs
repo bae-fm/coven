@@ -429,24 +429,40 @@ fn advance_max_updated_at(
 }
 
 /// Download blobs a changeset references. Returns true if all succeeded.
-/// Skips blobs whose local file already exists. The host's [`BlobPlan`] decides
-/// which row-changes carry blobs, their cloud namespace/scope, and the local
-/// destination path.
+/// The host's [`BlobPlan`] decides which row-changes carry blobs, their cloud
+/// namespace/scope, and the local destination path; the per-blob download runs
+/// through [`download_blobs`].
 ///
-/// Each blob's public scope is resolved to the internal key scope here — not in
-/// `BlobPlan`, which only sees `RowChange` columns and has no DB. By this point
-/// the changeset's `item_keys` rows are committed (the apply ran first), so an
-/// `Item(id)`-scoped blob finds its key. A blob whose item key is missing is a
-/// failed download (logged, `all_ok = false`) so the cursor doesn't advance and
-/// the next cycle retries once the key row has landed.
+/// By this point the changeset's `item_keys` rows are committed (the apply ran
+/// first), so an `Item(id)`-scoped blob resolves its key.
 async fn download_changeset_blobs(
     db: &Database,
     changes: &[RowChange],
     blob_plan: &dyn BlobPlan,
     storage: &dyn SyncStorage,
 ) -> bool {
+    download_blobs(db, blob_plan.blobs_to_pull(changes), storage).await
+}
+
+/// Download each blob in `blobs` to its `local_path`, decrypting via storage
+/// (which returns plaintext) and writing the bytes. Returns true if every blob
+/// succeeded. Skips blobs whose local file already exists.
+///
+/// Each blob's public scope is resolved to the internal key scope here — not in
+/// [`BlobPlan`], which has no DB. A blob whose item key is missing is a failed
+/// download (logged, `all_ok = false`) so a caller that gates on the result can
+/// retry once the key row has landed.
+///
+/// Shared by the incremental pull (per applied changeset) and the snapshot
+/// bootstrap backfill (per row in the freshly bootstrapped DB), so the
+/// download/decrypt/write path lives in one place.
+pub(crate) async fn download_blobs(
+    db: &Database,
+    blobs: Vec<crate::blob::BlobRef>,
+    storage: &dyn SyncStorage,
+) -> bool {
     let mut all_ok = true;
-    for blob in blob_plan.blobs_to_pull(changes) {
+    for blob in blobs {
         if blob.local_path.exists() {
             continue;
         }

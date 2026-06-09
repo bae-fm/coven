@@ -376,6 +376,17 @@ pub(crate) async fn open_db_and_pull(
         .await
         .map_err(|e| JoinError::Database(format!("Failed to suspend capture session: {e}")))?;
 
+    // Download the blob files the snapshot's rows reference. The snapshot carried
+    // the catalog rows but no per-row image/torrent files, and the pull below
+    // starts past the snapshot's cursors so it never re-walks the INSERTs that
+    // first carried them — without this backfill a bootstrapped device renders
+    // placeholders for synced cover art. Runs before the pull so a single failure
+    // path (the pull's per-changeset blob download) handles anything published
+    // after the snapshot.
+    crate::sync::snapshot::backfill_snapshot_blobs(&db, db_path, storage, blob_plan)
+        .await
+        .map_err(|e| JoinError::Database(format!("Failed to backfill snapshot blobs: {e}")))?;
+
     // Pull over the set `Database::open` owns (the host's tables plus coven's
     // injected `item_keys`), not the raw host list — one source of truth.
     let (updated_cursors, pull_result) = pull_changes(

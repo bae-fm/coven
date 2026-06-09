@@ -170,10 +170,14 @@ struct ItemPhotoBlobPlan {
 }
 
 impl ItemPhotoBlobPlan {
+    /// Every `note_photos` row maps to an `Item`-scoped blob keyed by its
+    /// `note_id`, regardless of discovery path.
+    fn scope_for(_kind: &str, note_id: &str) -> BlobScope {
+        BlobScope::Item(note_id.to_string())
+    }
+
     fn refs(&self, changes: &[RowChange]) -> Vec<BlobRef> {
-        crate::sync::test_helpers::note_photos_refs(changes, &self.dir, "audio", |_c, note_id| {
-            BlobScope::Item(note_id.to_string())
-        })
+        crate::sync::test_helpers::note_photos_refs(changes, &self.dir, "audio", &Self::scope_for)
     }
 }
 
@@ -183,6 +187,14 @@ impl BlobPlan for ItemPhotoBlobPlan {
     }
     fn blobs_to_pull(&self, changes: &[RowChange]) -> Vec<BlobRef> {
         self.refs(changes)
+    }
+    fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>> {
+        crate::sync::test_helpers::note_photos_refs_from_db(
+            conn,
+            &self.dir,
+            "audio",
+            &Self::scope_for,
+        )
     }
 }
 

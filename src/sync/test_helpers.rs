@@ -562,38 +562,85 @@ impl crate::blob::BlobPlan for NoopBlobPlan {
     fn blobs_to_pull(&self, _changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
         Vec::new()
     }
+    fn blobs_in_db(&self, _conn: &Connection) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
+        Ok(Vec::new())
+    }
 }
 
-/// Map every non-Delete `note_photos` row to a [`crate::blob::BlobRef`] under
-/// `dir` in `namespace`, scoping each via `scope_for(row, note_id)`. Shared by
-/// the photo blob plans in the test suite so the filter-and-extract logic lives
-/// once. A row that survives the `note_photos` filter must have a primary key and
-/// a `note_id` at column 1; their absence is a malformed test fixture, surfaced
-/// loudly rather than silently skipped.
+/// Build one [`crate::blob::BlobRef`] for a `note_photos` row from its
+/// `(id, note_id, kind)`, under `dir` in `namespace`, scoping via
+/// `scope_for(kind, note_id)`. The single per-row builder both the changeset and
+/// the DB enumeration paths call, so a photo blob's path and scope are derived
+/// one way regardless of whether the row came from a [`crate::changeset::RowChange`]
+/// or a `SELECT`.
+pub fn note_photo_ref(
+    id: &str,
+    note_id: &str,
+    kind: &str,
+    dir: &std::path::Path,
+    namespace: &str,
+    scope_for: &dyn Fn(&str, &str) -> crate::blob::BlobScope,
+) -> crate::blob::BlobRef {
+    crate::blob::BlobRef {
+        namespace: namespace.to_string(),
+        local_path: dir.join(id),
+        id: id.to_string(),
+        scope: scope_for(kind, note_id),
+    }
+}
+
+/// Map every non-Delete `note_photos` row-change to a [`crate::blob::BlobRef`]
+/// under `dir` in `namespace`, scoping each via `scope_for(kind, note_id)`. The
+/// changeset-driven analogue of [`note_photos_refs_from_db`]; both build each ref
+/// through [`note_photo_ref`]. A row that survives the `note_photos` filter must
+/// have a primary key and a `note_id` at column 1; their absence is a malformed
+/// test fixture, surfaced loudly rather than silently skipped.
 pub fn note_photos_refs(
     changes: &[crate::changeset::RowChange],
     dir: &std::path::Path,
     namespace: &str,
-    scope_for: impl Fn(&crate::changeset::RowChange, &str) -> crate::blob::BlobScope,
+    scope_for: &dyn Fn(&str, &str) -> crate::blob::BlobScope,
 ) -> Vec<crate::blob::BlobRef> {
     use crate::changeset::ChangeOp;
     changes
         .iter()
         .filter(|c| c.table == "note_photos" && c.op != ChangeOp::Delete)
         .map(|c| {
-            let id = c
-                .pk()
-                .expect("note_photos row has a primary key")
-                .to_string();
+            let id = c.pk().expect("note_photos row has a primary key");
             let note_id = c.col(1).expect("note_photos row has a note_id at column 1");
-            crate::blob::BlobRef {
-                namespace: namespace.to_string(),
-                local_path: dir.join(&id),
-                id,
-                scope: scope_for(c, note_id),
-            }
+            let kind = c.col(2).expect("note_photos row has a kind at column 2");
+            note_photo_ref(id, note_id, kind, dir, namespace, scope_for)
         })
         .collect()
+}
+
+/// Map every `note_photos` row currently in `conn` to a [`crate::blob::BlobRef`],
+/// the snapshot-bootstrap analogue of [`note_photos_refs`]: the rows the
+/// bootstrapped DB already holds, rather than an incoming changeset's. Both build
+/// each ref through [`note_photo_ref`], so a photo blob lands at the same path and
+/// scope however it was discovered.
+pub fn note_photos_refs_from_db(
+    conn: &Connection,
+    dir: &std::path::Path,
+    namespace: &str,
+    scope_for: &dyn Fn(&str, &str) -> crate::blob::BlobScope,
+) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
+    let mut stmt = conn.prepare("SELECT id, note_id, kind FROM note_photos")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut refs = Vec::new();
+    for row in rows {
+        let (id, note_id, kind) = row?;
+        refs.push(note_photo_ref(
+            &id, &note_id, &kind, dir, namespace, scope_for,
+        ));
+    }
+    Ok(refs)
 }
 
 /// A blob plan that maps `note_photos` rows to blobs under `dir`. `kind = "cover"`
@@ -603,14 +650,18 @@ pub struct PhotoBlobPlan {
 }
 
 impl PhotoBlobPlan {
+    /// The scope every `note_photos` row maps to, regardless of discovery path:
+    /// a cover photo uses a per-note derived key, everything else the master key.
+    fn scope_for(kind: &str, note_id: &str) -> crate::blob::BlobScope {
+        if kind == "cover" {
+            crate::blob::BlobScope::Derived(note_id.to_string())
+        } else {
+            crate::blob::BlobScope::Master
+        }
+    }
+
     fn refs(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
-        note_photos_refs(changes, &self.dir, "photos", |c, note_id| {
-            if c.col(2) == Some("cover") {
-                crate::blob::BlobScope::Derived(note_id.to_string())
-            } else {
-                crate::blob::BlobScope::Master
-            }
-        })
+        note_photos_refs(changes, &self.dir, "photos", &Self::scope_for)
     }
 }
 
@@ -620,5 +671,8 @@ impl crate::blob::BlobPlan for PhotoBlobPlan {
     }
     fn blobs_to_pull(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
         self.refs(changes)
+    }
+    fn blobs_in_db(&self, conn: &Connection) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
+        note_photos_refs_from_db(conn, &self.dir, "photos", &Self::scope_for)
     }
 }
