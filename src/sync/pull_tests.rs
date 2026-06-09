@@ -108,9 +108,77 @@ async fn pull_skips_changeset_from_newer_schema() {
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.skipped_schema, 1);
-    // Cursor still advances past the skipped seq so we don't re-fetch it.
-    assert_eq!(updated.get("dev1"), Some(&1));
+    // The cursor must NOT advance past a genuine newer-schema changeset: it
+    // becomes applicable once this app updates, and an already-running device
+    // never re-bootstraps, so advancing would strand its rows forever. Leaving
+    // the cursor put re-fetches seq 1 after the upgrade.
+    assert_eq!(updated.get("dev1"), None);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+}
+
+#[tokio::test]
+async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
+    let storage = MockSyncStorage::new();
+
+    // Source dev1: seq 1 references a photo blob; seq 2 is a plain note.
+    let db1 = open_test_db();
+    let cs1 = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'One', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+             VALUES ('ph1', 'n1', 'attach', '0000000001001-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs1, SCHEMA_VERSION);
+    // The photo blob is intentionally never uploaded, so seq 1's blob download
+    // fails on the puller (a transient cloud unavailability, in the real world).
+    let cs2 = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n2', 'Two', NULL, '0000000002000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 2, &cs2, SCHEMA_VERSION);
+
+    // The puller resolves note_photos to blobs, so seq 1's missing blob fails
+    // while seq 2 (no blob) would succeed.
+    let dst_photos = tempfile::tempdir().expect("dst photos");
+    let plan = PhotoBlobPlan {
+        dir: dst_photos.path().to_path_buf(),
+    };
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &plan,
+    )
+    .await;
+
+    assert!(
+        result.asset_downloads_failed,
+        "seq 1's blob download must fail"
+    );
+    // The cursor must NOT jump to 2 past the blob-failed seq 1 — otherwise seq 1's
+    // blob would never be re-fetched. It stays before seq 1 so the next cycle
+    // resumes there.
+    assert_ne!(
+        updated.get("dev1"),
+        Some(&2),
+        "cursor must not advance past the blob-failed seq",
+    );
+    assert_eq!(
+        updated.get("dev1"),
+        None,
+        "cursor stays before the blob-failed seq 1",
+    );
 }
 
 #[tokio::test]

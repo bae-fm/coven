@@ -232,10 +232,15 @@ pub async fn pull_changes(
                     "skipping changeset with newer schema version"
                 );
                 result.skipped_schema += 1;
-                // Advance cursor past this seq so we don't re-fetch it.
-                // When we upgrade, a new snapshot will reconcile.
-                updated_cursors.insert(head.device_id.clone(), seq);
-                continue;
+                // Do NOT advance the cursor. This changeset is genuine and
+                // becomes applicable once the local app updates past this schema;
+                // advancing past it would strand its rows forever, because an
+                // already-running device never re-bootstraps from a snapshot in a
+                // normal cycle. Stop pulling this device here — every later seq it
+                // produced is at least this schema version too, so nothing after
+                // it could apply anyway, and leaving the cursor put makes the next
+                // cycle re-fetch from this seq once we've upgraded.
+                break;
             }
 
             // Signature check: reject changesets with invalid signatures.
@@ -328,10 +333,16 @@ pub async fn pull_changes(
                 updated_cursors.insert(head.device_id.clone(), seq);
             } else {
                 warn!(
-                    "Blob download failed for {}/{}, cursor not advanced",
+                    "Blob download failed for {}/{}, cursor not advanced; stopping \
+                     this device's pull so a later seq can't carry the cursor past it",
                     head.device_id, seq
                 );
                 result.asset_downloads_failed = true;
+                // Stop here: do NOT continue to seq+1. A later seq's success would
+                // overwrite this device's cursor past the failed seq, so its blobs
+                // would never be re-fetched. Leaving the cursor at the last fully
+                // succeeded seq makes the next cycle resume at this one.
+                break;
             }
         }
 
