@@ -14,6 +14,8 @@ pub mod invite;
 #[cfg(test)]
 mod item_key_tests;
 pub mod join;
+#[cfg(test)]
+mod join_tests;
 pub mod membership;
 pub mod membership_ops;
 pub mod outbox;
