@@ -4,6 +4,7 @@
 //! S3-compatible endpoint.
 
 use async_trait::async_trait;
+use aws_config::stalled_stream_protection::StalledStreamProtectionConfig;
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::ResponseChecksumValidation;
@@ -46,7 +47,20 @@ impl S3CloudHome {
         let mut builder = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(region.clone()))
             .credentials_provider(credentials)
-            .http_client(http_client);
+            .http_client(http_client)
+            // The SDK default stalled-stream protection aborts any body
+            // transfer that stays under 1 B/s for 5 seconds — on slow or
+            // briefly-stalling links that kills large legitimate downloads
+            // (a pinned release's full-object GETs) with "minimum throughput
+            // was specified at 1 B/s, but throughput of 0 B/s was observed".
+            // Keep the protection (a truly dead stream should still error;
+            // uploads retry from the durable outbox) but give real-world
+            // stalls a 60-second grace window.
+            .stalled_stream_protection(
+                StalledStreamProtectionConfig::enabled()
+                    .grace_period(std::time::Duration::from_secs(60))
+                    .build(),
+            );
 
         if let Some(ref ep) = endpoint {
             builder = builder.endpoint_url(ep.trim_end_matches('/'));
