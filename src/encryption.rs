@@ -414,6 +414,23 @@ pub fn encrypted_chunk_range(plaintext_start: u64, plaintext_end: u64) -> (u64, 
     (chunk_start, chunk_end)
 }
 
+/// Calculate the total encrypted blob length for a chunked plaintext size.
+pub fn encrypted_blob_len_for_plaintext(plaintext_size: u64) -> u64 {
+    if plaintext_size == 0 {
+        return (NONCE_SIZE + TAG_SIZE) as u64;
+    }
+
+    let full_chunks = plaintext_size / CHUNK_SIZE as u64;
+    let final_chunk_size = plaintext_size % CHUNK_SIZE as u64;
+    let encrypted_chunks = if final_chunk_size == 0 {
+        full_chunks * ENCRYPTED_CHUNK_SIZE as u64
+    } else {
+        full_chunks * ENCRYPTED_CHUNK_SIZE as u64 + final_chunk_size + TAG_SIZE as u64
+    };
+
+    NONCE_SIZE as u64 + encrypted_chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +563,27 @@ mod tests {
 
         let decrypted = service.decrypt(&ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypted_blob_len_for_plaintext_matches_chunked_encryption() {
+        let service = create_test_service();
+        for plaintext_size in [
+            0,
+            1,
+            CHUNK_SIZE - 1,
+            CHUNK_SIZE,
+            CHUNK_SIZE + 1,
+            CHUNK_SIZE * 2 + 99,
+        ] {
+            let plaintext = vec![0x42u8; plaintext_size];
+            let ciphertext = service.encrypt(&plaintext);
+
+            assert_eq!(
+                encrypted_blob_len_for_plaintext(plaintext_size as u64),
+                ciphertext.len() as u64
+            );
+        }
     }
 
     #[test]
