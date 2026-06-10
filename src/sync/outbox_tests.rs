@@ -768,3 +768,51 @@ async fn delete_deferred_when_head_listing_is_torn() {
     assert_eq!(n, 0, "an empty listing (no own head) defers deletes");
     assert!(cloud.deletes_seen().is_empty());
 }
+
+/// `enqueue_upload_on` composes with a host transaction: a rollback takes the
+/// queued upload with it, and a commit lands it — so a host can make "row +
+/// its upload intent" a single atomic fact.
+#[tokio::test]
+async fn enqueue_upload_on_is_transactional_with_host_writes() {
+    let db = open_outbox_db();
+
+    // Rolled-back host transaction: the enqueue must vanish with it.
+    db.call(|conn| {
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        Database::enqueue_upload_on(
+            &tx,
+            "f-rollback",
+            "k-rollback",
+            None,
+            crate::blob::BlobScope::Master,
+            T0,
+        )?;
+        tx.rollback().map_err(DbError::from)
+    })
+    .await
+    .expect("rolled-back transaction");
+
+    // Committed host transaction: the enqueue lands.
+    db.call(|conn| {
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        Database::enqueue_upload_on(
+            &tx,
+            "f-commit",
+            "k-commit",
+            Some("/tmp/source.flac"),
+            crate::blob::BlobScope::Item("rel-1".to_string()),
+            T0,
+        )?;
+        tx.commit().map_err(DbError::from)
+    })
+    .await
+    .expect("committed transaction");
+
+    let pending = db.get_pending_cloud_uploads().await.expect("pending");
+    let keys: Vec<&str> = pending.iter().map(|e| e.cloud_key.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec!["k-commit"],
+        "only the committed enqueue persists"
+    );
+}

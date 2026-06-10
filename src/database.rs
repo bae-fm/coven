@@ -323,19 +323,33 @@ impl Database {
         let item_id = item_id.to_string();
         let new_key = crate::encryption::generate_random_key();
         let updated_at = self.hlc.now().to_string();
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO item_keys (item_id, key, _updated_at) \
-                 VALUES (?1, ?2, ?3)",
-                (&item_id, new_key.to_vec(), updated_at),
-            )
-            .map_err(DbError::from)?;
-            // Read back the stored key — `INSERT OR IGNORE` keeps the existing
-            // row, so on a re-mint this returns the original key, not `new_key`.
-            read_item_key(conn, &item_id)?
-                .ok_or_else(|| DbError(format!("item_keys row absent after mint for {item_id}")))
-        })
-        .await
+        self.call(move |conn| Self::mint_item_key_on(conn, &item_id, new_key, &updated_at))
+            .await
+    }
+
+    /// Transaction-composable form of [`mint_item_key`](Self::mint_item_key):
+    /// runs on a connection the host already holds inside a
+    /// [`call`](Self::call) closure, so the host can mint an item's key
+    /// atomically with the item's own rows. The caller supplies the random
+    /// key ([`crate::encryption::generate_random_key`]) and the `_updated_at`
+    /// stamp (the host's [`crate::sync::hlc::UpdatedAtStamper`], which shares
+    /// this database's HLC register).
+    pub fn mint_item_key_on(
+        conn: &Connection,
+        item_id: &str,
+        new_key: [u8; 32],
+        updated_at: &str,
+    ) -> Result<[u8; 32], DbError> {
+        conn.execute(
+            "INSERT OR IGNORE INTO item_keys (item_id, key, _updated_at) \
+             VALUES (?1, ?2, ?3)",
+            (item_id, new_key.to_vec(), updated_at),
+        )
+        .map_err(DbError::from)?;
+        // Read back the stored key — `INSERT OR IGNORE` keeps the existing
+        // row, so on a re-mint this returns the original key, not `new_key`.
+        read_item_key(conn, item_id)?
+            .ok_or_else(|| DbError(format!("item_keys row absent after mint for {item_id}")))
     }
 
     /// The content key for `item_id` from the synced `item_keys` table, or `None`
@@ -395,18 +409,46 @@ impl Database {
             source_path.map(str::to_string),
             created_at.to_string(),
         );
-        let scope = scope.to_outbox_str();
         self.call(move |conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, file_id, cloud_key, source_path, scope, created_at) \
-                 VALUES ('upload', ?1, ?2, ?3, ?4, ?5)",
-                (file_id, cloud_key, source_path, scope, created_at),
+            Self::enqueue_upload_on(
+                conn,
+                &file_id,
+                &cloud_key,
+                source_path.as_deref(),
+                scope,
+                &created_at,
             )
-            .map(|_| ())
-            .map_err(DbError::from)
         })
         .await
+    }
+
+    /// Transaction-composable form of [`enqueue_upload`](Self::enqueue_upload):
+    /// runs on a connection the host already holds inside a
+    /// [`call`](Self::call) closure, so the host can commit a row's upload
+    /// intent atomically with the row itself (e.g. an import that must either
+    /// land with its uploads queued or not land at all).
+    pub fn enqueue_upload_on(
+        conn: &Connection,
+        file_id: &str,
+        cloud_key: &str,
+        source_path: Option<&str>,
+        scope: crate::blob::BlobScope,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "INSERT OR IGNORE INTO cloud_outbox \
+             (operation, file_id, cloud_key, source_path, scope, created_at) \
+             VALUES ('upload', ?1, ?2, ?3, ?4, ?5)",
+            (
+                file_id,
+                cloud_key,
+                source_path,
+                scope.to_outbox_str(),
+                created_at,
+            ),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
     }
 
     /// Enqueue a blob delete, safe to run once every peer has synced past
