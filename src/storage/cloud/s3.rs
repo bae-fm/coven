@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
+use aws_sdk_s3::config::ResponseChecksumValidation;
 use aws_sdk_s3::Client;
 use tracing::warn;
 
@@ -54,6 +55,26 @@ impl S3CloudHome {
         let aws_config = builder.load().await;
         let s3_config = aws_sdk_s3::config::Builder::from(&aws_config)
             .force_path_style(true)
+            // Coven's S3 backend is intentionally S3-compatible, not AWS-only.
+            //
+            // The AWS SDK default is ResponseChecksumValidation::WhenSupported.
+            // For GetObject that default mutates the request to checksum-mode=ENABLED,
+            // then validates any returned x-amz-checksum-* header against the response
+            // body. That is correct for AWS S3's modeled checksum behavior, but it is
+            // not a portable integrity layer for S3-compatible providers.
+            //
+            // Google Cloud Storage's S3-compatible API returns
+            // x-amz-checksum-crc32c on ranged GetObject responses with the checksum of
+            // the whole object. A Range: bytes=0-23 response legitimately contains only
+            // those 24 bytes, so validating that partial body against the full-object
+            // checksum fails with a checksum mismatch before playback can read the
+            // encrypted nonce header.
+            //
+            // Do not use provider checksum headers as coven's generic byte-integrity
+            // contract. Managed encrypted blobs are authenticated by their AEAD tags
+            // during decrypt; plaintext cloud integrity needs coven-owned metadata or
+            // chunk hashes, not provider-specific response-header semantics.
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
             .build();
         let client = Client::from_conf(s3_config);
 
@@ -194,6 +215,19 @@ fn apply_prefix(prefix: Option<&str>, key: &str) -> String {
     }
 }
 
+fn body_read_error<E>(context: &str, key: &str, err: E) -> CloudHomeError
+where
+    E: std::error::Error + std::fmt::Debug,
+{
+    let mut msg = format!("{context} for {key}: {err}");
+    let mut source = err.source();
+    while let Some(err) = source {
+        msg.push_str(&format!("; caused by: {err}"));
+        source = err.source();
+    }
+    CloudHomeError::Storage(msg)
+}
+
 /// Map a GetObject failure to a `CloudHomeError`, surfacing the S3 error code and
 /// message (e.g. `AccessDenied`, `PermanentRedirect`, `SignatureDoesNotMatch`)
 /// rather than the opaque "service error". `NoSuchKey` becomes `NotFound`;
@@ -332,7 +366,7 @@ impl CloudHome for S3CloudHome {
             .body
             .collect()
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("read body for {key}: {e}")))?
+            .map_err(|e| body_read_error("read body", key, e))?
             .into_bytes()
             .to_vec();
 
@@ -356,7 +390,7 @@ impl CloudHome for S3CloudHome {
             .body
             .collect()
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("read range body for {key}: {e}")))?
+            .map_err(|e| body_read_error("read range body", key, e))?
             .into_bytes()
             .to_vec();
 
@@ -469,6 +503,12 @@ impl CloudHome for S3CloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+    use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
+    use axum::Router;
+    use std::sync::Arc;
 
     #[test]
     fn full_key_prepends_prefix() {
@@ -486,6 +526,101 @@ mod tests {
     fn full_key_strips_trailing_slash() {
         let key = apply_prefix(Some("libs/abc/"), "heads/dev1.json");
         assert_eq!(key, "libs/abc/heads/dev1.json");
+    }
+
+    #[derive(Clone)]
+    struct FakeRangeObject {
+        bucket: String,
+        key: String,
+        range_body: Vec<u8>,
+        object_len: u64,
+        whole_object_crc32c: &'static str,
+    }
+
+    async fn fake_s3_range_endpoint(
+        State(object): State<Arc<FakeRangeObject>>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+    ) -> Response<Body> {
+        let expected_path = format!("/{}/{}", object.bucket, object.key);
+        let range = headers.get(RANGE).and_then(|v| v.to_str().ok());
+
+        if method != Method::GET || uri.path() != expected_path || range != Some("bytes=0-23") {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!(
+                    "unexpected request: method={method}, path={}, range={range:?}",
+                    uri.path()
+                )))
+                .expect("build bad-request response");
+        }
+
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(CONTENT_RANGE, format!("bytes 0-23/{}", object.object_len))
+            .header(CONTENT_LENGTH, object.range_body.len().to_string())
+            .header("x-amz-checksum-crc32c", object.whole_object_crc32c)
+            .body(Body::from(object.range_body.clone()))
+            .expect("build fake range response")
+    }
+
+    async fn spawn_fake_s3_endpoint(
+        object: FakeRangeObject,
+    ) -> (String, tokio::sync::oneshot::Sender<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake S3 endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let app = Router::new()
+            .fallback(fake_s3_range_endpoint)
+            .with_state(Arc::new(object));
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("fake S3 endpoint failed");
+        });
+
+        (endpoint, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn read_range_accepts_s3_compatible_full_object_checksum_header() {
+        let range_body = b"abcdefghijklmnopqrstuvwx".to_vec();
+        let key = "storage/audio-object".to_string();
+        let bucket = "coven-s3-compatible-test".to_string();
+        let (endpoint, shutdown) = spawn_fake_s3_endpoint(FakeRangeObject {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            range_body: range_body.clone(),
+            object_len: 96,
+            whole_object_crc32c: "sNqCyA==",
+        })
+        .await;
+
+        let home = S3CloudHome::new(
+            bucket,
+            "us-central1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+
+        let bytes = home
+            .read_range(&key, 0, range_body.len() as u64)
+            .await
+            .expect("read range");
+
+        assert_eq!(bytes, range_body);
+        let _ = shutdown.send(());
     }
 
     // ── probe() against a real S3 endpoint ──────────────────────────────
@@ -521,6 +656,52 @@ mod tests {
             access_key: test_env("COVEN_TEST_S3_KEY", "coventest"),
             secret_key: test_env("COVEN_TEST_S3_SECRET", "coventestpass"),
         }
+    }
+
+    fn required_test_env(name: &str) -> String {
+        match std::env::var(name) {
+            Ok(s) => s,
+            Err(std::env::VarError::NotPresent) => {
+                panic!("test env var {name} must be set for this test");
+            }
+            Err(std::env::VarError::NotUnicode(raw)) => {
+                panic!("test env var {name} is non-utf8: {raw:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn read_range_succeeds_against_existing_s3_object() {
+        let creds = test_creds();
+        let bucket = required_test_env("COVEN_TEST_S3_BUCKET");
+        let region = test_env("COVEN_TEST_S3_REGION", "us-east-1");
+        let key = required_test_env("COVEN_TEST_S3_EXISTING_KEY");
+        let start: u64 = test_env("COVEN_TEST_S3_RANGE_START", "0")
+            .parse()
+            .expect("COVEN_TEST_S3_RANGE_START must be a u64");
+        let end: u64 = test_env("COVEN_TEST_S3_RANGE_END", "24")
+            .parse()
+            .expect("COVEN_TEST_S3_RANGE_END must be a u64");
+
+        let home = S3CloudHome::new(
+            bucket,
+            region,
+            Some(creds.endpoint),
+            creds.access_key,
+            creds.secret_key,
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+
+        eprintln!("reading {key} range {start}..{end}");
+        let bytes = home
+            .read_range(&key, start, end)
+            .await
+            .unwrap_or_else(|e| panic!("read_range failed: {e:?}"));
+
+        assert_eq!(bytes.len() as u64, end - start);
     }
 
     /// Provision the bucket configured on `home`.
