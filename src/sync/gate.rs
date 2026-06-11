@@ -767,86 +767,61 @@ unsafe fn gate_outbound_raw(
     let mut shared_visiting: HashSet<(String, String)> = HashSet::new();
 
     // Pass 1: walk the captured changeset, keep gated-true rows, note flips.
-    let bytes = changeset;
-    if !bytes.is_empty() {
-        let mut iter: *mut ffi::sqlite3_changeset_iter = ptr::null_mut();
-        let rc = ffi::sqlite3changeset_start(
-            &mut iter,
-            bytes.len() as c_int,
-            bytes.as_ptr() as *mut c_void,
-        );
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(GateError::Ffi("sqlite3changeset_start", rc));
-        }
-
-        loop {
-            let step = ffi::sqlite3changeset_next(iter);
-            if step == ffi::SQLITE_DONE as c_int {
-                break;
-            }
-            if step != ffi::SQLITE_ROW as c_int {
-                ffi::sqlite3changeset_finalize(iter);
-                return Err(GateError::Ffi("sqlite3changeset_next", step));
-            }
-
-            let row = ChangeRow::read(iter);
-
-            // A root whose gate flips false→true this cycle has its whole now-
-            // visible subtree re-emitted as full-state INSERTs below. Record it
-            // and skip the captured row: an UPDATE(false→true) is wrong for a
-            // peer that never had the row (it would apply as a NOTFOUND no-op),
-            // and an INSERT is reproduced identically by the re-emit. Letting
-            // re-emit be the single source avoids an UPDATE/INSERT dedup clash.
-            if let Some(TableGate::Root { gate_col }) = gates.tables.get(&row.table) {
-                let flips = match row.op {
-                    x if x == ffi::SQLITE_UPDATE => {
-                        row.old_truth(*gate_col) == Some(false)
-                            && row.new_truth(*gate_col) == Some(true)
-                    }
-                    x if x == ffi::SQLITE_INSERT => row.new_truth(*gate_col) == Some(true),
-                    _ => false,
-                };
-                if flips {
-                    if let Some(pk) = row.pk() {
-                        flipped_roots.insert((row.table.clone(), pk.to_string()));
-                    }
-                    continue;
+    for_each_change(changeset, |iter, row| {
+        // A root whose gate flips false→true this cycle has its whole now-visible
+        // subtree re-emitted as full-state INSERTs below. Record it and skip the
+        // captured row: an UPDATE(false→true) is wrong for a peer that never had
+        // the row (it would apply as a NOTFOUND no-op), and an INSERT is reproduced
+        // identically by the re-emit. Letting re-emit be the single source avoids
+        // an UPDATE/INSERT dedup clash.
+        if let Some(TableGate::Root { gate_col }) = gates.tables.get(&row.table) {
+            let flips = match row.op {
+                x if x == ffi::SQLITE_UPDATE => {
+                    row.old_truth(*gate_col) == Some(false)
+                        && row.new_truth(*gate_col) == Some(true)
                 }
-            }
-
-            // A DELETE propagates iff the row was shared before this changeset
-            // removed it — resolved against its pre-deletion state, since the live
-            // db (and thus `effective_gate`) no longer holds its gate terminus. An
-            // insert/update keeps the live-state gate.
-            let keep = if row.op == ffi::SQLITE_DELETE {
-                match row.pk() {
-                    Some(pk) => was_shared(
-                        db,
-                        gates,
-                        &deleted,
-                        &row.table,
-                        pk,
-                        &mut shared_memo,
-                        &mut shared_visiting,
-                    )?,
-                    None => false,
-                }
-            } else {
-                effective_gate(db, gates, &row)?
+                x if x == ffi::SQLITE_INSERT => row.new_truth(*gate_col) == Some(true),
+                _ => false,
             };
-            if keep {
-                group.add_change(iter)?;
-                // A kept row that repoints an FK onto a gated parent drags that
-                // parent's (possibly never-shared) subtree into visibility.
-                reparent_seeds.extend(reparent_targets(db, gates, &row)?);
+            if flips {
+                if let Some(pk) = row.pk() {
+                    flipped_roots.insert((row.table.clone(), pk.to_string()));
+                }
+                return Ok(());
             }
         }
 
-        let rc = ffi::sqlite3changeset_finalize(iter);
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(GateError::Ffi("sqlite3changeset_finalize", rc));
+        // A DELETE propagates iff the row was shared before this changeset removed
+        // it — resolved against its pre-deletion state, since the live db (and thus
+        // `effective_gate`) no longer holds its gate terminus. An insert/update
+        // keeps the live-state gate.
+        let keep = if row.op == ffi::SQLITE_DELETE {
+            match row.pk() {
+                Some(pk) => was_shared(
+                    db,
+                    gates,
+                    &deleted,
+                    &row.table,
+                    pk,
+                    &mut shared_memo,
+                    &mut shared_visiting,
+                )?,
+                None => {
+                    debug!(table = %row.table, "gate: delete row has no primary key; treating as not shared");
+                    false
+                }
+            }
+        } else {
+            effective_gate(db, gates, &row)?
+        };
+        if keep {
+            group.add_change(iter)?;
+            // A kept row that repoints an FK onto a gated parent drags that parent's
+            // (possibly never-shared) subtree into visibility.
+            reparent_seeds.extend(reparent_targets(db, gates, &row)?);
         }
-    }
+        Ok(())
+    })?;
 
     // Pass 2: re-emit full subtrees for flipped roots and reparent targets.
     if !flipped_roots.is_empty() || !reparent_seeds.is_empty() {
@@ -1196,16 +1171,18 @@ unsafe fn effective_gate(
     }
 }
 
-/// Every DELETE in the changeset, keyed by `(table, primary key)`, holding the
-/// row's old column values. [`was_shared`] reads these to resolve a deleted row's
-/// pre-deletion gate state — its gate terminus is gone from the live db, so the
-/// old values in the changeset are the only record that it was shared.
-unsafe fn collect_deletes(
+/// Walk `changeset`, reading each change as a [`ChangeRow`] and handing it — with
+/// the live iterator, which the caller needs for `add_change` — to `f`. Owns the
+/// `start`/`next`/`finalize` FFI boilerplate so each caller writes only its
+/// per-row action; `f` returning `Ok(())` early is this walk's "skip this row".
+/// A finalize failure surfaces only when the walk itself succeeded — a walk error
+/// is the more specific cause and takes precedence.
+unsafe fn for_each_change(
     changeset: &[u8],
-) -> Result<HashMap<(String, String), ChangeRow>, GateError> {
-    let mut deleted = HashMap::new();
+    mut f: impl FnMut(*mut ffi::sqlite3_changeset_iter, ChangeRow) -> Result<(), GateError>,
+) -> Result<(), GateError> {
     if changeset.is_empty() {
-        return Ok(deleted);
+        return Ok(());
     }
     let mut iter: *mut ffi::sqlite3_changeset_iter = ptr::null_mut();
     let rc = ffi::sqlite3changeset_start(
@@ -1216,26 +1193,50 @@ unsafe fn collect_deletes(
     if rc != ffi::SQLITE_OK as c_int {
         return Err(GateError::Ffi("sqlite3changeset_start", rc));
     }
-    loop {
+    let walk = loop {
         let step = ffi::sqlite3changeset_next(iter);
         if step == ffi::SQLITE_DONE as c_int {
-            break;
+            break Ok(());
         }
         if step != ffi::SQLITE_ROW as c_int {
-            ffi::sqlite3changeset_finalize(iter);
-            return Err(GateError::Ffi("sqlite3changeset_next", step));
+            break Err(GateError::Ffi("sqlite3changeset_next", step));
         }
         let row = ChangeRow::read(iter);
+        if let Err(e) = f(iter, row) {
+            break Err(e);
+        }
+    };
+    let fin = ffi::sqlite3changeset_finalize(iter);
+    match walk {
+        Ok(()) if fin != ffi::SQLITE_OK as c_int => {
+            Err(GateError::Ffi("sqlite3changeset_finalize", fin))
+        }
+        other => other,
+    }
+}
+
+/// Every DELETE in the changeset, keyed by `(table, primary key)`, holding the
+/// row's old column values. [`was_shared`] reads these to resolve a deleted row's
+/// pre-deletion gate state — its gate terminus is gone from the live db, so the
+/// old values in the changeset are the only record that it was shared.
+unsafe fn collect_deletes(
+    changeset: &[u8],
+) -> Result<HashMap<(String, String), ChangeRow>, GateError> {
+    let mut deleted = HashMap::new();
+    for_each_change(changeset, |_iter, row| {
         if row.op == ffi::SQLITE_DELETE {
-            if let Some(pk) = row.pk() {
-                deleted.insert((row.table.clone(), pk.to_string()), row);
+            match row.pk() {
+                Some(pk) => {
+                    deleted.insert((row.table.clone(), pk.to_string()), row);
+                }
+                None => debug!(
+                    table = %row.table,
+                    "gate: delete row has no primary key; not tracked for pre-delete resolution"
+                ),
             }
         }
-    }
-    let rc = ffi::sqlite3changeset_finalize(iter);
-    if rc != ffi::SQLITE_OK as c_int {
-        return Err(GateError::Ffi("sqlite3changeset_finalize", rc));
-    }
+        Ok(())
+    })?;
     Ok(deleted)
 }
 
@@ -1271,17 +1272,31 @@ unsafe fn was_shared(
         return Ok(v);
     }
     if !visiting.insert(key.clone()) {
-        return Ok(false); // a cycle is not a path to a shared terminus.
+        // A declared-FK cycle is not a path to a gated terminus. Defensive: the
+        // schema's gated FK graph is a DAG, so this should never fire.
+        debug!(
+            table,
+            id, "gate: FK cycle while resolving pre-delete share; treating as not shared"
+        );
+        return Ok(false);
     }
 
     let shared = match gates.tables.get(table) {
         // Ungated tables always sync, so their deletes always propagate.
         None => true,
+        // A truthy old gate value means the root was shared. A NULL/absent gate is
+        // a genuine not-shared value (a gated-false root), not masked data.
         Some(TableGate::Root { gate_col }) => match deleted.get(&key) {
             Some(row) => row.old_truth(*gate_col).unwrap_or(false),
             None => {
                 let col = nth_column_name(db, table, *gate_col)?;
-                query_truth(db, table, &col, id)?.unwrap_or(false)
+                match query_truth(db, table, &col, id)? {
+                    Some(t) => t,
+                    None => {
+                        warn!(table, id, "gate: live root absent while resolving a descendant's pre-delete share; treating as not shared");
+                        false
+                    }
+                }
             }
         },
         Some(TableGate::Child { fk_col, parent }) => {
@@ -1291,7 +1306,10 @@ unsafe fn was_shared(
             };
             match parent_id {
                 Some(pid) => was_shared(db, gates, deleted, parent, &pid, memo, visiting)?,
-                None => false,
+                None => {
+                    warn!(table, id, "gate: child has no FK parent while resolving pre-delete share; treating as not shared");
+                    false
+                }
             }
         }
         Some(TableGate::Parent { children }) => {
