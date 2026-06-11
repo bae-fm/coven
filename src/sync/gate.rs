@@ -759,6 +759,13 @@ unsafe fn gate_outbound_raw(
     // a peer applies the bare FK-change against a parent it doesn't have.
     let mut reparent_seeds: HashSet<(String, String)> = HashSet::new();
 
+    // Every deleted row's old values, so a DELETE's keep test can resolve the gate
+    // against the row's pre-deletion state (its terminus may be gone from the live
+    // db). Memo + cycle guard span the whole pass.
+    let deleted = collect_deletes(changeset)?;
+    let mut shared_memo: HashMap<(String, String), bool> = HashMap::new();
+    let mut shared_visiting: HashSet<(String, String)> = HashSet::new();
+
     // Pass 1: walk the captured changeset, keep gated-true rows, note flips.
     let bytes = changeset;
     if !bytes.is_empty() {
@@ -807,7 +814,27 @@ unsafe fn gate_outbound_raw(
                 }
             }
 
-            if effective_gate(db, gates, &row)? {
+            // A DELETE propagates iff the row was shared before this changeset
+            // removed it — resolved against its pre-deletion state, since the live
+            // db (and thus `effective_gate`) no longer holds its gate terminus. An
+            // insert/update keeps the live-state gate.
+            let keep = if row.op == ffi::SQLITE_DELETE {
+                match row.pk() {
+                    Some(pk) => was_shared(
+                        db,
+                        gates,
+                        &deleted,
+                        &row.table,
+                        pk,
+                        &mut shared_memo,
+                        &mut shared_visiting,
+                    )?,
+                    None => false,
+                }
+            } else {
+                effective_gate(db, gates, &row)?
+            };
+            if keep {
                 group.add_change(iter)?;
                 // A kept row that repoints an FK onto a gated parent drags that
                 // parent's (possibly never-shared) subtree into visibility.
@@ -1167,6 +1194,134 @@ unsafe fn effective_gate(
             }
         }
     }
+}
+
+/// Every DELETE in the changeset, keyed by `(table, primary key)`, holding the
+/// row's old column values. [`was_shared`] reads these to resolve a deleted row's
+/// pre-deletion gate state — its gate terminus is gone from the live db, so the
+/// old values in the changeset are the only record that it was shared.
+unsafe fn collect_deletes(
+    changeset: &[u8],
+) -> Result<HashMap<(String, String), ChangeRow>, GateError> {
+    let mut deleted = HashMap::new();
+    if changeset.is_empty() {
+        return Ok(deleted);
+    }
+    let mut iter: *mut ffi::sqlite3_changeset_iter = ptr::null_mut();
+    let rc = ffi::sqlite3changeset_start(
+        &mut iter,
+        changeset.len() as c_int,
+        changeset.as_ptr() as *mut c_void,
+    );
+    if rc != ffi::SQLITE_OK as c_int {
+        return Err(GateError::Ffi("sqlite3changeset_start", rc));
+    }
+    loop {
+        let step = ffi::sqlite3changeset_next(iter);
+        if step == ffi::SQLITE_DONE as c_int {
+            break;
+        }
+        if step != ffi::SQLITE_ROW as c_int {
+            ffi::sqlite3changeset_finalize(iter);
+            return Err(GateError::Ffi("sqlite3changeset_next", step));
+        }
+        let row = ChangeRow::read(iter);
+        if row.op == ffi::SQLITE_DELETE {
+            if let Some(pk) = row.pk() {
+                deleted.insert((row.table.clone(), pk.to_string()), row);
+            }
+        }
+    }
+    let rc = ffi::sqlite3changeset_finalize(iter);
+    if rc != ffi::SQLITE_OK as c_int {
+        return Err(GateError::Ffi("sqlite3changeset_finalize", rc));
+    }
+    Ok(deleted)
+}
+
+/// Whether the row `(table, id)` was shared to peers *before* this changeset's
+/// deletions — the keep test for a DELETE. The gate evaluates "shared" against the
+/// live db, but a deleted row's gate terminus is gone from it (an album whose last
+/// release was deleted, a track whose release was deleted), so a live evaluation
+/// always reads "not shared" and the deletion is wrongly cut, stranding a phantom
+/// on every peer. This resolves the gate against the row's pre-deletion state: the
+/// changeset's old values for rows it deleted, falling back to the live db for
+/// rows the changeset left in place (a descendant deleted under a surviving root).
+///
+/// - A root was shared iff its old gate value is truthy.
+/// - A child was shared iff its FK parent (old FK for a deleted child, live FK
+///   otherwise) was shared — recursively to the gated terminus.
+/// - An ancestor was shared iff it still has a live kept child, or a kept child of
+///   it is being deleted in this same changeset. A never-shared ancestor (only
+///   unmanaged children) stays cut, so its DELETE never leaks old column values to
+///   peers that never had it.
+///
+/// Memoized and cycle-guarded on `(table, id)`.
+unsafe fn was_shared(
+    db: *mut ffi::sqlite3,
+    gates: &Gates,
+    deleted: &HashMap<(String, String), ChangeRow>,
+    table: &str,
+    id: &str,
+    memo: &mut HashMap<(String, String), bool>,
+    visiting: &mut HashSet<(String, String)>,
+) -> Result<bool, GateError> {
+    let key = (table.to_string(), id.to_string());
+    if let Some(&v) = memo.get(&key) {
+        return Ok(v);
+    }
+    if !visiting.insert(key.clone()) {
+        return Ok(false); // a cycle is not a path to a shared terminus.
+    }
+
+    let shared = match gates.tables.get(table) {
+        // Ungated tables always sync, so their deletes always propagate.
+        None => true,
+        Some(TableGate::Root { gate_col }) => match deleted.get(&key) {
+            Some(row) => row.old_truth(*gate_col).unwrap_or(false),
+            None => {
+                let col = nth_column_name(db, table, *gate_col)?;
+                query_truth(db, table, &col, id)?.unwrap_or(false)
+            }
+        },
+        Some(TableGate::Child { fk_col, parent }) => {
+            let parent_id = match deleted.get(&key) {
+                Some(row) => row.fk_value(*fk_col).map(str::to_string),
+                None => lookup_fk_in_db(db, table, *fk_col, id)?,
+            };
+            match parent_id {
+                Some(pid) => was_shared(db, gates, deleted, parent, &pid, memo, visiting)?,
+                None => false,
+            }
+        }
+        Some(TableGate::Parent { children }) => {
+            // A live kept child keeps a surviving ancestor shared (a descendant was
+            // deleted but the ancestor and a sibling remain). For a deleted ancestor
+            // the cascade leaves no live child, so the kept child is found among the
+            // changeset's deletes instead.
+            if gates.row_kept(db, table, id)? {
+                true
+            } else {
+                let mut found = false;
+                'children: for (child_table, child_fk_col) in children {
+                    for ((dt, dpk), drow) in deleted {
+                        if dt == child_table
+                            && drow.fk_value(*child_fk_col) == Some(id)
+                            && was_shared(db, gates, deleted, child_table, dpk, memo, visiting)?
+                        {
+                            found = true;
+                            break 'children;
+                        }
+                    }
+                }
+                found
+            }
+        }
+    };
+
+    visiting.remove(&key);
+    memo.insert(key, shared);
+    Ok(shared)
 }
 
 /// The flipped-root key this row belongs to (for re-emit scoping): the
@@ -2499,6 +2654,136 @@ mod tests {
         assert!(
             !has_row(&changes, "tracks", "T"),
             "track of unmanaged release cut"
+        );
+    }
+
+    #[test]
+    fn deleting_a_shared_album_with_its_release_propagates_the_album_delete() {
+        let c = conn();
+        create_album_schema(&c);
+
+        // A shared album: a managed release under it makes the album sync to peers.
+        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('ar1', 'Artist', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('al1', 'ar1', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('tr1', 're1', '0000000001000-0000-dev1')");
+
+        // Deleting the album cascades the release and track; the capture records the
+        // album DELETE plus the cascaded child DELETEs.
+        let out = capture_and_gate(
+            &c,
+            &album_tables(),
+            &["DELETE FROM albums WHERE id = 'al1'"],
+        );
+        let changes = walk(&out).expect("walk");
+
+        assert!(
+            has_row(&changes, "releases", "re1"),
+            "the managed release's removal propagates"
+        );
+        assert!(
+            has_row(&changes, "albums", "al1"),
+            "the album's own removal must propagate so a peer drops the now-empty \
+             album instead of keeping a phantom"
+        );
+        assert!(
+            has_row(&changes, "tracks", "tr1"),
+            "the track's removal must propagate too — apply does not cascade, so a \
+             cut track would orphan under the removed release on every peer"
+        );
+    }
+
+    #[test]
+    fn deleting_one_release_keeps_the_surviving_shared_album() {
+        let c = conn();
+        create_album_schema(&c);
+
+        // An album with two managed releases; deleting one leaves the album shared.
+        exec(
+            &c,
+            "INSERT INTO albums (id, _updated_at) VALUES ('al1', '0000000001000-0000-dev1')",
+        );
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re2', 'al1', 1, '0000000001000-0000-dev1')");
+
+        let out = capture_and_gate(
+            &c,
+            &album_tables(),
+            &["DELETE FROM releases WHERE id = 're1'"],
+        );
+        let changes = walk(&out).expect("walk");
+
+        assert!(
+            has_row(&changes, "releases", "re1"),
+            "the deleted managed release's removal propagates"
+        );
+        assert!(
+            !has_row(&changes, "albums", "al1"),
+            "the album survives (it still has a managed release), so its row is not \
+             emitted as a deletion"
+        );
+    }
+
+    #[test]
+    fn deleting_a_private_album_does_not_propagate_its_delete() {
+        let c = conn();
+        create_album_schema(&c);
+
+        // A private album: only an unmanaged release, so it never synced to peers.
+        exec(
+            &c,
+            "INSERT INTO albums (id, _updated_at) VALUES ('al1', '0000000001000-0000-dev1')",
+        );
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 0, '0000000001000-0000-dev1')");
+
+        let out = capture_and_gate(
+            &c,
+            &album_tables(),
+            &["DELETE FROM albums WHERE id = 'al1'"],
+        );
+        let changes = walk(&out).expect("walk");
+
+        assert!(
+            !has_row(&changes, "releases", "re1"),
+            "the unmanaged release was never shared; its removal is cut"
+        );
+        assert!(
+            !has_row(&changes, "albums", "al1"),
+            "a never-shared album's removal must not propagate — its DELETE carries \
+             old column values a peer should never receive"
+        );
+    }
+
+    #[test]
+    fn deleting_a_shared_artist_with_its_album_propagates_the_artist_delete() {
+        let c = conn();
+        create_album_schema(&c);
+
+        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('ar1', 'Artist', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('al1', 'ar1', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('aa1', 'al1', 'ar1', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('re1', 'al1', 1, '0000000001000-0000-dev1')");
+
+        // album.artist_id has no ON DELETE CASCADE, so an artist is removed by
+        // deleting its albums (cascading releases/album_artists) then the artist.
+        let out = capture_and_gate(
+            &c,
+            &album_tables(),
+            &[
+                "DELETE FROM albums WHERE id = 'al1'",
+                "DELETE FROM artists WHERE id = 'ar1'",
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+
+        assert!(
+            has_row(&changes, "albums", "al1"),
+            "the shared album's removal propagates"
+        );
+        assert!(
+            has_row(&changes, "artists", "ar1"),
+            "the artist's removal must propagate up the chain once its last kept \
+             album is being removed"
         );
     }
 
