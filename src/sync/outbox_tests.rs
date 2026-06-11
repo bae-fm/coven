@@ -21,10 +21,8 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::invite::{create_invitation, unwrap_library_key};
 use crate::sync::membership::MemberRole;
-use crate::sync::storage::DeviceHead;
 use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
 use rusqlite::OptionalExtension;
-use std::collections::HashMap;
 
 // --- Database under test ----------------------------------------------------
 
@@ -282,11 +280,11 @@ fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String
 // --- Tests -----------------------------------------------------------------
 
 /// An upload row reads back as an `Upload` carrying its scope; a delete row
-/// reads back as a `Delete` carrying its seq floor. The operation-specific
-/// fields live in the variant, so a delete has no scope to be `None` and an
-/// upload has no `min_seq` — the flat row's unused columns are simply unread.
+/// reads back as a `Delete`. The operation-specific fields live in the variant,
+/// so a delete has no scope to be `None` — the flat row's unused columns are
+/// simply unread.
 #[tokio::test]
-async fn upload_carries_scope_delete_carries_min_seq() {
+async fn upload_carries_scope_delete_carries_no_extra_fields() {
     use crate::blob::BlobScope;
     use crate::db::OutboxOperation;
 
@@ -294,7 +292,7 @@ async fn upload_carries_scope_delete_carries_min_seq() {
     db.enqueue_upload("f1", "k-up", None, BlobScope::Master, T0)
         .await
         .expect("enqueue upload");
-    db.enqueue_delete("k-del", 7, T0)
+    db.enqueue_delete("k-del", T0)
         .await
         .expect("enqueue delete");
 
@@ -312,11 +310,7 @@ async fn upload_carries_scope_delete_carries_min_seq() {
 
     let deletes = db.get_pending_cloud_deletes().await.expect("deletes");
     assert_eq!(deletes.len(), 1);
-    assert_eq!(
-        deletes[0].operation,
-        OutboxOperation::Delete { min_seq: 7 },
-        "a delete entry carries its seq floor in the variant"
-    );
+    assert_eq!(deletes[0].operation, OutboxOperation::Delete);
 }
 
 #[tokio::test]
@@ -691,82 +685,37 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     assert_eq!(recovered, plaintext, "device B recovers the original audio");
 }
 
-/// A head for `device_id` at its own production `seq`, publishing `cursors` as its
-/// pull positions for other devices.
-fn head(device_id: &str, seq: u64, cursors: HashMap<String, u64>) -> DeviceHead {
-    DeviceHead {
-        device_id: device_id.to_string(),
-        seq,
-        snapshot_seq: None,
-        last_sync: None,
-        cursors,
-    }
-}
-
-/// A blob delete must wait until every peer's pull cursor FOR US has advanced
-/// past the deletion's min_seq — not until peers' own production counts have.
-/// A prolific peer (high own head.seq) that still trails in pulling us must NOT
-/// trigger the delete, or it would later fetch the still-referencing row and
-/// find the blob gone.
+/// A queued blob delete is removed from the cloud on the next drain, with no wait
+/// on peers. coven deletes eagerly and relies on a trailing peer pulling the
+/// row's removal on its own next cycle (and a consumer tolerating a briefly
+/// missing blob) rather than holding the delete until every device has synced
+/// past it — which only deferred cleanup while letting a departed device wedge
+/// deletion forever.
 #[tokio::test]
-async fn delete_waits_for_every_peer_to_pull_past_min_seq() {
+async fn process_deletes_removes_queued_blobs_immediately() {
     let db = open_outbox_db();
     let cloud = InMemoryCloudHome::new();
-    let our_id = "M";
 
-    db.enqueue_delete("k-del", 7, T0)
+    db.enqueue_delete("k-del-1", T0)
         .await
-        .expect("enqueue delete");
+        .expect("enqueue delete 1");
+    db.enqueue_delete("k-del-2", T0)
+        .await
+        .expect("enqueue delete 2");
 
-    // Our own head is at seq 8 (we kept working past the deletion at 7), and peer
-    // P has produced 90 of its OWN changesets — but P has only pulled us up to
-    // seq 5, behind the deletion. The old gate took min over the devices' own
-    // production seqs (min(8, 90) = 8 > 7) and would DELETE; the correct gate
-    // compares P's pull cursor FOR US (5 <= 7) and defers. Our own seq being past
-    // the floor is what makes this case distinguish the two gates.
-    let heads = vec![
-        head(our_id, 8, HashMap::new()),
-        head("P", 90, HashMap::from([(our_id.to_string(), 5)])),
-    ];
-    let n = process_deletes(&db, &cloud, our_id, &heads)
-        .await
-        .expect("deletes");
-    assert_eq!(
-        n, 0,
-        "deferred while a peer hasn't pulled past the deletion"
-    );
+    let n = process_deletes(&db, &cloud).await.expect("deletes");
+    assert_eq!(n, 2, "both queued deletes drain in one pass");
+
+    let mut seen = cloud.deletes_seen();
+    seen.sort();
+    assert_eq!(seen, vec!["k-del-1".to_string(), "k-del-2".to_string()]);
     assert!(
-        cloud.deletes_seen().is_empty(),
-        "the blob must not be deleted yet",
+        db.get_pending_cloud_deletes()
+            .await
+            .expect("pending")
+            .is_empty(),
+        "drained deletes are removed from the outbox",
     );
-
-    // P pulls us past the deletion.
-    let heads = vec![
-        head(our_id, 8, HashMap::new()),
-        head("P", 90, HashMap::from([(our_id.to_string(), 8)])),
-    ];
-    let n = process_deletes(&db, &cloud, our_id, &heads)
-        .await
-        .expect("deletes");
-    assert_eq!(n, 1, "safe once every peer pulled past the deletion");
-    assert_eq!(cloud.deletes_seen(), vec!["k-del".to_string()]);
-}
-
-/// A torn/empty head listing (our own head missing) must defer deletes, never
-/// fire them as if there were no peers.
-#[tokio::test]
-async fn delete_deferred_when_head_listing_is_torn() {
-    let db = open_outbox_db();
-    let cloud = InMemoryCloudHome::new();
-    db.enqueue_delete("k-del", 7, T0)
-        .await
-        .expect("enqueue delete");
-
-    let n = process_deletes(&db, &cloud, "M", &[])
-        .await
-        .expect("deletes");
-    assert_eq!(n, 0, "an empty listing (no own head) defers deletes");
-    assert!(cloud.deletes_seen().is_empty());
 }
 
 /// `enqueue_upload_on` composes with a host transaction: a rollback takes the

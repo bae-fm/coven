@@ -9,13 +9,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::blob::BlobUploadObserver;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::CloudHome;
-use crate::sync::storage::DeviceHead;
 
 /// How often the upload pipeline forwards a mid-file byte count to the
 /// observer. coven's `write` reports per chunk (every few MiB), which on a fast
@@ -258,68 +257,23 @@ pub async fn process_uploads(
     Ok(count)
 }
 
-/// Process pending deletes: remove cloud files whose deletion has been synced.
+/// Process pending deletes: remove the queued cloud blobs.
 ///
-/// A blob delete's `min_seq` is OUR `local_seq` at deletion time; the deletion
-/// becomes visible to a peer once that peer has applied our changeset past it.
-/// So a delete is safe only when EVERY peer's pull cursor *for us* has advanced
-/// past `min_seq` — read out of each peer's published head (`head.cursors[us]`).
-/// A peer that still trails would otherwise pull the row that references the
-/// blob and find the blob gone. Returns the number of successful deletes.
-pub async fn process_deletes(
-    db: &Database,
-    cloud_home: &dyn CloudHome,
-    our_device_id: &str,
-    heads: &[DeviceHead],
-) -> Result<usize, String> {
+/// A blob is deleted as soon as the deletion is queued and the cloud is
+/// reachable — coven does not hold the delete until peers have synced past it. A
+/// peer that still references the row will pull the row's removal on its own next
+/// cycle; in the window before that, a consumer that reaches for the missing blob
+/// treats it as removed rather than an error. Gating the delete on every peer
+/// having pulled bought only deferred cleanup while letting a single departed
+/// device wedge deletion forever. Returns the number of successful deletes.
+pub async fn process_deletes(db: &Database, cloud_home: &dyn CloudHome) -> Result<usize, String> {
     let deletes = db
         .get_pending_cloud_deletes()
         .await
         .map_err(|e| format!("Failed to get pending deletes: {e}"))?;
 
-    if deletes.is_empty() {
-        return Ok(0);
-    }
-
-    // Guard against a torn/empty head listing: our own head is always published,
-    // so its absence means we can't see the real peer set — defer rather than
-    // risk deleting a blob a peer we didn't see still needs.
-    if !heads.iter().any(|h| h.device_id == our_device_id) {
-        warn!("skipping deletes: own head absent from listing (torn read?)");
-        return Ok(0);
-    }
-
-    // Every peer (each device that isn't us). With no peers nobody references the
-    // blob, so deletes are immediately safe (the `all` over an empty set is true).
-    let peers: Vec<&DeviceHead> = heads
-        .iter()
-        .filter(|h| h.device_id != our_device_id)
-        .collect();
-
     let mut count = 0;
     for entry in deletes {
-        // Every row from `get_pending_cloud_deletes` is a `Delete` (the query
-        // filters `operation = 'delete'`); read its seq floor. An `Upload` here
-        // would be a broken query invariant, not a skippable row.
-        let crate::db::OutboxOperation::Delete { min_seq } = &entry.operation else {
-            unreachable!("get_pending_cloud_deletes returns only Delete rows");
-        };
-        // Safe only once EVERY peer's published cursor FOR US proves it has pulled
-        // past the deletion's seq. A peer that publishes no cursor for us is
-        // unknown, not zero — treat it as not-yet-pulled and defer (a peer still
-        // at or before the deletion holds the referencing row).
-        let all_pulled_past = peers
-            .iter()
-            .all(|h| h.cursors.get(our_device_id).is_some_and(|&c| c > *min_seq));
-        if !all_pulled_past {
-            debug!(
-                cloud_key = %entry.cloud_key,
-                min_seq = *min_seq,
-                "deferring blob delete: not every peer has pulled past min_seq"
-            );
-            continue;
-        }
-
         match cloud_home.delete(&entry.cloud_key).await {
             Ok(()) => {
                 if let Err(e) = db.remove_cloud_outbox_entry(entry.id).await {

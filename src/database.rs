@@ -451,24 +451,18 @@ impl Database {
         .map_err(DbError::from)
     }
 
-    /// Enqueue a blob delete, safe to run once every peer has synced past
-    /// `min_seq`. The host passes its current [`local_seq`](Self::local_seq) as the
-    /// floor. Idempotent on `(operation, cloud_key)`.
-    pub async fn enqueue_delete(
-        &self,
-        cloud_key: &str,
-        min_seq: u64,
-        created_at: &str,
-    ) -> Result<(), DbError> {
+    /// Enqueue a blob delete. The drain removes it from the cloud on the next
+    /// sync cycle once the cloud is reachable. Idempotent on `(operation, cloud_key)`.
+    pub async fn enqueue_delete(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
         let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
         // A delete touches no key, so it carries no scope — the column is
         // nullable and a delete row leaves it NULL.
         self.call(move |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, file_id, cloud_key, scope, created_at, min_seq) \
-                 VALUES ('delete', '', ?1, NULL, ?2, ?3)",
-                (cloud_key, created_at, min_seq as i64),
+                 (operation, file_id, cloud_key, scope, created_at) \
+                 VALUES ('delete', '', ?1, NULL, ?2)",
+                (cloud_key, created_at),
             )
             .map(|_| ())
             .map_err(DbError::from)
@@ -477,8 +471,8 @@ impl Database {
     }
 
     /// The device's local sequence number: the highest changeset seq this device
-    /// has produced. A host reads it to use as the `min_seq` floor when enqueuing
-    /// a blob delete, so it never reaches into coven's `sync_state` by hand.
+    /// has produced. A host accessor so it never reaches into coven's `sync_state`
+    /// by hand.
     pub async fn local_seq(&self) -> Result<u64, DbError> {
         self.call(move |conn| {
             match conn
@@ -515,7 +509,7 @@ impl Database {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, operation, file_id, cloud_key, source_path, scope, \
-                            created_at, min_seq, attempt_count, last_error, last_attempt_at \
+                            created_at, attempt_count, last_error, last_attempt_at \
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
                 .map_err(DbError::from)?;
@@ -659,21 +653,16 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
                 scope,
             }
         }
-        "delete" => OutboxOperation::Delete {
-            // A delete row always wrote a `min_seq` (the column is non-NULL for a
-            // delete); reading it as a required `i64` surfaces a NULL as a corrupt
-            // row rather than a silent `None`.
-            min_seq: r.get::<_, i64>(7)? as u64,
-        },
+        "delete" => OutboxOperation::Delete,
         other => panic!("invalid cloud_outbox.operation: {other:?}"),
     };
     Ok(OutboxEntry {
         id: r.get(0)?,
         cloud_key: r.get(3)?,
         created_at: r.get(6)?,
-        attempt_count: r.get(8)?,
-        last_error: r.get(9)?,
-        last_attempt_at: r.get(10)?,
+        attempt_count: r.get(7)?,
+        last_error: r.get(8)?,
+        last_attempt_at: r.get(9)?,
         operation,
     })
 }

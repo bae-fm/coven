@@ -48,7 +48,6 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     -- table does not sync.
     scope TEXT,
     created_at TEXT NOT NULL,
-    min_seq INTEGER,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     last_attempt_at TEXT,
@@ -65,11 +64,11 @@ CREATE TABLE IF NOT EXISTS item_keys (
 /// A pending cloud blob operation from the `cloud_outbox` table.
 ///
 /// The fields the two operations share live here; the operation-specific ones
-/// live in [`OutboxOperation`]. The `cloud_outbox` table is flat (every
-/// operation-specific column is nullable), but a row reads back as one variant
-/// or the other, so a drain matches on `operation` and never sees a column that
-/// doesn't belong to it (no upload-only `scope` on a delete, no delete-only
-/// `min_seq` on an upload).
+/// live in [`OutboxOperation`]. The `cloud_outbox` table is flat (the
+/// operation-specific `scope`/`source_path` columns are nullable), but a row
+/// reads back as one variant or the other, so a drain matches on `operation` and
+/// never sees a column that doesn't belong to it (no upload-only `scope` on a
+/// delete).
 #[derive(Debug, Clone)]
 pub struct OutboxEntry {
     pub id: i64,
@@ -104,11 +103,7 @@ pub enum OutboxOperation {
         /// always has one — a delete, which touches no key, has none.
         scope: crate::blob::BlobScope,
     },
-    /// Delete a cloud blob once every peer has synced past `min_seq`.
-    Delete {
-        /// The seq floor below which the delete is unsafe (a peer might still
-        /// reference the blob). Always set — `enqueue_delete` records the
-        /// device's local seq at deletion time.
-        min_seq: u64,
-    },
+    /// Delete a cloud blob. The drain removes it as soon as the cloud is
+    /// reachable; it carries no extra fields.
+    Delete,
 }

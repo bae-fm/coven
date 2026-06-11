@@ -127,8 +127,8 @@ async fn merge_deferred_changesets(
 }
 
 /// Push a changeset to the sync storage and update the device head. `head_cursors`
-/// is this device's pull cursors, published in the head so peers can gate blob
-/// deletes on every peer having pulled past the deletion.
+/// is this device's pull cursors, published in the head as its observable sync
+/// progress against each peer.
 pub async fn push_changeset(
     storage: &dyn SyncStorage,
     device_id: &str,
@@ -446,16 +446,15 @@ pub async fn run_single_sync_cycle(
                 })?;
         }
 
-        // Republish our head with the post-pull cursors, even when we pushed no
-        // changeset of our own this cycle. A peer gates its blob deletes on every
-        // peer's published cursor-for-it (process_deletes), and that cursor only
-        // lives in the head. push_changeset above writes the head only when this
-        // device produces a changeset, and with the pre-pull cursor snapshot at
-        // that — so a device that merely pulls a deletion never advertises that it
-        // has consumed it, and the deleter strands the blob delete forever. Write
-        // the head once here, after the pull, so the advance is always visible.
-        // Best-effort: a transient failure leaves last cycle's head, and the next
-        // cycle republishes unconditionally, so we log rather than abort.
+        // Republish our head every cycle, even when we pushed no changeset of our
+        // own. push_changeset writes the head only when this device produces a
+        // changeset, and with the pre-pull cursor snapshot at that — so a device
+        // that only pulls would otherwise never refresh its head. The head's
+        // last-sync time is what the sync-status view reads to show how recently
+        // each device synced; writing it here after the pull keeps that current
+        // (and the published pull cursors with it). Best-effort: a transient
+        // failure leaves last cycle's head, and the next cycle republishes
+        // unconditionally, so we log rather than abort.
         if let Err(e) = storage
             .put_head(
                 device_id,
@@ -466,7 +465,7 @@ pub async fn run_single_sync_cycle(
             )
             .await
         {
-            warn!("Failed to republish head with post-pull cursors: {e}");
+            warn!("Failed to republish head after pull: {e}");
         }
 
         // Advance the HLC past every applied row's `_updated_at`, so the next
@@ -492,13 +491,11 @@ pub async fn run_single_sync_cycle(
         .await
         .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
-        // Process outbox deletes (safe once every peer has pulled past the
-        // deletion — process_deletes reads each peer's cursor-for-us from the
-        // pulled heads).
+        // Process outbox deletes: remove the queued cloud blobs now, without
+        // waiting on peers. A peer still holding the referencing row pulls its
+        // removal on its own next cycle.
         if let Some(ch) = cloud_home {
-            match super::outbox::process_deletes(db, ch, device_id, &sync_result.pull.remote_heads)
-                .await
-            {
+            match super::outbox::process_deletes(db, ch).await {
                 Ok(n) if n > 0 => info!(count = n, "Processed outbox deletes"),
                 Err(e) => warn!("Outbox delete processing error: {e}"),
                 _ => {}
