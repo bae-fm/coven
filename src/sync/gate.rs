@@ -1183,10 +1183,22 @@ unsafe fn for_each_change(
     };
     let fin = ffi::sqlite3changeset_finalize(iter);
     match walk {
+        // Clean walk, failed finalize: the finalize failure is the cycle's outcome.
         Ok(()) if fin != ffi::SQLITE_OK as c_int => {
             Err(GateError::Ffi("sqlite3changeset_finalize", fin))
         }
-        other => other,
+        Ok(()) => Ok(()),
+        // The walk already failed (the more specific cause): return it, but don't
+        // swallow a finalize failure silently — log it alongside.
+        Err(e) => {
+            if fin != ffi::SQLITE_OK as c_int {
+                warn!(
+                    rc = fin,
+                    "gate: changeset finalize failed after a walk error"
+                );
+            }
+            Err(e)
+        }
     }
 }
 
