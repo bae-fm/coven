@@ -4,6 +4,8 @@ pub mod conflict;
 pub mod cycle;
 #[cfg(test)]
 mod cycle_tests;
+#[cfg(test)]
+mod delete_propagation_tests;
 pub mod encrypted_storage;
 pub mod envelope;
 pub mod gate;

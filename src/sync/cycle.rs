@@ -446,6 +446,29 @@ pub async fn run_single_sync_cycle(
                 })?;
         }
 
+        // Republish our head with the post-pull cursors, even when we pushed no
+        // changeset of our own this cycle. A peer gates its blob deletes on every
+        // peer's published cursor-for-it (process_deletes), and that cursor only
+        // lives in the head. push_changeset above writes the head only when this
+        // device produces a changeset, and with the pre-pull cursor snapshot at
+        // that — so a device that merely pulls a deletion never advertises that it
+        // has consumed it, and the deleter strands the blob delete forever. Write
+        // the head once here, after the pull, so the advance is always visible.
+        // Best-effort: a transient failure leaves last cycle's head, and the next
+        // cycle republishes unconditionally, so we log rather than abort.
+        if let Err(e) = storage
+            .put_head(
+                device_id,
+                local_seq,
+                snapshot_seq,
+                &sync_result.updated_cursors,
+                &timestamp,
+            )
+            .await
+        {
+            warn!("Failed to republish head with post-pull cursors: {e}");
+        }
+
         // Advance the HLC past every applied row's `_updated_at`, so the next
         // local stamp sorts causally after anything just pulled. The source is the
         // max applied-row `_updated_at` (a real HLC stamp), not the envelope/head
