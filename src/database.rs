@@ -470,29 +470,6 @@ impl Database {
         .await
     }
 
-    /// The device's local sequence number: the highest changeset seq this device
-    /// has produced. A host accessor so it never reaches into coven's `sync_state`
-    /// by hand.
-    pub async fn local_seq(&self) -> Result<u64, DbError> {
-        self.call(move |conn| {
-            match conn
-                .query_row(
-                    "SELECT value FROM sync_state WHERE key = 'local_seq'",
-                    [],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?
-            {
-                Some(v) => v
-                    .parse()
-                    .map_err(|e| DbError(format!("corrupt local_seq in sync_state: {e}"))),
-                None => Ok(0),
-            }
-        })
-        .await
-    }
-
     /// Pending upload entries, oldest first. The host reads these to drive its
     /// own upload-status UI; coven's sync loop reads them to do the uploads.
     pub async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {

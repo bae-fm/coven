@@ -220,17 +220,9 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
         signature: None,
     };
     let packed = envelope::pack(&env, &changeset);
-    push_changeset(
-        storage,
-        "dev-a",
-        1,
-        packed,
-        None,
-        &std::collections::HashMap::new(),
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("publish device A's changeset");
+    push_changeset(storage, "dev-a", 1, packed, None, "2026-01-01T00:00:00Z")
+        .await
+        .expect("publish device A's changeset");
 }
 
 /// Changeset-replay multi-device join, through the REAL pull path: device A mints

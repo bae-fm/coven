@@ -304,7 +304,6 @@ impl MockSyncStorage {
                 seq,
                 snapshot_seq: None,
                 last_sync: None,
-                cursors: HashMap::new(),
             })
             .seq = seq;
     }
@@ -341,7 +340,6 @@ impl SyncStorage for MockSyncStorage {
         device_id: &str,
         seq: u64,
         _snapshot_seq: Option<u64>,
-        cursors: &HashMap<String, u64>,
         _timestamp: &str,
     ) -> Result<(), StorageError> {
         self.heads.lock().unwrap().insert(
@@ -351,7 +349,6 @@ impl SyncStorage for MockSyncStorage {
                 seq,
                 snapshot_seq: None,
                 last_sync: None,
-                cursors: cursors.clone(),
             },
         );
         Ok(())

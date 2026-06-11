@@ -306,7 +306,6 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         outgoing.seq,
         outgoing.packed,
         None,
-        &HashMap::new(),
         "2026-01-01T00:00:00Z",
     )
     .await

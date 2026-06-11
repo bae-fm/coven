@@ -5,7 +5,6 @@
 //! goes through the owned [`Database`]; the capture session is suspended for the
 //! gate/pull span and resumed before the snapshot.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tracing::{error, info, warn};
@@ -126,21 +125,18 @@ async fn merge_deferred_changesets(
     ))
 }
 
-/// Push a changeset to the sync storage and update the device head. `head_cursors`
-/// is this device's pull cursors, published in the head as its observable sync
-/// progress against each peer.
+/// Push a changeset to the sync storage and update the device head.
 pub async fn push_changeset(
     storage: &dyn SyncStorage,
     device_id: &str,
     seq: u64,
     packed: Vec<u8>,
     snapshot_seq: Option<u64>,
-    head_cursors: &HashMap<String, u64>,
     timestamp: &str,
 ) -> Result<(), super::storage::StorageError> {
     storage.put_changeset(device_id, seq, packed).await?;
     storage
-        .put_head(device_id, seq, snapshot_seq, head_cursors, timestamp)
+        .put_head(device_id, seq, snapshot_seq, timestamp)
         .await?;
     Ok(())
 }
@@ -302,7 +298,6 @@ pub async fn run_single_sync_cycle(
                 seq,
                 staged_data,
                 snapshot_seq,
-                &cursors,
                 &timestamp,
             )
             .await
@@ -418,7 +413,6 @@ pub async fn run_single_sync_cycle(
                     seq,
                     outgoing.packed.clone(),
                     snapshot_seq,
-                    &cursors,
                     &timestamp,
                 )
                 .await
@@ -448,21 +442,14 @@ pub async fn run_single_sync_cycle(
 
         // Republish our head every cycle, even when we pushed no changeset of our
         // own. push_changeset writes the head only when this device produces a
-        // changeset, and with the pre-pull cursor snapshot at that — so a device
-        // that only pulls would otherwise never refresh its head. The head's
-        // last-sync time is what the sync-status view reads to show how recently
-        // each device synced; writing it here after the pull keeps that current
-        // (and the published pull cursors with it). Best-effort: a transient
-        // failure leaves last cycle's head, and the next cycle republishes
-        // unconditionally, so we log rather than abort.
+        // changeset — so a device that only pulls would otherwise never refresh
+        // its head. The head's last-sync time is what the sync-status view reads
+        // to show how recently each device synced; writing it here after the pull
+        // keeps that current. Best-effort: a transient failure leaves last cycle's
+        // head, and the next cycle republishes unconditionally, so we log rather
+        // than abort.
         if let Err(e) = storage
-            .put_head(
-                device_id,
-                local_seq,
-                snapshot_seq,
-                &sync_result.updated_cursors,
-                &timestamp,
-            )
+            .put_head(device_id, local_seq, snapshot_seq, &timestamp)
             .await
         {
             warn!("Failed to republish head after pull: {e}");

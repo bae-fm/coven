@@ -21,9 +21,6 @@ struct HeadJson {
     /// RFC 3339 timestamp of when this head was last written.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_sync: Option<String>,
-    /// This device's pull cursors (other_device_id -> last applied seq).
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    cursors: std::collections::HashMap<String, u64>,
 }
 
 /// Serialized form of `min_schema_version.json.enc`.
@@ -119,7 +116,6 @@ impl SyncStorage for EncryptedSyncStorage {
                 seq: head_json.seq,
                 snapshot_seq: head_json.snapshot_seq,
                 last_sync: head_json.last_sync,
-                cursors: head_json.cursors,
             });
         }
 
@@ -153,14 +149,12 @@ impl SyncStorage for EncryptedSyncStorage {
         device_id: &str,
         seq: u64,
         snapshot_seq: Option<u64>,
-        cursors: &std::collections::HashMap<String, u64>,
         timestamp: &str,
     ) -> Result<(), StorageError> {
         let head = HeadJson {
             seq,
             snapshot_seq,
             last_sync: Some(timestamp.to_string()),
-            cursors: cursors.clone(),
         };
         let json = serde_json::to_vec(&head)
             .map_err(|e| StorageError::S3(format!("serialize head: {e}")))?;

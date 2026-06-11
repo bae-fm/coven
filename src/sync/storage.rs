@@ -13,8 +13,6 @@
 ///
 /// All data is encrypted before upload and decrypted after download.
 /// The trait is async and mockable for testing.
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 
 /// Per-device head: the latest sequence number for a device.
@@ -29,11 +27,6 @@ pub struct DeviceHead {
     /// the device last synced). None for heads written before this field
     /// was added.
     pub last_sync: Option<String>,
-    /// This device's pull cursors: how far it has applied every OTHER device's
-    /// changesets (`other_device_id -> last applied seq`). Published in the head
-    /// as this device's observable sync progress against each peer. Empty for
-    /// heads written before this field existed.
-    pub cursors: HashMap<String, u64>,
 }
 
 /// Error type for storage operations.
@@ -83,16 +76,13 @@ pub trait SyncStorage: Send + Sync {
     /// Update the head pointer for a device.
     /// Writes to `heads/{device_id}.json.enc`.
     /// If `snapshot_seq` is Some, the head records that a snapshot covers
-    /// all changesets up to that seq. `cursors` is this device's pull cursors
-    /// (how far it has applied each other device), published in the head as its
-    /// observable sync progress. `timestamp` is the RFC 3339 time of this sync
-    /// (used by the sync status UI).
+    /// all changesets up to that seq. `timestamp` is the RFC 3339 time of this
+    /// sync (used by the sync status UI).
     async fn put_head(
         &self,
         device_id: &str,
         seq: u64,
         snapshot_seq: Option<u64>,
-        cursors: &HashMap<String, u64>,
         timestamp: &str,
     ) -> Result<(), StorageError>;
 

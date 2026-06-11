@@ -261,11 +261,11 @@ pub async fn process_uploads(
 ///
 /// A blob is deleted as soon as the deletion is queued and the cloud is
 /// reachable — coven does not hold the delete until peers have synced past it. A
-/// peer that still references the row will pull the row's removal on its own next
-/// cycle; in the window before that, a consumer that reaches for the missing blob
-/// treats it as removed rather than an error. Gating the delete on every peer
-/// having pulled bought only deferred cleanup while letting a single departed
-/// device wedge deletion forever. Returns the number of successful deletes.
+/// peer that still references the row pulls the row's removal on its own next
+/// cycle, so the blob and the row that points at it converge. Gating the delete
+/// on every peer having pulled bought only deferred cleanup while letting a
+/// single departed device wedge deletion forever. Returns the number of
+/// successful deletes.
 pub async fn process_deletes(db: &Database, cloud_home: &dyn CloudHome) -> Result<usize, String> {
     let deletes = db
         .get_pending_cloud_deletes()
