@@ -916,27 +916,7 @@ unsafe fn reemit_subtrees(
         return Ok(());
     }
 
-    let mut iter: *mut ffi::sqlite3_changeset_iter = ptr::null_mut();
-    let rc = ffi::sqlite3changeset_start(
-        &mut iter,
-        diff_bytes.len() as c_int,
-        diff_bytes.as_ptr() as *mut c_void,
-    );
-    if rc != ffi::SQLITE_OK as c_int {
-        return Err(GateError::Ffi("sqlite3changeset_start", rc));
-    }
-
-    loop {
-        let step = ffi::sqlite3changeset_next(iter);
-        if step == ffi::SQLITE_DONE as c_int {
-            break;
-        }
-        if step != ffi::SQLITE_ROW as c_int {
-            ffi::sqlite3changeset_finalize(iter);
-            return Err(GateError::Ffi("sqlite3changeset_next", step));
-        }
-
-        let row = ChangeRow::read(iter);
+    for_each_change(&diff_bytes, |iter, row| {
         let in_descendants =
             gated_root_id(db, gates, &row)?.is_some_and(|key| flipped_roots.contains(&key));
         let in_kept_component = row
@@ -945,13 +925,8 @@ unsafe fn reemit_subtrees(
         if in_descendants || in_kept_component {
             group.add_change(iter)?;
         }
-    }
-
-    let rc = ffi::sqlite3changeset_finalize(iter);
-    if rc != ffi::SQLITE_OK as c_int {
-        return Err(GateError::Ffi("sqlite3changeset_finalize", rc));
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// The whole connected component of currently-kept gated rows reachable from the
@@ -1284,10 +1259,18 @@ unsafe fn was_shared(
     let shared = match gates.tables.get(table) {
         // Ungated tables always sync, so their deletes always propagate.
         None => true,
-        // A truthy old gate value means the root was shared. A NULL/absent gate is
-        // a genuine not-shared value (a gated-false root), not masked data.
+        // A truthy old gate value means the root was shared. A present-but-NULL
+        // gate is a genuine not-shared value (a gated-false root), not masked data;
+        // a gate column missing from the delete row's old image is malformed.
         Some(TableGate::Root { gate_col }) => match deleted.get(&key) {
-            Some(row) => row.old_truth(*gate_col).unwrap_or(false),
+            Some(row) => match row.old.get(*gate_col) {
+                Some(Some(v)) => truthy(v),
+                Some(None) => false,
+                None => {
+                    warn!(table, id, "gate: deleted root's old gate value absent from the changeset row; treating as not shared");
+                    false
+                }
+            },
             None => {
                 let col = nth_column_name(db, table, *gate_col)?;
                 match query_truth(db, table, &col, id)? {
