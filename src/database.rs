@@ -460,8 +460,8 @@ impl Database {
         self.call(move |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, file_id, cloud_key, scope, created_at) \
-                 VALUES ('delete', '', ?1, NULL, ?2)",
+                 (operation, cloud_key, scope, created_at) \
+                 VALUES ('delete', ?1, NULL, ?2)",
                 (cloud_key, created_at),
             )
             .map(|_| ())

@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS sync_state (
 CREATE TABLE IF NOT EXISTS cloud_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete')),
-    file_id TEXT NOT NULL,
+    -- The blob's file id, which an upload reports progress under. NULL for a
+    -- delete entry, which carries no file id.
+    file_id TEXT,
     cloud_key TEXT NOT NULL,
     source_path TEXT,
     -- The blob's encryption scope (master / derived / item), serialized so the
