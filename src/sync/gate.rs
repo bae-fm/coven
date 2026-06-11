@@ -784,8 +784,14 @@ unsafe fn gate_outbound_raw(
                 _ => false,
             };
             if flips {
-                if let Some(pk) = row.pk() {
-                    flipped_roots.insert((row.table.clone(), pk.to_string()));
+                match row.pk() {
+                    Some(pk) => {
+                        flipped_roots.insert((row.table.clone(), pk.to_string()));
+                    }
+                    None => debug!(
+                        table = %row.table,
+                        "gate: flipped root row has no primary key; its subtree cannot be re-emitted"
+                    ),
                 }
                 return Ok(());
             }
