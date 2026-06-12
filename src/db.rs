@@ -1,30 +1,14 @@
-//! coven's bookkeeping schema, the `item_keys` synced table, and the
-//! cloud-outbox row types.
+//! coven's bookkeeping schema and the cloud-outbox row types.
 //!
 //! coven owns three device-local bookkeeping tables — `sync_cursors`,
-//! `sync_state`, `cloud_outbox` — plus the library-global synced table
-//! `item_keys`, all created by `MIGRATION_SQL`, which
+//! `sync_state`, `cloud_outbox` — all created by `MIGRATION_SQL`, which
 //! [`crate::database::Database::open`] runs against the connection coven owns.
 //! The host no longer implements any of this; it runs its own SQL through
 //! [`crate::database::Database::call`] and reads/writes the outbox through the
 //! [`crate::database::Database`] API.
-//!
-//! Unlike the bookkeeping tables, `item_keys` is content every member needs, so
-//! coven injects it into the synced-table set (see
-//! [`crate::database::Database::open`]) and it rides both sync paths: the
-//! changeset capture session records `mint_item_key` INSERTs, and the snapshot
-//! preserves it (it is in the synced set, so `clear_non_synced` keeps its rows).
 
-/// The coven-owned synced table holding per-item content keys. Injected into the
-/// synced-table set by [`crate::database::Database::open`], so it is captured,
-/// snapshotted, and applied like any synced table — but is owned by coven, not
-/// the host. The `_updated_at` HLC stamp satisfies the synced-table contract;
-/// rows are immutable (idempotent INSERT) so LWW never has to pick a winner.
-pub(crate) const ITEM_KEYS_TABLE: &str = "item_keys";
-
-/// SQL that creates coven's bookkeeping tables and the `item_keys` synced table,
-/// run by `Database::open` before the host's own migration. Idempotent
-/// (`IF NOT EXISTS`).
+/// SQL that creates coven's bookkeeping tables, run by `Database::open` before
+/// the host's own migration. Idempotent (`IF NOT EXISTS`).
 pub(crate) const MIGRATION_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS sync_cursors (
     device_id TEXT PRIMARY KEY,
@@ -44,22 +28,16 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     file_id TEXT,
     cloud_key TEXT NOT NULL,
     source_path TEXT,
-    -- The blob's encryption scope (master / derived / item), serialized so the
-    -- async drain resolves it to a key long after the enqueue site is gone.
-    -- NULL for a delete entry, which touches no key. Local bookkeeping; this
-    -- table does not sync.
+    -- The blob's encryption scope (master / derived), serialized so the async
+    -- drain resolves it to a key long after the enqueue site is gone. NULL for a
+    -- delete entry, which touches no key. Local bookkeeping; this table does not
+    -- sync.
     scope TEXT,
     created_at TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     last_attempt_at TEXT,
     UNIQUE(operation, cloud_key)
-);
-
-CREATE TABLE IF NOT EXISTS item_keys (
-    item_id TEXT PRIMARY KEY,
-    key BLOB NOT NULL,
-    _updated_at TEXT NOT NULL
 );
 ";
 
@@ -92,9 +70,8 @@ pub struct OutboxEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboxOperation {
     /// Upload a local blob. Carries the local source, the host-named encryption
-    /// scope (resolved to a key at drain — looking up `item_keys` for a
-    /// [`crate::blob::BlobScope::Item`] scope, since the upload runs long after
-    /// the enqueue site is gone), and the `file_id` the upload reports progress
+    /// scope (resolved to a key at drain, since the upload runs long after the
+    /// enqueue site is gone), and the `file_id` the upload reports progress
     /// under.
     Upload {
         file_id: String,

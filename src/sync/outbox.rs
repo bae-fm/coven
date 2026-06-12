@@ -123,14 +123,11 @@ async fn record_failure(
 
 /// Read an upload's local plaintext, resolve its scope to a key, and encrypt.
 ///
-/// The two failure modes — the local file can't be read, the scope can't be
-/// resolved to a key (a missing `item_keys` row) — both surface as an `Err`
-/// carrying a host-readable message, so the upload loop has one failure path
-/// (warn + record + skip) instead of one per step. The scope is resolved at
-/// drain (not enqueue) because the key may be minted/synced after the blob was
-/// queued, and an `Item` scope reads `item_keys` here, holding `db`.
+/// The local file read is the only failure mode; it surfaces as an `Err` carrying
+/// a host-readable message, so the upload loop has one failure path (warn +
+/// record + skip). The scope is resolved at drain (not enqueue) to keep the
+/// encrypt step beside the read.
 async fn resolve_and_encrypt(
-    db: &Database,
     encryption: &std::sync::RwLock<EncryptionService>,
     file_path: &Path,
     scope: crate::blob::BlobScope,
@@ -138,12 +135,10 @@ async fn resolve_and_encrypt(
     let data = tokio::fs::read(file_path)
         .await
         .map_err(|e| format!("cannot read local file {}: {e}", file_path.display()))?;
-    let resolved = db
-        .resolve_blob_scope(scope)
-        .await
-        .map_err(|e| format!("cannot resolve blob scope: {e}"))?;
-    let enc =
-        crate::sync::encrypted_storage::encryption_for_scope(resolved, &encryption.read().unwrap());
+    let enc = crate::sync::encrypted_storage::encryption_for_scope(
+        scope.resolve(),
+        &encryption.read().unwrap(),
+    );
     Ok(enc.encrypt(&data))
 }
 
@@ -219,12 +214,9 @@ pub async fn process_uploads(
             None => library_dir.join(crate::storage::local::storage_path(file_id)),
         };
 
-        // Read the local plaintext, resolve the scope to a key (an `Item` scope
-        // reads `item_keys` here, holding `db`), and encrypt — all in one step
-        // with a single failure path. A missing key is a host bug; record it as
-        // a failure rather than silently encrypting under the master key (which
-        // no share recipient could read).
-        let encrypted = match resolve_and_encrypt(db, encryption, &file_path, scope.clone()).await {
+        // Read the local plaintext, resolve the scope to a key, and encrypt — all
+        // in one step with a single failure path (the file read).
+        let encrypted = match resolve_and_encrypt(encryption, &file_path, scope.clone()).await {
             Ok(bytes) => bytes,
             Err(msg) => {
                 warn!("Upload failed for {}: {msg}", entry.cloud_key);

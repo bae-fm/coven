@@ -55,7 +55,6 @@ pub mod join_code;
 pub mod keys;
 pub mod library_dir;
 pub mod oauth;
-pub mod share;
 pub mod storage;
 pub mod sync;
 

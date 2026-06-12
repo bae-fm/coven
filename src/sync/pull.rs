@@ -89,9 +89,9 @@ struct DeferredChangeset {
 /// so the applied rows are not re-recorded into the next outgoing changeset.
 ///
 /// `tables` is the synced set [`Database::open`] owns — the host's declared
-/// tables plus coven's injected `item_keys` (for the `_updated_at` index map and
-/// apply conflict resolution); call sites pass `db.synced_tables()`. `cursors`
-/// maps device_id -> last_seq we've applied from that device.
+/// tables (for the `_updated_at` index map and apply conflict resolution); call
+/// sites pass `db.synced_tables()`. `cursors` maps device_id -> last_seq we've
+/// applied from that device.
 ///
 /// Returns the updated cursors map and a summary of what was applied.
 #[allow(clippy::too_many_arguments)]
@@ -310,10 +310,8 @@ pub async fn pull_changes(
             };
 
             // Download any blobs the changeset references. If any download fails,
-            // don't advance the cursor — retry next cycle. Resolution reads
-            // `item_keys` AFTER the apply above committed this (or an earlier)
-            // changeset's key rows, so an `Item(id)`-scoped blob finds its key.
-            let blobs_ok = download_changeset_blobs(db, &changes, blob_plan, storage).await;
+            // don't advance the cursor — retry next cycle.
+            let blobs_ok = download_changeset_blobs(&changes, blob_plan, storage).await;
 
             if apply_result.had_fk_violations {
                 deferred.push(DeferredChangeset {
@@ -432,16 +430,12 @@ fn advance_max_updated_at(
 /// The host's [`BlobPlan`] decides which row-changes carry blobs, their cloud
 /// namespace/scope, and the local destination path; the per-blob download runs
 /// through [`download_blobs`].
-///
-/// By this point the changeset's `item_keys` rows are committed (the apply ran
-/// first), so an `Item(id)`-scoped blob resolves its key.
 async fn download_changeset_blobs(
-    db: &Database,
     changes: &[RowChange],
     blob_plan: &dyn BlobPlan,
     storage: &dyn SyncStorage,
 ) -> bool {
-    download_blobs(db, blob_plan.blobs_to_pull(changes), storage).await
+    download_blobs(blob_plan.blobs_to_pull(changes), storage).await
 }
 
 /// Download each blob in `blobs` to its `local_path`, decrypting via storage
@@ -449,15 +443,12 @@ async fn download_changeset_blobs(
 /// succeeded. Skips blobs whose local file already exists.
 ///
 /// Each blob's public scope is resolved to the internal key scope here — not in
-/// [`BlobPlan`], which has no DB. A blob whose item key is missing is a failed
-/// download (logged, `all_ok = false`) so a caller that gates on the result can
-/// retry once the key row has landed.
+/// [`BlobPlan`], which has no DB — through the pure [`crate::blob::BlobScope::resolve`].
 ///
 /// Shared by the incremental pull (per applied changeset) and the snapshot
 /// bootstrap backfill (per row in the freshly bootstrapped DB), so the
 /// download/decrypt/write path lives in one place.
 pub(crate) async fn download_blobs(
-    db: &Database,
     blobs: Vec<crate::blob::BlobRef>,
     storage: &dyn SyncStorage,
 ) -> bool {
@@ -467,14 +458,7 @@ pub(crate) async fn download_blobs(
             continue;
         }
 
-        let resolved = match db.resolve_blob_scope(blob.scope.clone()).await {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot resolve blob scope, skipping download");
-                all_ok = false;
-                continue;
-            }
-        };
+        let resolved = blob.scope.resolve();
 
         match storage.get_blob(&blob.namespace, &blob.id, resolved).await {
             Ok(bytes) => {

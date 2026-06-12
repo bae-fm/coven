@@ -370,10 +370,9 @@ pub(crate) async fn open_db_and_pull(
     // download hits a transient error) here is not lost: the not-yet-complete
     // state is recorded in `sync_state`, and each later sync cycle re-runs the
     // reconciliation until every referenced blob is local.
-    let backfill_ok =
-        crate::sync::snapshot::reconcile_snapshot_blobs(&db, db_path, storage, blob_plan)
-            .await
-            .map_err(|e| JoinError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?;
+    let backfill_ok = crate::sync::snapshot::reconcile_snapshot_blobs(db_path, storage, blob_plan)
+        .await
+        .map_err(|e| JoinError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?;
     db.set_sync_state(
         crate::sync::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING,
         if backfill_ok { "" } else { "1" },
@@ -385,8 +384,8 @@ pub(crate) async fn open_db_and_pull(
         ))
     })?;
 
-    // Pull over the set `Database::open` owns (the host's tables plus coven's
-    // injected `item_keys`), not the raw host list — one source of truth.
+    // Pull over the set `Database::open` owns, not the raw host list — one
+    // source of truth.
     let (updated_cursors, pull_result) = pull_changes(
         &db,
         db.synced_tables(),

@@ -13,8 +13,6 @@ pub mod hlc;
 #[cfg(test)]
 mod hlc_register_tests;
 pub mod invite;
-#[cfg(test)]
-mod item_key_tests;
 pub mod join;
 #[cfg(test)]
 mod join_tests;
