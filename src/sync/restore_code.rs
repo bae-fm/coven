@@ -53,8 +53,6 @@ pub enum RestoreProvider {
     Dropbox { folder_path: String },
     #[serde(rename = "od")]
     OneDrive { drive_id: String, folder_id: String },
-    #[serde(rename = "bc")]
-    HttpProxy { url: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,7 +125,6 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
         RestoreProvider::GoogleDrive { .. } => crate::config::CloudProvider::GoogleDrive,
         RestoreProvider::Dropbox { .. } => crate::config::CloudProvider::Dropbox,
         RestoreProvider::OneDrive { .. } => crate::config::CloudProvider::OneDrive,
-        RestoreProvider::HttpProxy { .. } => crate::config::CloudProvider::HttpProxy,
     };
 
     let signing_key = URL_SAFE_NO_PAD
@@ -293,27 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_http_proxy_cloud() {
-        let code = RestoreCode {
-            v: 1,
-            lid: "lib-def".to_string(),
-            ek: "ff".repeat(32),
-            name: "Cloud Library".to_string(),
-            provider: RestoreProvider::HttpProxy {
-                url: "https://proxy.example.com/lib/abc".to_string(),
-            },
-            sk: test_sk(),
-        };
-        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
-        match &decoded.provider {
-            RestoreProvider::HttpProxy { url } => {
-                assert_eq!(url, "https://proxy.example.com/lib/abc");
-            }
-            _ => panic!("expected HttpProxy provider"),
-        }
-    }
-
-    #[test]
     fn missing_prefix() {
         let code = sample_s3_code();
         let encoded = encode_restore_code(&code);
@@ -408,9 +384,6 @@ mod tests {
         assert!(provider_needs_oauth(&RestoreProvider::OneDrive {
             drive_id: String::new(),
             folder_id: String::new(),
-        }));
-        assert!(!provider_needs_oauth(&RestoreProvider::HttpProxy {
-            url: String::new(),
         }));
     }
 

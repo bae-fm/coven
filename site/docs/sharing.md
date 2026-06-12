@@ -298,8 +298,8 @@ link coven opens a share by reproducing the documented wire format.
 
 ### Serving a share
 
-Whatever serves `shares/{share_id}/*` (coven's HTTP proxy, or the host's) is
-untrusted and unauthenticated. It gates each blob request with
+Whatever serves `shares/{share_id}/*` is untrusted and unauthenticated. It gates
+each blob request with
 [`ShareManifest::allows(cloud_key)`](rustdoc:method:coven::share::ShareManifest::allows):
 coven hashes each authorized `(namespace, id)` to its cloud key internally and
 compares, so the server never learns coven's path layout. The manifest authorizes

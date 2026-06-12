@@ -62,7 +62,7 @@ key cannot be reconstructed without it.
 
 ## What the storage provider sees
 
-The provider (S3, Google Drive, Dropbox, OneDrive, iCloud, an HTTP proxy) is an
+The provider (S3, Google Drive, Dropbox, OneDrive, iCloud) is an
 opaque byte store. It sees:
 
 - Ciphertext. Every object is encrypted under the library key (or, for a wrapped

@@ -8,7 +8,6 @@
 pub mod cloudkit;
 pub mod dropbox;
 pub mod google_drive;
-pub mod http;
 pub mod oauth_session;
 pub mod onedrive;
 pub mod s3;
@@ -53,9 +52,6 @@ pub enum CloudHomeJoinInfo {
         drive_id: String,
         folder_id: String,
     },
-    HttpProxy {
-        url: String,
-    },
     CloudKit {
         share_url: String,
     },
@@ -69,7 +65,6 @@ impl CloudHomeJoinInfo {
             CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
             CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
             CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
-            CloudHomeJoinInfo::HttpProxy { .. } => CloudProvider::HttpProxy,
             CloudHomeJoinInfo::CloudKit { .. } => CloudProvider::CloudKit,
         }
     }
@@ -81,12 +76,11 @@ impl CloudHomeJoinInfo {
 /// The count is of the bytes handed to `write` (the encrypted payload).
 pub type UploadProgress<'a> = dyn Fn(u64) + Send + Sync + 'a;
 
-/// Chunk size for the streaming/chunked upload paths that have no provider-
-/// specific alignment requirement (the HTTP-proxy streaming body and the
-/// in-memory test backend). Providers whose resumable API mandates a specific
-/// alignment (OneDrive 320 KiB multiples, Google Drive 256 KiB multiples, S3
-/// 5 MiB minimum parts) define their own constant. 4 MiB gives several progress
-/// ticks on a large audio file without flooding the coalescing layer.
+/// Chunk size the in-memory test backend uses to drive its `UploadProgress`
+/// callback in several ticks. Real providers whose resumable API mandates a
+/// specific alignment (OneDrive 320 KiB multiples, Google Drive 256 KiB
+/// multiples, S3 5 MiB minimum parts) define their own constant.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) const PROGRESS_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// A progress sink that discards its reports. For `write` calls whose payload
@@ -271,15 +265,6 @@ pub async fn create_cloud_home(
                 key_service.clone(),
                 clock,
             )))
-        }
-        Some(CloudProvider::HttpProxy) => {
-            let url = config.cloud_home.http_url.clone().ok_or_else(|| {
-                CloudHomeError::Storage("HTTP proxy URL not configured".to_string())
-            })?;
-            let keypair = key_service
-                .get_or_create_user_keypair()
-                .map_err(|e| CloudHomeError::Storage(format!("keypair: {e}")))?;
-            Ok(Box::new(http::HttpCloudHome::new(url, keypair, clock)))
         }
         Some(CloudProvider::CloudKit) => Err(CloudHomeError::Storage(
             "CloudKit requires the native Swift driver; construct via the host's Swift layer"

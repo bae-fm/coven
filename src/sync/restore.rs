@@ -49,9 +49,6 @@ pub enum RestoreSource {
         folder_id: String,
         tokens: OAuthTokens,
     },
-    HttpProxy {
-        url: String,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -93,7 +90,6 @@ impl From<JoinError> for RestoreError {
 async fn build_cloud_home(
     source: RestoreSource,
     library_id: &str,
-    global_ks: &KeyService,
     clock: crate::clock::ClockRef,
 ) -> Result<(CloudHomeJoinInfo, Box<dyn CloudHome>), RestoreError> {
     use crate::storage::cloud::*;
@@ -175,15 +171,6 @@ async fn build_cloud_home(
             };
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
-
-        RestoreSource::HttpProxy { url } => {
-            let keypair = global_ks
-                .get_or_create_user_keypair()
-                .map_err(RestoreError::Key)?;
-            let home = http::HttpCloudHome::new(url.clone(), keypair, clock);
-            let info = CloudHomeJoinInfo::HttpProxy { url };
-            Ok((info, Box::new(home) as Box<dyn CloudHome>))
-        }
     }
 }
 
@@ -220,9 +207,7 @@ pub async fn restore_from_cloud(
         ));
     }
 
-    let global_ks = KeyService::new("global".to_string());
-
-    let (join_info, cloud_home) = build_cloud_home(source, library_id, &global_ks, clock).await?;
+    let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
 
     // Create encryption service from the user-provided key.
     on_status("Verifying encryption key...");
@@ -343,7 +328,6 @@ pub async fn restore_from_code(
             folder_id,
             tokens: require_oauth("OneDrive")?,
         },
-        RestoreProvider::HttpProxy { url } => RestoreSource::HttpProxy { url },
     };
 
     let config = restore_from_cloud(

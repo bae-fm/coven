@@ -54,7 +54,6 @@ pub enum JoinError {
 /// credentials to the library-scoped keyring.
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
-    keypair: &crate::keys::UserKeypair,
     lib_ks: &KeyService,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
@@ -82,12 +81,6 @@ async fn build_cloud_home_for_join(
             .await?;
             Ok(Box::new(s3))
         }
-
-        CloudHomeJoinInfo::HttpProxy { url } => Ok(Box::new(http::HttpCloudHome::new(
-            url.clone(),
-            keypair.clone(),
-            clock,
-        ))),
 
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             info!("Authorizing with Google Drive...");
@@ -178,18 +171,11 @@ pub async fn join_from_invite_code(
         .map_err(|e| JoinError::Database(format!("Invalid invite code: {e}")))?;
 
     let global_ks = KeyService::new("global".to_string());
-    let keypair = global_ks.get_or_create_user_keypair()?;
     let lib_ks = KeyService::new(code.library_id.clone());
 
-    let cloud_home = build_cloud_home_for_join(
-        &code.join_info,
-        &keypair,
-        &lib_ks,
-        cloudkit_ops,
-        oauth_cancel,
-        clock,
-    )
-    .await?;
+    let cloud_home =
+        build_cloud_home_for_join(&code.join_info, &lib_ks, cloudkit_ops, oauth_cancel, clock)
+            .await?;
 
     let config = join_library(
         app_dir,
@@ -447,9 +433,9 @@ pub(crate) async fn open_db_and_pull(
 
 /// Derive the CloudHomeCredentials to persist from the JoinInfo.
 ///
-/// S3 credentials come from the invite code. HttpProxy uses keypair auth (no stored creds).
-/// OAuth providers store the joiner's token, but that's already saved to the keyring
-/// by the caller before constructing the CloudHome.
+/// S3 credentials come from the invite code. OAuth providers store the joiner's
+/// token, but that's already saved to the keyring by the caller before
+/// constructing the CloudHome.
 pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> CloudHomeCredentials {
     match join_info {
         CloudHomeJoinInfo::S3 {
@@ -460,7 +446,6 @@ pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> CloudHomeCred
             access_key: access_key.clone(),
             secret_key: secret_key.clone(),
         },
-        CloudHomeJoinInfo::HttpProxy { .. } => CloudHomeCredentials::None,
         // OAuth providers: the joiner's token was already saved to the keyring
         // before constructing the CloudHome. No additional save needed here,
         // but set_cloud_home_credentials expects a value, so pass what we have.
@@ -492,7 +477,6 @@ pub(crate) fn build_config(
 
     config.cloud_home.provider = Some(match join_info {
         CloudHomeJoinInfo::S3 { .. } => CloudProvider::S3,
-        CloudHomeJoinInfo::HttpProxy { .. } => CloudProvider::HttpProxy,
         CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
         CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
         CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
@@ -511,9 +495,6 @@ pub(crate) fn build_config(
             config.cloud_home.s3_region = Some(region.clone());
             config.cloud_home.s3_endpoint = endpoint.clone();
             config.cloud_home.s3_key_prefix = key_prefix.clone();
-        }
-        CloudHomeJoinInfo::HttpProxy { url } => {
-            config.cloud_home.http_url = Some(url.clone());
         }
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             config.cloud_home.google_drive_folder_id = Some(folder_id.clone());

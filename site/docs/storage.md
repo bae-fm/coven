@@ -162,14 +162,6 @@ places a provider deviates from "write opaque bytes by key".
   cannot build this one from Rust alone and returns a `Storage` error directing
   you to construct it through your Swift layer.
 
-- **HTTP proxy**
-  ([`HttpCloudHome`](rustdoc:struct:coven::storage::cloud::http::HttpCloudHome))
-  talks to an HTTP proxy's `/cloud/*` endpoints. Every request carries an Ed25519
-  signature over `method\npath\ntimestamp` in `X-Coven-Pubkey`,
-  `X-Coven-Timestamp`, and `X-Coven-Signature` headers; the proxy checks the
-  signature against the library's authorized keys. Writes stream the body so
-  progress advances as the bytes leave the device.
-
 - **In-memory**
   ([`InMemoryCloudHome`](rustdoc:struct:coven::storage::cloud::test_utils::InMemoryCloudHome),
   under the `test-utils` feature) is a `HashMap`-backed home that two simulated

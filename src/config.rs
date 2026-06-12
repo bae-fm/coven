@@ -15,7 +15,6 @@ pub enum CloudProvider {
     GoogleDrive,
     Dropbox,
     OneDrive,
-    HttpProxy,
     CloudKit,
 }
 
@@ -53,8 +52,6 @@ pub struct CloudHomeConfig {
     /// Whether this library's CloudKit zone is shared (joiner) vs owned (creator).
     #[serde(default)]
     pub cloudkit_is_shared: bool,
-    #[serde(default)]
-    pub http_url: Option<String>,
 }
 
 /// Configuration errors.
@@ -107,7 +104,6 @@ impl Config {
             Some(CloudProvider::OneDrive) => {
                 ch.onedrive_drive_id.is_some() && ch.onedrive_folder_id.is_some() && has_oauth
             }
-            Some(CloudProvider::HttpProxy) => ch.http_url.is_some(),
             Some(CloudProvider::CloudKit) => true,
             None => false,
         }

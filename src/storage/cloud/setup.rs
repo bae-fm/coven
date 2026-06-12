@@ -251,7 +251,6 @@ pub async fn sign_in_onedrive(
 /// Get a display string for the current cloud account (bucket name, username, etc.)
 pub fn cloud_account_display_for(config: &Config, key_service: &KeyService) -> Option<String> {
     match config.cloud_home.provider.as_ref()? {
-        CloudProvider::HttpProxy => config.cloud_home.http_url.clone(),
         CloudProvider::S3 => config
             .cloud_home
             .s3_bucket
@@ -361,13 +360,6 @@ pub fn generate_restore_code(
                 folder_id,
             }
         }
-        CloudProvider::HttpProxy => RestoreProvider::HttpProxy {
-            url: config
-                .cloud_home
-                .http_url
-                .clone()
-                .ok_or_else(|| SetupError("HTTP proxy URL not configured".to_string()))?,
-        },
     };
 
     let code = RestoreCode {
