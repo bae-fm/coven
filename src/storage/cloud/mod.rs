@@ -12,8 +12,6 @@ pub mod oauth_session;
 pub mod onedrive;
 pub mod s3;
 pub mod setup;
-#[cfg(feature = "share-proxy")]
-pub mod share_proxy;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -54,10 +52,6 @@ pub enum CloudHomeJoinInfo {
         drive_id: String,
         folder_id: String,
     },
-    #[cfg(feature = "share-proxy")]
-    ShareProxy {
-        url: String,
-    },
     CloudKit {
         share_url: String,
     },
@@ -71,8 +65,6 @@ impl CloudHomeJoinInfo {
             CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
             CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
             CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
-            #[cfg(feature = "share-proxy")]
-            CloudHomeJoinInfo::ShareProxy { .. } => CloudProvider::ShareProxy,
             CloudHomeJoinInfo::CloudKit { .. } => CloudProvider::CloudKit,
         }
     }
@@ -84,13 +76,11 @@ impl CloudHomeJoinInfo {
 /// The count is of the bytes handed to `write` (the encrypted payload).
 pub type UploadProgress<'a> = dyn Fn(u64) + Send + Sync + 'a;
 
-/// Chunk size for the streaming/chunked upload paths that have no provider-
-/// specific alignment requirement (the ShareProxy streaming body and the
-/// in-memory test backend). Providers whose resumable API mandates a specific
-/// alignment (OneDrive 320 KiB multiples, Google Drive 256 KiB multiples, S3
-/// 5 MiB minimum parts) define their own constant. 4 MiB gives several progress
-/// ticks on a large audio file without flooding the coalescing layer.
-#[cfg(any(test, feature = "test-utils", feature = "share-proxy"))]
+/// Chunk size the in-memory test backend uses to drive its `UploadProgress`
+/// callback in several ticks. Real providers whose resumable API mandates a
+/// specific alignment (OneDrive 320 KiB multiples, Google Drive 256 KiB
+/// multiples, S3 5 MiB minimum parts) define their own constant.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) const PROGRESS_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// A progress sink that discards its reports. For `write` calls whose payload
@@ -274,18 +264,6 @@ pub async fn create_cloud_home(
                 tokens,
                 key_service.clone(),
                 clock,
-            )))
-        }
-        #[cfg(feature = "share-proxy")]
-        Some(CloudProvider::ShareProxy) => {
-            let url = config.cloud_home.share_proxy_url.clone().ok_or_else(|| {
-                CloudHomeError::Storage("ShareProxy URL not configured".to_string())
-            })?;
-            let keypair = key_service
-                .get_or_create_user_keypair()
-                .map_err(|e| CloudHomeError::Storage(format!("keypair: {e}")))?;
-            Ok(Box::new(share_proxy::ShareProxyCloudHome::new(
-                url, keypair, clock,
             )))
         }
         Some(CloudProvider::CloudKit) => Err(CloudHomeError::Storage(

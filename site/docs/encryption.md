@@ -62,9 +62,8 @@ key cannot be reconstructed without it.
 
 ## What the storage provider sees
 
-The provider (S3, Google Drive, Dropbox, OneDrive, iCloud, or — under the
-`share-proxy` feature — a self-hosted share-proxy server) is an opaque byte
-store. It sees:
+The provider (S3, Google Drive, Dropbox, OneDrive, iCloud) is an
+opaque byte store. It sees:
 
 - Ciphertext. Every object is encrypted under the library key (or, for a wrapped
   library key, under a member's sealed box). Without the library key the bytes

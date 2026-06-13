@@ -62,10 +62,10 @@ serial_test = "3.4.0"
 
 [features]
 test-utils = []
-# The item-sharing module (`share`) and the self-hosted ShareProxy cloud-home
-# backend. Off by default so consumers that exhaustively match `CloudProvider`
-# (and the join/restore enums) compile without a `ShareProxy` arm; on, both are
-# present.
+# The item-sharing capability: the `share` module's `ShareProxy` type (mints and
+# revokes item shares over any CloudHome) plus its `BlobId` logical ref. Off by
+# default; sharing is not a storage backend and adds no CloudProvider variant
+# either way.
 share-proxy = []
 
 [lints.clippy]

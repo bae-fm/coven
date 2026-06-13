@@ -8,19 +8,21 @@
 //! with the same symmetric AEAD ([`EncryptionService`], XChaCha20-Poly1305) that
 //! encrypts blobs. The recipient has no keypair, only the secret.
 //!
-//! [`create_share`] writes two objects under `shares/{share_id}/`:
+//! Sharing is its own capability, independent of how the library is stored.
+//! [`ShareProxy`] layers on top of whatever [`CloudHome`] the library already
+//! uses (S3, Google Drive, Dropbox, OneDrive, iCloud) — it is *not* a storage
+//! backend. [`ShareProxy::create`] writes two objects under `shares/{share_id}/`:
 //! - `key.enc` — the item key wrapped under the per-share secret.
 //! - `manifest.json` — the authorized blobs as `(namespace, id)` logical refs.
 //!
-//! The share-proxy server serves `shares/{share_id}/*` unauthenticated, so the
-//! share's security rests on two independent properties: the per-share secret
-//! stays in the URL fragment (never sent on a request, so the server never sees
-//! it), and `share_id` is high-entropy so the prefix is unguessable. The manifest
+//! Whatever serves `shares/{share_id}/*` does so unauthenticated, so the share's
+//! security rests on two independent properties: the per-share secret stays in
+//! the URL fragment (never sent on a request, so the server never sees it), and
+//! `share_id` is high-entropy so the prefix is unguessable. The manifest
 //! authorizes *fetch*; the wrapped item key authorizes *decrypt* — independent,
 //! so a foreign blob ref in a manifest leaks only undecryptable ciphertext.
 //!
-//! This module (and the [`ShareProxy`](crate::config::CloudProvider::ShareProxy)
-//! backend that serves it) is gated behind the `share-proxy` cargo feature.
+//! This module is gated behind the `share-proxy` cargo feature.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,9 +63,9 @@ pub enum ShareError {
     Open(String),
 }
 
-/// What [`create_share`] hands back to the host. The host builds the share URL
-/// `{base}/share/{share_id}#{base64url(secret)}` — coven returns the secret as
-/// raw bytes and lets the host choose the fragment encoding.
+/// What [`ShareProxy::create`] hands back to the host. The host builds the share
+/// URL `{base}/share/{share_id}#{base64url(secret)}` — coven returns the secret
+/// as raw bytes and lets the host choose the fragment encoding.
 #[derive(Clone)]
 pub struct ShareToken {
     /// The high-entropy id naming the `shares/{share_id}/` prefix. coven owns it
@@ -88,7 +90,7 @@ impl std::fmt::Debug for ShareToken {
 
 /// The blobs a share authorizes, as `(namespace, id)` logical refs — never hashed
 /// cloud paths. coven hashes each ref to its cloud key internally (see
-/// [`ShareManifest::allows`]) so neither the host nor the share-proxy server
+/// [`ShareManifest::allows`]) so neither the host nor whatever serves the share
 /// reconstructs coven's `{namespace}/{ab}/{cd}/{id}` layout.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareManifest {
@@ -97,9 +99,9 @@ pub struct ShareManifest {
 }
 
 impl ShareManifest {
-    /// Whether `cloud_key` is one of the authorized blobs. The share-proxy server
-    /// resolves a requested object to its cloud key and asks coven; coven hashes
-    /// each authorized [`BlobId`] to its cloud key with the same layout the
+    /// Whether `cloud_key` is one of the authorized blobs. Whatever serves the
+    /// share resolves a requested object to its cloud key and asks coven; coven
+    /// hashes each authorized [`BlobId`] to its cloud key with the same layout the
     /// storage layer uses ([`EncryptedSyncStorage::blob_key`]) and matches. The
     /// server therefore never learns coven's `{ab}/{cd}` partitioning.
     pub fn allows(&self, cloud_key: &str) -> bool {
@@ -136,7 +138,7 @@ const MANIFEST_FILE: &str = "manifest.json";
 
 /// Cloud object key for one of a share's objects, e.g.
 /// `shares/{share_id}/key.enc`. The single home for the share layout, so
-/// `create_share` and `revoke_share` name the same objects.
+/// [`ShareProxy::create`] and [`ShareProxy::revoke`] name the same objects.
 fn share_object_path(share_id: &str, filename: &str) -> String {
     format!("{SHARE_PREFIX}/{share_id}/{filename}")
 }
@@ -150,50 +152,90 @@ fn new_share_id() -> String {
     hex::encode(crate::encryption::generate_random_key())
 }
 
-/// Export `item_id` as a share: wrap its item key under a fresh per-share secret
-/// and publish the wrapped key + the authorized-blobs manifest under a new
-/// high-entropy `shares/{share_id}/` prefix.
+/// Mints, revokes, and serves item shares over any [`CloudHome`].
 ///
-/// `blobs` are the `(namespace, id)` logical refs the share authorizes for fetch
-/// — coven stores them verbatim in the manifest and hashes them to cloud keys
-/// only when gating a request ([`ShareManifest::allows`]).
+/// Sharing is independent of how the library is stored — this is NOT a storage
+/// backend; it layers on top of whatever `CloudHome` the library already uses
+/// (S3, Drive, Dropbox, OneDrive, iCloud). It borrows the owned [`Database`] (to
+/// read item keys) and that `CloudHome` (to write/delete the share's objects),
+/// and mints or revokes shares over them.
 ///
-/// Errors with [`ShareError::ItemKeyAbsent`] if the item has no minted key: the
-/// host must mint it (and let it sync) first, since the recipient must hold the
-/// exact key the item's blobs are encrypted under.
-pub async fn create_share(
-    db: &Database,
-    cloud_home: &dyn CloudHome,
-    item_id: &str,
-    blobs: Vec<BlobId>,
-) -> Result<ShareToken, ShareError> {
-    let item_key = db
-        .item_key(item_id)
-        .await?
-        .ok_or_else(|| ShareError::ItemKeyAbsent(item_id.to_string()))?;
+/// The recipient side has neither — opening a share needs only the secret and the
+/// wrapped key bytes — so that is the free [`open_share`] function, which
+/// constructs no `ShareProxy`.
+pub struct ShareProxy<'a> {
+    db: &'a Database,
+    cloud_home: &'a dyn CloudHome,
+}
 
-    let secret = crate::encryption::generate_random_key();
-    let share_id = new_share_id();
-
-    // Wrap the item key under the per-share secret with the symmetric AEAD. This
-    // is the share wire format: `key.enc = from_key(secret).encrypt(item_key)`,
-    // the exact bytes `open_share` reverses.
-    let key_enc = EncryptionService::from_key(secret).encrypt(&item_key);
-
-    let manifest = ShareManifest { blobs };
-    let manifest_json = serde_json::to_vec(&manifest)?;
-
-    for (filename, data) in [(KEY_ENC_FILE, key_enc), (MANIFEST_FILE, manifest_json)] {
-        cloud_home
-            .write(
-                &share_object_path(&share_id, filename),
-                data,
-                &no_progress(),
-            )
-            .await?;
+impl<'a> ShareProxy<'a> {
+    /// Layer sharing over the library's `db` and `cloud_home`.
+    pub fn new(db: &'a Database, cloud_home: &'a dyn CloudHome) -> Self {
+        Self { db, cloud_home }
     }
 
-    Ok(ShareToken { share_id, secret })
+    /// Export `item_id` as a share: wrap its item key under a fresh per-share
+    /// secret and publish the wrapped key + the authorized-blobs manifest under a
+    /// new high-entropy `shares/{share_id}/` prefix.
+    ///
+    /// `blobs` are the `(namespace, id)` logical refs the share authorizes for
+    /// fetch — coven stores them verbatim in the manifest and hashes them to cloud
+    /// keys only when gating a request ([`ShareManifest::allows`]).
+    ///
+    /// Errors with [`ShareError::ItemKeyAbsent`] if the item has no minted key:
+    /// the host must mint it (and let it sync) first, since the recipient must
+    /// hold the exact key the item's blobs are encrypted under.
+    pub async fn create(
+        &self,
+        item_id: &str,
+        blobs: Vec<BlobId>,
+    ) -> Result<ShareToken, ShareError> {
+        let item_key = self
+            .db
+            .item_key(item_id)
+            .await?
+            .ok_or_else(|| ShareError::ItemKeyAbsent(item_id.to_string()))?;
+
+        let secret = crate::encryption::generate_random_key();
+        let share_id = new_share_id();
+
+        // Wrap the item key under the per-share secret with the symmetric AEAD.
+        // This is the share wire format:
+        // `key.enc = from_key(secret).encrypt(item_key)`, the exact bytes
+        // `open_share` reverses.
+        let key_enc = EncryptionService::from_key(secret).encrypt(&item_key);
+
+        let manifest = ShareManifest { blobs };
+        let manifest_json = serde_json::to_vec(&manifest)?;
+
+        for (filename, data) in [(KEY_ENC_FILE, key_enc), (MANIFEST_FILE, manifest_json)] {
+            self.cloud_home
+                .write(
+                    &share_object_path(&share_id, filename),
+                    data,
+                    &no_progress(),
+                )
+                .await?;
+        }
+
+        Ok(ShareToken { share_id, secret })
+    }
+
+    /// Revoke a share by deleting its objects, so whatever serves the share can no
+    /// longer read the manifest or the wrapped key and the URL stops resolving.
+    ///
+    /// This is the storage-access cut: it severs the only unauthenticated path to
+    /// the item's blobs. Bytes a recipient already downloaded are not clawed back
+    /// (the envelope model) — claw-back-before-download needs item-key rotation, a
+    /// separate capability.
+    pub async fn revoke(&self, share_id: &str) -> Result<(), ShareError> {
+        for filename in [KEY_ENC_FILE, MANIFEST_FILE] {
+            self.cloud_home
+                .delete(&share_object_path(share_id, filename))
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 /// Recover an item key from a share's wrapped key, given the per-share secret.
@@ -219,22 +261,6 @@ pub fn open_share(secret: &[u8; 32], key_enc: &[u8]) -> Result<[u8; 32], ShareEr
     item_key.try_into().map_err(|v: Vec<u8>| {
         ShareError::Open(format!("unwrapped key is {} bytes, not 32", v.len()))
     })
-}
-
-/// Revoke a share by deleting its objects, so the share-proxy server can no
-/// longer read the manifest or the wrapped key and the URL stops resolving.
-///
-/// This is the storage-access cut: it severs the only unauthenticated path to the
-/// item's blobs. Bytes a recipient already downloaded are not clawed back (the
-/// envelope model) — claw-back-before-download needs item-key rotation, a
-/// separate capability.
-pub async fn revoke_share(cloud_home: &dyn CloudHome, share_id: &str) -> Result<(), ShareError> {
-    for filename in [KEY_ENC_FILE, MANIFEST_FILE] {
-        cloud_home
-            .delete(&share_object_path(share_id, filename))
-            .await?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -264,17 +290,16 @@ mod tests {
         let plaintext = b"the shared item's content".to_vec();
         let ciphertext = EncryptionService::from_key(item_key).encrypt(&plaintext);
 
-        let token = create_share(
-            &db,
-            &home,
-            "item-1",
-            vec![BlobId {
-                namespace: "audio".to_string(),
-                id: "blob-1".to_string(),
-            }],
-        )
-        .await
-        .expect("create share");
+        let token = ShareProxy::new(&db, &home)
+            .create(
+                "item-1",
+                vec![BlobId {
+                    namespace: "audio".to_string(),
+                    id: "blob-1".to_string(),
+                }],
+            )
+            .await
+            .expect("create share");
 
         let key_enc = read_cloud(&home, &share_object_path(&token.share_id, KEY_ENC_FILE)).await;
         let recovered = open_share(&token.secret, &key_enc).expect("open share");
@@ -290,11 +315,12 @@ mod tests {
     /// [`ShareError::ItemKeyAbsent`] naming the item — coven does not invent a key
     /// a recipient could never match against the item's blobs.
     #[tokio::test]
-    async fn create_share_without_item_key_errors() {
+    async fn create_without_item_key_errors() {
         let db = open_test_db();
         let home = InMemoryCloudHome::new();
 
-        let err = create_share(&db, &home, "never-minted", Vec::new())
+        let err = ShareProxy::new(&db, &home)
+            .create("never-minted", Vec::new())
             .await
             .expect_err("sharing an item with no key must error");
         assert!(
@@ -309,7 +335,7 @@ mod tests {
 
     /// The manifest gate matches a listed `(namespace, id)`'s cloud key and
     /// rejects an unlisted one. coven hashes the authorized refs to cloud keys
-    /// internally, so the share-proxy server passes a cloud key and never
+    /// internally, so whatever serves the share passes a cloud key and never
     /// reconstructs the layout.
     #[test]
     fn manifest_allows_listed_blob_only() {
@@ -363,7 +389,7 @@ mod tests {
         );
     }
 
-    /// Pin `ShareManifest`'s serialized JSON shape. The share-proxy server is a
+    /// Pin `ShareManifest`'s serialized JSON shape. Whatever serves the share is a
     /// separate component that deserializes this manifest from the cloud, so the
     /// wire format is a cross-component contract: a field rename or a
     /// tuple-vs-struct change here would silently break it. This catches such a
@@ -382,16 +408,18 @@ mod tests {
         );
     }
 
-    /// After `revoke_share`, the share-proxy server can no longer read either
-    /// share object: reading `key.enc` from the cloud errors, so the URL stops
-    /// resolving.
+    /// After [`ShareProxy::revoke`], whatever serves the share can no longer read
+    /// either share object: reading `key.enc` from the cloud errors, so the URL
+    /// stops resolving.
     #[tokio::test]
     async fn revoke_removes_share_objects() {
         let db = open_test_db();
         let home = InMemoryCloudHome::new();
 
         db.mint_item_key("item-1").await.expect("mint item key");
-        let token = create_share(&db, &home, "item-1", Vec::new())
+        let share_proxy = ShareProxy::new(&db, &home);
+        let token = share_proxy
+            .create("item-1", Vec::new())
             .await
             .expect("create share");
 
@@ -403,7 +431,8 @@ mod tests {
             .get(&share_object_path(&token.share_id, MANIFEST_FILE))
             .is_some());
 
-        revoke_share(&home, &token.share_id)
+        share_proxy
+            .revoke(&token.share_id)
             .await
             .expect("revoke share");
 
@@ -444,17 +473,16 @@ mod tests {
         let item_2_ciphertext = EncryptionService::from_key(key_2).encrypt(&item_2_plaintext);
 
         // Share item-1 — even with item-2's blob forced into the manifest.
-        let token = create_share(
-            &db,
-            &home,
-            "item-1",
-            vec![BlobId {
-                namespace: "audio".to_string(),
-                id: "item-2-blob".to_string(),
-            }],
-        )
-        .await
-        .expect("create share of item-1");
+        let token = ShareProxy::new(&db, &home)
+            .create(
+                "item-1",
+                vec![BlobId {
+                    namespace: "audio".to_string(),
+                    id: "item-2-blob".to_string(),
+                }],
+            )
+            .await
+            .expect("create share of item-1");
 
         let key_enc = read_cloud(&home, &share_object_path(&token.share_id, KEY_ENC_FILE)).await;
         let recovered = open_share(&token.secret, &key_enc).expect("open share");

@@ -49,8 +49,6 @@ pub enum RestoreSource {
         folder_id: String,
         tokens: OAuthTokens,
     },
-    #[cfg(feature = "share-proxy")]
-    ShareProxy { url: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,18 +169,6 @@ async fn build_cloud_home(
                 drive_id,
                 folder_id,
             };
-            Ok((info, Box::new(home) as Box<dyn CloudHome>))
-        }
-
-        #[cfg(feature = "share-proxy")]
-        RestoreSource::ShareProxy { url } => {
-            // ShareProxy authenticates with the device's own identity keypair,
-            // held under the global KeyService.
-            let keypair = KeyService::new("global".to_string())
-                .get_or_create_user_keypair()
-                .map_err(RestoreError::Key)?;
-            let home = share_proxy::ShareProxyCloudHome::new(url.clone(), keypair, clock);
-            let info = CloudHomeJoinInfo::ShareProxy { url };
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
     }
@@ -342,8 +328,6 @@ pub async fn restore_from_code(
             folder_id,
             tokens: require_oauth("OneDrive")?,
         },
-        #[cfg(feature = "share-proxy")]
-        RestoreProvider::ShareProxy { url } => RestoreSource::ShareProxy { url },
     };
 
     let config = restore_from_cloud(

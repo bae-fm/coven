@@ -265,16 +265,19 @@ and the `item_keys` table stays empty.
 
 ## Creating and opening a share
 
-> The share module and the [ShareProxy](storage.md) backend that serves it are
-> gated behind the `share-proxy` cargo feature. With the feature off, none of the
-> functions below exist.
+> Sharing is gated behind the `share-proxy` cargo feature. With the feature off,
+> the `share` module and the types below do not exist.
 
 A share hands one item to someone outside the library through a URL. The recipient
 has no coven identity and no library key — only a secret in the URL fragment. It
 builds on the [item key](#item-keys) above: because that key is independent of the
 master, coven can wrap it for an outsider without exposing the library.
 
-[`create_share(db, cloud_home, item_id, blobs)`](rustdoc:fn:coven::share::create_share):
+Sharing is its own capability, not a storage backend.
+[`ShareProxy`](rustdoc:struct:coven::share::ShareProxy) layers over whatever
+`CloudHome` already stores the library (S3, Drive, Dropbox, OneDrive, iCloud):
+construct it with the owned database and that `CloudHome`, then
+[`ShareProxy::create(item_id, blobs)`](rustdoc:method:coven::share::ShareProxy::create):
 
 1. Reads the item's key (errors if it was never minted — the host must mint it and
    let it sync first, since the recipient holds the exact key the blobs are
@@ -295,13 +298,14 @@ The recipient's browser reads the secret from the URL fragment (never sent to th
 server), fetches `key.enc`, and calls
 [`open_share(secret, key_enc)`](rustdoc:fn:coven::share::open_share) to recover the
 item key, then fetches and decrypts the item's blobs with it. `open_share` is a
-pure function of the encryption primitive alone, so a browser client that can't
+free function — pure in the encryption primitive alone, taking no database or
+`CloudHome` — because the recipient has neither, so a browser client that can't
 link coven opens a share by reproducing the documented wire format.
 
 ### Serving a share
 
-Whatever serves `shares/{share_id}/*` (the share-proxy server, or the host's own)
-is untrusted and unauthenticated. It gates each blob request with
+Whatever serves `shares/{share_id}/*` is untrusted and unauthenticated. It gates
+each blob request with
 [`ShareManifest::allows(cloud_key)`](rustdoc:method:coven::share::ShareManifest::allows):
 coven hashes each authorized `(namespace, id)` to its cloud key internally and
 compares, so the server never learns coven's path layout. The manifest authorizes
@@ -314,9 +318,9 @@ the server never sees it), and `share_id` is unguessable (so the unauthenticated
 
 ### Revoking a share
 
-[`revoke_share(cloud_home, share_id)`](rustdoc:fn:coven::share::revoke_share)
-deletes the `shares/{share_id}/` objects. The server can no longer read the
-manifest, so it stops serving the share and the URL goes dead. Bytes the recipient
-already downloaded are not clawed back — the same envelope model coven uses for
-membership revocation.
+[`ShareProxy::revoke(share_id)`](rustdoc:method:coven::share::ShareProxy::revoke)
+deletes the `shares/{share_id}/` objects. Whatever serves the share can no longer
+read the manifest, so it stops serving the share and the URL goes dead. Bytes the
+recipient already downloaded are not clawed back — the same envelope model coven
+uses for membership revocation.
 
