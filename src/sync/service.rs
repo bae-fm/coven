@@ -106,8 +106,12 @@ impl SyncService {
                     continue;
                 }
                 // Resolve the host's public scope to the internal key scope before
-                // storage encrypts.
-                let resolved = blob.scope.resolve();
+                // storage encrypts. An `Item(id)` scope reads the key from
+                // `item_keys`; a missing row is a host bug and aborts the cycle.
+                let resolved = db
+                    .resolve_blob_scope(blob.scope.clone())
+                    .await
+                    .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
                 let bytes = std::fs::read(&blob.local_path)
                     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
                 storage

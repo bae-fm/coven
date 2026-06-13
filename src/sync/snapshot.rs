@@ -442,11 +442,14 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 /// cycle runs this, so a caught-up library pays nothing.
 ///
 /// `blobs_in_db` is a read-only enumeration the host's plan runs against a
-/// short-lived connection to the same on-disk DB the `db` actor owns. At
-/// bootstrap capture is suspended and the pull has not started; in a cycle this
-/// runs after the pull's span has resumed capture, and is read-only either way,
-/// so it does not re-record rows or race the actor.
+/// short-lived connection to the same on-disk DB the `db` actor owns; `db` is
+/// still needed because `download_blobs` resolves each blob's scope through it
+/// (an `Item`-scoped blob reads its key from the `item_keys` rows). At bootstrap
+/// capture is suspended and the pull has not started; in a cycle this runs after
+/// the pull's span has resumed capture, and is read-only either way, so it does
+/// not re-record rows or race the actor.
 pub(crate) async fn reconcile_snapshot_blobs(
+    db: &crate::database::Database,
     db_path: &Path,
     storage: &dyn SyncStorage,
     blob_plan: &dyn crate::blob::BlobPlan,
@@ -463,7 +466,7 @@ pub(crate) async fn reconcile_snapshot_blobs(
     }
 
     let total = blobs.len();
-    let all_ok = crate::sync::pull::download_blobs(blobs, storage).await;
+    let all_ok = crate::sync::pull::download_blobs(db, blobs, storage).await;
     if all_ok {
         info!(total, "snapshot blob reconciliation complete");
     } else {

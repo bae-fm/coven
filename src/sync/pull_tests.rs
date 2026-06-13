@@ -206,11 +206,14 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     // Upload the blobs the changeset references, then publish the changeset.
     // Resolve the public scope to the internal key scope exactly as the push
-    // loop does — `PhotoBlobPlan` only emits Derived/Master.
+    // loop does — `PhotoBlobPlan` only emits Derived/Master, which pass through.
     let changes = crate::changeset::walk(&cs).expect("walk");
     for b in src_plan.blobs_to_push(&changes) {
         let data = std::fs::read(&b.local_path).expect("read photo");
-        let resolved = b.scope.resolve();
+        let resolved = db1
+            .resolve_blob_scope(b.scope.clone())
+            .await
+            .expect("resolve scope");
         storage
             .put_blob(&b.namespace, &b.id, resolved, data)
             .await

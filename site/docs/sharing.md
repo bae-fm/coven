@@ -5,10 +5,11 @@ append-only, Ed25519-signed log of membership changes, the membership chain.
 Pull verifies both each changeset's own signature and the chain itself, so the
 cloud provider never has to be trusted with who is allowed to write.
 
-Coven shares at one scope: **membership**, which grants the *whole library* to
-another *writer* — a peer with their own identity in the chain. The owner seals
-the library key to each member's keypair (asymmetric), so a member reads and
-writes everything; the cloud provider is never trusted with who is allowed in.
+Coven shares a library by **membership** — most of this page: it grants the
+*whole library* to another *writer*, a peer with their own identity in the chain,
+by sealing the library key to that member's keypair (asymmetric `seal_box`).
+[Item keys](#item-keys) are a separate, finer scope — a per-item key, independent
+of the library master, that gives one item its own encryption key.
 
 The examples use a todos app: `workspaces` hold `lists`, a `list` holds
 `todos`, and a todo can carry `todo_attachments`. Two people sharing the
@@ -231,3 +232,34 @@ consumer cloud the user re-authenticates during restore.
 Because the code contains the library key and any stored credentials, it is the
 most sensitive string coven produces; anyone holding it has full access to the
 library.
+
+## Item keys
+
+An **item key** is a random 32-byte key for one *item* — a logical unit the host
+names (a todo with its attachments, a music release with its files), identified by
+an opaque `item_id`. It is the second key tier, below the library master key.
+
+Coven owns its lifecycle. The host calls
+[`mint_item_key(item_id)`](rustdoc:method:coven::database::Database::mint_item_key) when it
+creates the item; coven generates the key and stores it in the synced `item_keys`
+table. Because that table is synced like any other, the key rides the
+master-encrypted changeset to every member and is preserved in snapshots — a
+member who joins by changeset replay *or* by snapshot bootstrap gets it. The host
+never sees raw key bytes: it tags a blob with
+[`BlobScope::Item(item_id)`](rustdoc:enum:coven::blob::BlobScope) (see
+[Blobs](blobs.md#encryption-scope)), and coven resolves the id to the key when it
+encrypts on push and decrypts on pull.
+
+**Why an item key and not `Master` or `Derived`?** Because it is **independent of
+the master** — a random key coven mints, stores, and syncs, not one derived from
+the master. It gives one item its own key without reusing the library master or a
+master-derived key.
+
+A *member* can read every item key (each rides the master-encrypted changeset, and
+a member holds the master), so an item key does not hide an item *from members* —
+it scopes one item to a key of its own.
+
+Item keys are opt-in. An app that needs no per-item key never emits
+`BlobScope::Item` and never calls `mint_item_key`: it stays on `Master`/`Derived`
+and the `item_keys` table stays empty.
+

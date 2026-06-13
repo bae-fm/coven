@@ -11,60 +11,61 @@ use crate::changeset::RowChange;
 
 /// Which key encrypts a blob, as a host names it on a [`BlobRef`].
 ///
-/// The host names *what* a blob is scoped to — the whole library or a derived
-/// per-scope key — never the raw key bytes. coven resolves the scope to a
-/// [`ResolvedScope`] before it touches storage, so a host can't hand coven raw
-/// bytes.
+/// The host names *what* a blob is scoped to — the whole library, a derived
+/// per-scope key, or a coven-managed item — never the raw key bytes. coven
+/// resolves the scope to a [`ResolvedScope`] (looking up the item's key in the
+/// `item_keys` table for [`BlobScope::Item`]) before it touches storage, so a
+/// host can't hand coven raw bytes and bypass `item_keys`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobScope {
     /// The library master key — every member reads it.
     Master,
     /// A per-scope key derived from the master key (e.g. one key per item).
     Derived(String),
+    /// A coven-managed item key, named by `item_id`. coven mints the random
+    /// per-item key with [`crate::Database::mint_item_key`], syncs it on the
+    /// `item_keys` table, and resolves this scope to that key. Independent of
+    /// the master, so the item can be rotated or shared to a non-member without
+    /// exposing the whole library.
+    Item(String),
 }
 
 /// The key a blob is actually encrypted under, resolved from a [`BlobScope`].
 ///
-/// coven resolves [`BlobScope`] to this before reading or writing storage.
-/// [`SyncStorage`](crate::sync::storage::SyncStorage) blob methods take this
-/// internal form.
+/// coven resolves [`BlobScope`] to this before reading or writing storage:
+/// [`BlobScope::Item`] becomes [`ResolvedScope::Key`] by looking up the
+/// `item_keys` row. [`SyncStorage`](crate::sync::storage::SyncStorage) blob
+/// methods take this internal form — the public `Item` scope never reaches
+/// storage or encryption.
 ///
 /// Internal to coven, though `pub` by necessity: it appears in the `SyncStorage`
 /// trait, which a tree of `pub` sync entry points (the cycle, pull, snapshot, and
 /// membership functions a host reaches only through `SyncManager`) references in
 /// turn, so narrowing it would force that whole tree private. A host never names
 /// this type — it tags a blob with the public [`BlobScope`] and coven resolves it
-/// here.
+/// here — so the raw-key `Key([u8; 32])` variant stays a coven concern in
+/// practice even while the type is reachable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedScope {
     /// The library master key.
     Master,
     /// A per-scope key derived from the master key.
     Derived(String),
+    /// An explicit 32-byte key (a resolved item key).
+    Key([u8; 32]),
 }
 
 impl BlobScope {
-    /// Resolve a host-named [`BlobScope`] to the internal [`ResolvedScope`] that
-    /// storage and encryption consume. A pure 1:1 mapping — `Master` and
-    /// `Derived` carry everything the resolved form needs. This is the single
-    /// resolution point shared by the three blob paths (changeset push, changeset
-    /// pull, outbox drain).
-    pub fn resolve(&self) -> ResolvedScope {
-        match self {
-            BlobScope::Master => ResolvedScope::Master,
-            BlobScope::Derived(s) => ResolvedScope::Derived(s.clone()),
-        }
-    }
-
     /// Serialize for the `cloud_outbox.scope` column. The audio outbox persists
     /// the public scope at enqueue and resolves it to a key at drain, so the
     /// string must round-trip every variant. The variant tag is split from the
-    /// payload at the first `:`; the payload (a derived scope name) is stored
-    /// verbatim, so it may itself contain `:`.
+    /// payload at the first `:`; the payload (a derived scope name or an item id)
+    /// is stored verbatim, so it may itself contain `:`.
     pub fn to_outbox_str(&self) -> String {
         match self {
             BlobScope::Master => "master".to_string(),
             BlobScope::Derived(s) => format!("derived:{s}"),
+            BlobScope::Item(id) => format!("item:{id}"),
         }
     }
 
@@ -75,6 +76,7 @@ impl BlobScope {
         match s.split_once(':') {
             None if s == "master" => Some(BlobScope::Master),
             Some(("derived", rest)) => Some(BlobScope::Derived(rest.to_string())),
+            Some(("item", rest)) => Some(BlobScope::Item(rest.to_string())),
             _ => None,
         }
     }

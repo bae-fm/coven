@@ -513,13 +513,19 @@ pub async fn run_single_sync_cycle(
     let (sync_result, local_seq) = span?;
 
     // Reconcile the blob files a snapshot bootstrap could not land. Runs only
-    // while the pending flag is set, after the pull's span resumed capture. The
+    // while the pending flag is set, and after the pull's span resumed capture so
+    // any blob whose `item_keys` row arrived this cycle now resolves its key. The
     // reconciliation is read-only (it downloads files, writes no rows), so it does
     // not need the suspended span. On the first run that lands every referenced
     // blob the flag clears and no later cycle scans.
     if snapshot_blob_backfill_pending {
-        match super::snapshot::reconcile_snapshot_blobs(&library_dir.db_path(), storage, blob_plan)
-            .await
+        match super::snapshot::reconcile_snapshot_blobs(
+            db,
+            &library_dir.db_path(),
+            storage,
+            blob_plan,
+        )
+        .await
         {
             Ok(true) => {
                 db.set_sync_state(super::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING, "")
