@@ -55,6 +55,8 @@ pub mod join_code;
 pub mod keys;
 pub mod library_dir;
 pub mod oauth;
+#[cfg(feature = "share-proxy")]
+pub mod share;
 pub mod storage;
 pub mod sync;
 

@@ -62,7 +62,10 @@ encrypted under:
   and resolves by `item_id` on both push and pull. The host names the item; coven
   holds the key, so the host never handles raw key bytes. Unlike `Derived`, an
   item key is *not* a function of the master — it is a random key coven mints,
-  stores in `item_keys`, and syncs. See [Item keys](sharing.md#item-keys).
+  stores in `item_keys`, and syncs. Because it is independent of the master, coven
+  can hand it to a non-member without exposing the library — that export is a
+  [share](sharing.md#creating-and-opening-a-share) (under the `share-proxy`
+  feature). See [Item keys](sharing.md#item-keys).
 
 The derivation is deterministic: the same `scope_id` always yields the same key,
 on push and on pull alike. That is what lets a puller decrypt: it passes the same

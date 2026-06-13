@@ -263,3 +263,60 @@ Item keys are opt-in. An app that needs no per-item key never emits
 `BlobScope::Item` and never calls `mint_item_key`: it stays on `Master`/`Derived`
 and the `item_keys` table stays empty.
 
+## Creating and opening a share
+
+> The share module and the [ShareProxy](storage.md) backend that serves it are
+> gated behind the `share-proxy` cargo feature. With the feature off, none of the
+> functions below exist.
+
+A share hands one item to someone outside the library through a URL. The recipient
+has no coven identity and no library key — only a secret in the URL fragment. It
+builds on the [item key](#item-keys) above: because that key is independent of the
+master, coven can wrap it for an outsider without exposing the library.
+
+[`create_share(db, cloud_home, item_id, blobs)`](rustdoc:fn:coven::share::create_share):
+
+1. Reads the item's key (errors if it was never minted — the host must mint it and
+   let it sync first, since the recipient holds the exact key the blobs are
+   encrypted under).
+2. Generates a random per-share `secret` and a high-entropy `share_id`.
+3. Wraps the item key under the secret with the symmetric AEAD —
+   `key.enc = EncryptionService::from_key(secret).encrypt(item_key)`, the same
+   cipher that encrypts blobs. Symmetric, not the asymmetric `seal_box` membership
+   uses, because the recipient has only the secret, no keypair.
+4. Writes two objects under `shares/{share_id}/`: `key.enc` (the wrapped key) and
+   `manifest.json`, a [`ShareManifest`](rustdoc:struct:coven::share::ShareManifest)
+   listing the authorized blobs as `(namespace, id)` logical refs.
+5. Returns a [`ShareToken`](rustdoc:struct:coven::share::ShareToken) — the
+   `share_id` and the raw `secret`. The host builds the URL
+   `{base}/share/{share_id}#{base64url(secret)}`.
+
+The recipient's browser reads the secret from the URL fragment (never sent to the
+server), fetches `key.enc`, and calls
+[`open_share(secret, key_enc)`](rustdoc:fn:coven::share::open_share) to recover the
+item key, then fetches and decrypts the item's blobs with it. `open_share` is a
+pure function of the encryption primitive alone, so a browser client that can't
+link coven opens a share by reproducing the documented wire format.
+
+### Serving a share
+
+Whatever serves `shares/{share_id}/*` (the share-proxy server, or the host's own)
+is untrusted and unauthenticated. It gates each blob request with
+[`ShareManifest::allows(cloud_key)`](rustdoc:method:coven::share::ShareManifest::allows):
+coven hashes each authorized `(namespace, id)` to its cloud key internally and
+compares, so the server never learns coven's path layout. The manifest authorizes
+*fetch*; the wrapped item key authorizes *decrypt* — independently, so a stray
+blob ref in a manifest only ever leaks undecryptable ciphertext.
+
+A share's security rests on two things: the `secret` stays in the URL fragment (so
+the server never sees it), and `share_id` is unguessable (so the unauthenticated
+`shares/{share_id}/` prefix can't be enumerated).
+
+### Revoking a share
+
+[`revoke_share(cloud_home, share_id)`](rustdoc:fn:coven::share::revoke_share)
+deletes the `shares/{share_id}/` objects. The server can no longer read the
+manifest, so it stops serving the share and the URL goes dead. Bytes the recipient
+already downloaded are not clawed back — the same envelope model coven uses for
+membership revocation.
+

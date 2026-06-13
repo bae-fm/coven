@@ -251,6 +251,8 @@ pub async fn sign_in_onedrive(
 /// Get a display string for the current cloud account (bucket name, username, etc.)
 pub fn cloud_account_display_for(config: &Config, key_service: &KeyService) -> Option<String> {
     match config.cloud_home.provider.as_ref()? {
+        #[cfg(feature = "share-proxy")]
+        CloudProvider::ShareProxy => config.cloud_home.share_proxy_url.clone(),
         CloudProvider::S3 => config
             .cloud_home
             .s3_bucket
@@ -360,6 +362,14 @@ pub fn generate_restore_code(
                 folder_id,
             }
         }
+        #[cfg(feature = "share-proxy")]
+        CloudProvider::ShareProxy => RestoreProvider::ShareProxy {
+            url: config
+                .cloud_home
+                .share_proxy_url
+                .clone()
+                .ok_or_else(|| SetupError("ShareProxy URL not configured".to_string()))?,
+        },
     };
 
     let code = RestoreCode {

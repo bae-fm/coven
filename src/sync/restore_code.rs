@@ -53,6 +53,9 @@ pub enum RestoreProvider {
     Dropbox { folder_path: String },
     #[serde(rename = "od")]
     OneDrive { drive_id: String, folder_id: String },
+    #[cfg(feature = "share-proxy")]
+    #[serde(rename = "bc")]
+    ShareProxy { url: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +128,8 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
         RestoreProvider::GoogleDrive { .. } => crate::config::CloudProvider::GoogleDrive,
         RestoreProvider::Dropbox { .. } => crate::config::CloudProvider::Dropbox,
         RestoreProvider::OneDrive { .. } => crate::config::CloudProvider::OneDrive,
+        #[cfg(feature = "share-proxy")]
+        RestoreProvider::ShareProxy { .. } => crate::config::CloudProvider::ShareProxy,
     };
 
     let signing_key = URL_SAFE_NO_PAD
@@ -289,6 +294,28 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "share-proxy")]
+    #[test]
+    fn roundtrip_share_proxy_cloud() {
+        let code = RestoreCode {
+            v: 1,
+            lid: "lib-def".to_string(),
+            ek: "ff".repeat(32),
+            name: "Cloud Library".to_string(),
+            provider: RestoreProvider::ShareProxy {
+                url: "https://proxy.example.com/lib/abc".to_string(),
+            },
+            sk: test_sk(),
+        };
+        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
+        match &decoded.provider {
+            RestoreProvider::ShareProxy { url } => {
+                assert_eq!(url, "https://proxy.example.com/lib/abc");
+            }
+            _ => panic!("expected ShareProxy provider"),
+        }
+    }
+
     #[test]
     fn missing_prefix() {
         let code = sample_s3_code();
@@ -384,6 +411,10 @@ mod tests {
         assert!(provider_needs_oauth(&RestoreProvider::OneDrive {
             drive_id: String::new(),
             folder_id: String::new(),
+        }));
+        #[cfg(feature = "share-proxy")]
+        assert!(!provider_needs_oauth(&RestoreProvider::ShareProxy {
+            url: String::new(),
         }));
     }
 

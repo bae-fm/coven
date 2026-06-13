@@ -143,6 +143,18 @@ async fn build_cloud_home_for_join(
             )))
         }
 
+        #[cfg(feature = "share-proxy")]
+        CloudHomeJoinInfo::ShareProxy { url } => {
+            // ShareProxy authenticates with the device's own identity keypair (no
+            // stored credentials), held under the global KeyService.
+            let keypair = KeyService::new("global".to_string()).get_or_create_user_keypair()?;
+            Ok(Box::new(share_proxy::ShareProxyCloudHome::new(
+                url.clone(),
+                keypair,
+                clock,
+            )))
+        }
+
         CloudHomeJoinInfo::CloudKit { .. } => {
             let ops = cloudkit_ops
                 .ok_or_else(|| JoinError::Database("CloudKit driver not provided".to_string()))?;
@@ -433,9 +445,9 @@ pub(crate) async fn open_db_and_pull(
 
 /// Derive the CloudHomeCredentials to persist from the JoinInfo.
 ///
-/// S3 credentials come from the invite code. OAuth providers store the joiner's
-/// token, but that's already saved to the keyring by the caller before
-/// constructing the CloudHome.
+/// S3 credentials come from the invite code. ShareProxy uses keypair auth (no
+/// stored creds). OAuth providers store the joiner's token, but that's already
+/// saved to the keyring by the caller before constructing the CloudHome.
 pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> CloudHomeCredentials {
     match join_info {
         CloudHomeJoinInfo::S3 {
@@ -446,6 +458,8 @@ pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> CloudHomeCred
             access_key: access_key.clone(),
             secret_key: secret_key.clone(),
         },
+        #[cfg(feature = "share-proxy")]
+        CloudHomeJoinInfo::ShareProxy { .. } => CloudHomeCredentials::None,
         // OAuth providers: the joiner's token was already saved to the keyring
         // before constructing the CloudHome. No additional save needed here,
         // but set_cloud_home_credentials expects a value, so pass what we have.
@@ -480,6 +494,8 @@ pub(crate) fn build_config(
         CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
         CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
         CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
+        #[cfg(feature = "share-proxy")]
+        CloudHomeJoinInfo::ShareProxy { .. } => CloudProvider::ShareProxy,
         CloudHomeJoinInfo::CloudKit { .. } => CloudProvider::CloudKit,
     });
 
@@ -508,6 +524,10 @@ pub(crate) fn build_config(
         } => {
             config.cloud_home.onedrive_drive_id = Some(drive_id.clone());
             config.cloud_home.onedrive_folder_id = Some(folder_id.clone());
+        }
+        #[cfg(feature = "share-proxy")]
+        CloudHomeJoinInfo::ShareProxy { url } => {
+            config.cloud_home.share_proxy_url = Some(url.clone());
         }
         CloudHomeJoinInfo::CloudKit { .. } => {
             config.cloud_home.cloudkit_is_shared = true;

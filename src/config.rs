@@ -15,6 +15,11 @@ pub enum CloudProvider {
     GoogleDrive,
     Dropbox,
     OneDrive,
+    /// Self-hosted share-proxy server (the backend that serves item shares).
+    /// Wire name `"share_proxy"`.
+    #[cfg(feature = "share-proxy")]
+    #[serde(rename = "share_proxy")]
+    ShareProxy,
     CloudKit,
 }
 
@@ -52,6 +57,11 @@ pub struct CloudHomeConfig {
     /// Whether this library's CloudKit zone is shared (joiner) vs owned (creator).
     #[serde(default)]
     pub cloudkit_is_shared: bool,
+    /// Base URL of the self-hosted share-proxy server, when the provider is
+    /// [`CloudProvider::ShareProxy`].
+    #[cfg(feature = "share-proxy")]
+    #[serde(default)]
+    pub share_proxy_url: Option<String>,
 }
 
 /// Configuration errors.
@@ -104,6 +114,8 @@ impl Config {
             Some(CloudProvider::OneDrive) => {
                 ch.onedrive_drive_id.is_some() && ch.onedrive_folder_id.is_some() && has_oauth
             }
+            #[cfg(feature = "share-proxy")]
+            Some(CloudProvider::ShareProxy) => ch.share_proxy_url.is_some(),
             Some(CloudProvider::CloudKit) => true,
             None => false,
         }
