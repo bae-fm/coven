@@ -18,6 +18,7 @@ use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
 };
+use crate::sync::pull::pull_changes;
 use crate::sync::session::SyncedTable;
 use crate::sync::storage::{DeviceHead, StorageError, SyncStorage};
 
@@ -547,6 +548,51 @@ impl CloudHome for MockSyncStorage {
     async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
         Ok(())
     }
+}
+
+/// A [`BlobUploadObserver`](crate::blob::BlobUploadObserver) that breaks the
+/// outbox drain after every upload by returning
+/// [`DrainControl::Publish`](crate::blob::DrainControl), modeling a host that
+/// flips a gate column on the moment a unit's blobs land. The other callbacks are
+/// no-ops. Shared by the cycle and outbox drain tests.
+pub struct PublishingObserver;
+
+#[async_trait]
+impl crate::blob::BlobUploadObserver for PublishingObserver {
+    async fn on_blob_upload_started(&self, _file_id: &str) {}
+    async fn on_blob_uploaded(&self, _file_id: &str) -> crate::blob::DrainControl {
+        crate::blob::DrainControl::Publish
+    }
+    async fn on_blob_upload_failed(&self, _file_id: &str, _error: &str) {}
+}
+
+/// Pull into `db` the way the protocol requires: suspend its capture session
+/// first (so applying remote rows isn't re-recorded as a local change), pull +
+/// apply, then resume. Returns the updated cursors and the pull result.
+pub async fn pull_into(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    cursors: &HashMap<String, u64>,
+    library_dir: &crate::library_dir::LibraryDir,
+    blob_plan: &dyn crate::blob::BlobPlan,
+) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
+    db.take_changeset_and_suspend()
+        .await
+        .expect("suspend before pull");
+    let r = pull_changes(
+        db,
+        &test_synced_tables(),
+        storage,
+        device_id,
+        cursors,
+        library_dir,
+        blob_plan,
+    )
+    .await
+    .expect("pull");
+    db.resume_session().await.expect("resume after pull");
+    r
 }
 
 /// A blob plan that references no blobs — for cycle/pull tests not exercising blobs.

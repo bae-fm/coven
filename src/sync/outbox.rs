@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tracing::warn;
 
-use crate::blob::BlobUploadObserver;
+use crate::blob::{BlobUploadObserver, DrainControl};
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::CloudHome;
@@ -147,13 +147,32 @@ async fn resolve_and_encrypt(
     Ok(enc.encrypt(&data))
 }
 
+/// The result of one outbox drain pass.
+pub struct DrainOutcome {
+    /// Number of successful uploads this pass.
+    pub uploaded: usize,
+    /// The drain stopped early because [`BlobUploadObserver::on_blob_uploaded`]
+    /// returned [`DrainControl::Publish`] — the host made new rows shareable, so
+    /// the cycle should publish them and the loop should run the next cycle
+    /// promptly to drain the rest. `false` when the queue drained in one pass
+    /// (or stopped on a pause / left only backed-off entries), so the loop waits
+    /// its normal interval.
+    pub yielded_for_publish: bool,
+}
+
 /// Process pending uploads: read local file, encrypt, write to cloud.
 ///
-/// Returns the number of successful uploads. A failing entry is recorded and
-/// skipped rather than stopping the drain, with a per-entry backoff so a
-/// persistently-failing entry doesn't block the rest of the queue or get
-/// re-attempted every cycle. The `observer` (if any) is notified as each
-/// attempt starts, succeeds, or fails.
+/// A failing entry is recorded and skipped rather than stopping the drain, with a
+/// per-entry backoff so a persistently-failing entry doesn't block the rest of
+/// the queue or get re-attempted every cycle. The `observer` (if any) is notified
+/// as each attempt starts, succeeds, or fails.
+///
+/// The drain stops early when [`BlobUploadObserver::on_blob_uploaded`] returns
+/// [`DrainControl::Publish`] — the host signals it just made new rows shareable,
+/// so the cycle should publish them before draining the rest (the remaining
+/// entries stay queued). The returned [`DrainOutcome`] carries that signal.
+/// Without an observer, or while it returns [`DrainControl::Continue`], the queue
+/// drains in one pass.
 pub async fn process_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
@@ -161,7 +180,7 @@ pub async fn process_uploads(
     library_dir: &Path,
     clock: &dyn crate::clock::Clock,
     observer: Option<&dyn BlobUploadObserver>,
-) -> Result<usize, String> {
+) -> Result<DrainOutcome, String> {
     let uploads = db
         .get_pending_cloud_uploads()
         .await
@@ -169,6 +188,7 @@ pub async fn process_uploads(
 
     let now = clock.now();
     let mut count = 0;
+    let mut yielded_for_publish = false;
     for entry in uploads {
         // Host-driven pause: short-circuit before pulling the next entry so a
         // freshly paused queue stops draining without aborting an in-flight
@@ -242,7 +262,14 @@ pub async fn process_uploads(
                 count += 1;
 
                 if let Some(obs) = observer {
-                    obs.on_blob_uploaded(file_id).await;
+                    if obs.on_blob_uploaded(file_id).await == DrainControl::Publish {
+                        // The host just made new rows shareable (e.g. flipped a
+                        // gate column on). Stop draining so this cycle publishes
+                        // them now; the entries still queued drain on the next
+                        // cycle, which the loop runs promptly.
+                        yielded_for_publish = true;
+                        break;
+                    }
                 }
             }
             Err(e) => {
@@ -254,7 +281,10 @@ pub async fn process_uploads(
         }
     }
 
-    Ok(count)
+    Ok(DrainOutcome {
+        uploaded: count,
+        yielded_for_publish,
+    })
 }
 
 /// Process pending deletes: remove the queued cloud blobs.

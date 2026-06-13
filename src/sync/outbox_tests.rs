@@ -12,7 +12,7 @@ use std::sync::{Mutex, RwLock};
 use chrono::Duration;
 
 use super::outbox::{backoff_window, process_deletes, process_uploads};
-use crate::blob::BlobUploadObserver;
+use crate::blob::{BlobUploadObserver, DrainControl};
 use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
@@ -21,7 +21,7 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::invite::{create_invitation, unwrap_library_key};
 use crate::sync::membership::MemberRole;
-use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
+use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage, PublishingObserver};
 use rusqlite::OptionalExtension;
 
 // --- Database under test ----------------------------------------------------
@@ -133,11 +133,12 @@ impl BlobUploadObserver for RecordingObserver {
             bytes_total,
         ));
     }
-    async fn on_blob_uploaded(&self, file_id: &str) {
+    async fn on_blob_uploaded(&self, file_id: &str) -> DrainControl {
         self.events
             .lock()
             .unwrap()
             .push(ObsEvent::Uploaded(file_id.to_string()));
+        DrainControl::Continue
     }
     async fn on_blob_upload_failed(&self, file_id: &str, error: &str) {
         self.events
@@ -328,7 +329,8 @@ async fn bad_item_does_not_block_good_later_item() {
 
     let n = process_uploads(&db, &cloud, &enc(), tmp.path(), &clock, Some(&observer))
         .await
-        .unwrap();
+        .unwrap()
+        .uploaded;
 
     assert_eq!(n, 1, "the good entry uploads despite the earlier failure");
     assert!(cloud.get("key-b").is_some(), "good blob landed in cloud");
@@ -341,6 +343,53 @@ async fn bad_item_does_not_block_good_later_item() {
     assert_eq!(recorded.with_timezone(&chrono::Utc), clock.now());
 
     assert!(get_upload(&db, 2).await.is_none(), "uploaded entry removed");
+}
+
+/// `DrainControl::Publish` breaks the drain after that upload: the first blob
+/// uploads and its entry is removed, but the rest of the queue is left for the
+/// next cycle so the host can publish the just-completed unit now.
+#[tokio::test]
+async fn publish_signal_breaks_the_drain_leaving_the_rest_queued() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p1 = write_temp_file(tmp.path(), "a.bin", b"aaaa");
+    let p2 = write_temp_file(tmp.path(), "b.bin", b"bbbb");
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "fa", "key-a", Some(p1), 0, None).await;
+    insert_upload(&db, 2, "fb", "key-b", Some(p2), 0, None).await;
+    let cloud = InMemoryCloudHome::new();
+
+    let outcome = process_uploads(
+        &db,
+        &cloud,
+        &enc(),
+        tmp.path(),
+        &fixed_clock(T0),
+        Some(&PublishingObserver),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.uploaded, 1,
+        "the drain stops after the first upload on Publish"
+    );
+    assert!(
+        outcome.yielded_for_publish,
+        "the drain reports it broke to let the cycle publish"
+    );
+    assert!(cloud.get("key-a").is_some(), "first blob uploaded");
+    assert!(
+        cloud.get("key-b").is_none(),
+        "second blob is not uploaded this pass"
+    );
+    assert!(
+        get_upload(&db, 1).await.is_none(),
+        "the uploaded entry was removed"
+    );
+    assert!(
+        get_upload(&db, 2).await.is_some(),
+        "the rest of the queue stays for the next cycle",
+    );
 }
 
 /// A failed attempt persists attempt_count + last_error, and a later cycle past
@@ -397,7 +446,8 @@ async fn backoff_skips_item_inside_window() {
         Some(&observer),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .uploaded;
     assert_eq!(n, 0);
     assert_eq!(
         cloud.write_calls(),
@@ -639,7 +689,8 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
 
     let n = process_uploads(&db, &cloud, &master_enc, tmp.path(), &fixed_clock(T0), None)
         .await
-        .expect("upload");
+        .expect("upload")
+        .uploaded;
     assert_eq!(n, 1, "the release blob uploads");
 
     // At rest the blob is per-release ciphertext: not plaintext, and NOT

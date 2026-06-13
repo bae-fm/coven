@@ -20,9 +20,7 @@ use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
 
 use super::encrypted_storage::EncryptedSyncStorage;
-use super::envelope;
 use super::hlc::Hlc;
-use super::push::SCHEMA_VERSION;
 use super::service::SyncService;
 use super::storage::SyncStorage;
 
@@ -42,6 +40,10 @@ pub struct SyncCycleResult {
     pub asset_downloads_failed: bool,
     /// Row changes from applied changesets, for the host to map to domain events.
     pub row_changes: Vec<RowChange>,
+    /// The outbox drain broke this cycle to publish a just-completed unit
+    /// (`DrainControl::Publish`), so the loop should run the next cycle promptly
+    /// to drain + publish the rest instead of waiting the idle interval.
+    pub resume_drain_promptly: bool,
 }
 
 /// Path for staging outgoing changeset bytes that survived a push failure.
@@ -80,49 +82,6 @@ pub fn read_staged_changeset(library_dir: &LibraryDir) -> Option<Vec<u8>> {
     } else {
         None
     }
-}
-
-/// Merge a freshly-gated changeset into an already-staged one while uploads are
-/// pending. Both are signed envelopes; unpack each to its raw changeset,
-/// concatenate the raw changesets (via the gate's changegroup), and re-sign the
-/// merged result at `seq` (the bytes changed, so the signature must too).
-///
-/// This merge exists because the cycle must suspend the capture session before
-/// the pull (so the apply isn't re-recorded), and the only suspend primitive —
-/// `take_changeset_and_suspend` — *consumes* the changeset. A capture-level
-/// "peek, don't consume" would dissolve this merge, but it would also have to
-/// keep the session enabled across the pull's apply (re-recording remote rows as
-/// local) or break the span's single unconditional resume; both are worse than
-/// staging the already-captured bytes and concatenating subsequent ones here.
-async fn merge_deferred_changesets(
-    db: &Database,
-    staged: &[u8],
-    incoming: &[u8],
-    device_id: &str,
-    seq: u64,
-    keypair: &UserKeypair,
-    timestamp: &str,
-) -> Result<Vec<u8>, String> {
-    let (_, staged_raw) =
-        envelope::unpack(staged).map_err(|e| format!("Failed to unpack staged changeset: {e}"))?;
-    let (_, incoming_raw) = envelope::unpack(incoming)
-        .map_err(|e| format!("Failed to unpack incoming changeset: {e}"))?;
-    let merged = db
-        .call(move |conn| {
-            super::gate::concat_changesets(conn, &staged_raw, &incoming_raw)
-                .map_err(|e| crate::database::DbError(e.to_string()))
-        })
-        .await
-        .map_err(|e| format!("Failed to accumulate deferred changeset: {e}"))?;
-    Ok(envelope::pack_signed(
-        device_id,
-        seq,
-        SCHEMA_VERSION,
-        "background sync",
-        timestamp,
-        keypair,
-        &merged,
-    ))
 }
 
 /// Push a changeset to the sync storage and update the device head.
@@ -244,9 +203,15 @@ pub async fn run_single_sync_cycle(
         Err(e) => return Err(format!("Failed to read snapshot blob backfill flag: {e}")),
     };
 
-    // Process outbox uploads (files must be in cloud before any changeset or
-    // snapshot references them). Run BEFORE the staged-push decisions below, so a
-    // changeset whose blobs just finished uploading this cycle can push now.
+    // Process outbox uploads. Blob-before-row ordering is the host's
+    // responsibility: it keeps a blob-bearing row's gate column off until its
+    // blobs land, then flips it on in `on_blob_uploaded` (which can also return
+    // `DrainControl::Publish` to break this drain so a just-completed unit
+    // publishes now instead of waiting for the whole batch). The changeset is
+    // gated per row by the gate column, not by a global "any upload pending"
+    // flag. The drain reports whether it broke to publish, which drives the
+    // loop's cadence below.
+    let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
         match super::outbox::process_uploads(
             db,
@@ -258,18 +223,15 @@ pub async fn run_single_sync_cycle(
         )
         .await
         {
-            Ok(n) if n > 0 => info!(count = n, "Processed outbox uploads"),
+            Ok(outcome) => {
+                resume_drain_promptly = outcome.yielded_for_publish;
+                if outcome.uploaded > 0 {
+                    info!(count = outcome.uploaded, "Processed outbox uploads");
+                }
+            }
             Err(e) => warn!("Outbox upload processing error: {e}"),
-            _ => {}
         }
     }
-
-    // Whether to gate changeset/snapshot propagation on pending uploads: remote
-    // devices must not learn about rows whose blobs (audio) aren't in cloud yet.
-    let has_pending_uploads = db
-        .has_pending_cloud_uploads()
-        .await
-        .map_err(|e| format!("Failed to check pending cloud uploads: {e}"))?;
 
     // This device's pull cursors: where the pull starts from, and what we publish
     // in our head so peers know how far we've consumed each of them.
@@ -278,17 +240,12 @@ pub async fn run_single_sync_cycle(
         .await
         .map_err(|e| format!("Failed to load sync cursors: {e}"))?;
 
-    // Push the staged changeset (deferred for pending uploads in an earlier
-    // cycle, or surviving a failed push) — but only once its blobs are in the
-    // cloud. While uploads remain pending it stays staged and this cycle's
-    // capture accumulates into it in the span below.
+    // Retry a staged changeset left behind by a failed push in an earlier cycle.
+    // Staging exists only to let the bytes survive a push failure (the capture
+    // already consumed them from the session, so a lost push must not lose the
+    // rows); a fresh capture stages-then-pushes in the span below.
     if let Some(seq) = staged_seq {
-        if has_pending_uploads {
-            info!(
-                seq,
-                "Holding staged changeset: pending cloud uploads remain"
-            );
-        } else if let Some(staged_data) = read_staged_changeset(library_dir) {
+        if let Some(staged_data) = read_staged_changeset(library_dir) {
             let timestamp = hlc.now().to_string();
             info!(seq, "Retrying staged changeset push");
 
@@ -366,64 +323,36 @@ pub async fn run_single_sync_cycle(
             .await
             .map_err(|e| format!("Sync cycle error: {e}"))?;
 
-        // Propagate the captured changeset. While cloud uploads are still
-        // pending we must NOT make the rows visible to peers (their blobs aren't
-        // in the cloud yet), but we must NOT drop the captured changeset either —
-        // the capture already consumed it from the session, so dropping it loses
-        // those rows forever. Stage it instead, accumulating into any
-        // already-staged changeset, and let the gated retry above push it once
-        // the uploads finish.
+        // Propagate the captured changeset. The gate already cut any row whose
+        // gate column is off (the host keeps a blob-bearing row gated until its
+        // blobs upload), so whatever the gate emitted is safe to publish now —
+        // there is no global upload deferral. Stage the bytes before pushing so a
+        // push failure doesn't lose them (the capture already consumed them from
+        // the session); the staged-retry above re-pushes on the next cycle.
         if let Some(outgoing) = &sync_result.outgoing {
             let seq = outgoing.seq;
 
-            if has_pending_uploads {
-                let staged = match read_staged_changeset(library_dir) {
-                    Some(existing) => {
-                        merge_deferred_changesets(
-                            db,
-                            &existing,
-                            &outgoing.packed,
-                            device_id,
-                            seq,
-                            user_keypair,
-                            &timestamp,
-                        )
-                        .await?
-                    }
-                    None => outgoing.packed.clone(),
-                };
-                stage_changeset(library_dir, &staged);
-                db.set_sync_state("staged_seq", &seq.to_string())
-                    .await
-                    .map_err(|e| format!("Failed to persist staged_seq while deferring: {e}"))?;
-                info!(
-                    seq,
-                    "Deferred changeset staged: pending cloud uploads remain"
-                );
-            } else {
-                // Stage before pushing so the bytes survive a push failure.
-                stage_changeset(library_dir, &outgoing.packed);
-                db.set_sync_state("staged_seq", &seq.to_string())
-                    .await
-                    .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
-
-                match push_changeset(
-                    storage,
-                    device_id,
-                    seq,
-                    outgoing.packed.clone(),
-                    snapshot_seq,
-                    &timestamp,
-                )
+            stage_changeset(library_dir, &outgoing.packed);
+            db.set_sync_state("staged_seq", &seq.to_string())
                 .await
-                {
-                    Ok(()) => {
-                        commit_push_success(db, library_dir, seq, &mut local_seq).await?;
-                        info!(seq, "Pushed changeset");
-                    }
-                    Err(e) => {
-                        warn!(seq, "Push failed, changeset staged for retry: {e}");
-                    }
+                .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
+
+            match push_changeset(
+                storage,
+                device_id,
+                seq,
+                outgoing.packed.clone(),
+                snapshot_seq,
+                &timestamp,
+            )
+            .await
+            {
+                Ok(()) => {
+                    commit_push_success(db, library_dir, seq, &mut local_seq).await?;
+                    info!(seq, "Pushed changeset");
+                }
+                Err(e) => {
+                    warn!(seq, "Push failed, changeset staged for retry: {e}");
                 }
             }
         }
@@ -552,13 +481,14 @@ pub async fn run_single_sync_cycle(
     let is_initial_sync =
         local_seq == 0 && snapshot_seq.is_none() && sync_result.outgoing.is_none();
 
-    // The snapshot is the second channel that propagates rows to peers, so it
-    // honors the same blob-before-row gate as the changeset push: defer it while
-    // uploads are pending, otherwise a bootstrapping peer would materialize a row
-    // whose audio isn't in the cloud yet.
-    if !has_pending_uploads
-        && (is_initial_sync
-            || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since))
+    // The snapshot is the second channel that propagates rows to peers. It
+    // applies the same row-level gate as the changeset push (create_snapshot runs
+    // the gate's delete_gated_false), so a row whose gate column is off — which
+    // the host keeps off until its blobs upload — is already excluded. No global
+    // upload deferral is needed: the snapshot can never carry a row whose blobs
+    // aren't in the cloud.
+    if is_initial_sync
+        || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since)
     {
         if is_initial_sync {
             info!("Initial sync: pushing snapshot of existing library data");
@@ -623,6 +553,7 @@ pub async fn run_single_sync_cycle(
         sync_time: now,
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,
         row_changes: sync_result.pull.row_changes,
+        resume_drain_promptly,
     })
 }
 

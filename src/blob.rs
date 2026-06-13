@@ -142,6 +142,28 @@ pub trait BlobPlan: Send + Sync {
     fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>>;
 }
 
+/// What the outbox drain should do after a successful upload, returned by
+/// [`BlobUploadObserver::on_blob_uploaded`].
+///
+/// coven drains the outbox in one pass per cycle, then the cycle captures and
+/// pushes the changeset. For a host that gates rows on blob upload (keeping a
+/// row's gate column off until its blobs land, then flipping it in
+/// `on_blob_uploaded`), draining the whole queue before publishing means every
+/// row waits on the slowest upload in the batch. Returning [`Self::Publish`]
+/// lets the host break the drain the moment an upload makes new rows shareable,
+/// so the cycle publishes them and the loop resumes draining the rest next
+/// cycle — turning all-or-nothing propagation into per-unit propagation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainControl {
+    /// Keep draining the next queued upload before publishing.
+    Continue,
+    /// Stop draining now so this sync cycle publishes before continuing. The
+    /// host returns this when the upload just made new rows shareable (e.g. it
+    /// flipped a gate column on). Entries still queued drain on the next cycle,
+    /// which the loop runs promptly rather than after the idle interval.
+    Publish,
+}
+
 /// Notified about the lifecycle of a blob upload, for host-specific
 /// bookkeeping and UI (e.g. transitioning a record from "uploading" to
 /// "cloud-only", or surfacing a failure). `on_blob_upload_started` fires before
@@ -156,6 +178,10 @@ pub trait BlobPlan: Send + Sync {
 /// backend actually transfers), which is marginally larger than the plaintext
 /// file. It fires zero or more times per upload; backends that can't report
 /// sub-file progress call it once at the end with `bytes_done == bytes_total`.
+///
+/// `on_blob_uploaded` returns a [`DrainControl`] so a host that gates rows on
+/// upload can publish each unit as its blobs land instead of after the whole
+/// queue drains.
 ///
 /// `should_skip_uploads` lets the host pause the upload pipeline without
 /// touching the queue contents. The sync cycle consults it before processing
@@ -175,8 +201,11 @@ pub trait BlobUploadObserver: Send + Sync {
         let _ = (file_id, bytes_done, bytes_total);
     }
 
-    /// The blob was uploaded to the cloud successfully.
-    async fn on_blob_uploaded(&self, file_id: &str);
+    /// The blob was uploaded to the cloud successfully. Returns whether the
+    /// drain should keep going or stop so the cycle can publish now (see
+    /// [`DrainControl`]). A host that doesn't gate rows on upload returns
+    /// [`DrainControl::Continue`].
+    async fn on_blob_uploaded(&self, file_id: &str) -> DrainControl;
 
     /// An upload attempt failed; the entry remains queued for retry.
     async fn on_blob_upload_failed(&self, file_id: &str, error: &str);

@@ -7,44 +7,15 @@
 use std::collections::HashMap;
 
 use crate::blob::BlobPlan;
-use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cycle;
 use crate::sync::encrypted_storage::EncryptedSyncStorage;
-use crate::sync::pull::pull_changes;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::service::SyncService;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
-
-/// Pull into `db` (suspending its capture session first, as the protocol requires).
-async fn pull_into(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    device_id: &str,
-    cursors: &HashMap<String, u64>,
-    library_dir: &crate::library_dir::LibraryDir,
-    blob_plan: &dyn BlobPlan,
-) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
-    db.take_changeset_and_suspend()
-        .await
-        .expect("suspend before pull");
-    let r = pull_changes(
-        db,
-        &test_synced_tables(),
-        storage,
-        device_id,
-        cursors,
-        library_dir,
-        blob_plan,
-    )
-    .await
-    .expect("pull");
-    db.resume_session().await.expect("resume after pull");
-    r
-}
 
 #[tokio::test]
 async fn pull_applies_remote_changeset_and_surfaces_row_changes() {

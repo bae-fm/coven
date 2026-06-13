@@ -1,25 +1,35 @@
-//! The sync cycle defers a changeset push while cloud uploads are still pending
-//! — remote devices must not learn about releases whose audio isn't in the cloud
-//! yet. But a deferred changeset must *survive* to a later cycle: it was taken
-//! out of the capture session (`take_changeset_and_suspend`), so dropping it on
-//! defer loses those mutations forever, and the device's `local_seq` never
-//! advances past them even after the uploads finish.
+//! Blob-before-row ordering is the host's job, enforced per row by the gate
+//! column: the host keeps a blob-bearing row's gate column off until that row's
+//! blobs upload, then flips it on (in `on_blob_uploaded`), so the changeset gate
+//! — and the snapshot, which runs the same gate — only ever carry rows whose
+//! blobs are in the cloud. The sync cycle does not hold the whole changeset back
+//! on a global "any upload pending" flag.
+//!
+//! These tests pin that contract: a pending upload does not hold back an
+//! already-shareable (gated-true) changeset or snapshot, a gated-false row is
+//! withheld until its gate flips, and a `DrainControl::Publish` from the observer
+//! lets the cycle publish a just-completed unit mid-batch (surfaced as
+//! `resume_drain_promptly` so the loop runs the next cycle promptly).
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::blob::{BlobScope, BlobUploadObserver};
 use crate::clock::SystemClock;
-use crate::database::{Database, DbError};
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::storage::cloud::CloudHome;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::pull::pull_changes;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
-/// Run one sync cycle for device "M" against the mock storage with no cloud home.
+const T0: &str = "2024-01-01T00:00:00Z";
+
+/// Run one sync cycle for device "M" with no cloud home (no outbox drain).
 async fn run_cycle_m(
     storage: &MockSyncStorage,
     db: &Database,
@@ -45,30 +55,41 @@ async fn run_cycle_m(
     .expect("cycle");
 }
 
-/// Seed one pending `upload` outbox entry so `has_pending_cloud_uploads` is true.
-/// The source path doesn't exist, so the cycle's upload pass can't drain it —
-/// the entry stays pending, which is what we want for the deferral.
+/// Queue a pending upload whose source file doesn't exist, so the cycle's drain
+/// can't clear it — the entry stays pending, modeling a slow or stuck upload
+/// while we assert the changeset/snapshot aren't held back by it.
 async fn seed_pending_upload(db: &Database) {
-    let scope = crate::blob::BlobScope::Master.to_outbox_str();
-    db.call(move |conn| {
-        conn.execute(
-            &format!(
-                "INSERT INTO cloud_outbox \
-                 (id, operation, file_id, cloud_key, source_path, scope, created_at, attempt_count) \
-                 VALUES (1, 'upload', 'f1', 'storage/aa/bb/f1', '/nonexistent/f1', '{scope}', \
-                         '2024-01-01T00:00:00Z', 0)"
-            ),
-            [],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
+    db.enqueue_upload(
+        "f1",
+        "storage/aa/bb/f1",
+        Some("/nonexistent/f1"),
+        BlobScope::Master,
+        T0,
+    )
     .await
     .expect("seed pending upload");
 }
 
+/// Queue a pending upload whose source file exists, so the cycle's drain uploads
+/// it for real.
+async fn seed_real_upload(db: &Database, file_id: &str, source: &str) {
+    db.enqueue_upload(
+        file_id,
+        &format!("storage/{file_id}"),
+        Some(source),
+        BlobScope::Master,
+        T0,
+    )
+    .await
+    .expect("seed real upload");
+}
+
+/// A pending cloud upload does not hold back a gated-true changeset: the gate
+/// column decides per-row visibility, so a row that is shareable now reaches
+/// peers without waiting for unrelated uploads to finish. The gate still cuts a
+/// gated-false row, which is what withholds a not-yet-uploaded unit.
 #[tokio::test]
-async fn changeset_deferred_for_pending_uploads_is_not_lost() {
+async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
@@ -76,118 +97,99 @@ async fn changeset_deferred_for_pending_uploads_is_not_lost() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    // A pending cloud upload makes the cycle defer any changeset push.
+    // A slow/stuck upload for some OTHER unit is pending the whole time.
     seed_pending_upload(&db).await;
 
-    // A local change captured into the session — the equivalent of flipping a
-    // release to managed=1 after enqueuing its audio for upload. `shared=1` so
-    // the gate keeps it (an unshared row would be cut and never sync).
+    // One shareable note (its blobs are up → gate on) and one still-private note
+    // (its blobs aren't up yet → gate off; the host hasn't flipped it).
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'Album Title', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+         VALUES ('pub', 'Shareable', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('priv', 'NotYet', NULL, 0, '0000000002000-0000-M', '2026-01-01')",
     )
     .await;
 
-    // Cycle 1: the upload is still pending, so the push is deferred — nothing in
-    // the cloud yet.
-    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
-    assert!(
-        storage.get_changeset("M", 1).await.is_err(),
-        "while uploads are pending the changeset push must be deferred",
-    );
-
-    // The upload completes; the outbox drains.
-    exec(&db, "DELETE FROM cloud_outbox WHERE operation = 'upload'").await;
-
-    // Cycle 2: no pending uploads, and no *new* local changes — the only thing to
-    // push is the change captured in cycle 1. It must reach the cloud, not have
-    // been dropped with cycle 1's capture session.
+    // The changeset pushes despite the pending upload — no global deferral.
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         storage.get_changeset("M", 1).await.is_ok(),
-        "a changeset deferred for pending uploads must be pushed once uploads \
-         complete, not dropped",
+        "a gated-true changeset must push even while an unrelated upload is pending",
+    );
+
+    // A fresh peer pulls: it gets the shareable row, never the gated-false one.
+    let db_b = open_test_db();
+    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobPlan).await;
+    assert_eq!(
+        query_text(&db_b, "SELECT title FROM notes WHERE id = 'pub'").await,
+        "Shareable",
+        "the shareable note reaches the peer",
+    );
+    assert!(
+        !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'priv'").await,
+        "a gated-false row is still withheld — that is what holds a not-yet-uploaded unit",
     );
 }
 
+/// A gated-false row is withheld until its gate flips on, then it propagates: the
+/// per-row gate, not a global flag, is what holds a not-yet-uploaded unit. (A
+/// host flips the gate in `on_blob_uploaded` once the row's blobs land.)
 #[tokio::test]
-async fn deferred_changesets_accumulate_across_cycles_then_all_reach_a_peer() {
+async fn gated_false_row_propagates_once_its_gate_flips() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(EncryptionService::new_with_key(&[6u8; 32]));
+    let enc = RwLock::new(EncryptionService::new_with_key(&[8u8; 32]));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    // A pending upload keeps every push deferred across the next two cycles.
-    seed_pending_upload(&db).await;
-
-    // First shared note, captured and deferred (staged).
+    // A note whose blobs aren't up yet: gate off.
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'One', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+         VALUES ('n1', 'Album Title', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
 
-    // A SECOND shared note while uploads are still pending. It must ACCUMULATE
-    // into the staged changeset, not overwrite the first — otherwise the first
-    // deferred change is lost when more edits arrive before the upload finishes.
-    exec(
-        &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n2', 'Two', NULL, 1, '0000000002000-0000-M', '2026-01-01')",
-    )
-    .await;
-    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
-    assert!(
-        storage.get_changeset("M", 1).await.is_err(),
-        "both changesets stay deferred while uploads are pending",
-    );
-
-    // Uploads finish; the accumulated changeset pushes.
-    exec(&db, "DELETE FROM cloud_outbox WHERE operation = 'upload'").await;
-    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
-    assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
-        "the accumulated changeset must push once uploads complete",
-    );
-
-    // A fresh peer pulls and must receive BOTH notes — proving the second
-    // deferral accumulated onto the first rather than clobbering it.
     let db_b = open_test_db();
-    db_b.take_changeset_and_suspend().await.expect("suspend B");
-    pull_changes(
-        &db_b,
-        &test_synced_tables(),
-        &storage,
-        "B",
-        &HashMap::new(),
-        &ld,
-        &NoopBlobPlan,
+    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobPlan).await;
+    assert!(
+        !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "a gated-false row must not reach a peer",
+    );
+
+    // The blobs land; the host flips the gate on. The next cycle re-emits the
+    // now-shareable row.
+    exec(
+        &db,
+        "UPDATE notes SET shared = 1, _updated_at = '0000000003000-0000-M' WHERE id = 'n1'",
     )
-    .await
-    .expect("B pull");
+    .await;
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+
+    // n1 was gated-false in cycle 1 (cut → no changeset pushed), so the flip
+    // re-emits it at seq 1. Re-pull from empty cursors to pick it up wherever it
+    // landed.
+    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobPlan).await;
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
-        "One",
-        "the first deferred note must survive accumulation and reach the peer",
-    );
-    assert_eq!(
-        query_text(&db_b, "SELECT title FROM notes WHERE id = 'n2'").await,
-        "Two",
-        "the second deferred note must also reach the peer",
+        "Album Title",
+        "once its gate flips on, the row reaches the peer",
     );
 }
 
-/// The snapshot is the second channel that propagates rows to peers, so it must
-/// honor the same blob-before-row gate as the changeset push: while a cloud
-/// upload is pending, the snapshot is withheld and only pushed once uploads
-/// finish.
+/// The snapshot is the second propagation channel and runs the same row-level
+/// gate (`delete_gated_false`), so a pending upload does not withhold it: the
+/// snapshot carries the gated-true rows and excludes the gated-false ones, which
+/// is the blob-before-row guarantee at snapshot granularity.
 #[tokio::test]
-async fn snapshot_is_withheld_while_uploads_are_pending() {
+async fn snapshot_is_not_withheld_by_pending_uploads() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
@@ -195,8 +197,7 @@ async fn snapshot_is_withheld_while_uploads_are_pending() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    // local_seq past 0 with no snapshot yet → the snapshot policy would fire this
-    // cycle. A pending upload must gate it.
+    // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
     db.set_sync_state("local_seq", "1")
         .await
         .expect("seed local_seq");
@@ -204,15 +205,61 @@ async fn snapshot_is_withheld_while_uploads_are_pending() {
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        SyncStorage::get_snapshot(&storage).await.is_err(),
-        "the snapshot must be withheld while uploads are pending",
-    );
-
-    // Uploads finish.
-    exec(&db, "DELETE FROM cloud_outbox WHERE operation = 'upload'").await;
-    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
-    assert!(
         SyncStorage::get_snapshot(&storage).await.is_ok(),
-        "the snapshot is pushed once uploads complete",
+        "the snapshot must push even while an upload is pending — the gate, not a \
+         global flag, decides what it carries",
+    );
+}
+
+/// When the observer breaks the drain mid-batch (Publish), the cycle reports
+/// `resume_drain_promptly`: it uploaded one blob and left the rest queued, so the
+/// loop runs the next cycle promptly to keep draining + publishing per unit.
+#[tokio::test]
+async fn cycle_reports_resume_drain_promptly_when_drain_breaks_mid_batch() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(EncryptionService::new_with_key(&[3u8; 32]));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let cloud = InMemoryCloudHome::new();
+
+    // Two real uploads queued; the shared observer publishes after each upload,
+    // so the drain breaks after the first.
+    let a = tmp.path().join("a.bin");
+    let b = tmp.path().join("b.bin");
+    std::fs::write(&a, b"aaaa").unwrap();
+    std::fs::write(&b, b"bbbb").unwrap();
+    seed_real_upload(&db, "fa", a.to_str().unwrap()).await;
+    seed_real_upload(&db, "fb", b.to_str().unwrap()).await;
+
+    let result = run_single_sync_cycle(
+        &storage,
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &keypair,
+        &ld,
+        Some(&cloud as &dyn CloudHome),
+        &NoopBlobPlan,
+        Some(&PublishingObserver as &dyn BlobUploadObserver),
+    )
+    .await
+    .expect("cycle");
+
+    assert!(
+        result.resume_drain_promptly,
+        "after the drain breaks mid-batch with entries still queued, the cycle \
+         signals the loop to run again promptly",
+    );
+    assert!(
+        cloud.get("storage/fa").is_some(),
+        "the first blob uploaded this cycle",
+    );
+    assert!(
+        cloud.get("storage/fb").is_none(),
+        "the second blob is left for the next cycle",
     );
 }

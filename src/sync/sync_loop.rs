@@ -154,9 +154,16 @@ impl SyncLoopHandle {
 
                     let mut consecutive_failures: u32 = 0;
                     loop {
+                        // When an outbox drain is mid-batch (this cycle uploaded a
+                        // blob and entries remain), run the next cycle immediately
+                        // so each unit publishes as its blobs land instead of
+                        // waiting the idle interval. A failed cycle leaves this
+                        // false and falls back to the failure backoff.
+                        let mut drain_in_progress = false;
                         match run_single_cycle(&inner, clock.as_ref(), &library_dir).await {
                             Ok(result) => {
                                 consecutive_failures = 0;
+                                drain_in_progress = result.resume_drain_promptly;
                                 // Schema-skip takes priority — newer-version changesets
                                 // are permanently inapplicable until the user updates the
                                 // app, while asset download failures retry naturally next
@@ -203,10 +210,17 @@ impl SyncLoopHandle {
                             }
                         }
 
-                        let wait = Duration::from_secs(super::backoff::backoff_secs(
-                            consecutive_failures,
-                            300,
-                        ));
+                        let wait = if drain_in_progress {
+                            // Keep draining + publishing without the inter-cycle
+                            // pause. The next cycle does real upload work, so this
+                            // is paced by the upload, not a busy-loop.
+                            Duration::ZERO
+                        } else {
+                            Duration::from_secs(super::backoff::backoff_secs(
+                                consecutive_failures,
+                                300,
+                            ))
+                        };
                         if consecutive_failures > 0 {
                             debug!(
                                 "Backing off {wait:?} after {consecutive_failures} consecutive failure(s)",

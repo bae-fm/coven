@@ -127,9 +127,19 @@ each one reads the local file, resolves the entry's `scope` to a key (an `Item`
 scope reads the `item_keys` table), encrypts under it, writes the encrypted bytes
 to the cloud at the entry's `cloud_key`, and removes the entry on success.
 
-Uploads run before the changeset push, and the cycle will not publish a changeset
-while uploads are still pending. A peer therefore never pulls a changeset that
-points at a blob the cloud does not yet hold.
+Uploads run before the changeset push, but the cycle does not hold the whole
+changeset back while the outbox drains. Blob-before-row ordering is the host's
+job: it keeps a blob-bearing row's gate column off until that row's blobs upload,
+then flips it on (typically in `on_blob_uploaded`). The gate cuts the row while
+its column is off and re-emits the row's full subtree when it flips on, so a peer
+never pulls a changeset that points at a blob the cloud does not yet hold. This
+gating is per row, so one slow or stuck upload holds back only its own row, not
+every other shareable row in the batch — and a row whose upload fails for good
+never wedges the rest.
+
+To publish a unit the moment its blobs land instead of after the whole queue
+drains, `on_blob_uploaded` can return [`DrainControl::Publish`](rustdoc:enum:coven::blob::DrainControl)
+(see [Observing uploads](#observing-uploads)).
 
 The drain does not stop on a failure. A failed entry stays queued with its
 `attempt_count` bumped and `last_error` and `last_attempt_at` recorded, and the
@@ -195,7 +205,7 @@ other two default to a no-op:
 pub trait BlobUploadObserver: Send + Sync {
     async fn on_blob_upload_started(&self, file_id: &str);
     async fn on_blob_upload_progress(&self, file_id: &str, bytes_done: u64, bytes_total: u64) {}
-    async fn on_blob_uploaded(&self, file_id: &str);
+    async fn on_blob_uploaded(&self, file_id: &str) -> DrainControl;
     async fn on_blob_upload_failed(&self, file_id: &str, error: &str);
     fn should_skip_uploads(&self) -> bool { false }
 }
@@ -208,6 +218,16 @@ times. `on_blob_uploaded` fires once, when the entry leaves the queue.
 string; the entry stays queued for retry. A todos app wires these into the
 attachment's row: `started` shows "uploading", `uploaded` shows "synced",
 `failed` shows "will retry" with the error in a tooltip.
+
+`on_blob_uploaded` returns a
+[`DrainControl`](rustdoc:enum:coven::blob::DrainControl): `Continue` keeps
+draining the next queued upload, while `Publish` stops the drain so the current
+cycle publishes before continuing — the lever a host uses to release each unit as
+its blobs land. A host that flips a gate column on once a unit's last blob lands
+returns `Publish` from that same call, so the unit's now-shareable rows reach
+peers without waiting for the rest of the batch; the entries still queued drain on
+the next cycle, which the loop runs promptly. A host that doesn't gate rows on
+upload returns `Continue` and the queue drains in one pass.
 
 `on_blob_upload_progress` reports bytes reaching the cloud between start and the
 terminal callback, so a per-file bar moves instead of jumping from 0 to 100% at

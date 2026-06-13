@@ -502,22 +502,6 @@ impl Database {
         .await
     }
 
-    /// Whether any upload is still queued. The host's changeset push gates on
-    /// this so peers never learn of a row whose blob isn't in the cloud yet.
-    pub async fn has_pending_cloud_uploads(&self) -> Result<bool, DbError> {
-        self.call(move |conn| {
-            conn.query_row(
-                "SELECT 1 FROM cloud_outbox WHERE operation = 'upload' LIMIT 1",
-                [],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|o| o.is_some())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
     /// Remove an outbox entry by id (after the upload or delete completed).
     pub async fn remove_cloud_outbox_entry(&self, id: i64) -> Result<(), DbError> {
         self.call(move |conn| {
