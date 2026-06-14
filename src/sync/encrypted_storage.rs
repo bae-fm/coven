@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
+use tracing::warn;
 
 use super::storage::{DeviceHead, StorageError, SyncStorage};
 use crate::encryption::EncryptionService;
@@ -103,10 +104,20 @@ impl SyncStorage for EncryptedSyncStorage {
                 .ok_or_else(|| StorageError::S3(format!("unexpected head key format: {key}")))?;
 
             let encrypted = self.home.read(key).await?;
-            let decrypted = self
-                .enc()
-                .decrypt(&encrypted)
-                .map_err(|e| StorageError::Decryption(format!("head {device_id}: {e}")))?;
+            // A head we can't decrypt is not ours: a head a *different* library
+            // wrote when it reused this bucket, under its own encryption key.
+            // Skip it rather than abort — otherwise one foreign head wedges every
+            // sync cycle for this library, so it never pulls, pushes its catalog
+            // or snapshot, or publishes its own head. A transient read error
+            // above still propagates (it retries next cycle); a parse failure of
+            // a head we *can* decrypt is our own corrupt data and still surfaces.
+            let decrypted = match self.enc().decrypt(&encrypted) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("skipping head {device_id} this library cannot decrypt: {e}");
+                    continue;
+                }
+            };
 
             let head_json: HeadJson = serde_json::from_slice(&decrypted)
                 .map_err(|e| StorageError::S3(format!("parse head {device_id}: {e}")))?;
@@ -414,6 +425,45 @@ mod tests {
                 .await
                 .is_err(),
             "the master key must not decrypt a Key-scoped blob"
+        );
+    }
+
+    /// A head this library cannot decrypt — e.g. one a *different* library wrote
+    /// when it reused the same bucket (its own encryption key) — must be skipped,
+    /// not abort `list_heads`. The sync cycle's pull calls `list_heads`, so an
+    /// abort there wedges every cycle: the library never pulls, never pushes its
+    /// catalog or snapshot, and never publishes its own head.
+    #[tokio::test]
+    async fn list_heads_skips_a_head_it_cannot_decrypt() {
+        let storage = EncryptedSyncStorage::new(
+            Box::new(InMemoryCloudHome::new()),
+            EncryptionService::new_with_key(&[1u8; 32]),
+        );
+        storage
+            .put_head("ours", 5, None, "2026-01-01T00:00:00Z")
+            .await
+            .expect("put our head");
+
+        // A foreign head our key can't decrypt (not our ciphertext).
+        storage
+            .cloud_home()
+            .write(
+                "heads/foreign-device.json.enc",
+                b"a different library's head, encrypted with another key".to_vec(),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("write foreign head");
+
+        let heads = storage
+            .list_heads()
+            .await
+            .expect("list_heads must not abort on a head it cannot decrypt");
+        let ids: Vec<&str> = heads.iter().map(|h| h.device_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["ours"],
+            "the decryptable head is returned; the foreign one is skipped",
         );
     }
 }
