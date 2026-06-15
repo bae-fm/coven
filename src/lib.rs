@@ -70,6 +70,13 @@ pub mod wasm;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_opfs_test;
 
+// Headless proof that the sync engine runs on wasm: a row crosses from one
+// `Database` to another through capture → push → pull → apply over a shared
+// in-memory cloud. Inside the crate because it reaches crate-internal sync test
+// helpers; see the module.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_sync_test;
+
 pub use database::Database;
 pub use sync::hlc::UpdatedAtStamper;
 
@@ -79,3 +86,27 @@ pub use sync::hlc::UpdatedAtStamper;
 /// directly, so the host can never drift onto a `libsqlite3-sys` version that
 /// conflicts with coven's.
 pub use rusqlite;
+
+/// Thread-safety floor for coven's async storage traits ([`storage::cloud::CloudHome`],
+/// [`sync::storage::SyncStorage`], [`blob::BlobUploadObserver`]).
+///
+/// Native sync runs the connection on a thread actor and awaits multi-threaded
+/// cloud SDKs, so those traits must be `Send + Sync` and their method futures
+/// `Send`. The browser runs one thread: reqwest's wasm `Response` and the wasm
+/// `Database`'s `Rc`-held state are `!Send`, and the engine drives every future
+/// on that single thread. So this bound is `Send + Sync` on native and empty on
+/// wasm, and the traits that carry it (plus their `#[async_trait]` futures) relax
+/// to `?Send` there. The blanket impl makes it transparent — every type that
+/// meets the native floor satisfies it, and on wasm it constrains nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeThreadSafe: Send + Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync + ?Sized> MaybeThreadSafe for T {}
+
+/// See the native [`MaybeThreadSafe`]. On wasm the engine drives every storage
+/// future on the browser's single thread, so the floor is empty and every type
+/// satisfies it.
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeThreadSafe {}
+#[cfg(target_arch = "wasm32")]
+impl<T: ?Sized> MaybeThreadSafe for T {}

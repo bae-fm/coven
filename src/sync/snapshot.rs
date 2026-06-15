@@ -626,7 +626,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl SyncStorage for MockSyncStorage {
         async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
             let heads = self.heads.lock().unwrap();

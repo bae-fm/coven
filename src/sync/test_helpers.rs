@@ -334,7 +334,8 @@ impl MockSyncStorage {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for MockSyncStorage {
     async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
         Ok(self.heads.lock().unwrap().values().cloned().collect())
@@ -514,7 +515,8 @@ impl SyncStorage for MockSyncStorage {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CloudHome for MockSyncStorage {
     async fn write(
         &self,
@@ -583,7 +585,8 @@ impl CloudHome for MockSyncStorage {
 /// no-ops. Shared by the cycle and outbox drain tests.
 pub struct PublishingObserver;
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl crate::blob::BlobUploadObserver for PublishingObserver {
     async fn on_blob_upload_started(&self, _file_id: &str) {}
     async fn on_blob_uploaded(&self, _file_id: &str) -> crate::blob::DrainControl {

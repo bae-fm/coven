@@ -236,7 +236,8 @@ mod tests {
     /// Minimal CloudHome mock that returns a dummy S3 JoinInfo.
     struct MockCloudHome;
 
-    #[async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl CloudHome for MockCloudHome {
         async fn write(
             &self,

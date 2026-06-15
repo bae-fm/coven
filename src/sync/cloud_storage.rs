@@ -210,7 +210,8 @@ pub(crate) fn encryption_for_scope(
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for CloudSyncStorage {
     async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
         let suffix = self.suffix();
@@ -801,7 +802,8 @@ mod tests {
     /// `Box<dyn CloudHome>`.
     struct StorageHome(Arc<InMemoryCloudHome>);
 
-    #[async_trait]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl CloudHome for StorageHome {
         async fn write(
             &self,

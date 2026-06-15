@@ -66,8 +66,12 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
     }
 }
 
-#[async_trait]
-pub trait SyncStorage: Send + Sync {
+/// `Send + Sync` with `Send` method futures on native; `?Send` on wasm. See
+/// [`crate::MaybeThreadSafe`] for why the bound is cfg'd — the browser drives
+/// every sync future on one thread.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait SyncStorage: crate::MaybeThreadSafe {
     /// List all device heads (one LIST call to `heads/`).
     async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError>;
 

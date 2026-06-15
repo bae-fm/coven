@@ -77,6 +77,10 @@ sqlite-wasm-vfs = "0.2"
 # 0.2, whose `js` feature enables the same backend.
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_legacy = { package = "getrandom", version = "0.2", features = ["js"] }
+# Wall-clock source for the HLC on wasm: `js_sys::Date::now()`. `std::time` has no
+# wasm backend (`SystemTime::now()` panics), so the HLC reads epoch millis from
+# the browser clock instead.
+js-sys = "0.3"
 
 # The headless wasm test (tests/wasm_opfs.rs) drives a real dedicated Worker in
 # Firefox to prove the connection persists through OPFS. None of these belong on

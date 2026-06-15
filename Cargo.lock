@@ -916,6 +916,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac 0.12.1",
+ "js-sys",
  "keyring-core",
  "libsqlite3-sys",
  "open",

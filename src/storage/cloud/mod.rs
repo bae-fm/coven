@@ -103,8 +103,16 @@ pub fn no_progress() -> impl Fn(u64) + Send + Sync {
 /// Low-level cloud storage. Implementations handle a single library.
 ///
 /// All methods deal in raw bytes. No encryption or path layout logic.
-#[async_trait]
-pub trait CloudHome: Send + Sync {
+///
+/// The trait carries `Send + Sync` (and `Send` method futures) on native, where
+/// the DB lives on a thread actor and backends await multi-threaded SDKs, and
+/// drops them on wasm, where the browser is single-threaded, reqwest's `Response`
+/// is `!Send`, and the engine drives every future on that one thread. The
+/// supertrait bound is the cfg'd [`crate::MaybeThreadSafe`] marker and the
+/// futures are cfg'd by `async_trait`'s `?Send` mode on wasm.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait CloudHome: crate::MaybeThreadSafe {
     /// Verify the backend is reachable with the configured credentials.
     /// Setup flows call this *before* persisting credentials, so a typo or
     /// missing bucket fails fast at setup time instead of via a delayed

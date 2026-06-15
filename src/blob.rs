@@ -197,8 +197,12 @@ pub enum DrainControl {
 /// the outbox so a paused queue still accepts new entries but doesn't drain;
 /// in-flight uploads complete normally (process_uploads checks once at the top
 /// of each entry).
-#[async_trait::async_trait]
-pub trait BlobUploadObserver: Send + Sync {
+/// `Send + Sync` with `Send` method futures on native; `?Send` on wasm. See
+/// [`crate::MaybeThreadSafe`] for why the bound is cfg'd — the browser drives
+/// every upload future on one thread.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait BlobUploadObserver: crate::MaybeThreadSafe {
     /// An upload attempt for this blob is starting now.
     async fn on_blob_upload_started(&self, file_id: &str);
 

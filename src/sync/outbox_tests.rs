@@ -119,7 +119,8 @@ impl RecordingObserver {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl BlobUploadObserver for RecordingObserver {
     async fn on_blob_upload_started(&self, file_id: &str) {
         self.events
@@ -166,7 +167,8 @@ impl FailingCloudHome {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl CloudHome for FailingCloudHome {
     async fn write(
         &self,
@@ -213,7 +215,8 @@ struct SlowChunkedCloudHome {
     per_chunk_delay: std::time::Duration,
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl CloudHome for SlowChunkedCloudHome {
     async fn write(
         &self,

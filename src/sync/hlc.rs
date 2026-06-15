@@ -23,6 +23,7 @@
 /// between cycles, so seeding from it alone could let the first post-restart
 /// stamp sort below the device's own un-flushed rows.
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `sync_state` key under which the clock's high-water mark is persisted, so it
@@ -237,11 +238,21 @@ impl UpdatedAtStamper {
     }
 }
 
+/// Epoch milliseconds for the HLC's physical component. Native reads the OS clock
+/// via `std::time`; wasm reads the browser clock via `js_sys::Date::now()`, since
+/// `std::time` has no wasm backend (`SystemTime::now()` panics there). The HLC's
+/// monotonic counter still guarantees ordering when this source repeats or jumps.
+#[cfg(not(target_arch = "wasm32"))]
 fn wall_clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_millis() as u64
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wall_clock_ms() -> u64 {
+    js_sys::Date::now() as u64
 }
 
 #[cfg(test)]
