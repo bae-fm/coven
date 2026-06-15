@@ -5,12 +5,15 @@ pub mod conflict;
 pub mod cycle;
 #[cfg(test)]
 mod cycle_tests;
-#[cfg(test)]
+// Drives the native-only `join` bootstrap, so it builds only on native.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod delete_propagation_tests;
 pub mod envelope;
 pub mod gate;
 pub mod hlc;
-#[cfg(test)]
+// Exercises the register clock through `Database::hlc()`, a native-only accessor
+// (its sole consumer is the native-only SyncManager), so it builds only on native.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod hlc_register_tests;
 pub mod invite;
 #[cfg(test)]
@@ -40,6 +43,12 @@ pub mod session;
 pub mod snapshot;
 pub mod status;
 pub mod storage;
+// The background sync loop runs on a dedicated OS thread (a current-thread tokio
+// runtime that block_on's the loop) holding the `Database` handle. The browser
+// is single-threaded — there is no thread to spawn and the wasm `Database` is
+// `!Send` — and the loop's only consumer is the native-only `sync_manager`, so it
+// is native-only.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sync_loop;
 // The host-facing connected-sync controller: builds the cloud home + sync loop
 // and drives membership. Every method that does real work constructs a

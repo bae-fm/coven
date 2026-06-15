@@ -99,6 +99,9 @@ fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
 /// register clock (so a test can control the wall clock), plus an extra `seed`
 /// step run after the schema is created (to plant `sync_state` rows or seeded
 /// `notes` rows before `Database::open` reads its floor).
+///
+/// Used only by the native-only register-clock tests (`hlc_register_tests`).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_test_db_with_hlc(
     hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
     seed: impl FnOnce(&Connection) -> Result<(), DbError>,
@@ -306,6 +309,9 @@ impl MockSyncStorage {
     /// Store a pre-packed envelope (already signed/packed by the caller) and
     /// advance the device head. For tests that need a specific signature or
     /// envelope timestamp `store_changeset`'s synthetic envelope can't express.
+    ///
+    /// Used only by the native-only register-clock tests (`hlc_register_tests`).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn put_changeset_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
         self.store_packed(device_id, seq, packed);
     }

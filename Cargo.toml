@@ -61,12 +61,30 @@ aws-smithy-http-client = { version = "1.1", default-features = false, features =
 # browser runtime drives sync off the JS event loop in later work.
 tokio = { version = "1.0", features = ["rt", "sync", "macros", "time", "io-util"] }
 rusqlite = { version = "0.40", features = ["session"] }
+# The wasm SQLite that rusqlite's no-bundle path resolves to. Named directly (not
+# just pulled transitively through rusqlite) so the OPFS VFS install can reference
+# `sqlite_wasm_rs::WasmOsCallback`; pinned to the same line rusqlite links, so the
+# VFS registers into the very SQLite the connection uses.
+sqlite-wasm-rs = "0.5"
+# The opfs-sahpool VFS: SQLite-over-OPFS via per-file FileSystemSyncAccessHandles,
+# making the connection durable across page loads. Worker-only (the sync access
+# handles are not available on the main thread), which is why DB code runs on a
+# dedicated Worker.
+sqlite-wasm-vfs = "0.2"
 # Two getrandom majors reach the browser RNG two different ways: rand 0.9 pulls
 # getrandom 0.3 (wasm_js feature + the cfg in .cargo/config.toml); the RustCrypto
 # stack (rand_core 0.6 under chacha20poly1305/crypto_box/dalek) pulls getrandom
 # 0.2, whose `js` feature enables the same backend.
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_legacy = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# The headless wasm test (tests/wasm_opfs.rs) drives a real dedicated Worker in
+# Firefox to prove the connection persists through OPFS. None of these belong on
+# native, which tests the thread-actor path instead.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 apple-native-keyring-store = { version = "0.2", features = ["protected"] }

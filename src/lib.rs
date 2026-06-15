@@ -59,6 +59,16 @@ pub mod oauth;
 pub mod share;
 pub mod storage;
 pub mod sync;
+// Browser-only storage setup: installing the OPFS-backed SQLite VFS that makes
+// the wasm `Database` durable across page loads. Documented at the module.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
+// Headless proof that the wasm `Database` persists on OPFS through coven's own
+// API. Inside the crate (not `tests/`) because it drives the crate-private
+// `take_changeset_and_suspend` capture path. Worker-only — see the module.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_opfs_test;
 
 pub use database::Database;
 pub use sync::hlc::UpdatedAtStamper;
