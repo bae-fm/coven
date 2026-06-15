@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, KeyService};
+use crate::sync::cloud_storage::CloudCipher;
 
 /// Google Drive OAuth sign-in: authorize, find/create the library folder, save
 /// tokens to the keyring. Returns the folder id for the host to persist in its
@@ -284,10 +285,19 @@ pub fn generate_restore_code(
         SetupError("No cloud provider configured. Set up sync first.".to_string())
     })?;
 
-    let encryption_key_hex = key_service
-        .get_encryption_key()
-        .map_err(|e| SetupError(format!("Failed to read encryption key: {e}")))?
-        .ok_or_else(|| SetupError("No encryption key found".to_string()))?;
+    // An encrypted home carries its library key in the restore code so a second
+    // device can read the bucket; a plaintext home has no key (`ek` is omitted),
+    // and the restorer rebuilds a `CloudCipher::Plaintext` from its absence.
+    let ek = if config.cloud_home.encrypted {
+        Some(
+            key_service
+                .get_encryption_key()
+                .map_err(|e| SetupError(format!("Failed to read encryption key: {e}")))?
+                .ok_or_else(|| SetupError("No encryption key found".to_string()))?,
+        )
+    } else {
+        None
+    };
 
     let keypair = key_service
         .get_or_create_user_keypair()
@@ -365,7 +375,7 @@ pub fn generate_restore_code(
     let code = RestoreCode {
         v: 1,
         lid: config.library_id.clone(),
-        ek: encryption_key_hex,
+        ek,
         name: config.library_name.clone(),
         provider,
         sk: URL_SAFE_NO_PAD.encode(keypair.signing_key),
@@ -374,35 +384,54 @@ pub fn generate_restore_code(
     Ok(encode_restore_code(&code))
 }
 
+/// Build the [`CloudCipher`] a library's config selects: an encrypted home seals
+/// every object under the keyring's library key; a plaintext home
+/// (`cloud_home.encrypted == false`) stores objects in the clear.
+///
+/// A plaintext home has no library key, so it never reads the keyring — the
+/// absence of a key there is expected, not an error.
+pub fn build_cloud_cipher(
+    config: &Config,
+    key_service: &KeyService,
+) -> Result<CloudCipher, String> {
+    if !config.cloud_home.encrypted {
+        return Ok(CloudCipher::Plaintext);
+    }
+    let key = key_service
+        .get_encryption_key()
+        .map_err(|e| format!("Failed to read encryption key: {e}"))?
+        .ok_or("No encryption key found")?;
+    let enc = crate::encryption::EncryptionService::new(&key)
+        .map_err(|e| format!("Failed to create encryption service: {e}"))?;
+    Ok(CloudCipher::Encrypted(enc))
+}
+
 /// Create sync storage from config and credentials.
 ///
 /// This is a lighter version of `sync::cycle::init_sync` that only creates the
 /// storage client without starting a sync session or extracting raw DB handles.
 /// Used by membership management which only needs storage access.
+///
+/// `cipher` lets the caller reuse an already-built cipher (so the sync loop and
+/// storage share one instance for in-place key rotation); when `None` it is
+/// built from config via [`build_cloud_cipher`].
 pub async fn create_sync_storage(
     config: &Config,
     key_service: &KeyService,
-    encryption_service: &Option<crate::encryption::EncryptionService>,
+    cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
-) -> Result<crate::sync::encrypted_storage::EncryptedSyncStorage, String> {
+) -> Result<crate::sync::cloud_storage::CloudSyncStorage, String> {
     let cloud_home = super::create_cloud_home(config, key_service, clock)
         .await
         .map_err(|e| format!("{e}"))?;
 
-    let encryption = match encryption_service {
-        Some(enc) => enc.clone(),
-        None => {
-            let key = key_service
-                .get_encryption_key()
-                .map_err(|e| format!("Failed to read encryption key: {e}"))?
-                .ok_or("No encryption key found")?;
-            crate::encryption::EncryptionService::new(&key)
-                .map_err(|e| format!("Failed to create encryption service: {e}"))?
-        }
+    let cipher = match cipher {
+        Some(c) => c,
+        None => build_cloud_cipher(config, key_service)?,
     };
 
-    Ok(crate::sync::encrypted_storage::EncryptedSyncStorage::new(
-        cloud_home, encryption,
+    Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
+        cloud_home, cipher,
     ))
 }
 

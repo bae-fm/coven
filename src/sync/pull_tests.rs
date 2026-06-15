@@ -10,8 +10,8 @@ use crate::blob::BlobPlan;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::sync::cloud_storage::{CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
-use crate::sync::encrypted_storage::EncryptedSyncStorage;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::service::SyncService;
 use crate::sync::storage::SyncStorage;
@@ -208,17 +208,17 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     assert_eq!(downloaded, b"PHOTOBYTES");
 }
 
-/// Full encrypted blob round-trip through `EncryptedSyncStorage` over a shared
-/// `CloudHome`. Device A publishes a note plus its cover photo via the real
+/// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
+/// shared `CloudHome`. Device A publishes a note plus its cover photo via the real
 /// `SyncService::sync`; the blob lands ciphertext at rest. Device B — a fresh DB
 /// with its own asset directory but the same library key — pulls, downloads the
 /// blob, decrypts it, and recovers the original bytes byte-for-byte.
 #[tokio::test]
 async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // One cloud and one library key, shared by both devices.
-    let storage = EncryptedSyncStorage::new(
+    let storage = CloudSyncStorage::new(
         Box::new(InMemoryCloudHome::new()),
-        EncryptionService::new_with_key(&[7u8; 32]),
+        CloudCipher::Encrypted(EncryptionService::new_with_key(&[7u8; 32])),
     );
 
     // Device A: a note and its cover photo, the file present locally.
@@ -283,7 +283,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     .expect("push_changeset");
 
     // At rest the cover photo is ciphertext, not the source bytes.
-    let blob_key = EncryptedSyncStorage::blob_key("photos", "p1cover");
+    let blob_key = CloudSyncStorage::blob_key("photos", "p1cover");
     let at_rest = storage
         .cloud_home()
         .read(&blob_key)

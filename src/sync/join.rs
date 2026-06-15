@@ -17,7 +17,7 @@ use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
 use crate::library_dir::LibraryDir;
 use crate::oauth::OAuthError;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
-use crate::sync::encrypted_storage::EncryptedSyncStorage;
+use crate::sync::cloud_storage::{CloudCipher, CloudSyncStorage};
 use crate::sync::invite::{unwrap_library_key, InviteError};
 use crate::sync::pull::{pull_changes, PullError};
 use crate::sync::session::SyncedTable;
@@ -222,10 +222,13 @@ pub async fn join_library(
     let encryption_key = unwrap_library_key(cloud_home.as_ref(), &user_keypair).await?;
     let encryption_key_hex = hex::encode(encryption_key);
 
-    // Step 3: Create the sync storage with the real encryption key.
+    // Step 3: Create the sync storage with the real encryption key. Joining a
+    // shared library only makes sense over an encrypted home — the invite wraps
+    // the library key — so the cipher is always `Encrypted` here.
     on_status("Downloading library snapshot...");
     let encryption = EncryptionService::new(&encryption_key_hex)?;
-    let storage = EncryptedSyncStorage::new(cloud_home, encryption.clone());
+    let cipher = CloudCipher::Encrypted(encryption);
+    let storage = CloudSyncStorage::new(cloud_home, cipher.clone());
 
     // Step 4: Create library directory using the invite code's library_id.
     let library_id = code.library_id;
@@ -240,7 +243,7 @@ pub async fn join_library(
 
     let result = bootstrap_and_save(
         &storage,
-        &encryption,
+        &cipher,
         &encryption_key_hex,
         &library_dir,
         &library_id,
@@ -264,8 +267,8 @@ pub async fn join_library(
 /// Inner bootstrap + save logic, separated so the caller can clean up on failure.
 #[allow(clippy::too_many_arguments)]
 async fn bootstrap_and_save(
-    storage: &EncryptedSyncStorage,
-    encryption: &EncryptionService,
+    storage: &CloudSyncStorage,
+    cipher: &CloudCipher,
     encryption_key_hex: &str,
     library_dir: &LibraryDir,
     library_id: &str,
@@ -280,7 +283,7 @@ async fn bootstrap_and_save(
     // Step 5: Bootstrap from snapshot.
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
-    let bootstrap_result = bootstrap_from_snapshot(bucket_dyn, encryption, &db_path).await?;
+    let bootstrap_result = bootstrap_from_snapshot(bucket_dyn, cipher, &db_path).await?;
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",
@@ -321,7 +324,7 @@ async fn bootstrap_and_save(
         library_dir,
         library_name,
         join_info,
-        encryption,
+        cipher,
     );
 
     config.save_to_config_yaml()?;
@@ -456,14 +459,16 @@ pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> CloudHomeCred
     }
 }
 
-/// Build the Config struct from join parameters.
+/// Build the Config struct from join/restore parameters. The cipher records
+/// whether this home is encrypted (a library key is stored, with its
+/// fingerprint) or plaintext (`encrypted = false`, no key, no fingerprint).
 pub(crate) fn build_config(
     library_id: &str,
     device_id: &str,
     library_dir: &LibraryDir,
     library_name: &str,
     join_info: &CloudHomeJoinInfo,
-    encryption: &EncryptionService,
+    cipher: &CloudCipher,
 ) -> Config {
     let mut config = Config::with_defaults(
         library_id.to_string(),
@@ -472,8 +477,18 @@ pub(crate) fn build_config(
         library_name.to_string(),
     );
 
-    config.encryption_key_stored = true;
-    config.encryption_key_fingerprint = Some(encryption.fingerprint());
+    match cipher {
+        CloudCipher::Encrypted(enc) => {
+            config.cloud_home.encrypted = true;
+            config.encryption_key_stored = true;
+            config.encryption_key_fingerprint = Some(enc.fingerprint());
+        }
+        CloudCipher::Plaintext => {
+            config.cloud_home.encrypted = false;
+            config.encryption_key_stored = false;
+            config.encryption_key_fingerprint = None;
+        }
+    }
 
     config.cloud_home.provider = Some(match join_info {
         CloudHomeJoinInfo::S3 { .. } => CloudProvider::S3,

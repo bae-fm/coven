@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyService, UserKeypair};
 
+use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
 use super::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
@@ -202,26 +203,36 @@ pub async fn remove_member(
     Ok(new_key)
 }
 
-/// Apply the effects of a member removal: update keyring, config, and encryption service.
-/// Rotate the in-use encryption key: persist it to the keyring and swap the live
-/// encryption service. Returns the new key's fingerprint for the host to record
-/// in its own config — coven never writes the host's config.
+/// Rotate the in-use encryption key after a member removal: persist it to the
+/// keyring and swap the live cipher in place. Returns the new key's fingerprint
+/// for the host to record in its own config — coven never writes the host's
+/// config.
+///
+/// A plaintext home has no library key to rotate, so this is an error there:
+/// sharing (and hence member removal) requires an encrypted home.
 pub fn apply_key_rotation(
     new_key: [u8; 32],
     key_service: &KeyService,
-    encryption_lock: &std::sync::RwLock<EncryptionService>,
+    cipher_lock: &std::sync::RwLock<CloudCipher>,
 ) -> Result<String, MembershipOpsError> {
-    let new_key_hex = hex::encode(new_key);
-    key_service
-        .set_encryption_key(&new_key_hex)
-        .map_err(|e| MembershipOpsError(format!("Failed to persist new encryption key: {e}")))?;
-
-    {
-        let mut enc = encryption_lock.write().unwrap();
-        *enc = EncryptionService::from_key(new_key);
-    }
-
-    let new_fingerprint = encryption_lock.read().unwrap().fingerprint();
+    let new_fingerprint = {
+        let mut cipher = cipher_lock.write().unwrap();
+        match &mut *cipher {
+            CloudCipher::Encrypted(enc) => {
+                let new_key_hex = hex::encode(new_key);
+                key_service.set_encryption_key(&new_key_hex).map_err(|e| {
+                    MembershipOpsError(format!("Failed to persist new encryption key: {e}"))
+                })?;
+                *enc = EncryptionService::from_key(new_key);
+                enc.fingerprint()
+            }
+            CloudCipher::Plaintext => {
+                return Err(MembershipOpsError(
+                    "sharing requires an encrypted cloud home".to_string(),
+                ));
+            }
+        }
+    };
     Ok(new_fingerprint)
 }
 

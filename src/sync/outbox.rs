@@ -13,8 +13,8 @@ use tracing::warn;
 
 use crate::blob::{BlobUploadObserver, DrainControl};
 use crate::database::Database;
-use crate::encryption::EncryptionService;
 use crate::storage::cloud::CloudHome;
+use crate::sync::cloud_storage::CloudCipher;
 
 /// How often the upload pipeline forwards a mid-file byte count to the
 /// observer. coven's `write` reports per chunk (every few MiB), which on a fast
@@ -121,7 +121,9 @@ async fn record_failure(
     }
 }
 
-/// Read an upload's local plaintext, resolve its scope to a key, and encrypt.
+/// Read an upload's local plaintext, resolve its scope to a key, and seal it for
+/// storage (encrypting under the scope's key for an encrypted home, or storing
+/// it verbatim for a plaintext one).
 ///
 /// The two failure modes — the local file can't be read, the scope can't be
 /// resolved to a key (a missing `item_keys` row) — both surface as an `Err`
@@ -129,9 +131,9 @@ async fn record_failure(
 /// (warn + record + skip) instead of one per step. The scope is resolved at
 /// drain (not enqueue) because the key may be minted/synced after the blob was
 /// queued, and an `Item` scope reads `item_keys` here, holding `db`.
-async fn resolve_and_encrypt(
+async fn resolve_and_seal(
     db: &Database,
-    encryption: &std::sync::RwLock<EncryptionService>,
+    cipher: &std::sync::RwLock<CloudCipher>,
     file_path: &Path,
     scope: crate::blob::BlobScope,
 ) -> Result<Vec<u8>, String> {
@@ -142,9 +144,7 @@ async fn resolve_and_encrypt(
         .resolve_blob_scope(scope)
         .await
         .map_err(|e| format!("cannot resolve blob scope: {e}"))?;
-    let enc =
-        crate::sync::encrypted_storage::encryption_for_scope(resolved, &encryption.read().unwrap());
-    Ok(enc.encrypt(&data))
+    Ok(cipher.read().unwrap().seal_scoped(resolved, &data))
 }
 
 /// The result of one outbox drain pass.
@@ -176,7 +176,7 @@ pub struct DrainOutcome {
 pub async fn process_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
-    encryption: &std::sync::RwLock<EncryptionService>,
+    cipher: &std::sync::RwLock<CloudCipher>,
     library_dir: &Path,
     clock: &dyn crate::clock::Clock,
     observer: Option<&dyn BlobUploadObserver>,
@@ -240,11 +240,11 @@ pub async fn process_uploads(
         };
 
         // Read the local plaintext, resolve the scope to a key (an `Item` scope
-        // reads `item_keys` here, holding `db`), and encrypt — all in one step
-        // with a single failure path. A missing key is a host bug; record it as
-        // a failure rather than silently encrypting under the master key (which
-        // no share recipient could read).
-        let encrypted = match resolve_and_encrypt(db, encryption, &file_path, scope.clone()).await {
+        // reads `item_keys` here, holding `db`), and seal it for storage — all in
+        // one step with a single failure path. A missing key is a host bug;
+        // record it as a failure rather than silently sealing under the master
+        // key (which no share recipient could read).
+        let sealed = match resolve_and_seal(db, cipher, &file_path, scope.clone()).await {
             Ok(bytes) => bytes,
             Err(msg) => {
                 warn!("Upload failed for {}: {msg}", entry.cloud_key);
@@ -253,8 +253,7 @@ pub async fn process_uploads(
             }
         };
 
-        match upload_with_progress(cloud_home, &entry.cloud_key, file_id, encrypted, observer).await
-        {
+        match upload_with_progress(cloud_home, &entry.cloud_key, file_id, sealed, observer).await {
             Ok(()) => {
                 if let Err(e) = db.remove_cloud_outbox_entry(entry.id).await {
                     warn!("Failed to remove outbox entry {}: {e}", entry.id);

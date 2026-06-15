@@ -22,6 +22,7 @@ use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
+use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::storage::SyncStorage;
@@ -33,7 +34,7 @@ const T0: &str = "2024-01-01T00:00:00Z";
 async fn run_cycle_m(
     storage: &MockSyncStorage,
     db: &Database,
-    enc: &RwLock<EncryptionService>,
+    cipher: &RwLock<CloudCipher>,
     keypair: &UserKeypair,
     hlc: &Hlc,
     ld: &LibraryDir,
@@ -44,7 +45,7 @@ async fn run_cycle_m(
         hlc,
         &SystemClock,
         db,
-        enc,
+        cipher,
         keypair,
         ld,
         None,
@@ -93,7 +94,9 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(EncryptionService::new_with_key(&[5u8; 32]));
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[5u8; 32],
+    )));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
@@ -144,7 +147,9 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(EncryptionService::new_with_key(&[8u8; 32]));
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[8u8; 32],
+    )));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
@@ -193,7 +198,9 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(EncryptionService::new_with_key(&[9u8; 32]));
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[9u8; 32],
+    )));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
@@ -219,7 +226,9 @@ async fn cycle_reports_resume_drain_promptly_when_drain_breaks_mid_batch() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(EncryptionService::new_with_key(&[3u8; 32]));
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[3u8; 32],
+    )));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let cloud = InMemoryCloudHome::new();

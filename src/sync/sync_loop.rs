@@ -20,12 +20,11 @@ use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::changeset::RowChange;
 use crate::clock::ClockRef;
 use crate::database::Database;
-use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 
+use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::cycle::SyncComponents;
-use super::encrypted_storage::EncryptedSyncStorage;
 use super::hlc::Hlc;
 use super::storage::SyncStorage;
 
@@ -55,10 +54,10 @@ pub struct SyncLoopHandle {
 }
 
 struct SyncLoopInner {
-    storage: Arc<EncryptedSyncStorage>,
+    storage: Arc<CloudSyncStorage>,
     hlc: Arc<Hlc>,
     device_id: String,
-    encryption: Arc<std::sync::RwLock<EncryptionService>>,
+    cipher: Arc<std::sync::RwLock<CloudCipher>>,
     db: Database,
     user_keypair: UserKeypair,
     blob_plan: Arc<dyn BlobPlan>,
@@ -82,7 +81,7 @@ impl SyncLoopHandle {
                 storage: components.storage,
                 hlc: components.hlc,
                 device_id: components.device_id,
-                encryption: components.encryption,
+                cipher: components.cipher,
                 db,
                 user_keypair: components.user_keypair,
                 blob_plan,
@@ -269,7 +268,7 @@ impl SyncLoopHandle {
 
     // -- Accessors for membership operations --
 
-    pub fn storage(&self) -> &Arc<EncryptedSyncStorage> {
+    pub fn storage(&self) -> &Arc<CloudSyncStorage> {
         &self.inner.storage
     }
 
@@ -281,8 +280,8 @@ impl SyncLoopHandle {
         &self.inner.hlc
     }
 
-    pub fn encryption(&self) -> &Arc<std::sync::RwLock<EncryptionService>> {
-        &self.inner.encryption
+    pub fn cipher(&self) -> &Arc<std::sync::RwLock<CloudCipher>> {
+        &self.inner.cipher
     }
 }
 
@@ -301,7 +300,7 @@ async fn run_single_cycle(
         &inner.hlc,
         clock,
         &inner.db,
-        &inner.encryption,
+        &inner.cipher,
         &inner.user_keypair,
         library_dir,
         Some(cloud_home),

@@ -31,7 +31,7 @@ use tracing::warn;
 
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError};
-use crate::sync::encrypted_storage::EncryptedSyncStorage;
+use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::Database;
 
 /// What can go wrong creating, opening, or revoking a share.
@@ -102,7 +102,7 @@ impl ShareManifest {
     /// Whether `cloud_key` is one of the authorized blobs. Whatever serves the
     /// share resolves a requested object to its cloud key and asks coven; coven
     /// hashes each authorized [`BlobId`] to its cloud key with the same layout the
-    /// storage layer uses ([`EncryptedSyncStorage::blob_key`]) and matches. The
+    /// storage layer uses ([`CloudSyncStorage::blob_key`]) and matches. The
     /// server therefore never learns coven's `{ab}/{cd}` partitioning.
     pub fn allows(&self, cloud_key: &str) -> bool {
         self.blobs.iter().any(|b| {
@@ -122,7 +122,7 @@ impl ShareManifest {
                 );
                 return false;
             }
-            EncryptedSyncStorage::blob_key(&b.namespace, &b.id) == cloud_key
+            CloudSyncStorage::blob_key(&b.namespace, &b.id) == cloud_key
         })
     }
 }

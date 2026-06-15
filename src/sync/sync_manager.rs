@@ -16,6 +16,7 @@ use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
 use crate::storage::cloud::CloudHome;
+use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
@@ -142,6 +143,15 @@ impl SyncManager {
             return;
         }
 
+        // The home's at-rest cipher: encrypted (the manager's library key) or
+        // plaintext, per config. Built here so the sync loop and storage share
+        // one instance — a member removal rotates the key in place through it.
+        let cipher = if config.cloud_home.encrypted {
+            CloudCipher::Encrypted(self.encryption_service.clone())
+        } else {
+            CloudCipher::Plaintext
+        };
+
         // Initialize sync loop. The synced-table set is owned by the Database, so
         // init_sync reads it from there rather than from a separately-held copy.
         let sync_loop = crate::sync::cycle::init_sync(
@@ -149,7 +159,7 @@ impl SyncManager {
             &self.key_service,
             &self.db,
             self.clock.clone(),
-            &self.encryption_service,
+            &cipher,
             self.hlc.clone(),
         )
         .await;
@@ -227,7 +237,7 @@ impl SyncManager {
         let storage = crate::storage::cloud::setup::create_sync_storage(
             &config,
             &self.key_service,
-            &Some(self.encryption_service.clone()),
+            None,
             self.clock.clone(),
         )
         .await
@@ -265,6 +275,12 @@ impl SyncManager {
             .unwrap()
             .clone()
             .ok_or("Sync is not configured")?;
+
+        // Inviting a member wraps the library key to them, which only an encrypted
+        // home has. Refuse before touching the membership chain.
+        if sync_loop.cipher().read().unwrap().is_plaintext() {
+            return Err("sharing requires an encrypted cloud home".to_string());
+        }
 
         let encryption_key_hex = self
             .key_service
@@ -310,6 +326,13 @@ impl SyncManager {
             .clone()
             .ok_or("Sync is not configured")?;
 
+        // Removing a member rotates the library key, which only an encrypted home
+        // has. Refuse up front so a plaintext home never mutates the membership
+        // chain or re-wraps keys before the rotation fails.
+        if sync_loop.cipher().read().unwrap().is_plaintext() {
+            return Err("sharing requires an encrypted cloud home".to_string());
+        }
+
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
 
@@ -328,7 +351,7 @@ impl SyncManager {
         let fingerprint = crate::sync::membership_ops::apply_key_rotation(
             new_key,
             &self.key_service,
-            sync_loop.encryption(),
+            sync_loop.cipher(),
         )
         .map_err(|e| e.0)?;
 

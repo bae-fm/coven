@@ -15,6 +15,7 @@ use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
+use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::join::open_db_and_pull;
@@ -27,7 +28,7 @@ use crate::sync::test_helpers::*;
 
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
-    let enc = EncryptionService::new_with_key(&[7u8; 32]);
+    let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[7u8; 32]));
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables();
 
@@ -132,7 +133,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 /// absent — a synced album renders a placeholder cover. Asserts the file lands.
 #[tokio::test]
 async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
-    let enc = EncryptionService::new_with_key(&[9u8; 32]);
+    let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[9u8; 32]));
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables();
 
@@ -231,7 +232,7 @@ async fn backfill_pending(db: &Database) -> bool {
 /// advanced that cursor past the INSERT that carried this one.
 #[tokio::test]
 async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
-    let enc = EncryptionService::new_with_key(&[11u8; 32]);
+    let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[11u8; 32]));
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables();
 

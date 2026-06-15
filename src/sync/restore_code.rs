@@ -5,6 +5,9 @@
 //!
 //! The code contains secrets (encryption key, S3 credentials). OAuth tokens are NOT included
 //! because they expire -- the user re-authenticates on restore.
+//!
+//! The encryption key (`ek`) is present for an encrypted home and absent for a
+//! plaintext one: `ek` present ⇒ encrypted, `ek` absent ⇒ plaintext.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -19,8 +22,10 @@ pub struct RestoreCode {
     pub v: u8,
     /// Library ID (UUID).
     pub lid: String,
-    /// Encryption key (hex-encoded, 64 chars).
-    pub ek: String,
+    /// Encryption key (hex-encoded, 64 chars), present only for an encrypted
+    /// home. Absent ⇒ a plaintext home, restored with `CloudCipher::Plaintext`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ek: Option<String>,
     /// Library display name.
     pub name: String,
     /// Cloud provider and its connection details.
@@ -159,7 +164,7 @@ mod tests {
         RestoreCode {
             v: 1,
             lid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            ek: "aa".repeat(32),
+            ek: Some("aa".repeat(32)),
             name: "Test Library".to_string(),
             provider: RestoreProvider::S3 {
                 bucket: "my-bucket".to_string(),
@@ -210,7 +215,7 @@ mod tests {
         let code = RestoreCode {
             v: 1,
             lid: "lib-123".to_string(),
-            ek: "bb".repeat(32),
+            ek: Some("bb".repeat(32)),
             name: "CloudKit Library".to_string(),
             provider: RestoreProvider::CloudKit,
             sk: test_sk(),
@@ -226,7 +231,7 @@ mod tests {
         let code = RestoreCode {
             v: 1,
             lid: "lib-456".to_string(),
-            ek: "cc".repeat(32),
+            ek: Some("cc".repeat(32)),
             name: "GDrive Library".to_string(),
             provider: RestoreProvider::GoogleDrive {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
@@ -247,7 +252,7 @@ mod tests {
         let code = RestoreCode {
             v: 1,
             lid: "lib-789".to_string(),
-            ek: "dd".repeat(32),
+            ek: Some("dd".repeat(32)),
             name: "Dropbox Library".to_string(),
             provider: RestoreProvider::Dropbox {
                 folder_path: "/Apps/your-app/My Library".to_string(),
@@ -268,7 +273,7 @@ mod tests {
         let code = RestoreCode {
             v: 1,
             lid: "lib-abc".to_string(),
-            ek: "ee".repeat(32),
+            ek: Some("ee".repeat(32)),
             name: "OneDrive Library".to_string(),
             provider: RestoreProvider::OneDrive {
                 drive_id: "drive-id-123".to_string(),
@@ -344,7 +349,7 @@ mod tests {
         let code = RestoreCode {
             v: 1,
             lid: "lib-1".to_string(),
-            ek: "aa".repeat(32),
+            ek: Some("aa".repeat(32)),
             name: "Test Library".to_string(),
             provider: RestoreProvider::S3 {
                 bucket: "b".to_string(),
@@ -362,6 +367,51 @@ mod tests {
         assert!(!json.contains("key_prefix"));
         // Required fields should be present
         assert!(json.contains("name"));
+    }
+
+    /// A plaintext home's restore code carries no encryption key: `ek` is `None`,
+    /// so the field is omitted from the JSON, and it round-trips back to `None`.
+    #[test]
+    fn plaintext_code_omits_ek() {
+        let code = RestoreCode {
+            v: 1,
+            lid: "lib-plain".to_string(),
+            ek: None,
+            name: "Plaintext Library".to_string(),
+            provider: RestoreProvider::S3 {
+                bucket: "b".to_string(),
+                region: "r".to_string(),
+                endpoint: None,
+                key_prefix: None,
+                access_key: "ak".to_string(),
+                secret_key: "sk-cred".to_string(),
+            },
+            sk: test_sk(),
+        };
+        let json = serde_json::to_string(&code).unwrap();
+        assert!(
+            !json.contains("\"ek\""),
+            "a plaintext home's code must omit ek: {json}"
+        );
+
+        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
+        assert_eq!(decoded.ek, None, "ek round-trips back to None");
+    }
+
+    /// An encrypted home's restore code carries the key: `ek` is `Some`, present
+    /// in the JSON, and round-trips intact.
+    #[test]
+    fn encrypted_code_includes_ek() {
+        let code = sample_s3_code();
+        assert!(code.ek.is_some());
+        let json = serde_json::to_string(&code).unwrap();
+        assert!(
+            json.contains("\"ek\""),
+            "an encrypted home's code must include ek: {json}"
+        );
+
+        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
+        assert_eq!(decoded.ek, code.ek, "ek round-trips intact");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Restore an existing library from cloud storage.
 //!
-//! Unlike join (which unwraps the encryption key from an invite), restore takes the
-//! encryption key directly from the user. Unlike join, restore sets
+//! Unlike join (which unwraps the encryption key from an invite), restore takes
+//! the encryption key directly from the user — present for an encrypted home,
+//! absent for a plaintext one. Unlike join, restore sets
 //! `cloudkit_is_shared = false` because the restorer is the owner.
 
 use std::path::Path;
@@ -16,7 +17,7 @@ use crate::keys::{KeyError, KeyService};
 use crate::library_dir::LibraryDir;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
-use crate::sync::encrypted_storage::EncryptedSyncStorage;
+use crate::sync::cloud_storage::{CloudCipher, CloudSyncStorage};
 use crate::sync::join::{build_config, derive_credentials, open_db_and_pull, JoinError};
 use crate::sync::pull::PullError;
 use crate::sync::session::SyncedTable;
@@ -181,7 +182,7 @@ async fn build_cloud_home(
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     library_id: &str,
-    encryption_key_hex: &str,
+    encryption_key_hex: Option<&str>,
     library_name: &str,
     synced_tables: &[SyncedTable],
     source: RestoreSource,
@@ -191,28 +192,33 @@ pub async fn restore_from_cloud(
     make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
-    if library_id.is_empty() || encryption_key_hex.is_empty() {
-        return Err(RestoreError::Database(
-            "Library ID and encryption key are required".to_string(),
-        ));
+    if library_id.is_empty() {
+        return Err(RestoreError::Database("Library ID is required".to_string()));
     }
-    if encryption_key_hex.len() != 64 {
-        return Err(RestoreError::Database(
-            "Encryption key must be 64 hex characters (32 bytes)".to_string(),
-        ));
-    }
-    if hex::decode(encryption_key_hex).is_err() {
-        return Err(RestoreError::Database(
-            "Invalid hex encoding in encryption key".to_string(),
-        ));
-    }
+
+    // A key present ⇒ an encrypted home (validate it and build the cipher); a key
+    // absent ⇒ a plaintext home (`CloudCipher::Plaintext`, no key to validate).
+    let cipher = match encryption_key_hex {
+        Some(key_hex) => {
+            if key_hex.len() != 64 {
+                return Err(RestoreError::Database(
+                    "Encryption key must be 64 hex characters (32 bytes)".to_string(),
+                ));
+            }
+            if hex::decode(key_hex).is_err() {
+                return Err(RestoreError::Database(
+                    "Invalid hex encoding in encryption key".to_string(),
+                ));
+            }
+            on_status("Verifying encryption key...");
+            CloudCipher::Encrypted(EncryptionService::new(key_hex)?)
+        }
+        None => CloudCipher::Plaintext,
+    };
 
     let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
 
-    // Create encryption service from the user-provided key.
-    on_status("Verifying encryption key...");
-    let encryption = EncryptionService::new(encryption_key_hex)?;
-    let storage = EncryptedSyncStorage::new(cloud_home, encryption.clone());
+    let storage = CloudSyncStorage::new(cloud_home, cipher.clone());
 
     // Create library directory.
     let device_id = ids.new_id();
@@ -225,7 +231,7 @@ pub async fn restore_from_cloud(
 
     let result = bootstrap_and_save(
         &storage,
-        &encryption,
+        &cipher,
         encryption_key_hex,
         &library_dir,
         library_id,
@@ -332,7 +338,7 @@ pub async fn restore_from_code(
 
     let config = restore_from_cloud(
         &parsed.lid,
-        &parsed.ek,
+        parsed.ek.as_deref(),
         &parsed.name,
         synced_tables,
         source,
@@ -357,9 +363,9 @@ pub async fn restore_from_code(
 /// Inner bootstrap + save logic, separated so the caller can clean up on failure.
 #[allow(clippy::too_many_arguments)]
 async fn bootstrap_and_save(
-    storage: &EncryptedSyncStorage,
-    encryption: &EncryptionService,
-    encryption_key_hex: &str,
+    storage: &CloudSyncStorage,
+    cipher: &CloudCipher,
+    encryption_key_hex: Option<&str>,
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
@@ -374,7 +380,7 @@ async fn bootstrap_and_save(
     on_status("Downloading library snapshot...");
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
-    let bootstrap_result = bootstrap_from_snapshot(bucket_dyn, encryption, &db_path).await?;
+    let bootstrap_result = bootstrap_from_snapshot(bucket_dyn, cipher, &db_path).await?;
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",
@@ -400,22 +406,26 @@ async fn bootstrap_and_save(
         info!("Applied {changesets_applied} changesets since snapshot");
     }
 
-    // Step 5: Save encryption key to keyring.
+    // Step 5: Save the encryption key to the keyring — only for an encrypted
+    // home. A plaintext home has no key to store.
     on_status("Saving configuration...");
-    key_service.set_encryption_key(encryption_key_hex)?;
+    if let Some(key_hex) = encryption_key_hex {
+        key_service.set_encryption_key(key_hex)?;
+    }
 
     // Step 6: Save cloud credentials to keyring.
     let credentials = derive_credentials(join_info);
     key_service.set_cloud_home_credentials(&credentials)?;
 
-    // Step 7: Create and save config.
+    // Step 7: Create and save config. The cipher records whether this home is
+    // encrypted (key stored + fingerprint) or plaintext (`encrypted = false`).
     let mut config = build_config(
         library_id,
         device_id,
         library_dir,
         library_name,
         join_info,
-        encryption,
+        cipher,
     );
 
     // Restore is done by the owner — CloudKit uses the private database.

@@ -14,12 +14,11 @@ use crate::changeset::RowChange;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::Database;
-use crate::encryption::EncryptionService;
 use crate::keys::{KeyService, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
 
-use super::encrypted_storage::EncryptedSyncStorage;
+use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
 use super::service::SyncService;
 use super::storage::SyncStorage;
@@ -138,7 +137,7 @@ pub async fn run_single_sync_cycle(
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
     db: &Database,
-    encryption: &std::sync::RwLock<EncryptionService>,
+    cipher: &std::sync::RwLock<CloudCipher>,
     user_keypair: &UserKeypair,
     library_dir: &LibraryDir,
     cloud_home: Option<&dyn CloudHome>,
@@ -213,15 +212,8 @@ pub async fn run_single_sync_cycle(
     // loop's cadence below.
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
-        match super::outbox::process_uploads(
-            db,
-            ch,
-            encryption,
-            library_dir.as_ref(),
-            clock,
-            observer,
-        )
-        .await
+        match super::outbox::process_uploads(db, ch, cipher, library_dir.as_ref(), clock, observer)
+            .await
         {
             Ok(outcome) => {
                 resume_drain_promptly = outcome.yielded_for_publish;
@@ -502,10 +494,10 @@ pub async fn run_single_sync_cycle(
         // on one `/tmp/snapshot.db`. A library's own cycles run serially.
         let temp_dir = library_dir.as_ref().to_path_buf();
         let snapshot_result = {
-            let enc = encryption.read().unwrap().clone();
+            let cipher = cipher.read().unwrap().clone();
             let tables = tables.to_vec();
             db.call(move |conn| {
-                super::snapshot::create_snapshot(conn, &temp_dir, &tables, &enc)
+                super::snapshot::create_snapshot(conn, &temp_dir, &tables, &cipher)
                     .map_err(|e| crate::database::DbError(e.to_string()))
             })
             .await
@@ -559,15 +551,17 @@ pub async fn run_single_sync_cycle(
 
 /// Initialize sync infrastructure from config and credentials.
 ///
-/// Creates the encrypted storage, bootstraps auth keys, and returns the
-/// components the sync loop needs. Returns None if any component isn't available
-/// (missing config, credentials, etc.).
+/// Creates the cloud storage with the caller's [`CloudCipher`] (so the sync loop
+/// and snapshot creation share one instance — a member removal rotates the key
+/// in place through it), bootstraps auth keys, and returns the components the
+/// sync loop needs. Returns None if any component isn't available (missing
+/// config, credentials, etc.).
 pub async fn init_sync(
     config: &Config,
     key_service: &KeyService,
     db: &Database,
     clock: ClockRef,
-    encryption: &EncryptionService,
+    cipher: &CloudCipher,
     hlc: std::sync::Arc<Hlc>,
 ) -> Option<SyncComponents> {
     // Integration guard. The host declared its synced tables to `Database::open`;
@@ -585,7 +579,7 @@ pub async fn init_sync(
     let storage = match crate::storage::cloud::setup::create_sync_storage(
         config,
         key_service,
-        &Some(encryption.clone()),
+        Some(cipher.clone()),
         clock.clone(),
     )
     .await
@@ -596,7 +590,7 @@ pub async fn init_sync(
             return None;
         }
     };
-    let encryption_lock = storage.shared_encryption();
+    let cipher_lock = storage.shared_cipher();
 
     let user_keypair = match key_service.get_or_create_user_keypair() {
         Ok(kp) => kp,
@@ -667,7 +661,7 @@ pub async fn init_sync(
         storage: std::sync::Arc::new(storage),
         hlc,
         device_id: config.device_id.clone(),
-        encryption: encryption_lock,
+        cipher: cipher_lock,
         user_keypair,
     })
 }
@@ -675,12 +669,12 @@ pub async fn init_sync(
 /// Components needed to run sync cycles.
 ///
 /// The connection itself is the shared [`Database`]; the sync loop holds a clone
-/// of it, so these carry only the storage, register clock, device identity,
-/// encryption, and keypair.
+/// of it, so these carry only the storage, register clock, device identity, the
+/// at-rest cipher, and keypair.
 pub struct SyncComponents {
-    pub storage: std::sync::Arc<EncryptedSyncStorage>,
+    pub storage: std::sync::Arc<CloudSyncStorage>,
     pub hlc: std::sync::Arc<Hlc>,
     pub device_id: String,
-    pub encryption: std::sync::Arc<std::sync::RwLock<EncryptionService>>,
+    pub cipher: std::sync::Arc<std::sync::RwLock<CloudCipher>>,
     pub user_keypair: UserKeypair,
 }

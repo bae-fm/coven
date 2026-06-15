@@ -1,9 +1,10 @@
 /// Snapshots and garbage collection for the sync system.
 ///
 /// Periodically, a device creates a full snapshot of the database via
-/// `VACUUM INTO`, encrypts it, and uploads as `snapshot.db.enc`. This
-/// allows new devices to bootstrap without replaying the entire changeset
-/// history, and enables GC of old changesets.
+/// `VACUUM INTO`, seals it through the home's [`CloudCipher`], and uploads it as
+/// `snapshot.db{suffix}` (`.enc` for an encrypted home, no suffix for a
+/// plaintext one). This allows new devices to bootstrap without replaying the
+/// entire changeset history, and enables GC of old changesets.
 ///
 /// Snapshot creation policy: after every N changesets (default 100) or
 /// T hours (default 24) since the last snapshot.
@@ -14,9 +15,9 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use super::cloud_storage::CloudCipher;
 use super::session::SyncedTable;
 use super::storage::{StorageError, SyncStorage};
-use crate::encryption::EncryptionService;
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
@@ -47,7 +48,7 @@ pub enum SnapshotError {
     ClearFailed(String),
 }
 
-/// Metadata stored alongside a snapshot in `snapshot_meta.json.enc`.
+/// Metadata stored alongside a snapshot in `snapshot_meta.json{suffix}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMeta {
     /// Per-device cursors at snapshot time: device_id -> head seq.
@@ -65,11 +66,12 @@ pub struct BootstrapResult {
     pub cursors: HashMap<String, u64>,
 }
 
-/// Create a snapshot of the database as encrypted bytes.
+/// Create a snapshot of the database as bytes sealed for storage.
 ///
 /// Uses `VACUUM INTO` to create a clean copy of the database at a temp path,
 /// then clears every non-synced table's data from that copy, reads the bytes,
-/// encrypts, and returns the encrypted blob.
+/// seals them through the home's [`CloudCipher`] (encrypting for an encrypted
+/// home, verbatim for a plaintext one), and returns the sealed blob.
 ///
 /// A snapshot is restored byte-for-byte as the joining device's `library.db`
 /// (no migration rebuild), so it must carry only data that is eligible to
@@ -82,7 +84,7 @@ pub fn create_snapshot(
     conn: &Connection,
     temp_dir: &Path,
     tables: &[SyncedTable],
-    encryption: &EncryptionService,
+    cipher: &CloudCipher,
 ) -> Result<Vec<u8>, SnapshotError> {
     // A snapshot with no synced set would either leak every local-only table or
     // clear the whole DB — both wrong. Refuse before doing any work.
@@ -117,19 +119,19 @@ pub fn create_snapshot(
         return Err(e);
     }
 
-    // Read the cleared snapshot file and encrypt.
+    // Read the cleared snapshot file and seal it for storage.
     let plaintext = std::fs::read(&snapshot_path)?;
     let _ = std::fs::remove_file(&snapshot_path);
 
-    let encrypted = encryption.encrypt(&plaintext);
+    let sealed = cipher.seal(&plaintext);
 
     info!(
         plaintext_size = plaintext.len(),
-        encrypted_size = encrypted.len(),
+        sealed_size = sealed.len(),
         "created snapshot"
     );
 
-    Ok(encrypted)
+    Ok(sealed)
 }
 
 /// Delete every non-synced table's rows from the snapshot copy at `path`,
@@ -200,22 +202,22 @@ fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
 
 /// Upload a snapshot to the sync storage and update the device head.
 ///
-/// Also uploads per-device cursor metadata (`snapshot_meta.json.enc`) so that
-/// bootstrapping devices know where each device was at snapshot time, and GC
-/// can safely delete only changesets covered by the snapshot.
+/// Also uploads per-device cursor metadata (`snapshot_meta.json{suffix}`) so
+/// that bootstrapping devices know where each device was at snapshot time, and
+/// GC can safely delete only changesets covered by the snapshot.
 pub async fn push_snapshot(
     storage: &dyn SyncStorage,
-    encrypted_snapshot: Vec<u8>,
+    sealed_snapshot: Vec<u8>,
     device_id: &str,
     applied_cursors: HashMap<String, u64>,
     current_seq: u64,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(), SnapshotError> {
-    let size = encrypted_snapshot.len();
+    let size = sealed_snapshot.len();
     let timestamp = clock.now().to_rfc3339();
 
     // Upload snapshot (overwrites previous).
-    storage.put_snapshot(encrypted_snapshot).await?;
+    storage.put_snapshot(sealed_snapshot).await?;
 
     // The snapshot DB is a VACUUM of this device's live database, so its
     // metadata must describe exactly what THIS device has applied — never
@@ -368,15 +370,17 @@ pub struct GcResult {
 
 /// Bootstrap a new device from a snapshot.
 ///
-/// Downloads `snapshot.db.enc`, decrypts, and writes the plaintext database
-/// to `target_path`. The caller should then open this as their local database
-/// and pull any changesets newer than the per-device cursors in the result.
+/// Downloads the snapshot, opens it through the home's [`CloudCipher`]
+/// (decrypting for an encrypted home, verbatim for a plaintext one), and writes
+/// the plaintext database to `target_path`. The caller should then open this as
+/// their local database and pull any changesets newer than the per-device
+/// cursors in the result.
 ///
 /// Returns a `BootstrapResult` with per-device cursors so the caller knows
 /// where to start pulling changesets from each device.
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
-    encryption: &EncryptionService,
+    cipher: &CloudCipher,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
     // Download both the snapshot blob and its per-device cursor metadata
@@ -393,9 +397,9 @@ pub async fn bootstrap_from_snapshot(
         .map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
     let cursors = meta.cursors;
 
-    let encrypted = storage.get_snapshot().await?;
-    let plaintext = encryption
-        .decrypt(&encrypted)
+    let sealed = storage.get_snapshot().await?;
+    let plaintext = cipher
+        .open(&sealed)
         .map_err(|e| SnapshotError::Decryption(e.to_string()))?;
 
     if let Some(parent) = target_path.parent() {
@@ -481,6 +485,7 @@ pub(crate) async fn reconcile_snapshot_blobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encryption::EncryptionService;
     use crate::sync::apply::apply_changeset_lww;
     use crate::sync::storage::DeviceHead;
     use async_trait::async_trait;
@@ -698,7 +703,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .clone()
-                .ok_or(StorageError::NotFound("snapshot.db.enc".into()))
+                .ok_or(StorageError::NotFound("snapshot.db".into()))
         }
 
         async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
@@ -776,12 +781,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .clone()
-                .ok_or(StorageError::NotFound("snapshot_meta.json.enc".into()))
+                .ok_or(StorageError::NotFound("snapshot_meta.json".into()))
         }
     }
 
-    fn test_encryption() -> EncryptionService {
-        EncryptionService::new_with_key(&[0x42u8; 32])
+    /// An encrypted-home cipher over a fixed key, the default the snapshot tests
+    /// run against. Plaintext-home snapshot round-tripping is covered end-to-end
+    /// through the real cycle in `delete_propagation_tests`.
+    fn test_encryption() -> CloudCipher {
+        CloudCipher::Encrypted(EncryptionService::new_with_key(&[0x42u8; 32]))
     }
 
     // ---- should_create_snapshot tests ----
@@ -841,7 +849,7 @@ mod tests {
             create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("create_snapshot");
 
         assert!(!encrypted.is_empty());
-        let plaintext = enc.decrypt(&encrypted).expect("decrypt should succeed");
+        let plaintext = enc.open(&encrypted).expect("open should succeed");
         assert!(!plaintext.is_empty());
         assert!(
             plaintext.starts_with(b"SQLite format 3\0"),
@@ -866,7 +874,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let enc = test_encryption();
         let encrypted = create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("snapshot");
-        let plaintext = enc.decrypt(&encrypted).expect("decrypt");
+        let plaintext = enc.open(&encrypted).expect("open");
 
         let db_path = temp.path().join("verify.db");
         std::fs::write(&db_path, &plaintext).unwrap();
@@ -1391,7 +1399,7 @@ mod tests {
         drop(session2);
 
         // --- Path A: bootstrap from snapshot + apply cs2 ---
-        let snapshot_plain = enc.decrypt(&snapshot_encrypted).unwrap();
+        let snapshot_plain = enc.open(&snapshot_encrypted).unwrap();
         let path_a = temp.path().join("path_a.db");
         std::fs::write(&path_a, &snapshot_plain).unwrap();
         let db_a = open_db_at(&path_a);

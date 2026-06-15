@@ -28,7 +28,7 @@ impl CloudProvider {
 /// The cloud home: which provider backs sync and its per-provider settings.
 /// One cohesive unit — connecting picks a provider and fills its fields;
 /// disconnecting resets the whole thing to default.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CloudHomeConfig {
     /// Selected provider. None = not configured.
     #[serde(default)]
@@ -52,6 +52,38 @@ pub struct CloudHomeConfig {
     /// Whether this library's CloudKit zone is shared (joiner) vs owned (creator).
     #[serde(default)]
     pub cloudkit_is_shared: bool,
+    /// Whether objects are encrypted at rest. A plaintext home stores every object
+    /// in the clear and drops the `.enc` suffix so the bucket is browsable.
+    ///
+    /// Defaults to `true`: the default home is encrypted, and an on-disk config
+    /// written before this field existed describes an encrypted home, so an
+    /// absent value reads back as `true`.
+    #[serde(default = "default_encrypted")]
+    pub encrypted: bool,
+}
+
+/// The default for [`CloudHomeConfig::encrypted`]: every home is encrypted unless
+/// explicitly opted out.
+fn default_encrypted() -> bool {
+    true
+}
+
+impl Default for CloudHomeConfig {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            s3_bucket: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_key_prefix: None,
+            google_drive_folder_id: None,
+            dropbox_folder_path: None,
+            onedrive_drive_id: None,
+            onedrive_folder_id: None,
+            cloudkit_is_shared: false,
+            encrypted: default_encrypted(),
+        }
+    }
 }
 
 /// Configuration errors.

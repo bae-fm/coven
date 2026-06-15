@@ -197,12 +197,22 @@ reconnect message.
 
 ## Where encryption sits
 
-`CloudHome` deals only in encrypted bytes. The encryption and the key layout
-live one level up, in `EncryptedSyncStorage`, which wraps any `dyn CloudHome`:
-it encrypts on the way down, decrypts on the way up, and owns the mapping from
-sync concepts (a device's changeset seq, a blob id, a member's wrapped key) to
-the flat keys the trait stores. A provider sees `changes/dev1/42.enc` and a blob
-of ciphertext; it never sees a todo title or an attachment's bytes.
+`CloudHome` deals only in raw bytes. The at-rest protection and the key layout
+live one level up, in `CloudSyncStorage`, which wraps any `dyn CloudHome`: it
+seals on the way down, opens on the way up, and owns the mapping from sync
+concepts (a device's changeset seq, a blob id, a member's wrapped key) to the
+flat keys the trait stores. How it seals — and the key suffix — comes from the
+home's `CloudCipher`:
+
+- An **encrypted** home (the default) encrypts every object under the library key
+  and stores it with the `.enc` suffix (`snapshot.db.enc`,
+  `heads/{device}.json.enc`, `changes/{device}/{seq}.enc`, …). A provider sees
+  `changes/dev1/42.enc` and a blob of ciphertext; it never sees a todo title or an
+  attachment's bytes.
+- A **plaintext** home stores every object verbatim and drops the suffix, so the
+  same objects are at bare names (`snapshot.db`, `heads/{device}.json`,
+  `changes/{device}/{seq}`, …). The bucket is browsable; the provider sees the
+  actual bytes.
 
 ## Lifecycle
 

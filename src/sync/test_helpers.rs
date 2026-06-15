@@ -244,9 +244,9 @@ pub struct MockSyncStorage {
     objects: Mutex<HashMap<String, Vec<u8>>>,
     /// Published device heads, keyed by device_id.
     heads: Mutex<HashMap<String, DeviceHead>>,
-    /// The single shared snapshot blob (`snapshot.db.enc`).
+    /// The single shared snapshot blob (`snapshot.db{suffix}`).
     snapshot: Mutex<Option<Vec<u8>>>,
-    /// The snapshot's per-device cursor metadata (`snapshot_meta.json.enc`).
+    /// The snapshot's per-device cursor metadata (`snapshot_meta.json{suffix}`).
     snapshot_meta: Mutex<Option<Vec<u8>>>,
     /// Minimum schema version marker (None = no minimum set).
     min_schema_version: Mutex<Option<u32>>,
@@ -391,7 +391,7 @@ impl SyncStorage for MockSyncStorage {
             .lock()
             .unwrap()
             .clone()
-            .ok_or(StorageError::NotFound("snapshot.db.enc".into()))
+            .ok_or(StorageError::NotFound("snapshot.db".into()))
     }
 
     async fn delete_changeset(&self, _device_id: &str, _seq: u64) -> Result<(), StorageError> {
@@ -484,7 +484,7 @@ impl SyncStorage for MockSyncStorage {
             .lock()
             .unwrap()
             .clone()
-            .ok_or(StorageError::NotFound("snapshot_meta.json.enc".into()))
+            .ok_or(StorageError::NotFound("snapshot_meta.json".into()))
     }
 }
 

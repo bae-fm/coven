@@ -3,7 +3,7 @@
 //!
 //! These drive a real [`crate::database::Database`] (so `mint_item_key`'s INSERT
 //! enters the capture session's changeset and `item_keys` rides the synced set
-//! `Database::open` injects) and a real [`EncryptedSyncStorage`] over a shared
+//! `Database::open` injects) and a real [`CloudSyncStorage`] over a shared
 //! [`InMemoryCloudHome`] (so a blob actually round-trips through encryption). The
 //! load-bearing property throughout: an `Item`-scoped blob is encrypted under the
 //! per-item key, which a joining device recovers — by changeset replay or by
@@ -17,8 +17,8 @@ use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::sync::cloud_storage::{CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::push_changeset;
-use crate::sync::encrypted_storage::EncryptedSyncStorage;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::pull::pull_changes;
 use crate::sync::push::SCHEMA_VERSION;
@@ -46,10 +46,13 @@ fn open_db(device_id: &str) -> Database {
     db
 }
 
-/// An `EncryptedSyncStorage` over `home`, keyed by the library master key. A
-/// blob's actual encryption key is selected by the resolved scope, not this.
-fn storage_over(home: InMemoryCloudHome) -> EncryptedSyncStorage {
-    EncryptedSyncStorage::new(Box::new(home), EncryptionService::new_with_key(&MASTER_KEY))
+/// A `CloudSyncStorage` over `home`, keyed by the library master key. A blob's
+/// actual encryption key is selected by the resolved scope, not this.
+fn storage_over(home: InMemoryCloudHome) -> CloudSyncStorage {
+    CloudSyncStorage::new(
+        Box::new(home),
+        CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
+    )
 }
 
 /// An `Item`-scoped blob is encrypted under the minted item key: it round-trips
@@ -236,9 +239,9 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
 /// not land. Members that join before any snapshot exists take this path.
 #[tokio::test]
 async fn changeset_replay_join_resolves_item_and_decrypts() {
-    let storage = EncryptedSyncStorage::new(
+    let storage = CloudSyncStorage::new(
         Box::new(InMemoryCloudHome::new()),
-        EncryptionService::new_with_key(&MASTER_KEY),
+        CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
     );
 
     // --- Device A: mint the item key, write a shareable note + a blob-bearing
@@ -348,7 +351,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
 async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     let home = InMemoryCloudHome::new();
     let storage = storage_over(home);
-    let snapshot_enc = EncryptionService::new_with_key(&MASTER_KEY);
+    let snapshot_enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY));
 
     // --- Device A: mint + upload an Item-scoped blob, then snapshot its live DB. ---
     let db_a = open_db("dev-a");

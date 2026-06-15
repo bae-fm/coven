@@ -19,6 +19,7 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::invite::{create_invitation, unwrap_library_key};
 use crate::sync::membership::MemberRole;
 use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage, PublishingObserver};
@@ -268,8 +269,10 @@ fn fixed_clock(rfc3339: &str) -> FixedClock {
     )
 }
 
-fn enc() -> RwLock<EncryptionService> {
-    RwLock::new(EncryptionService::new_with_key(&[0u8; 32]))
+fn enc() -> RwLock<CloudCipher> {
+    RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[0u8; 32],
+    )))
 }
 
 fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String {
@@ -685,7 +688,9 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     )
     .await
     .expect("enqueue the release blob scoped to its item");
-    let master_enc = RwLock::new(EncryptionService::from_key(master_key));
+    let master_enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        master_key,
+    )));
 
     let n = process_uploads(&db, &cloud, &master_enc, tmp.path(), &fixed_clock(T0), None)
         .await

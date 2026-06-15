@@ -133,7 +133,11 @@ pub async fn unwrap_library_key(
 ) -> Result<[u8; 32], InviteError> {
     let pubkey_hex = hex::encode(keypair.public_key);
 
-    // Download wrapped key.
+    // Download the wrapped key directly off the cloud home (not through
+    // `CloudSyncStorage`, which the joiner hasn't built yet). The `.enc` suffix is
+    // hardcoded because joining a shared library is an encrypted-home-only path —
+    // the invite wraps the library key — so `CloudSyncStorage::put_wrapped_key`
+    // always wrote it under the encrypted-home key (`keys/{pubkey}.enc`).
     let key_path = format!("keys/{pubkey_hex}.enc");
     let wrapped_key = cloud_home.read(&key_path).await?;
 

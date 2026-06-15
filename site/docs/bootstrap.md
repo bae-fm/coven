@@ -14,7 +14,7 @@ a `todo` has `todo_attachments`, and `todos` carry `labels` through a
 ## What a snapshot is
 
 A snapshot is a full copy of the database, made with SQLite's `VACUUM INTO`, then
-scoped down to exactly the rows eligible to cross devices, then encrypted.
+scoped down to exactly the rows eligible to cross devices, then sealed for storage.
 [`create_snapshot`](rustdoc:fn:coven::sync::snapshot::create_snapshot) does this
 in one pass:
 
@@ -36,7 +36,11 @@ in one pass:
    changeset filter uses, so the snapshot carries the exact same set of rows the
    changeset path would have sent. See [Local data](local-data.md) for the gate.
 4. A second `VACUUM` reclaims the pages freed by those deletes, then the bytes are
-   read and encrypted with the library key.
+   read and sealed by the home's cipher. On an encrypted home that means
+   encrypting with the library key and storing the snapshot at `snapshot.db.enc`;
+   on a [plaintext home](encryption.md#the-optional-plaintext-cloud-home) the
+   bytes are stored verbatim at `snapshot.db`, so the snapshot is a directly
+   readable SQLite image.
 
 Because the snapshot and the changeset path share one gate, a device that
 bootstraps from a snapshot and a device that applied live changesets converge on
@@ -86,7 +90,8 @@ next policy check.
 [`push_snapshot`](rustdoc:fn:coven::sync::snapshot::push_snapshot) uploads two
 objects and updates the device head:
 
-- the encrypted snapshot blob (overwriting any previous one), and
+- the sealed snapshot blob (overwriting any previous one) — encrypted on an
+  encrypted home, stored verbatim on a plaintext one, and
 - per-device cursor metadata as
   [`SnapshotMeta`](rustdoc:struct:coven::sync::snapshot::SnapshotMeta), holding a
   `device_id -> seq` map and an RFC 3339 `created_at` timestamp.
@@ -106,9 +111,10 @@ the restore flow (the owner recovering the library on new hardware). Both call
 1. Download the snapshot metadata first. Its absence is a torn bucket (see
    below), and fetching it before writing anything means a torn bucket leaves no
    half-written database on disk.
-2. Download the snapshot blob, decrypt it, and write the plaintext bytes directly
-   to `target_path`. There is no migration replay: the snapshot bytes *are* the
-   database file.
+2. Download the snapshot blob, open it through the home's cipher (decrypt on an
+   encrypted home; pass through on a plaintext one), and write the resulting bytes
+   directly to `target_path`. There is no migration replay: the snapshot bytes
+   *are* the database file.
 3. Return a
    [`BootstrapResult`](rustdoc:struct:coven::sync::snapshot::BootstrapResult)
    carrying the per-device cursors from the metadata.

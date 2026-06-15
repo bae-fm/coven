@@ -79,6 +79,10 @@ opaque byte store. It sees:
   keys/{member_pubkey}.enc               library key wrapped to each member
   ```
 
+  (These are the paths of an encrypted home. A plaintext home — see below — drops
+  the `.enc` suffix, so the same objects are at `changes/{device_id}/{seq}`,
+  `snapshot.db`, and so on.)
+
 - The existence and count of per-member key files under `keys/`, and the hex
   Ed25519 public keys in those paths. A pubkey is a random-looking 32-byte value,
   not a name or an email.
@@ -107,6 +111,40 @@ own app identity. That name becomes the first component of every keyring account
 so two coven-based apps on one machine never read or overwrite each other's keys.
 It is required, not defaulted: a getter called before the host sets it panics
 rather than fall back to a shared name.
+
+## The optional plaintext cloud home
+
+Encryption at rest is the default, but a library can opt into a **plaintext cloud
+home**: one that stores every object in the clear. This is a per-library choice
+recorded as `cloud_home.encrypted` in the config (`true` by default). It is for a
+library whose contents are not secret and whose owner wants the bucket to be
+browsable — a reader can open `snapshot.db` or a blob directly without the library
+key.
+
+The seam is `CloudCipher`, which a `CloudSyncStorage` holds in place of a raw
+`EncryptionService`:
+
+- `CloudCipher::Encrypted(key)` seals every object under the library key (the
+  behavior described everywhere above) and stores it with the `.enc` suffix.
+- `CloudCipher::Plaintext` stores every object verbatim and drops the `.enc`
+  suffix, so the layout uses bare names (`snapshot.db`, `heads/{device}.json`,
+  `changes/{device}/{seq}`, …).
+
+A plaintext home changes only what happens at rest. Changesets, snapshots, the
+snapshot metadata, the min-schema marker, membership entries, and blobs are all
+stored as their plaintext bytes; everything else — the sync protocol, the HLC
+register, the row-level gate — is unchanged.
+
+Two capabilities require encryption and are unavailable on a plaintext home:
+
+- **Restore codes** carry the library key (`ek`) so a second device can read the
+  bucket. A plaintext home has no key, so its restore code omits `ek` entirely.
+  On restore, the absence of `ek` selects `CloudCipher::Plaintext`; its presence
+  selects `CloudCipher::Encrypted`.
+- **Sharing** (inviting and removing members) wraps and rotates the library key.
+  With no key there is nothing to wrap or rotate, so a member-removal key rotation
+  on a plaintext home is a clear error ("sharing requires an encrypted cloud
+  home") rather than a silent no-op.
 
 ## Chunked encryption
 
