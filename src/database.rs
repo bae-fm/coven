@@ -971,24 +971,24 @@ fn attach_session<'c>(
 /// Map a library DB `path` to the flat OPFS filename the connection opens
 /// against, since the opfs-sahpool VFS has no directories.
 ///
-/// The mapping is the path's file-name component: `/libs/music/library.db` →
-/// `library.db`. It is deterministic, so a reopen on the same `path` resolves the
-/// same OPFS file and reads back what the first open wrote. `:memory:` passes
-/// through unchanged so an in-memory open stays in memory (each such connection
-/// is its own private database, never touching OPFS).
-///
-/// A path with no file-name component (e.g. a bare directory or `..`) is a host
-/// integration error — there is no stable name to key the OPFS file by — and
-/// surfaces as an error rather than collapsing distinct libraries onto one name.
+/// The mapping is a hash of the full path, not its file-name component: coven
+/// names every library's database the same way (`.../{library_id}/library.db`),
+/// so the file name alone collapses distinct libraries onto one OPFS file. The
+/// full-path hash is unique per library and deterministic, so a reopen on the
+/// same `path` resolves the same OPFS file and reads back what the first open
+/// wrote. `:memory:` passes through unchanged so an in-memory open stays in
+/// memory (each such connection is its own private database, never touching OPFS).
 #[cfg(target_arch = "wasm32")]
 fn opfs_filename(path: &Path) -> Result<String, DbError> {
+    use sha2::{Digest, Sha256};
     if path.as_os_str() == ":memory:" {
         return Ok(":memory:".to_string());
     }
-    match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) if !name.is_empty() => Ok(name.to_string()),
-        _ => Err(DbError(format!(
-            "wasm: cannot derive an OPFS filename from path with no file name: {path:?}"
-        ))),
-    }
+    let path_str = path.to_str().ok_or_else(|| {
+        DbError(format!(
+            "wasm: non-UTF-8 db path cannot map to an OPFS file: {path:?}"
+        ))
+    })?;
+    let digest = Sha256::digest(path_str.as_bytes());
+    Ok(format!("coven-{}.db", hex::encode(&digest[..16])))
 }
