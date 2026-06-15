@@ -29,9 +29,9 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::oneshot;
-#[cfg(not(target_arch = "wasm32"))]
-use tracing::error;
 use tracing::warn;
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::{debug, error};
 
 use crate::db::{OutboxEntry, OutboxOperation, MIGRATION_SQL};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
@@ -130,10 +130,7 @@ impl Owned {
     /// and drops the session first — the C session object never outlives the
     /// `sqlite3*` it points at.
     fn new(conn: Connection, synced_tables: &[SyncedTable]) -> Result<Self, DbError> {
-        let session = Some(erase_session_lifetime(attach_session(
-            &conn,
-            synced_tables,
-        )?));
+        let session = Some(attach_erased_session(&conn, synced_tables)?);
         Ok(Owned { session, conn })
     }
 }
@@ -153,6 +150,17 @@ fn erase_session_lifetime(
             session,
         )
     }
+}
+
+/// Attach a capture session and erase its connection-borrow lifetime to `'static`
+/// for storage in [`Owned`]. The caller must keep `conn` alive at least as long as
+/// the returned session (see [`erase_session_lifetime`]).
+#[cfg(target_arch = "wasm32")]
+fn attach_erased_session(
+    conn: &Connection,
+    synced_tables: &[SyncedTable],
+) -> Result<rusqlite::session::Session<'static>, DbError> {
+    Ok(erase_session_lifetime(attach_session(conn, synced_tables)?))
 }
 
 /// Joins the actor thread when the last `Database` handle drops, so the
@@ -401,7 +409,7 @@ impl Database {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn resume_session(&self) -> Result<(), DbError> {
         let mut owned = self.owned.borrow_mut();
-        let session = erase_session_lifetime(attach_session(&owned.conn, &self.synced_tables)?);
+        let session = attach_erased_session(&owned.conn, &self.synced_tables)?;
         owned.session = Some(session);
         Ok(())
     }
@@ -881,7 +889,9 @@ fn run_actor(
                 }
             }
             Request::TakeChangesetAndSuspend(reply) => {
-                let _ = reply.send(take_changeset(&mut session));
+                if reply.send(take_changeset(&mut session)).is_err() {
+                    debug!("db actor: changeset-capture caller dropped its reply receiver");
+                }
             }
             Request::ResumeSession(reply) => {
                 let result = match attach_session(&conn, synced_tables) {
@@ -894,7 +904,9 @@ fn run_actor(
                         Err(e)
                     }
                 };
-                let _ = reply.send(result);
+                if reply.send(result).is_err() {
+                    debug!("db actor: resume-session caller dropped its reply receiver");
+                }
             }
         }
     }
