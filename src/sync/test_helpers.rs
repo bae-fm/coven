@@ -238,13 +238,19 @@ pub fn make_entry(
 }
 
 /// The object key [`MockSyncStorage`] stores a blob under. A plain-scheme blob
-/// (one carrying a `cloud_path`) lands at the readable `{namespace}/{cloud_path}`,
-/// matching `CloudSyncStorage`'s plain layout; an obfuscated one keys by id as
-/// `{namespace}/{id}` (the mock doesn't shard, but a flat id key is unambiguous
-/// for tests).
+/// (one carrying a `cloud_path`) delegates to [`CloudSyncStorage::blob_key`] so it
+/// is exactly the readable key production writes; an obfuscated one keys flat by id
+/// as `{namespace}/{id}` (the mock deliberately doesn't shard — a flat id key is
+/// unambiguous for tests and never needs to match production's `{ab}/{cd}` layout).
 fn blob_key(namespace: &str, id: &str, cloud_path: Option<&str>) -> String {
     match cloud_path {
-        Some(path) => format!("{namespace}/{path}"),
+        Some(path) => crate::sync::cloud_storage::CloudSyncStorage::blob_key(
+            crate::sync::cloud_storage::BlobPathScheme::Plain,
+            namespace,
+            id,
+            Some(path),
+        )
+        .expect("plain blob_key with a cloud_path is always Ok"),
         None => format!("{namespace}/{id}"),
     }
 }
