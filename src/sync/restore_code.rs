@@ -41,22 +41,10 @@ pub struct RestoreCode {
     /// `false` for an unobfuscated (consumer-path) one. The restorer rebuilds the
     /// matching [`crate::sync::cloud_storage::BlobPathScheme`] from this.
     #[serde(
-        default = "default_obfuscate_blob_paths",
-        skip_serializing_if = "is_default_obfuscate_blob_paths"
+        default = "crate::config::default_obfuscate_blob_paths",
+        skip_serializing_if = "crate::config::is_default_obfuscate_blob_paths"
     )]
     pub obf: bool,
-}
-
-/// The default for [`RestoreCode::obf`]: an absent value means the obfuscated
-/// (content-addressed) layout, matching every code written before this field.
-fn default_obfuscate_blob_paths() -> bool {
-    true
-}
-
-/// Skip serializing [`RestoreCode::obf`] when it holds the default (obfuscated),
-/// so an ordinary code stays as compact as before this field existed.
-fn is_default_obfuscate_blob_paths(obf: &bool) -> bool {
-    *obf
 }
 
 /// Cloud provider details. Each variant carries only the fields needed for that provider.

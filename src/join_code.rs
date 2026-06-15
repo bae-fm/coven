@@ -16,23 +16,10 @@ pub struct InviteCode {
     /// back to `true`) for an obfuscated home, matching every code written before
     /// this field.
     #[serde(
-        default = "default_obfuscate_blob_paths",
-        skip_serializing_if = "is_default_obfuscate_blob_paths"
+        default = "crate::config::default_obfuscate_blob_paths",
+        skip_serializing_if = "crate::config::is_default_obfuscate_blob_paths"
     )]
     pub obfuscate_blob_paths: bool,
-}
-
-/// The default for [`InviteCode::obfuscate_blob_paths`]: an absent value means the
-/// obfuscated (content-addressed) layout, matching every code written before this
-/// field existed.
-fn default_obfuscate_blob_paths() -> bool {
-    true
-}
-
-/// Skip serializing [`InviteCode::obfuscate_blob_paths`] when it holds the default
-/// (obfuscated), so an ordinary invite code stays compact.
-fn is_default_obfuscate_blob_paths(obfuscate: &bool) -> bool {
-    *obfuscate
 }
 
 pub fn encode(code: &InviteCode) -> String {

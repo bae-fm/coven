@@ -78,9 +78,17 @@ fn default_encrypted() -> bool {
 }
 
 /// The default for [`CloudHomeConfig::obfuscate_blob_paths`]: every home uses the
-/// content-addressed blob layout unless explicitly opted out.
-fn default_obfuscate_blob_paths() -> bool {
+/// content-addressed blob layout unless explicitly opted out. Shared with the
+/// restore code and invite code, which carry the same flag to a joining device.
+pub(crate) fn default_obfuscate_blob_paths() -> bool {
     true
+}
+
+/// `skip_serializing_if` predicate for the `obfuscate_blob_paths` flag in the
+/// restore/invite codes: omit it when it holds the default ([`true`]) so a code
+/// only spells the flag out for an unobfuscated home.
+pub(crate) fn is_default_obfuscate_blob_paths(obfuscate: &bool) -> bool {
+    *obfuscate
 }
 
 impl Default for CloudHomeConfig {
