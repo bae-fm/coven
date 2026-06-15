@@ -8,8 +8,7 @@
 // The concrete cloud backends are native-only: S3 needs the aws SDK; the OAuth
 // backends await reqwest, whose wasm `Response` is `!Send` and so can't satisfy
 // `CloudHome`'s `Send` future bound on the single-threaded browser; CloudKit is
-// Apple-only. wasm gets real backends (a fetch-based S3 client, a redirect OAuth
-// flow) in the browser-runtime work.
+// Apple-only. No concrete backend compiles for wasm.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloudkit;
 #[cfg(not(target_arch = "wasm32"))]
@@ -184,8 +183,7 @@ fn parse_oauth_tokens(
 /// Reads provider settings from config and credentials from the OS keyring.
 ///
 /// Native-only: every concrete backend it constructs is native-only (see the
-/// module gating above). The browser builds its cloud home a different way in
-/// the browser-runtime work.
+/// module gating above).
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn create_cloud_home(
     config: &crate::config::Config,

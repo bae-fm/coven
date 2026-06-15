@@ -18,7 +18,7 @@ mod item_key_tests;
 // join/restore are the "connect a real cloud backend, then bootstrap a library
 // onto local disk" orchestration. Every backend they construct is native-only,
 // and only host entry points (CLI/macOS/iOS) call them — nothing in coven's core
-// sync does. The browser-runtime work rebuilds these against wasm backends.
+// sync does — so they are native-only.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod join;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -44,8 +44,7 @@ pub mod sync_loop;
 // The host-facing connected-sync controller: builds the cloud home + sync loop
 // and drives membership. Every method that does real work constructs a
 // native-only backend (via create_cloud_home / create_sync_storage / init_sync),
-// and only host entry points build it. The browser-runtime work introduces a
-// wasm manager that drives the loop off the JS event loop.
+// and only host entry points build it — so it is native-only.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sync_manager;
 #[cfg(test)]

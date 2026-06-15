@@ -564,8 +564,7 @@ pub async fn run_single_sync_cycle(
 ///
 /// Native-only: builds the storage through the native-only
 /// [`crate::storage::cloud::setup::create_sync_storage`] (which constructs a
-/// native-only concrete backend). The browser-runtime work supplies a wasm cloud
-/// home and its own init path.
+/// native-only concrete backend).
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn init_sync(
     config: &Config,

@@ -469,8 +469,7 @@ pub async fn refresh(
 /// (S3, CloudKit) that don't.
 ///
 /// Native-only: reads each provider's config off its native-only backend type
-/// (`GoogleDriveCloudHome::oauth_config()` etc.). The browser-runtime work will
-/// supply provider configs without the backend types.
+/// (`GoogleDriveCloudHome::oauth_config()` etc.).
 #[cfg(not(target_arch = "wasm32"))]
 fn oauth_config_for_provider(
     provider: crate::config::CloudProvider,

@@ -194,7 +194,6 @@ impl Database {
     /// and stamps envelopes off it; it is the same `Arc<Hlc>` the stamper wraps.
     ///
     /// Native-only: the sole consumer is the native-only [`crate::sync::sync_manager::SyncManager`].
-    /// The browser-runtime work reaches the same clock through its own manager.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn hlc(&self) -> Arc<Hlc> {
         self.hlc.clone()
