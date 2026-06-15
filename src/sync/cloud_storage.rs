@@ -611,9 +611,9 @@ mod tests {
     /// `.enc`-suffixed key is absent.
     #[tokio::test]
     async fn plaintext_home_stores_control_objects_in_the_clear_without_enc_suffix() {
-        let home = Arc::new(InMemoryCloudHome::new());
+        let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
-            Box::new(StorageHome(home.clone())),
+            Box::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
         );
@@ -726,9 +726,9 @@ mod tests {
     /// `get_blob` with the same `cloud_path` round-trips.
     #[tokio::test]
     async fn plain_scheme_stores_blob_at_the_readable_cloud_path() {
-        let home = Arc::new(InMemoryCloudHome::new());
+        let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
-            Box::new(StorageHome(home.clone())),
+            Box::new(home.clone()),
             CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32])),
             BlobPathScheme::Plain,
         );
@@ -795,59 +795,5 @@ mod tests {
                 .is_err(),
             "put_blob for a plain home with no cloud_path must error, not silently hash",
         );
-    }
-
-    /// A `CloudHome` newtype over a shared `Arc<InMemoryCloudHome>` so a test can
-    /// keep its own handle for direct at-rest assertions while the storage owns a
-    /// `Box<dyn CloudHome>`.
-    struct StorageHome(Arc<InMemoryCloudHome>);
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl CloudHome for StorageHome {
-        async fn write(
-            &self,
-            key: &str,
-            data: Vec<u8>,
-            progress: &crate::storage::cloud::UploadProgress<'_>,
-        ) -> Result<(), crate::storage::cloud::CloudHomeError> {
-            self.0.write(key, data, progress).await
-        }
-        async fn read(&self, key: &str) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
-            self.0.read(key).await
-        }
-        async fn read_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: u64,
-        ) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
-            self.0.read_range(key, start, end).await
-        }
-        async fn list(
-            &self,
-            prefix: &str,
-        ) -> Result<Vec<String>, crate::storage::cloud::CloudHomeError> {
-            self.0.list(prefix).await
-        }
-        async fn delete(&self, key: &str) -> Result<(), crate::storage::cloud::CloudHomeError> {
-            self.0.delete(key).await
-        }
-        async fn exists(&self, key: &str) -> Result<bool, crate::storage::cloud::CloudHomeError> {
-            self.0.exists(key).await
-        }
-        async fn grant_access(
-            &self,
-            member_id: &str,
-        ) -> Result<crate::storage::cloud::CloudHomeJoinInfo, crate::storage::cloud::CloudHomeError>
-        {
-            self.0.grant_access(member_id).await
-        }
-        async fn revoke_access(
-            &self,
-            member_id: &str,
-        ) -> Result<(), crate::storage::cloud::CloudHomeError> {
-            self.0.revoke_access(member_id).await
-        }
     }
 }

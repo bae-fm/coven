@@ -13,18 +13,21 @@ use async_trait::async_trait;
 
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
-/// In-memory CloudHome backed by a HashMap. Thread-safe; cheap to share
-/// between simulated devices via `Arc`.
+/// In-memory CloudHome backed by a HashMap. `Clone` shares one backing store, so
+/// clones act as separate devices reading and writing the same cloud bucket, and
+/// a test can keep its own handle for direct at-rest assertions while each device
+/// owns a `Box<dyn CloudHome>` clone.
+#[derive(Clone)]
 pub struct InMemoryCloudHome {
-    writes: Mutex<HashMap<String, Vec<u8>>>,
-    deletes: Mutex<Vec<String>>,
+    writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    deletes: Arc<Mutex<Vec<String>>>,
 }
 
 impl InMemoryCloudHome {
     pub fn new() -> Self {
         Self {
-            writes: Mutex::new(HashMap::new()),
-            deletes: Mutex::new(Vec::new()),
+            writes: Arc::new(Mutex::new(HashMap::new())),
+            deletes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -137,76 +140,6 @@ impl CloudHome for InMemoryCloudHome {
 
     async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
         Ok(())
-    }
-}
-
-/// A `CloudHome` handle that shares one backing [`InMemoryCloudHome`]. Cloning it
-/// yields another handle onto the same store, so two `CloudSyncStorage` instances
-/// built over clones model two devices reading and writing one cloud bucket. The
-/// inner `Arc` also lets a test keep its own handle for direct at-rest assertions
-/// while each device owns a `Box<dyn CloudHome>` clone.
-#[derive(Clone, Default)]
-pub struct SharedInMemoryCloudHome(Arc<InMemoryCloudHome>);
-
-impl SharedInMemoryCloudHome {
-    pub fn new() -> Self {
-        Self(Arc::new(InMemoryCloudHome::new()))
-    }
-
-    /// Snapshot of the bytes at `key` in the shared store, or `None` if absent.
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.0.get(key)
-    }
-
-    /// Number of objects in the shared store.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Whether the shared store is empty.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl CloudHome for SharedInMemoryCloudHome {
-    async fn write(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        self.0.write(key, data, progress).await
-    }
-
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.0.read(key).await
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        self.0.read_range(key, start, end).await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        self.0.list(prefix).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        self.0.delete(key).await
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        self.0.exists(key).await
-    }
-
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        self.0.grant_access(member_id).await
-    }
-
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
-        self.0.revoke_access(member_id).await
     }
 }
 

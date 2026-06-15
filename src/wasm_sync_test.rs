@@ -3,7 +3,7 @@
 //! capture, changeset push, pull, and apply — over a shared in-memory cloud.
 //!
 //! Two `:memory:` `Database`s stand in for two devices; each wraps the SAME
-//! backing `SharedInMemoryCloudHome` in its own `CloudSyncStorage`, so they read
+//! backing `InMemoryCloudHome` in its own `CloudSyncStorage`, so they read
 //! and write one cloud bucket. The cipher is `Plaintext` and blobs are hashed, so
 //! the engine exercises the production `CloudSyncStorage` path end to end with no
 //! key setup. The drive entry is [`run_single_sync_cycle`] — the same single-cycle
@@ -25,7 +25,7 @@ use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
-use crate::storage::cloud::test_utils::SharedInMemoryCloudHome;
+use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
@@ -50,8 +50,8 @@ fn open_device(device_id: &str) -> Database {
 
 /// A `CloudSyncStorage` over a clone of the shared cloud handle, plaintext at rest
 /// with hashed blob paths. Two of these built over clones of one
-/// `SharedInMemoryCloudHome` are two devices on one bucket.
-fn storage_for(cloud: &SharedInMemoryCloudHome) -> CloudSyncStorage {
+/// `InMemoryCloudHome` are two devices on one bucket.
+fn storage_for(cloud: &InMemoryCloudHome) -> CloudSyncStorage {
     CloudSyncStorage::new(
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
@@ -108,7 +108,7 @@ async fn has_note(db: &Database, id: &str) -> bool {
 async fn row_syncs_from_one_database_to_another_through_the_engine() {
     console_error_panic_hook::set_once();
 
-    let cloud = SharedInMemoryCloudHome::new();
+    let cloud = InMemoryCloudHome::new();
     assert!(cloud.is_empty(), "the shared cloud starts empty");
 
     let db_a = open_device("device-a");
