@@ -11,6 +11,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+// `info`/`warn` are used only by the native-only localhost-callback `authorize`.
+#[cfg(not(target_arch = "wasm32"))]
 use tracing::{info, warn};
 
 /// OAuth provider configuration.
@@ -84,8 +86,12 @@ pub enum OAuthError {
     Reauthorize(String),
 }
 
+/// Guards the localhost OAuth-callback server task — native-only, like
+/// [`authorize`], the only thing that spawns that task.
+#[cfg(not(target_arch = "wasm32"))]
 struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AbortOnDrop {
     fn new(handle: tokio::task::JoinHandle<()>) -> Self {
         Self(Some(handle))
@@ -99,6 +105,7 @@ impl AbortOnDrop {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         if let Some(h) = self.0.take() {
@@ -238,6 +245,12 @@ pub fn build_authorize_url(
 /// 3. Spawn a one-shot HTTP server on `localhost:{redirect_port}`
 /// 4. Wait for the callback with the authorization code
 /// 5. Exchange the code for tokens at `token_url`
+///
+/// Native-only: binds a localhost TCP port (`tokio::net`), serves the callback
+/// with axum, and opens the system browser (`open`) — none of which exist on
+/// wasm. The browser captures the redirect itself via the pure
+/// [`build_authorize_url`] + [`exchange_code`] pair.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn authorize(
     config: &OAuthConfig,
     cancel: tokio::sync::watch::Receiver<bool>,
@@ -454,6 +467,11 @@ pub async fn refresh(
 
 /// The OAuth config for a provider that uses OAuth, or an error for providers
 /// (S3, CloudKit) that don't.
+///
+/// Native-only: reads each provider's config off its native-only backend type
+/// (`GoogleDriveCloudHome::oauth_config()` etc.). The browser-runtime work will
+/// supply provider configs without the backend types.
+#[cfg(not(target_arch = "wasm32"))]
 fn oauth_config_for_provider(
     provider: crate::config::CloudProvider,
 ) -> Result<OAuthConfig, OAuthError> {
@@ -473,6 +491,10 @@ fn oauth_config_for_provider(
 ///
 /// Returns tokens on success. Only Google Drive, Dropbox, and OneDrive support
 /// OAuth; other providers return an error.
+///
+/// Native-only: uses [`authorize`]'s localhost-callback flow and the native-only
+/// [`oauth_config_for_provider`].
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn authorize_provider(
     provider: crate::config::CloudProvider,
     cancel: tokio::sync::watch::Receiver<bool>,
@@ -485,6 +507,11 @@ pub async fn authorize_provider(
 /// `redirect_uri`, for hosts that capture the redirect themselves (a mobile OS
 /// auth session). Pair the returned verifier and the same `redirect_uri` with
 /// [`exchange_code_for_provider`].
+///
+/// Native-only for now: depends on the native-only [`oauth_config_for_provider`]
+/// (provider config currently lives on the native-only backend types). The
+/// browser-runtime work will reintroduce a wasm-available provider-config path.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_authorize_request_for_provider(
     provider: crate::config::CloudProvider,
     redirect_uri: &str,
@@ -495,6 +522,10 @@ pub fn build_authorize_request_for_provider(
 /// Exchange an authorization `code` captured by the host for `provider`'s
 /// tokens. `redirect_uri` and `verifier` must match the originating
 /// [`build_authorize_request_for_provider`] call.
+///
+/// Native-only for now (see [`build_authorize_request_for_provider`]). The pure
+/// [`exchange_code`] it delegates to is available on wasm directly.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn exchange_code_for_provider(
     provider: crate::config::CloudProvider,
     code: &str,

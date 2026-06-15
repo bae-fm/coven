@@ -45,7 +45,9 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 
-use libsqlite3_sys as ffi;
+// Reach the SQLite C FFI through rusqlite so it resolves to the right backend
+// per target: libsqlite3-sys natively, sqlite-wasm-rs on wasm32.
+use rusqlite::ffi;
 use rusqlite::Connection;
 use tracing::{debug, warn};
 

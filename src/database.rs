@@ -114,8 +114,17 @@ impl Database {
         // WAL is a no-op on an in-memory db (the pragma reports "memory"); use a
         // query that tolerates the returned row rather than `pragma_update`,
         // which errors when a pragma yields rows.
+        //
+        // The browser's OPFS-backed SQLite VFS forbids WAL — leave the default
+        // rollback journal there. (sqlite-wasm-rs's VFS has no shared-memory WAL
+        // index.) Skipped, not silently defaulted: the log records the choice.
+        #[cfg(not(target_arch = "wasm32"))]
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
             .map_err(DbError::from)?;
+        #[cfg(target_arch = "wasm32")]
+        tracing::debug!(
+            "wasm: skipping PRAGMA journal_mode=WAL (OPFS VFS uses the rollback journal)"
+        );
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
 
@@ -183,6 +192,10 @@ impl Database {
 
     /// The shared register clock. coven's sync layer advances it past pulled rows
     /// and stamps envelopes off it; it is the same `Arc<Hlc>` the stamper wraps.
+    ///
+    /// Native-only: the sole consumer is the native-only [`crate::sync::sync_manager::SyncManager`].
+    /// The browser-runtime work reaches the same clock through its own manager.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn hlc(&self) -> Arc<Hlc> {
         self.hlc.clone()
     }

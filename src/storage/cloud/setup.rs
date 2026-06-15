@@ -3,15 +3,24 @@
 //! Contains the OAuth sign-in flows for Google Drive, Dropbox, and OneDrive,
 //! as well as managed service signup/login, disconnect, and account display logic.
 
-use tracing::{info, warn};
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::info;
+use tracing::warn;
 
 use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, KeyService};
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sync::cloud_storage::BlobPathScheme;
+use crate::sync::cloud_storage::CloudCipher;
 
 /// Google Drive OAuth sign-in: authorize, find/create the library folder, save
 /// tokens to the keyring. Returns the folder id for the host to persist in its
 /// own config (coven never writes the host's config).
+///
+/// Native-only: drives coven's localhost-callback OAuth flow ([`crate::oauth::authorize`]),
+/// which binds a TCP port and opens a browser — neither exists on wasm. The
+/// browser uses the redirect OAuth flow in the browser-runtime work.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn sign_in_google_drive(
     key_service: &KeyService,
     library_name: &str,
@@ -108,6 +117,9 @@ pub async fn sign_in_google_drive(
 
 /// Dropbox OAuth sign-in: authorize, create the library folder, save tokens to
 /// the keyring. Returns the folder path for the host to persist in its config.
+///
+/// Native-only (see [`sign_in_google_drive`]).
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn sign_in_dropbox(
     key_service: &KeyService,
     library_name: &str,
@@ -164,6 +176,9 @@ pub async fn sign_in_dropbox(
 /// OneDrive OAuth sign-in: authorize, resolve the default drive, create the app
 /// folder, save tokens to the keyring. Returns `(drive_id, folder_id)` for the
 /// host to persist in its config.
+///
+/// Native-only (see [`sign_in_google_drive`]).
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn sign_in_onedrive(
     key_service: &KeyService,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
@@ -416,6 +431,9 @@ pub fn build_cloud_cipher(
 /// `cipher` lets the caller reuse an already-built cipher (so the sync loop and
 /// storage share one instance for in-place key rotation); when `None` it is
 /// built from config via [`build_cloud_cipher`].
+///
+/// Native-only: builds the cloud home via the native-only [`super::create_cloud_home`].
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn create_sync_storage(
     config: &Config,
     key_service: &KeyService,

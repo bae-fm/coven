@@ -11,10 +11,15 @@ use tracing::{error, info, warn};
 
 use crate::blob::{BlobPlan, BlobUploadObserver};
 use crate::changeset::RowChange;
+// `Config`/`ClockRef`/`KeyService` are used only by the native-only `init_sync`.
+#[cfg(not(target_arch = "wasm32"))]
 use crate::clock::ClockRef;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::config::Config;
 use crate::database::Database;
-use crate::keys::{KeyService, UserKeypair};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::keys::KeyService;
+use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
 
@@ -556,6 +561,12 @@ pub async fn run_single_sync_cycle(
 /// in place through it), bootstraps auth keys, and returns the components the
 /// sync loop needs. Returns None if any component isn't available (missing
 /// config, credentials, etc.).
+///
+/// Native-only: builds the storage through the native-only
+/// [`crate::storage::cloud::setup::create_sync_storage`] (which constructs a
+/// native-only concrete backend). The browser-runtime work supplies a wasm cloud
+/// home and its own init path.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn init_sync(
     config: &Config,
     key_service: &KeyService,

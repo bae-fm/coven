@@ -5,11 +5,22 @@
 //! semantics. Higher-level concerns live in `CloudSyncStorage` which wraps any
 //! `dyn CloudHome` and applies the path layout and at-rest protection.
 
+// The concrete cloud backends are native-only: S3 needs the aws SDK; the OAuth
+// backends await reqwest, whose wasm `Response` is `!Send` and so can't satisfy
+// `CloudHome`'s `Send` future bound on the single-threaded browser; CloudKit is
+// Apple-only. wasm gets real backends (a fetch-based S3 client, a redirect OAuth
+// flow) in the browser-runtime work.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cloudkit;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod dropbox;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod google_drive;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oauth_session;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod onedrive;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod s3;
 pub mod setup;
 
@@ -143,6 +154,7 @@ pub trait CloudHome: Send + Sync {
 }
 
 /// Extract the OAuth token JSON from cloud home credentials, or return a storage error.
+#[cfg(not(target_arch = "wasm32"))]
 fn require_oauth_token(
     key_service: &crate::keys::KeyService,
     provider_name: &str,
@@ -158,6 +170,7 @@ fn require_oauth_token(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_oauth_tokens(
     key_service: &crate::keys::KeyService,
     provider_name: &str,
@@ -169,6 +182,11 @@ fn parse_oauth_tokens(
 
 /// Construct a CloudHome from the desktop app's Config + KeyService.
 /// Reads provider settings from config and credentials from the OS keyring.
+///
+/// Native-only: every concrete backend it constructs is native-only (see the
+/// module gating above). The browser builds its cloud home a different way in
+/// the browser-runtime work.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn create_cloud_home(
     config: &crate::config::Config,
     key_service: &crate::keys::KeyService,
