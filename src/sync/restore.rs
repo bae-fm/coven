@@ -17,7 +17,7 @@ use crate::keys::{KeyError, KeyService};
 use crate::library_dir::LibraryDir;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
-use crate::sync::cloud_storage::{CloudCipher, CloudSyncStorage};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::join::{build_config, derive_credentials, open_db_and_pull, JoinError};
 use crate::sync::pull::PullError;
 use crate::sync::session::SyncedTable;
@@ -183,6 +183,7 @@ async fn build_cloud_home(
 pub async fn restore_from_cloud(
     library_id: &str,
     encryption_key_hex: Option<&str>,
+    obfuscate_blob_paths: bool,
     library_name: &str,
     synced_tables: &[SyncedTable],
     source: RestoreSource,
@@ -216,9 +217,17 @@ pub async fn restore_from_cloud(
         None => CloudCipher::Plaintext,
     };
 
+    // The source's blob-path scheme, from the restore code, so this device
+    // computes the same blob keys the source wrote.
+    let blob_paths = if obfuscate_blob_paths {
+        BlobPathScheme::Hashed
+    } else {
+        BlobPathScheme::Plain
+    };
+
     let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
 
-    let storage = CloudSyncStorage::new(cloud_home, cipher.clone());
+    let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths);
 
     // Create library directory.
     let device_id = ids.new_id();
@@ -233,6 +242,7 @@ pub async fn restore_from_cloud(
         &storage,
         &cipher,
         encryption_key_hex,
+        obfuscate_blob_paths,
         &library_dir,
         library_id,
         &device_id,
@@ -339,6 +349,7 @@ pub async fn restore_from_code(
     let config = restore_from_cloud(
         &parsed.lid,
         parsed.ek.as_deref(),
+        parsed.obf,
         &parsed.name,
         synced_tables,
         source,
@@ -366,6 +377,7 @@ async fn bootstrap_and_save(
     storage: &CloudSyncStorage,
     cipher: &CloudCipher,
     encryption_key_hex: Option<&str>,
+    obfuscate_blob_paths: bool,
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
@@ -426,6 +438,7 @@ async fn bootstrap_and_save(
         library_name,
         join_info,
         cipher,
+        obfuscate_blob_paths,
     );
 
     // Restore is done by the owner — CloudKit uses the private database.

@@ -237,6 +237,18 @@ pub fn make_entry(
     entry
 }
 
+/// The object key [`MockSyncStorage`] stores a blob under. A plain-scheme blob
+/// (one carrying a `cloud_path`) lands at the readable `{namespace}/{cloud_path}`,
+/// matching `CloudSyncStorage`'s plain layout; an obfuscated one keys by id as
+/// `{namespace}/{id}` (the mock doesn't shard, but a flat id key is unambiguous
+/// for tests).
+fn blob_key(namespace: &str, id: &str, cloud_path: Option<&str>) -> String {
+    match cloud_path {
+        Some(path) => format!("{namespace}/{path}"),
+        None => format!("{namespace}/{id}"),
+    }
+}
+
 /// In-memory mock of SyncStorage for tests.
 /// Stores changesets as plaintext (no encryption in tests).
 pub struct MockSyncStorage {
@@ -360,9 +372,10 @@ impl SyncStorage for MockSyncStorage {
         namespace: &str,
         id: &str,
         _scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        let key = format!("{namespace}/{id}");
+        let key = blob_key(namespace, id, cloud_path);
         self.objects.lock().unwrap().insert(key, data);
         Ok(())
     }
@@ -372,8 +385,9 @@ impl SyncStorage for MockSyncStorage {
         namespace: &str,
         id: &str,
         _scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
-        let key = format!("{namespace}/{id}");
+        let key = blob_key(namespace, id, cloud_path);
         let objects = self.objects.lock().unwrap();
         objects
             .get(&key)
@@ -629,6 +643,9 @@ pub fn note_photo_ref(
         local_path: dir.join(id),
         id: id.to_string(),
         scope: scope_for(kind, note_id),
+        // These helpers exercise the hashed (default) scheme; a plain-scheme test
+        // constructs its own ref with a `cloud_path`.
+        cloud_path: None,
     }
 }
 

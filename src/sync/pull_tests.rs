@@ -10,7 +10,7 @@ use crate::blob::BlobPlan;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::sync::cloud_storage::{CloudCipher, CloudSyncStorage};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::service::SyncService;
@@ -186,7 +186,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
             .await
             .expect("resolve scope");
         storage
-            .put_blob(&b.namespace, &b.id, resolved, data)
+            .put_blob(&b.namespace, &b.id, resolved, b.cloud_path.as_deref(), data)
             .await
             .expect("put_blob");
     }
@@ -208,6 +208,165 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     assert_eq!(downloaded, b"PHOTOBYTES");
 }
 
+/// A blob plan that names each `note_photos` row at a readable cloud path
+/// (`{note_id}/{kind}.jpg`) so the plain scheme stores it browsably, instead of
+/// the content-addressed shard. The local file still lives under `dir`.
+struct ReadablePhotoBlobPlan {
+    dir: std::path::PathBuf,
+}
+
+impl ReadablePhotoBlobPlan {
+    fn refs(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
+        use crate::changeset::ChangeOp;
+        changes
+            .iter()
+            .filter(|c| c.table == "note_photos" && c.op == ChangeOp::Insert)
+            .map(|c| {
+                let id = c.pk().expect("note_photos pk");
+                let note_id = c.col(1).expect("note_photos note_id");
+                let kind = c.col(2).expect("note_photos kind");
+                crate::blob::BlobRef {
+                    namespace: "photos".to_string(),
+                    id: id.to_string(),
+                    local_path: self.dir.join(id),
+                    scope: crate::blob::BlobScope::Master,
+                    cloud_path: Some(format!("{note_id}/{kind}.jpg")),
+                }
+            })
+            .collect()
+    }
+}
+
+impl BlobPlan for ReadablePhotoBlobPlan {
+    fn blobs_to_push(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
+        self.refs(changes)
+    }
+    fn blobs_to_pull(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
+        self.refs(changes)
+    }
+    fn blobs_in_db(
+        &self,
+        _conn: &rusqlite::Connection,
+    ) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
+        Ok(vec![])
+    }
+}
+
+/// A plain-scheme home stores a changeset-driven blob at the consumer's readable
+/// `cloud_path` (`photos/n1/cover.jpg`), not the content-addressed shard, and a
+/// second device with the same plan pulls it from that readable key and recovers
+/// the bytes. This is the changeset-push / changeset-pull half of the blob path
+/// (the audio outbox was always consumer-controlled), end to end over a real
+/// `CloudSyncStorage` in `BlobPathScheme::Plain`.
+#[tokio::test]
+async fn plain_scheme_blob_round_trips_at_the_readable_key() {
+    let storage = CloudSyncStorage::new(
+        Box::new(InMemoryCloudHome::new()),
+        CloudCipher::Encrypted(EncryptionService::new_with_key(&[5u8; 32])),
+        BlobPathScheme::Plain,
+    );
+
+    // Device A: a shared note + a cover photo whose file is present locally.
+    // Driven through the real `SyncService::sync` + `push_changeset` so the
+    // production blob-upload path keys the blob from its `cloud_path`.
+    let plaintext = b"COVERART";
+    let src_photos = tempfile::tempdir().expect("src photos");
+    std::fs::write(src_photos.path().join("p1cover"), plaintext).expect("write photo");
+    let src_plan = ReadablePhotoBlobPlan {
+        dir: src_photos.path().to_path_buf(),
+    };
+
+    let db1 = open_test_db();
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db1,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('p1cover', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db1
+        .take_changeset_and_suspend()
+        .await
+        .expect("capture outgoing");
+
+    let service = SyncService::new("dev1".to_string());
+    let keypair = UserKeypair::generate();
+    let (_t1, ld1) = temp_library_dir();
+    let result = service
+        .sync(
+            &db1,
+            &test_synced_tables(),
+            outgoing,
+            0,
+            &HashMap::new(),
+            &storage,
+            "2026-01-01T00:00:00Z",
+            "",
+            &keypair,
+            &ld1,
+            &src_plan,
+        )
+        .await
+        .expect("sync");
+    db1.resume_session().await.expect("resume");
+    let outgoing = result.outgoing.expect("outgoing changeset");
+    cycle::push_changeset(
+        &storage,
+        "dev1",
+        outgoing.seq,
+        outgoing.packed,
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .await
+    .expect("push_changeset");
+
+    // The blob lands at the readable key, not the hashed shard.
+    assert!(
+        storage
+            .cloud_home()
+            .exists("photos/n1/cover.jpg")
+            .await
+            .expect("exists at readable key"),
+        "the blob must land at the readable cloud_path key",
+    );
+    let hashed = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "photos", "p1cover", None)
+        .expect("hashed key");
+    assert!(
+        !storage
+            .cloud_home()
+            .exists(&hashed)
+            .await
+            .expect("exists at hashed key"),
+        "the hashed shard key must be absent under the plain scheme",
+    );
+
+    // Device B: a fresh DB and its own asset dir, same cloud + plain scheme,
+    // pulls and downloads the cover from the readable key.
+    let dst_photos = tempfile::tempdir().expect("dst photos");
+    let dst_plan = ReadablePhotoBlobPlan {
+        dir: dst_photos.path().to_path_buf(),
+    };
+    let db2 = open_test_db();
+    let (_t2, ld) = temp_library_dir();
+    let (_updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan).await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(!result.asset_downloads_failed);
+    let downloaded =
+        std::fs::read(dst_photos.path().join("p1cover")).expect("device B downloaded cover");
+    assert_eq!(
+        downloaded, plaintext,
+        "device B recovers the source bytes from the readable plain-scheme key",
+    );
+}
+
 /// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
 /// shared `CloudHome`. Device A publishes a note plus its cover photo via the real
 /// `SyncService::sync`; the blob lands ciphertext at rest. Device B — a fresh DB
@@ -219,6 +378,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let storage = CloudSyncStorage::new(
         Box::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&[7u8; 32])),
+        BlobPathScheme::Hashed,
     );
 
     // Device A: a note and its cover photo, the file present locally.
@@ -283,7 +443,8 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     .expect("push_changeset");
 
     // At rest the cover photo is ciphertext, not the source bytes.
-    let blob_key = CloudSyncStorage::blob_key("photos", "p1cover");
+    let blob_key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "photos", "p1cover", None)
+        .expect("hashed key");
     let at_rest = storage
         .cloud_home()
         .read(&blob_key)

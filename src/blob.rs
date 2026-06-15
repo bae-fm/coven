@@ -1,9 +1,11 @@
 //! Blob plumbing for sync.
 //!
-//! coven syncs opaque encrypted blobs referenced by DB rows. It owns the cloud
-//! layout (`{namespace}/{ab}/{cd}/{id}`) and encryption; the host decides which
-//! rows carry blobs, where their plaintext lives locally, and how each is
-//! scoped for encryption.
+//! coven syncs opaque encrypted blobs referenced by DB rows. By default it owns
+//! the cloud layout (the content-addressed `{namespace}/{ab}/{cd}/{id}`) and
+//! encryption; the host decides which rows carry blobs, where their plaintext
+//! lives locally, and how each is scoped for encryption. A home configured for
+//! the unobfuscated blob-path scheme instead stores each blob at the consumer's
+//! readable [`BlobRef::cloud_path`] so the bucket is browsable.
 
 use std::path::PathBuf;
 
@@ -103,7 +105,8 @@ impl BlobScope {
 /// A blob referenced by a changeset: its cloud identity plus the local file.
 #[derive(Debug, Clone)]
 pub struct BlobRef {
-    /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`.
+    /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`
+    /// under the hashed scheme, or `{namespace}/{cloud_path}` under the plain one.
     pub namespace: String,
     /// Blob id (typically the id of the blob-bearing row).
     pub id: String,
@@ -111,6 +114,12 @@ pub struct BlobRef {
     pub local_path: PathBuf,
     /// Encryption scope for this blob.
     pub scope: BlobScope,
+    /// The consumer's readable cloud-relative path for this blob, e.g.
+    /// `"Artist - Album/cover.jpg"`. Used as the object key under `namespace` when
+    /// the home's [`crate::sync::cloud_storage::BlobPathScheme`] is `Plain`;
+    /// ignored when `Hashed`. `None` is only valid for a `Hashed` home — a `Plain`
+    /// home with no `cloud_path` is a surfaced error, never a silent fallback.
+    pub cloud_path: Option<String>,
 }
 
 /// Maps changeset row-changes to the blobs that must move with them.

@@ -9,12 +9,20 @@
 /// ```text
 /// changes/{device_id}/{seq}{suffix}          -- changeset envelopes
 /// heads/{device_id}.json{suffix}             -- head pointers
-/// images/{ab}/{cd}/{id}                      -- library images (blobs)
+/// images/{ab}/{cd}/{id}                      -- library images (blobs), hashed scheme
+/// images/{cloud_path}                        -- library images (blobs), plain scheme
 /// snapshot.db{suffix}                        -- full DB snapshot for bootstrapping
 /// snapshot_meta.json{suffix}                 -- per-device cursors at snapshot time
 /// membership/{author_pubkey}/{seq}{suffix}   -- membership entries
 /// keys/{user_pubkey}{suffix}                 -- wrapped library keys per member
 /// ```
+///
+/// Blob keys follow the home's
+/// [`BlobPathScheme`](crate::sync::cloud_storage::BlobPathScheme): the default
+/// hashed scheme shards each blob by its id (`{namespace}/{ab}/{cd}/{id}`); the
+/// plain scheme keys it at the consumer-supplied readable path
+/// (`{namespace}/{cloud_path}`) so the bucket is browsable. The blob-path scheme
+/// is independent of the at-rest cipher below.
 ///
 /// An encrypted home seals every object under the library key before upload and
 /// opens it after download; a plaintext home stores and serves objects verbatim.
@@ -93,7 +101,10 @@ pub trait SyncStorage: Send + Sync {
         timestamp: &str,
     ) -> Result<(), StorageError>;
 
-    /// Upload a blob to `{namespace}/{id[0..2]}/{id[2..4]}/{id}`.
+    /// Upload a blob. Under the hashed (default) scheme it is keyed
+    /// `{namespace}/{id[0..2]}/{id[2..4]}/{id}` and `cloud_path` is ignored; under
+    /// the plain scheme it is keyed `{namespace}/{cloud_path}` verbatim, so the
+    /// bucket is browsable, and a missing `cloud_path` is an error.
     /// On an encrypted home the plaintext is sealed with the key the resolved
     /// `scope` selects (master, a per-scope derived key, or an explicit item key);
     /// on a plaintext home it is stored verbatim (scope ignored). The caller
@@ -104,17 +115,20 @@ pub trait SyncStorage: Send + Sync {
         namespace: &str,
         id: &str,
         scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError>;
 
-    /// Download and open a blob from `{namespace}/{id[0..2]}/{id[2..4]}/{id}`,
+    /// Download and open a blob, keyed `{namespace}/{id[0..2]}/{id[2..4]}/{id}`
+    /// under the hashed scheme or `{namespace}/{cloud_path}` under the plain one,
     /// using the key the resolved `scope` selects on an encrypted home (verbatim
-    /// on a plaintext one).
+    /// on a plaintext one). A plain-scheme home with no `cloud_path` is an error.
     async fn get_blob(
         &self,
         namespace: &str,
         id: &str,
         scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError>;
 
     /// Upload a snapshot.

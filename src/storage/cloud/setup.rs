@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, KeyService};
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 
 /// Google Drive OAuth sign-in: authorize, find/create the library folder, save
 /// tokens to the keyring. Returns the folder id for the host to persist in its
@@ -379,6 +379,7 @@ pub fn generate_restore_code(
         name: config.library_name.clone(),
         provider,
         sk: URL_SAFE_NO_PAD.encode(keypair.signing_key),
+        obf: config.cloud_home.obfuscate_blob_paths,
     };
 
     Ok(encode_restore_code(&code))
@@ -406,6 +407,17 @@ pub fn build_cloud_cipher(
     Ok(CloudCipher::Encrypted(enc))
 }
 
+/// The [`BlobPathScheme`] a library's config selects: the obfuscated
+/// content-addressed layout (the default) or the consumer-supplied readable path
+/// when `obfuscate_blob_paths == false`.
+pub fn build_blob_path_scheme(config: &Config) -> BlobPathScheme {
+    if config.cloud_home.obfuscate_blob_paths {
+        BlobPathScheme::Hashed
+    } else {
+        BlobPathScheme::Plain
+    }
+}
+
 /// Create sync storage from config and credentials.
 ///
 /// This is a lighter version of `sync::cycle::init_sync` that only creates the
@@ -431,7 +443,9 @@ pub async fn create_sync_storage(
     };
 
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
-        cloud_home, cipher,
+        cloud_home,
+        cipher,
+        build_blob_path_scheme(config),
     ))
 }
 

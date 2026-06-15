@@ -476,7 +476,15 @@ pub(crate) async fn download_blobs(
             }
         };
 
-        match storage.get_blob(&blob.namespace, &blob.id, resolved).await {
+        match storage
+            .get_blob(
+                &blob.namespace,
+                &blob.id,
+                resolved,
+                blob.cloud_path.as_deref(),
+            )
+            .await
+        {
             Ok(bytes) => {
                 if let Some(parent) = blob.local_path.parent() {
                     if let Err(e) = std::fs::create_dir_all(parent) {

@@ -60,11 +60,26 @@ pub struct CloudHomeConfig {
     /// absent value reads back as `true`.
     #[serde(default = "default_encrypted")]
     pub encrypted: bool,
+    /// Whether blob objects use coven's obfuscated content-addressed path
+    /// (`{namespace}/{ab}/{cd}/{id}`). When false, blobs use the consumer-supplied
+    /// readable path so the bucket is browsable.
+    ///
+    /// Defaults to `true`: the default home obfuscates blob paths, and an on-disk
+    /// config written before this field existed describes an obfuscated home, so
+    /// an absent value reads back as `true`. Independent of [`Self::encrypted`].
+    #[serde(default = "default_obfuscate_blob_paths")]
+    pub obfuscate_blob_paths: bool,
 }
 
 /// The default for [`CloudHomeConfig::encrypted`]: every home is encrypted unless
 /// explicitly opted out.
 fn default_encrypted() -> bool {
+    true
+}
+
+/// The default for [`CloudHomeConfig::obfuscate_blob_paths`]: every home uses the
+/// content-addressed blob layout unless explicitly opted out.
+fn default_obfuscate_blob_paths() -> bool {
     true
 }
 
@@ -82,6 +97,7 @@ impl Default for CloudHomeConfig {
             onedrive_folder_id: None,
             cloudkit_is_shared: false,
             encrypted: default_encrypted(),
+            obfuscate_blob_paths: default_obfuscate_blob_paths(),
         }
     }
 }

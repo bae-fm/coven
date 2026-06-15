@@ -679,6 +679,7 @@ mod tests {
             _namespace: &str,
             _id: &str,
             _scope: crate::blob::ResolvedScope,
+            _cloud_path: Option<&str>,
             _data: Vec<u8>,
         ) -> Result<(), StorageError> {
             Ok(())
@@ -689,6 +690,7 @@ mod tests {
             namespace: &str,
             id: &str,
             _scope: crate::blob::ResolvedScope,
+            _cloud_path: Option<&str>,
         ) -> Result<Vec<u8>, StorageError> {
             Err(StorageError::NotFound(format!("{namespace}/{id}")))
         }

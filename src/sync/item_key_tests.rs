@@ -17,7 +17,7 @@ use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::sync::cloud_storage::{CloudCipher, CloudSyncStorage};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::push_changeset;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::pull::pull_changes;
@@ -52,6 +52,7 @@ fn storage_over(home: InMemoryCloudHome) -> CloudSyncStorage {
     CloudSyncStorage::new(
         Box::new(home),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
+        BlobPathScheme::Hashed,
     )
 }
 
@@ -82,13 +83,19 @@ async fn item_scoped_blob_round_trips_master_cannot_read() {
     );
 
     storage
-        .put_blob("images", "item-1", resolved.clone(), plaintext.clone())
+        .put_blob(
+            "images",
+            "item-1",
+            resolved.clone(),
+            None,
+            plaintext.clone(),
+        )
         .await
         .expect("put item-scoped blob");
 
     // The item key reads it back.
     let got = storage
-        .get_blob("images", "item-1", resolved)
+        .get_blob("images", "item-1", resolved, None)
         .await
         .expect("get item-scoped blob");
     assert_eq!(got, plaintext);
@@ -96,7 +103,7 @@ async fn item_scoped_blob_round_trips_master_cannot_read() {
     // The master key — held by every member — cannot decrypt it.
     assert!(
         storage
-            .get_blob("images", "item-1", ResolvedScope::Master)
+            .get_blob("images", "item-1", ResolvedScope::Master, None)
             .await
             .is_err(),
         "the master key must not decrypt an item-scoped blob"
@@ -242,6 +249,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     let storage = CloudSyncStorage::new(
         Box::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
+        BlobPathScheme::Hashed,
     );
 
     // --- Device A: mint the item key, write a shareable note + a blob-bearing
@@ -268,7 +276,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         .await
         .expect("resolve on A");
     storage
-        .put_blob("audio", "blob-1", resolved_a, plaintext.clone())
+        .put_blob("audio", "blob-1", resolved_a, None, plaintext.clone())
         .await
         .expect("A uploads the item-scoped blob");
 
@@ -334,7 +342,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     // The master key alone (membership) does not unlock it.
     assert!(
         storage
-            .get_blob("audio", "blob-1", ResolvedScope::Master)
+            .get_blob("audio", "blob-1", ResolvedScope::Master, None)
             .await
             .is_err(),
         "membership alone (the master key) does not unlock item content"
@@ -363,7 +371,7 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
         .await
         .expect("resolve on A");
     storage
-        .put_blob("audio", "item-1", resolved_a, plaintext.clone())
+        .put_blob("audio", "item-1", resolved_a, None, plaintext.clone())
         .await
         .expect("A uploads the item-scoped blob");
 
@@ -420,7 +428,7 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
         .await
         .expect("resolve on bootstrapped B");
     let recovered = storage
-        .get_blob("audio", "item-1", resolved_b)
+        .get_blob("audio", "item-1", resolved_b, None)
         .await
         .expect("B decrypts the item-scoped blob after bootstrap");
     assert_eq!(

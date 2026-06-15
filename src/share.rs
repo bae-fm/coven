@@ -31,7 +31,6 @@ use tracing::warn;
 
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError};
-use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::Database;
 
 /// What can go wrong creating, opening, or revoking a share.
@@ -101,9 +100,12 @@ pub struct ShareManifest {
 impl ShareManifest {
     /// Whether `cloud_key` is one of the authorized blobs. Whatever serves the
     /// share resolves a requested object to its cloud key and asks coven; coven
-    /// hashes each authorized [`BlobId`] to its cloud key with the same layout the
-    /// storage layer uses ([`CloudSyncStorage::blob_key`]) and matches. The
-    /// server therefore never learns coven's `{ab}/{cd}` partitioning.
+    /// hashes each authorized [`BlobId`] to its cloud key with the same hashed
+    /// layout ([`crate::library_dir::LibraryDir::hashed_path`]) and matches. The
+    /// server therefore never learns coven's `{ab}/{cd}` partitioning. Sharing is
+    /// inherently hashed: `allows` recomputes a blob's key from its id, which only
+    /// the content-addressed layout supports — the plain (consumer-path) scheme
+    /// has no id-derivable key, so share-proxy always uses the hashed layout.
     pub fn allows(&self, cloud_key: &str) -> bool {
         self.blobs.iter().any(|b| {
             // `blob_key` → `hashed_path` indexes `&hex[..2]`/`&hex[2..4]` on the
@@ -122,7 +124,8 @@ impl ShareManifest {
                 );
                 return false;
             }
-            CloudSyncStorage::blob_key(&b.namespace, &b.id) == cloud_key
+            // Share-proxy always uses the hashed layout (see the doc comment).
+            crate::library_dir::LibraryDir::hashed_path(&b.namespace, &b.id) == cloud_key
         })
     }
 }

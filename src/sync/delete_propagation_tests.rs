@@ -126,6 +126,7 @@ async fn blob_delete_fires_immediately_without_waiting_for_peers() {
             "storage",
             "blob1",
             crate::blob::ResolvedScope::Master,
+            None,
             b"audio-bytes".to_vec(),
         )
         .await

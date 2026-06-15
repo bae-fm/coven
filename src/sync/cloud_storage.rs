@@ -25,6 +25,17 @@ pub enum CloudCipher {
     Plaintext,
 }
 
+/// How a cloud home names its blob objects. This is independent of the at-rest
+/// [`CloudCipher`]: a home can be encrypted or plaintext under either scheme.
+#[derive(Clone, Copy)]
+pub enum BlobPathScheme {
+    /// Content-addressed shard `{namespace}/{ab}/{cd}/{id}` (the default).
+    Hashed,
+    /// The consumer's own readable path, verbatim: `{namespace}/{cloud_path}`.
+    /// The consumer must supply `cloud_path` on every blob; coven errors otherwise.
+    Plain,
+}
+
 impl CloudCipher {
     /// Protect a control object (heads, changesets, snapshot, snapshot_meta,
     /// min_schema, membership) for storage. Encrypted seals under the library
@@ -105,13 +116,17 @@ struct MinSchemaVersionJson {
 pub struct CloudSyncStorage {
     home: Box<dyn CloudHome>,
     cipher: Arc<RwLock<CloudCipher>>,
+    /// How blob objects are keyed. Unlike the cipher, the scheme does not rotate
+    /// over a home's life, so it is a plain field with no lock.
+    blob_paths: BlobPathScheme,
 }
 
 impl CloudSyncStorage {
-    pub fn new(home: Box<dyn CloudHome>, cipher: CloudCipher) -> Self {
+    pub fn new(home: Box<dyn CloudHome>, cipher: CloudCipher, blob_paths: BlobPathScheme) -> Self {
         CloudSyncStorage {
             home,
             cipher: Arc::new(RwLock::new(cipher)),
+            blob_paths,
         }
     }
 
@@ -137,9 +152,32 @@ impl CloudSyncStorage {
         self.cipher().suffix()
     }
 
-    /// Blob key: `{namespace}/{ab}/{cd}/{id}`.
-    pub fn blob_key(namespace: &str, id: &str) -> String {
-        crate::library_dir::LibraryDir::hashed_path(namespace, id)
+    /// The cloud object key for a blob under the home's [`BlobPathScheme`].
+    ///
+    /// `Hashed` ignores `cloud_path` and shards by the id:
+    /// `{namespace}/{ab}/{cd}/{id}`. `Plain` uses the consumer's `cloud_path`
+    /// verbatim: `{namespace}/{cloud_path}`. A `Plain` home with no `cloud_path`
+    /// is an error — coven never silently falls back to the hashed layout, which
+    /// would scatter readable-path blobs under unfindable shard keys.
+    pub fn blob_key(
+        scheme: BlobPathScheme,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, StorageError> {
+        match scheme {
+            BlobPathScheme::Hashed => {
+                Ok(crate::library_dir::LibraryDir::hashed_path(namespace, id))
+            }
+            BlobPathScheme::Plain => {
+                let path = cloud_path.ok_or_else(|| {
+                    StorageError::S3(format!(
+                        "unobfuscated blob-path home requires a cloud_path for blob {namespace}/{id}"
+                    ))
+                })?;
+                Ok(format!("{namespace}/{path}"))
+            }
+        }
     }
 }
 
@@ -255,9 +293,10 @@ impl SyncStorage for CloudSyncStorage {
         namespace: &str,
         id: &str,
         scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        let key = Self::blob_key(namespace, id);
+        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
         let stored = self.cipher().seal_scoped(scope, &data);
         self.home
             .write(&key, stored, &crate::storage::cloud::no_progress())
@@ -270,8 +309,9 @@ impl SyncStorage for CloudSyncStorage {
         namespace: &str,
         id: &str,
         scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
-        let key = Self::blob_key(namespace, id);
+        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
         let stored = self.home.read(&key).await?;
         self.cipher()
             .open_scoped(scope, &stored)
@@ -470,6 +510,7 @@ mod tests {
         let storage = CloudSyncStorage::new(
             Box::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(master),
+            BlobPathScheme::Hashed,
         );
 
         let item_key = [9u8; 32];
@@ -479,28 +520,31 @@ mod tests {
                 "images",
                 "item-1",
                 ResolvedScope::Key(item_key),
+                None,
                 plaintext.clone(),
             )
             .await
             .expect("put_blob with Key scope");
 
         // At rest it is ciphertext.
+        let hashed = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "item-1", None)
+            .expect("hashed key");
         let at_rest = storage
             .cloud_home()
-            .read(&CloudSyncStorage::blob_key("images", "item-1"))
+            .read(&hashed)
             .await
             .expect("blob present");
         assert_ne!(at_rest, plaintext, "blob is encrypted at rest");
 
         // The explicit key reads it back; the master key does not.
         let got = storage
-            .get_blob("images", "item-1", ResolvedScope::Key(item_key))
+            .get_blob("images", "item-1", ResolvedScope::Key(item_key), None)
             .await
             .expect("get_blob with the same Key");
         assert_eq!(got, plaintext);
         assert!(
             storage
-                .get_blob("images", "item-1", ResolvedScope::Master)
+                .get_blob("images", "item-1", ResolvedScope::Master, None)
                 .await
                 .is_err(),
             "the master key must not decrypt a Key-scoped blob"
@@ -517,6 +561,7 @@ mod tests {
         let storage = CloudSyncStorage::new(
             Box::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(EncryptionService::new_with_key(&[1u8; 32])),
+            BlobPathScheme::Hashed,
         );
         storage
             .put_head("ours", 5, None, "2026-01-01T00:00:00Z")
@@ -554,8 +599,11 @@ mod tests {
     #[tokio::test]
     async fn plaintext_home_stores_control_objects_in_the_clear_without_enc_suffix() {
         let home = Arc::new(InMemoryCloudHome::new());
-        let storage =
-            CloudSyncStorage::new(Box::new(StorageHome(home.clone())), CloudCipher::Plaintext);
+        let storage = CloudSyncStorage::new(
+            Box::new(StorageHome(home.clone())),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Hashed,
+        );
 
         // Head: bare key present, `.enc` key absent, and it reads back.
         storage
@@ -633,21 +681,106 @@ mod tests {
         // A Master-scoped blob is stored verbatim too (no per-scope key).
         let blob = b"cover-art-plaintext".to_vec();
         storage
-            .put_blob("photos", "p1cover", ResolvedScope::Master, blob.clone())
+            .put_blob(
+                "photos",
+                "p1cover",
+                ResolvedScope::Master,
+                None,
+                blob.clone(),
+            )
             .await
             .expect("put_blob");
+        let hashed = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "photos", "p1cover", None)
+            .expect("hashed key");
         assert_eq!(
-            home.get(&CloudSyncStorage::blob_key("photos", "p1cover"))
-                .as_deref(),
+            home.get(&hashed).as_deref(),
             Some(blob.as_slice()),
             "blob stored verbatim in a plaintext home",
         );
         assert_eq!(
             storage
-                .get_blob("photos", "p1cover", ResolvedScope::Master)
+                .get_blob("photos", "p1cover", ResolvedScope::Master, None)
                 .await
                 .expect("get_blob"),
             blob
+        );
+    }
+
+    /// A `BlobPathScheme::Plain` home stores each blob at the consumer's readable
+    /// `cloud_path` (`{namespace}/{cloud_path}`), not the content-addressed shard:
+    /// the bucket is browsable. Asserts the blob lands at the exact readable key,
+    /// that the hashed shard key it *would* have used is absent, and that
+    /// `get_blob` with the same `cloud_path` round-trips.
+    #[tokio::test]
+    async fn plain_scheme_stores_blob_at_the_readable_cloud_path() {
+        let home = Arc::new(InMemoryCloudHome::new());
+        let storage = CloudSyncStorage::new(
+            Box::new(StorageHome(home.clone())),
+            CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32])),
+            BlobPathScheme::Plain,
+        );
+
+        let cloud_path = "Artist - Album/cover.jpg";
+        let bytes = b"cover-art-bytes".to_vec();
+        storage
+            .put_blob(
+                "images",
+                "cover-row-id",
+                ResolvedScope::Master,
+                Some(cloud_path),
+                bytes.clone(),
+            )
+            .await
+            .expect("put_blob plain");
+
+        // It lands at the bare readable key.
+        assert!(
+            home.get("images/Artist - Album/cover.jpg").is_some(),
+            "blob stored at the readable cloud_path key",
+        );
+        // The hashed shard key it would otherwise have used does not exist.
+        let hashed =
+            CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "cover-row-id", None)
+                .expect("hashed key");
+        assert!(
+            home.get(&hashed).is_none(),
+            "the hashed shard key must be absent under the plain scheme",
+        );
+
+        // Round-trips with the same cloud_path.
+        let got = storage
+            .get_blob(
+                "images",
+                "cover-row-id",
+                ResolvedScope::Master,
+                Some(cloud_path),
+            )
+            .await
+            .expect("get_blob plain");
+        assert_eq!(got, bytes);
+    }
+
+    /// A plain-scheme home with no `cloud_path` is a surfaced error, never a
+    /// silent fall back to the hashed shard (which would scatter readable-path
+    /// blobs under unfindable keys). Asserts both `blob_key` and `put_blob` error.
+    #[tokio::test]
+    async fn plain_scheme_without_cloud_path_errors() {
+        assert!(
+            CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", "id-1", None).is_err(),
+            "blob_key for a plain home with no cloud_path must error",
+        );
+
+        let storage = CloudSyncStorage::new(
+            Box::new(InMemoryCloudHome::new()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+        );
+        assert!(
+            storage
+                .put_blob("images", "id-1", ResolvedScope::Master, None, b"x".to_vec())
+                .await
+                .is_err(),
+            "put_blob for a plain home with no cloud_path must error, not silently hash",
         );
     }
 

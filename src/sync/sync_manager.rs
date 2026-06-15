@@ -301,9 +301,13 @@ impl SyncManager {
             .try_into()
             .map_err(|_| "Encryption key wrong length".to_string())?;
 
-        let (library_id, library_name) = {
+        let (library_id, library_name, obfuscate_blob_paths) = {
             let config = (self.config_provider)();
-            (config.library_id.clone(), config.library_name.clone())
+            (
+                config.library_id.clone(),
+                config.library_name.clone(),
+                config.cloud_home.obfuscate_blob_paths,
+            )
         };
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
@@ -319,6 +323,7 @@ impl SyncManager {
             &key_bytes,
             &library_id,
             &library_name,
+            obfuscate_blob_paths,
         )
         .await
         .map_err(|e| e.0)?;

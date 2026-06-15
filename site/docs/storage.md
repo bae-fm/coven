@@ -214,6 +214,12 @@ home's `CloudCipher`:
   `changes/{device}/{seq}`, …). The bucket is browsable; the provider sees the
   actual bytes.
 
+Blob objects are keyed `{namespace}/{ab}/{cd}/{id}` by default — content-addressed
+and sharded by the id — or `{namespace}/{cloud_path}` for an
+[unobfuscated home](blobs.md#unobfuscated-blob-paths), which stores each blob at
+the consumer's readable path so the bucket is browsable by name. The blob-path
+scheme is independent of the at-rest cipher above.
+
 ## Lifecycle
 
 [`SyncManager::start_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::start_sync)

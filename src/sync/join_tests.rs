@@ -173,6 +173,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
             "photos",
             "photo1",
             crate::blob::ResolvedScope::Derived("n1".to_string()),
+            None,
             b"cover-bytes".to_vec(),
         )
         .await
@@ -311,6 +312,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
             "photos",
             "photo1",
             crate::blob::ResolvedScope::Derived("n1".to_string()),
+            None,
             b"cover-bytes".to_vec(),
         )
         .await

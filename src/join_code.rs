@@ -10,6 +10,29 @@ pub struct InviteCode {
     pub library_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
+    /// Whether the home obfuscates blob paths (the default content-addressed
+    /// layout) vs. the consumer's readable path. A joining device must know the
+    /// scheme to compute the same blob keys the owner writes. Omitted (and decoded
+    /// back to `true`) for an obfuscated home, matching every code written before
+    /// this field.
+    #[serde(
+        default = "default_obfuscate_blob_paths",
+        skip_serializing_if = "is_default_obfuscate_blob_paths"
+    )]
+    pub obfuscate_blob_paths: bool,
+}
+
+/// The default for [`InviteCode::obfuscate_blob_paths`]: an absent value means the
+/// obfuscated (content-addressed) layout, matching every code written before this
+/// field existed.
+fn default_obfuscate_blob_paths() -> bool {
+    true
+}
+
+/// Skip serializing [`InviteCode::obfuscate_blob_paths`] when it holds the default
+/// (obfuscated), so an ordinary invite code stays compact.
+fn is_default_obfuscate_blob_paths(obfuscate: &bool) -> bool {
+    *obfuscate
 }
 
 pub fn encode(code: &InviteCode) -> String {
@@ -106,6 +129,7 @@ mod tests {
                 key_prefix: None,
             },
             owner_pubkey: "deadbeef".into(),
+            obfuscate_blob_paths: true,
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
@@ -146,6 +170,7 @@ mod tests {
                 key_prefix: None,
             },
             owner_pubkey: "cafebabe".into(),
+            obfuscate_blob_paths: true,
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
@@ -167,6 +192,7 @@ mod tests {
                 folder_id: "abc123".into(),
             },
             owner_pubkey: "cafebabe".into(),
+            obfuscate_blob_paths: true,
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
@@ -203,6 +229,7 @@ mod tests {
                 share_url: "https://www.icloud.com/share/abc123".into(),
             },
             owner_pubkey: "aabbccdd".into(),
+            obfuscate_blob_paths: true,
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
@@ -215,6 +242,44 @@ mod tests {
         }
     }
 
+    /// An invite for an unobfuscated home carries `obfuscate_blob_paths = false`
+    /// so the joiner computes the owner's readable blob keys; a default invite
+    /// omits the field and decodes back to `true` (obfuscated).
+    #[test]
+    fn round_trip_obfuscate_blob_paths() {
+        let plain = InviteCode {
+            library_id: "lib-plain".into(),
+            library_name: "Browsable".into(),
+            join_info: CloudHomeJoinInfo::S3 {
+                bucket: "b".into(),
+                region: "r".into(),
+                endpoint: None,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                key_prefix: None,
+            },
+            owner_pubkey: "ff00".into(),
+            obfuscate_blob_paths: false,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(
+            json.contains("obfuscate_blob_paths"),
+            "an unobfuscated invite must carry the flag: {json}"
+        );
+        let decoded = decode(&encode(&plain)).unwrap();
+        assert!(!decoded.obfuscate_blob_paths, "false round-trips");
+
+        let mut obfuscated = plain;
+        obfuscated.obfuscate_blob_paths = true;
+        let json = serde_json::to_string(&obfuscated).unwrap();
+        assert!(
+            !json.contains("obfuscate_blob_paths"),
+            "an obfuscated (default) invite omits the flag: {json}"
+        );
+        let decoded = decode(&encode(&obfuscated)).unwrap();
+        assert!(decoded.obfuscate_blob_paths, "absent decodes to true");
+    }
+
     #[test]
     fn decode_trims_whitespace() {
         let code = InviteCode {
@@ -224,6 +289,7 @@ mod tests {
                 shared_folder_id: "sf1".into(),
             },
             owner_pubkey: "aabb".into(),
+            obfuscate_blob_paths: true,
         };
         let encoded = format!("  {} \n", encode(&code));
         let decoded = decode(&encoded).unwrap();

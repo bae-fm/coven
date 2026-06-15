@@ -115,7 +115,13 @@ impl SyncService {
                 let bytes = std::fs::read(&blob.local_path)
                     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
                 storage
-                    .put_blob(&blob.namespace, &blob.id, resolved, bytes)
+                    .put_blob(
+                        &blob.namespace,
+                        &blob.id,
+                        resolved,
+                        blob.cloud_path.as_deref(),
+                        bytes,
+                    )
                     .await
                     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
                 info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
