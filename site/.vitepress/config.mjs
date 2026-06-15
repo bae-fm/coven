@@ -112,14 +112,10 @@ export default defineConfig({
 
         nav: [
             { text: 'Docs', link: '/docs/', activeMatch: '/docs/' },
-            { text: 'Example', link: '/docs/example' },
-            { text: 'Rust API', link: '/rustdoc/coven/index.html', target: '_self' },
-            { text: 'GitHub', link: 'https://github.com/bae-fm/coven' },
         ],
 
         sidebar: {
             '/docs/': [
-                { text: 'Example', link: '/docs/example' },
                 {
                     text: 'Docs',
                     items: [
@@ -136,6 +132,7 @@ export default defineConfig({
                 {
                     text: 'Reference',
                     items: [
+                        { text: 'Example', link: '/docs/example' },
                         { text: 'Rust API', link: '/rustdoc/coven/index.html', target: '_self' },
                         { text: 'Crate Index', link: '/rustdoc/coven/all.html', target: '_self' },
                     ],
