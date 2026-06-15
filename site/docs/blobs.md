@@ -234,6 +234,17 @@ enqueues an audio upload with an explicit `cloud_key` (see
 that key verbatim. `obfuscate_blob_paths` governs only the changeset-driven blobs
 above (images and the like), which coven keys itself.
 
+The two schemes at a glance:
+
+| | Hashed (default) | Plain |
+| --- | --- | --- |
+| Config `cloud_home.obfuscate_blob_paths` | `true` | `false` |
+| Invite-/restore-code flag | obfuscated (omitted) | spelled out (`false`) |
+| Runtime scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
+| `BlobRef.cloud_path` | ignored (leave `None`) | required |
+| Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
+| Blob with no `cloud_path` | keyed by id | surfaced error |
+
 ## Observing uploads
 
 The host can pass a

@@ -146,6 +146,17 @@ Two capabilities require encryption and are unavailable on a plaintext home:
   on a plaintext home is a clear error ("sharing requires an encrypted cloud
   home") rather than a silent no-op.
 
+The two modes at a glance:
+
+| | Encrypted (default) | Plaintext |
+| --- | --- | --- |
+| Config `cloud_home.encrypted` | `true` | `false` |
+| Restore-code `ek` | `Some(hex)` | absent |
+| Runtime cipher | `CloudCipher::Encrypted(key)` | `CloudCipher::Plaintext` |
+| Object bytes at rest | sealed (XChaCha20-Poly1305) | verbatim |
+| Object-key suffix | `.enc` | none |
+| Sharing (invite / remove member) | available | error |
+
 ## Chunked encryption
 
 A blob can be large (a `todo_attachments` image, a snapshot), and a reader often
