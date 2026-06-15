@@ -305,14 +305,20 @@ impl SyncStorage for CloudSyncStorage {
         let prefix = format!("changes/{device_id}/");
         let keys = self.home.list(&prefix).await?;
 
-        let mut seqs: Vec<u64> = keys
-            .iter()
-            .filter_map(|k| {
-                k.strip_prefix(&prefix)
-                    .and_then(|s| s.strip_suffix(suffix))
-                    .and_then(|s| s.parse().ok())
-            })
-            .collect();
+        let mut seqs = Vec::new();
+        for key in &keys {
+            let Some(seq_str) = key
+                .strip_prefix(&prefix)
+                .and_then(|s| s.strip_suffix(suffix))
+            else {
+                warn!("skipping changeset key with unexpected format: {key}");
+                continue;
+            };
+            match seq_str.parse::<u64>() {
+                Ok(seq) => seqs.push(seq),
+                Err(e) => warn!("skipping changeset key {key} with non-numeric seq: {e}"),
+            }
+        }
         seqs.sort();
         Ok(seqs)
     }
@@ -383,22 +389,25 @@ impl SyncStorage for CloudSyncStorage {
 
         for key in &keys {
             // key = "membership/{author_pubkey}/{seq}{suffix}"
-            let rest = match key.strip_prefix("membership/") {
-                Some(r) => r,
-                None => continue,
+            let Some(rest) = key.strip_prefix("membership/") else {
+                warn!("skipping membership key without the expected prefix: {key}");
+                continue;
             };
-            let rest = match rest.strip_suffix(suffix) {
-                Some(r) => r,
-                None => continue,
+            let Some(rest) = rest.strip_suffix(suffix) else {
+                warn!("skipping membership key without the expected suffix: {key}");
+                continue;
             };
 
             // Split into author_pubkey and seq. The pubkey is hex (no slashes),
             // so the last '/' separates pubkey from seq.
-            if let Some(slash_pos) = rest.rfind('/') {
-                let author = &rest[..slash_pos];
-                if let Ok(seq) = rest[slash_pos + 1..].parse::<u64>() {
-                    entries.push((author.to_string(), seq));
-                }
+            let Some(slash_pos) = rest.rfind('/') else {
+                warn!("skipping membership key with no pubkey/seq separator: {key}");
+                continue;
+            };
+            let author = &rest[..slash_pos];
+            match rest[slash_pos + 1..].parse::<u64>() {
+                Ok(seq) => entries.push((author.to_string(), seq)),
+                Err(e) => warn!("skipping membership key {key} with non-numeric seq: {e}"),
             }
         }
 

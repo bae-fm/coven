@@ -27,6 +27,16 @@ use crate::sync::sync_loop::SyncLoopHandle;
 /// changes without rebuilding the manager.
 pub type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
+/// Refuse a membership operation on a plaintext home. Inviting wraps the library
+/// key to a member and removing rotates it — both meaningless without a key — so
+/// the caller must bail before mutating the membership chain or re-wrapping keys.
+fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<(), String> {
+    if cipher.read().unwrap().is_plaintext() {
+        return Err("sharing requires an encrypted cloud home".to_string());
+    }
+    Ok(())
+}
+
 /// High-level sync manager.
 ///
 /// Always has a valid EncryptionService — if no encryption key exists,
@@ -278,9 +288,7 @@ impl SyncManager {
 
         // Inviting a member wraps the library key to them, which only an encrypted
         // home has. Refuse before touching the membership chain.
-        if sync_loop.cipher().read().unwrap().is_plaintext() {
-            return Err("sharing requires an encrypted cloud home".to_string());
-        }
+        require_encrypted_home(sync_loop.cipher())?;
 
         let encryption_key_hex = self
             .key_service
@@ -329,9 +337,7 @@ impl SyncManager {
         // Removing a member rotates the library key, which only an encrypted home
         // has. Refuse up front so a plaintext home never mutates the membership
         // chain or re-wraps keys before the rotation fails.
-        if sync_loop.cipher().read().unwrap().is_plaintext() {
-            return Err("sharing requires an encrypted cloud home".to_string());
-        }
+        require_encrypted_home(sync_loop.cipher())?;
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
