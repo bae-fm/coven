@@ -18,8 +18,7 @@ use crate::sync::cloud_storage::CloudCipher;
 /// own config (coven never writes the host's config).
 ///
 /// Native-only: drives coven's localhost-callback OAuth flow ([`crate::oauth::authorize`]),
-/// which binds a TCP port and opens a browser — neither exists on wasm. The
-/// browser uses the redirect OAuth flow in the browser-runtime work.
+/// which binds a TCP port and opens a browser — neither exists on wasm.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn sign_in_google_drive(
     key_service: &KeyService,

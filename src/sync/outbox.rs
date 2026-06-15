@@ -153,16 +153,13 @@ async fn read_upload_plaintext(file_path: &Path) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("cannot read local file {}: {e}", file_path.display()))
 }
 
-/// wasm stub — real implementation lands in the browser storage/runtime work.
-/// The browser has no native filesystem; an OPFS-backed read replaces this when
-/// the browser storage work lands. Until then a wasm upload drain surfaces the
-/// missing read as a per-entry failure (logged + recorded + skipped by the loop)
-/// rather than silently uploading nothing.
+/// wasm has no native filesystem, so the local upload plaintext is unavailable
+/// here: a wasm upload-drain entry fails at this read (logged + recorded +
+/// skipped by the loop) rather than silently uploading nothing.
 #[cfg(target_arch = "wasm32")]
 async fn read_upload_plaintext(file_path: &Path) -> Result<Vec<u8>, String> {
     Err(format!(
-        "wasm: local blob read for upload lands in the browser storage work \
-         (cannot read {})",
+        "wasm: no native filesystem to read the local upload blob (cannot read {})",
         file_path.display()
     ))
 }

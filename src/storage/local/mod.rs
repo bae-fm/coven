@@ -5,9 +5,8 @@
 //! encryption happens only on upload to the cloud home.
 // `BlobStore` writes plaintext blobs to the native filesystem via `tokio::fs`,
 // which wasm has no equivalent for, and nothing in coven's core constructs it
-// (it's host-facing API). The browser storage work adds an OPFS-backed local
-// store. `storage_path` below is pure and stays on every target — the outbox
-// uses it to compute cloud keys.
+// (it's host-facing API), so it is native-only. `storage_path` below is pure and
+// stays on every target — the outbox uses it to compute cloud keys.
 #[cfg(not(target_arch = "wasm32"))]
 mod traits;
 

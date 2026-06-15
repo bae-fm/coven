@@ -508,9 +508,8 @@ pub async fn authorize_provider(
 /// auth session). Pair the returned verifier and the same `redirect_uri` with
 /// [`exchange_code_for_provider`].
 ///
-/// Native-only for now: depends on the native-only [`oauth_config_for_provider`]
-/// (provider config currently lives on the native-only backend types). The
-/// browser-runtime work will reintroduce a wasm-available provider-config path.
+/// Native-only: depends on [`oauth_config_for_provider`], whose per-provider
+/// config lives on the native-only cloud-backend types.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_authorize_request_for_provider(
     provider: crate::config::CloudProvider,
@@ -523,8 +522,8 @@ pub fn build_authorize_request_for_provider(
 /// tokens. `redirect_uri` and `verifier` must match the originating
 /// [`build_authorize_request_for_provider`] call.
 ///
-/// Native-only for now (see [`build_authorize_request_for_provider`]). The pure
-/// [`exchange_code`] it delegates to is available on wasm directly.
+/// Native-only for the same reason as [`build_authorize_request_for_provider`].
+/// The pure [`exchange_code`] it delegates to is available on wasm directly.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn exchange_code_for_provider(
     provider: crate::config::CloudProvider,
