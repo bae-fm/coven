@@ -129,9 +129,12 @@ impl Owned {
     /// `'static`. Sound because `Owned` owns the connection alongside the session
     /// and drops the session first — the C session object never outlives the
     /// `sqlite3*` it points at.
-    fn new(conn: Connection, synced_tables: &[SyncedTable]) -> Self {
-        let session = attach_session(&conn, synced_tables).map(erase_session_lifetime);
-        Owned { session, conn }
+    fn new(conn: Connection, synced_tables: &[SyncedTable]) -> Result<Self, DbError> {
+        let session = Some(erase_session_lifetime(attach_session(
+            &conn,
+            synced_tables,
+        )?));
+        Ok(Owned { session, conn })
     }
 }
 
@@ -291,7 +294,7 @@ impl Database {
         // the same `synced_tables` the native actor does.
         #[cfg(target_arch = "wasm32")]
         let database = Database {
-            owned: std::rc::Rc::new(std::cell::RefCell::new(Owned::new(conn, &synced_tables))),
+            owned: std::rc::Rc::new(std::cell::RefCell::new(Owned::new(conn, &synced_tables)?)),
             hlc,
             synced_tables,
         };
@@ -377,27 +380,7 @@ impl Database {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn take_changeset_and_suspend(&self) -> Result<Vec<u8>, DbError> {
         let mut owned = self.owned.borrow_mut();
-        let result = match owned.session.as_mut() {
-            Some(s) => {
-                let mut buf = Vec::new();
-                s.changeset_strm(&mut buf)
-                    .map(|()| buf)
-                    .map_err(DbError::from)
-            }
-            // An absent session is exceptional: it means a prior resume failed to
-            // re-attach. Reporting "no local changes" would mask that the device
-            // has silently stopped capturing host writes, so make the absence
-            // loud. The cycle's unconditional resume re-attaches afterward.
-            None => {
-                warn!(
-                    "capture session unexpectedly absent at changeset capture; \
-                     reporting no local changes (a prior resume must have failed)"
-                );
-                Ok(Vec::new())
-            }
-        };
-        owned.session = None;
-        result
+        take_changeset(&mut owned.session)
     }
 
     /// Recreate and re-attach the session, resuming capture of host writes. Call
@@ -418,14 +401,9 @@ impl Database {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn resume_session(&self) -> Result<(), DbError> {
         let mut owned = self.owned.borrow_mut();
-        let session = attach_session(&owned.conn, &self.synced_tables).map(erase_session_lifetime);
-        let ok = if session.is_some() {
-            Ok(())
-        } else {
-            Err(DbError("failed to re-attach capture session".to_string()))
-        };
-        owned.session = session;
-        ok
+        let session = erase_session_lifetime(attach_session(&owned.conn, &self.synced_tables)?);
+        owned.session = Some(session);
+        Ok(())
     }
 
     // ---- Bookkeeping: sync_state ----
@@ -872,7 +850,16 @@ fn run_actor(
     synced_tables: &[SyncedTable],
     rx: std::sync::mpsc::Receiver<Request>,
 ) {
-    let mut session = attach_session(&conn, synced_tables);
+    // A failure here leaves capture off; the connection still serves reads/writes,
+    // so log it loudly rather than aborting the actor. A later ResumeSession
+    // re-attempts and surfaces its own error to the caller.
+    let mut session = match attach_session(&conn, synced_tables) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            error!("capture session not attached at startup: {e}");
+            None
+        }
+    };
 
     while let Ok(req) = rx.recv() {
         match req {
@@ -894,37 +881,20 @@ fn run_actor(
                 }
             }
             Request::TakeChangesetAndSuspend(reply) => {
-                let result = match session.as_mut() {
-                    Some(s) => {
-                        let mut buf = Vec::new();
-                        s.changeset_strm(&mut buf)
-                            .map(|()| buf)
-                            .map_err(DbError::from)
-                    }
-                    // An absent session is exceptional: it means a prior resume
-                    // failed to re-attach. Reporting "no local changes" would mask
-                    // that the device has silently stopped capturing host writes,
-                    // so make the absence loud. The cycle's unconditional resume
-                    // (below, in the sync cycle) re-attaches afterward.
-                    None => {
-                        warn!(
-                            "capture session unexpectedly absent at changeset capture; \
-                             reporting no local changes (a prior resume must have failed)"
-                        );
-                        Ok(Vec::new())
-                    }
-                };
-                session = None;
-                let _ = reply.send(result);
+                let _ = reply.send(take_changeset(&mut session));
             }
             Request::ResumeSession(reply) => {
-                session = attach_session(&conn, synced_tables);
-                let ok = if session.is_some() {
-                    Ok(())
-                } else {
-                    Err(DbError("failed to re-attach capture session".to_string()))
+                let result = match attach_session(&conn, synced_tables) {
+                    Ok(s) => {
+                        session = Some(s);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        session = None;
+                        Err(e)
+                    }
                 };
-                let _ = reply.send(ok);
+                let _ = reply.send(result);
             }
         }
     }
@@ -948,24 +918,48 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 fn attach_session<'c>(
     conn: &'c Connection,
     synced_tables: &[SyncedTable],
-) -> Option<rusqlite::session::Session<'c>> {
-    let mut session = match rusqlite::session::Session::new(conn) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("failed to create capture session: {e}");
-            return None;
+) -> Result<rusqlite::session::Session<'c>, DbError> {
+    let mut session = rusqlite::session::Session::new(conn)
+        .map_err(|e| DbError(format!("failed to create capture session: {e}")))?;
+    for t in synced_tables {
+        session.attach(Some(t.name())).map_err(|e| {
+            DbError(format!(
+                "failed to attach synced table {} to session: {e}",
+                t.name()
+            ))
+        })?;
+    }
+    Ok(session)
+}
+
+/// Drain the session's recorded changes into a changeset and suspend capture by
+/// dropping the session, so a following apply is not re-recorded as local.
+///
+/// An absent session is exceptional — it means a prior resume failed to re-attach
+/// — so it is logged loudly and reported as no local changes rather than silently
+/// masking that the device stopped capturing host writes; the cycle's
+/// unconditional resume re-attaches afterward. Shared by the native actor and the
+/// wasm inline path so both drain the session identically.
+fn take_changeset(
+    session: &mut Option<rusqlite::session::Session<'_>>,
+) -> Result<Vec<u8>, DbError> {
+    let result = match session.as_mut() {
+        Some(s) => {
+            let mut buf = Vec::new();
+            s.changeset_strm(&mut buf)
+                .map(|()| buf)
+                .map_err(DbError::from)
+        }
+        None => {
+            warn!(
+                "capture session unexpectedly absent at changeset capture; \
+                 reporting no local changes (a prior resume must have failed)"
+            );
+            Ok(Vec::new())
         }
     };
-    for t in synced_tables {
-        if let Err(e) = session.attach(Some(t.name())) {
-            warn!(
-                table = t.name(),
-                "failed to attach synced table to session: {e}"
-            );
-            return None;
-        }
-    }
-    Some(session)
+    *session = None;
+    result
 }
 
 /// Map a library DB `path` to the flat OPFS filename the connection opens
