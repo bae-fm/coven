@@ -30,18 +30,15 @@ impl CloudCipher {
     /// min_schema, membership) for storage. Encrypted seals under the library
     /// key; plaintext returns the bytes unchanged.
     pub fn seal(&self, plaintext: &[u8]) -> Vec<u8> {
-        match self {
-            CloudCipher::Encrypted(e) => e.encrypt(plaintext),
-            CloudCipher::Plaintext => plaintext.to_vec(),
-        }
+        // A control object is always whole-home scoped; only blobs carry a scope.
+        // This is exactly the master-scoped blob path: `encryption_for_scope`
+        // maps `Master` to the library key itself.
+        self.seal_scoped(crate::blob::ResolvedScope::Master, plaintext)
     }
 
     /// Recover a control object read from storage. Inverse of [`Self::seal`].
     pub fn open(&self, stored: &[u8]) -> Result<Vec<u8>, EncryptionError> {
-        match self {
-            CloudCipher::Encrypted(e) => e.decrypt(stored),
-            CloudCipher::Plaintext => Ok(stored.to_vec()),
-        }
+        self.open_scoped(crate::blob::ResolvedScope::Master, stored)
     }
 
     /// Protect a blob under its resolved scope. Encrypted derives the scope's key
