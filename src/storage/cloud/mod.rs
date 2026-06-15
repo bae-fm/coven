@@ -21,6 +21,12 @@ pub mod oauth_session;
 pub mod onedrive;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod s3;
+// The browser's S3 backend: signs requests with SigV4 and sends them over
+// reqwest's `fetch` transport, since the native `aws-sdk-s3` is tokio/C-bound and
+// won't build for wasm. Shipped only on wasm; also compiled in native test builds
+// so its pure URL/XML helpers and signing run under `cargo test`.
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod s3_wasm;
 pub mod setup;
 
 #[cfg(any(test, feature = "test-utils"))]

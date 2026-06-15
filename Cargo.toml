@@ -81,6 +81,20 @@ getrandom_legacy = { package = "getrandom", version = "0.2", features = ["js"] }
 # wasm backend (`SystemTime::now()` panics), so the HLC reads epoch millis from
 # the browser clock instead.
 js-sys = "0.3"
+# AWS SigV4 signing for the fetch-based S3 backend. reqsign-aws-v4 signs an
+# `http::Request`'s parts with a static credential; the AWS SDK it replaces on
+# native is C/tokio-bound and won't build for wasm. Whichever request lacks an
+# `x-amz-content-sha256` header is signed UNSIGNED-PAYLOAD, which is what a
+# browser sending bodies over `fetch` (no body pre-hash) needs.
+reqsign-core = "3"
+reqsign-aws-v4 = "3"
+# reqsign reads the signing time through `jiff::Timestamp::now()`, which panics on
+# wasm32-unknown-unknown unless jiff's `js` feature bridges to the browser clock.
+# Named directly only to turn that feature on for the transitive dependency.
+jiff = { version = "0.2", features = ["js"] }
+# The fetch-based S3 backend builds and signs `http::Request`s directly (reqsign
+# signs the parts, reqwest's wasm Client sends them). Shares reqwest's `http` 1.x.
+http = "1"
 
 # The headless wasm test (tests/wasm_opfs.rs) drives a real dedicated Worker in
 # Firefox to prove the connection persists through OPFS. None of these belong on
@@ -96,9 +110,17 @@ apple-native-keyring-store = { version = "0.2", features = ["protected"] }
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "0.5"
 
+# The wasm S3 backend (`storage::cloud::s3_wasm`) is shipped only on wasm, but its
+# pure URL/XML helpers and its SigV4 signing run as plain `#[test]`s under
+# `cargo test` so they're covered in native CI. That compiles the module on native
+# in test builds, which needs its signing + http deps available there too.
 [dev-dependencies]
 tempfile = "3.8"
 tokio = { version = "1.0", features = ["test-util"] }
+reqsign-core = "3"
+reqsign-aws-v4 = "3"
+jiff = "0.2"
+http = "1"
 serial_test = "3.4.0"
 
 [features]
