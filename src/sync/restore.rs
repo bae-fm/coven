@@ -219,11 +219,7 @@ pub async fn restore_from_cloud(
 
     // The source's blob-path scheme, from the restore code, so this device
     // computes the same blob keys the source wrote.
-    let blob_paths = if obfuscate_blob_paths {
-        BlobPathScheme::Hashed
-    } else {
-        BlobPathScheme::Plain
-    };
+    let blob_paths = BlobPathScheme::from_obfuscate(obfuscate_blob_paths);
 
     let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
 

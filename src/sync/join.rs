@@ -231,11 +231,7 @@ pub async fn join_library(
     let encryption = EncryptionService::new(&encryption_key_hex)?;
     let cipher = CloudCipher::Encrypted(encryption);
     let obfuscate_blob_paths = code.obfuscate_blob_paths;
-    let blob_paths = if obfuscate_blob_paths {
-        BlobPathScheme::Hashed
-    } else {
-        BlobPathScheme::Plain
-    };
+    let blob_paths = BlobPathScheme::from_obfuscate(obfuscate_blob_paths);
     let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths);
 
     // Step 4: Create library directory using the invite code's library_id.

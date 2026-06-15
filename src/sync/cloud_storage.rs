@@ -36,6 +36,18 @@ pub enum BlobPathScheme {
     Plain,
 }
 
+impl BlobPathScheme {
+    /// Map a home's `obfuscate_blob_paths` flag (config, restore code, invite
+    /// code) to a scheme: obfuscated ⇒ `Hashed`, otherwise `Plain`.
+    pub fn from_obfuscate(obfuscate: bool) -> Self {
+        if obfuscate {
+            BlobPathScheme::Hashed
+        } else {
+            BlobPathScheme::Plain
+        }
+    }
+}
+
 impl CloudCipher {
     /// Protect a control object (heads, changesets, snapshot, snapshot_meta,
     /// min_schema, membership) for storage. Encrypted seals under the library

@@ -407,17 +407,6 @@ pub fn build_cloud_cipher(
     Ok(CloudCipher::Encrypted(enc))
 }
 
-/// The [`BlobPathScheme`] a library's config selects: the obfuscated
-/// content-addressed layout (the default) or the consumer-supplied readable path
-/// when `obfuscate_blob_paths == false`.
-pub fn build_blob_path_scheme(config: &Config) -> BlobPathScheme {
-    if config.cloud_home.obfuscate_blob_paths {
-        BlobPathScheme::Hashed
-    } else {
-        BlobPathScheme::Plain
-    }
-}
-
 /// Create sync storage from config and credentials.
 ///
 /// This is a lighter version of `sync::cycle::init_sync` that only creates the
@@ -445,7 +434,7 @@ pub async fn create_sync_storage(
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
         cloud_home,
         cipher,
-        build_blob_path_scheme(config),
+        BlobPathScheme::from_obfuscate(config.cloud_home.obfuscate_blob_paths),
     ))
 }
 
