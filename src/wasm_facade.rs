@@ -349,7 +349,7 @@ fn query_rows(conn: &Connection, sql: &str) -> Result<Vec<serde_json::Value>, Db
         for (i, name) in column_names.iter().enumerate() {
             obj.insert(
                 name.clone(),
-                value_ref_to_json(row.get_ref(i).map_err(DbError::from)?),
+                value_ref_to_json(name, row.get_ref(i).map_err(DbError::from)?)?,
             );
         }
         out.push(serde_json::Value::Object(obj));
@@ -357,19 +357,27 @@ fn query_rows(conn: &Connection, sql: &str) -> Result<Vec<serde_json::Value>, Db
     Ok(out)
 }
 
-/// Render one column value as JSON. SQLite's five storage classes map directly:
-/// NULL → null, INTEGER/REAL → number, TEXT → string, and BLOB → a lossy UTF-8
-/// string (the demo schema stores only text, so a blob would be malformed input,
-/// not normal data).
-fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
-    match value {
+/// Render one column value as JSON. SQLite's storage classes map directly: NULL →
+/// null, INTEGER/REAL → number, TEXT → string. A BLOB is surfaced as an error —
+/// this facade's `query` is for the demo's text columns, and lossily stringifying
+/// arbitrary bytes would corrupt them silently; a real app that stores blobs adds
+/// an explicit (e.g. base64) encoding here.
+fn value_ref_to_json(column: &str, value: ValueRef<'_>) -> Result<serde_json::Value, DbError> {
+    Ok(match value {
         ValueRef::Null => serde_json::Value::Null,
         ValueRef::Integer(i) => serde_json::Value::from(i),
         ValueRef::Real(f) => serde_json::Value::from(f),
-        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
-            serde_json::Value::from(String::from_utf8_lossy(bytes).into_owned())
+        ValueRef::Text(bytes) => serde_json::Value::from(
+            std::str::from_utf8(bytes)
+                .map_err(|e| DbError(format!("column {column} is not valid UTF-8 text: {e}")))?
+                .to_owned(),
+        ),
+        ValueRef::Blob(_) => {
+            return Err(DbError(format!(
+                "column {column} is a BLOB; query() renders only text/number columns as JSON"
+            )))
         }
-    }
+    })
 }
 
 /// The demo app's blob plan: it references no blobs, because the demo `notes`
