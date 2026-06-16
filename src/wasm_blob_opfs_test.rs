@@ -86,12 +86,13 @@ async fn local_blob_round_trips_through_opfs() {
 
     let path = Path::new("/coven-blob-test/unit/ab/cd/blob-1");
 
-    // A path that no test writes is absent, and reading it is an error (not empty
-    // bytes) — the upload paths rely on that distinction.
+    // A path that no test writes is absent (a definite `Ok(false)`, not an error),
+    // and reading it is an error (not empty bytes) — the upload paths rely on both.
     let absent = Path::new("/coven-blob-test/unit/definitely/absent");
-    assert!(
-        !crate::local_blob::exists(absent).await,
-        "unwritten path is absent"
+    assert_eq!(
+        crate::local_blob::exists(absent).await,
+        Ok(false),
+        "an unwritten path is reported absent, not as an error",
     );
     assert!(
         crate::local_blob::read(absent).await.is_err(),
@@ -103,7 +104,11 @@ async fn local_blob_round_trips_through_opfs() {
     crate::local_blob::write(path, &payload)
         .await
         .expect("write blob to OPFS");
-    assert!(crate::local_blob::exists(path).await, "written path exists");
+    assert_eq!(
+        crate::local_blob::exists(path).await,
+        Ok(true),
+        "a written path exists",
+    );
     assert_eq!(
         crate::local_blob::read(path).await.expect("read back"),
         payload,
@@ -179,8 +184,9 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     run_cycle(&storage_a, &db_a, "device-a", dir_a).await;
 
     // B has not pulled, so the blob is not on B's OPFS yet.
-    assert!(
-        !crate::local_blob::exists(&dir_b.join("photo-1")).await,
+    assert_eq!(
+        crate::local_blob::exists(&dir_b.join("photo-1")).await,
+        Ok(false),
         "the photo must not be on B's OPFS before B syncs",
     );
 

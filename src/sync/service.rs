@@ -101,9 +101,22 @@ impl SyncService {
         if let Some(ref cs) = outgoing_cs {
             let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
             for blob in blob_plan.blobs_to_push(&changes) {
-                if !crate::local_blob::exists(&blob.local_path).await {
-                    warn!(id = %blob.id, "blob file not found locally, skipping upload");
-                    continue;
+                match crate::local_blob::exists(&blob.local_path).await {
+                    Ok(true) => {}
+                    // Genuinely absent: this device doesn't hold the file, so skip
+                    // its upload (another device may push it).
+                    Ok(false) => {
+                        warn!(id = %blob.id, "blob file not found locally, skipping upload");
+                        continue;
+                    }
+                    // A real storage failure checking existence is not "absent" —
+                    // abort the cycle rather than silently dropping the upload.
+                    Err(e) => {
+                        return Err(SyncCycleError::AssetUpload(format!(
+                            "checking local blob for {}: {e}",
+                            blob.id
+                        )));
+                    }
                 }
                 // Resolve the host's public scope to the internal key scope before
                 // storage encrypts. An `Item(id)` scope reads the key from

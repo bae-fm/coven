@@ -463,8 +463,15 @@ pub(crate) async fn download_blobs(
 ) -> bool {
     let mut all_ok = true;
     for blob in blobs {
-        if crate::local_blob::exists(&blob.local_path).await {
-            continue;
+        match crate::local_blob::exists(&blob.local_path).await {
+            // Already on disk — don't re-download.
+            Ok(true) => continue,
+            Ok(false) => {}
+            // Couldn't tell (a real storage failure): fall through and re-download,
+            // which overwrites idempotently. Logged so the failure isn't silent.
+            Err(e) => {
+                warn!(id = %blob.id, error = %e, "cannot check for local blob; attempting download");
+            }
         }
 
         let resolved = match db.resolve_blob_scope(blob.scope.clone()).await {

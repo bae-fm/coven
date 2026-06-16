@@ -30,11 +30,13 @@ pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     imp::write(path, bytes).await
 }
 
-/// Whether a local file already exists at `path`. The pull skip-check (a blob whose
-/// file is already on disk is not re-downloaded) and the push presence-check both
-/// read it; a backend error counts as "absent" so the caller re-attempts rather
-/// than skipping.
-pub async fn exists(path: &Path) -> bool {
+/// Whether a local file exists at `path`. `Ok(true)`/`Ok(false)` is a definite
+/// answer; `Err` is a real backend failure (a broken filesystem, an OPFS API
+/// error) — never collapsed into "absent", so a caller can tell "the file isn't
+/// there" apart from "I couldn't find out". The pull skip-check (don't re-download
+/// a blob already on disk) and the push presence-check (don't upload a file that
+/// isn't here) each decide what a failure means in their context.
+pub async fn exists(path: &Path) -> Result<bool, String> {
     imp::exists(path).await
 }
 
@@ -59,8 +61,10 @@ mod imp {
             .map_err(|e| format!("write local blob {}: {e}", path.display()))
     }
 
-    pub async fn exists(path: &Path) -> bool {
-        tokio::fs::try_exists(path).await.unwrap_or(false)
+    pub async fn exists(path: &Path) -> Result<bool, String> {
+        tokio::fs::try_exists(path)
+            .await
+            .map_err(|e| format!("check local blob {}: {e}", path.display()))
     }
 }
 
@@ -85,6 +89,41 @@ mod imp {
                     .map(|er| String::from(er.message()))
             })
             .unwrap_or_else(|| format!("{e:?}"))
+    }
+
+    /// A handle lookup either found the path absent or hit a real failure. Keeping
+    /// these apart lets `exists` answer `Ok(false)` for absence while still
+    /// surfacing a broken-storage error, instead of collapsing both to "absent".
+    enum HandleError {
+        /// The directory or file isn't there — OPFS raised a `NotFoundError`.
+        NotFound,
+        /// A real backend failure (no Worker, a storage API error, a type mismatch).
+        Other(String),
+    }
+
+    impl HandleError {
+        /// Render as a message for callers that treat absence as an error too (a
+        /// read of a missing file), describing what was being looked up.
+        fn into_message(self, what: &str) -> String {
+            match self {
+                HandleError::NotFound => format!("{what} not found"),
+                HandleError::Other(m) => m,
+            }
+        }
+    }
+
+    /// Classify an OPFS rejection: a `NotFoundError` DOMException is absence,
+    /// everything else is a real failure (carrying `context` and the message).
+    fn classify(e: JsValue, context: String) -> HandleError {
+        if e.dyn_ref::<web_sys::DomException>()
+            .map(|d| d.name())
+            .as_deref()
+            == Some("NotFoundError")
+        {
+            HandleError::NotFound
+        } else {
+            HandleError::Other(format!("{context}: {}", err_str(&e)))
+        }
     }
 
     /// The non-empty path segments, dropping the root and any `.`/`..` — OPFS is a
@@ -114,39 +153,34 @@ mod imp {
     }
 
     /// Walk `path` to its file handle. With `create`, missing directories and the
-    /// file are made along the way; without it, a missing component is an `Err` the
-    /// caller maps to not-found.
-    async fn file_handle(path: &Path, create: bool) -> Result<FileSystemFileHandle, String> {
+    /// file are made along the way; without it, a missing directory or file yields
+    /// [`HandleError::NotFound`] (a real backend failure yields
+    /// [`HandleError::Other`]), so each caller decides what absence means.
+    async fn file_handle(path: &Path, create: bool) -> Result<FileSystemFileHandle, HandleError> {
         let segs = segments(path);
         let (name, dirs) = segs
             .split_last()
-            .ok_or_else(|| format!("empty OPFS path: {}", path.display()))?;
+            .ok_or_else(|| HandleError::Other(format!("empty OPFS path: {}", path.display())))?;
 
-        let mut dir = root().await?;
+        let mut dir = root().await.map_err(HandleError::Other)?;
         let dir_opts = FileSystemGetDirectoryOptions::new();
         dir_opts.set_create(create);
         for d in dirs {
             let next = JsFuture::from(dir.get_directory_handle_with_options(d, &dir_opts))
                 .await
-                .map_err(|e| {
-                    format!(
-                        "OPFS directory {d:?} in {}: {}",
-                        path.display(),
-                        err_str(&e)
-                    )
-                })?;
-            dir = next
-                .dyn_into::<FileSystemDirectoryHandle>()
-                .map_err(|_| "OPFS directory handle has the wrong type".to_string())?;
+                .map_err(|e| classify(e, format!("OPFS directory {d:?} in {}", path.display())))?;
+            dir = next.dyn_into::<FileSystemDirectoryHandle>().map_err(|_| {
+                HandleError::Other("OPFS directory handle has the wrong type".into())
+            })?;
         }
 
         let file_opts = FileSystemGetFileOptions::new();
         file_opts.set_create(create);
         let fh = JsFuture::from(dir.get_file_handle_with_options(name, &file_opts))
             .await
-            .map_err(|e| format!("OPFS file {name:?} in {}: {}", path.display(), err_str(&e)))?;
+            .map_err(|e| classify(e, format!("OPFS file {name:?} in {}", path.display())))?;
         fh.dyn_into::<FileSystemFileHandle>()
-            .map_err(|_| "OPFS file handle has the wrong type".to_string())
+            .map_err(|_| HandleError::Other("OPFS file handle has the wrong type".into()))
     }
 
     /// A synchronous access handle for `fh`. Holding one locks the file, so every
@@ -167,7 +201,11 @@ mod imp {
     }
 
     pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
-        let fh = file_handle(path, false).await?;
+        // A read of a missing file is an error too, so not-found folds into the
+        // message the same as any other failure.
+        let fh = file_handle(path, false)
+            .await
+            .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
         let sah = sync_access(&fh).await?;
         let out = read_all(&sah, path);
         sah.close();
@@ -192,7 +230,11 @@ mod imp {
     }
 
     pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-        let fh = file_handle(path, true).await?;
+        // `create = true`, so a component is created rather than reported missing —
+        // not-found can't arise here, but fold it into a message for completeness.
+        let fh = file_handle(path, true)
+            .await
+            .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
         let sah = sync_access(&fh).await?;
         let out = write_all(&sah, bytes, path);
         sah.close();
@@ -224,7 +266,11 @@ mod imp {
             .map_err(|e| format!("OPFS flush {}: {}", path.display(), err_str(&e)))
     }
 
-    pub async fn exists(path: &Path) -> bool {
-        file_handle(path, false).await.is_ok()
+    pub async fn exists(path: &Path) -> Result<bool, String> {
+        match file_handle(path, false).await {
+            Ok(_) => Ok(true),
+            Err(HandleError::NotFound) => Ok(false),
+            Err(HandleError::Other(m)) => Err(m),
+        }
     }
 }
