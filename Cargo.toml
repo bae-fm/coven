@@ -126,6 +126,21 @@ serde-wasm-bindgen = "0.6"
 # message and a stack instead of an opaque `unreachable`. The facade installs it in
 # `open`; it is shipped code (not just the test harness), so it is a normal dep.
 console_error_panic_hook = "0.1"
+# OPFS (Origin Private File System) for the device-local blob files. coven reads a
+# blob on push and writes it on pull; `std::fs` has no wasm backend, so the wasm
+# `local_blob` reads/writes through the browser's OPFS sync access handles instead —
+# the same stable, Worker-only API the SQLite VFS runs on (no `web_sys_unstable_apis`).
+web-sys = { version = "0.3", features = [
+    "StorageManager",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemSyncAccessHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemReadWriteOptions",
+] }
 
 # The headless wasm tests drive a real dedicated Worker in Firefox. Belongs only on
 # wasm; native tests the thread-actor path instead.

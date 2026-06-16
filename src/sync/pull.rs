@@ -463,7 +463,7 @@ pub(crate) async fn download_blobs(
 ) -> bool {
     let mut all_ok = true;
     for blob in blobs {
-        if blob.local_path.exists() {
+        if crate::local_blob::exists(&blob.local_path).await {
             continue;
         }
 
@@ -486,15 +486,9 @@ pub(crate) async fn download_blobs(
             .await
         {
             Ok(bytes) => {
-                if let Some(parent) = blob.local_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        warn!(id = %blob.id, error = %e, "failed to create blob directory");
-                        all_ok = false;
-                        continue;
-                    }
-                }
-
-                if let Err(e) = std::fs::write(&blob.local_path, bytes) {
+                // `local_blob::write` creates the parent directories itself, so the
+                // pull path stays the same on native (filesystem) and wasm (OPFS).
+                if let Err(e) = crate::local_blob::write(&blob.local_path, &bytes).await {
                     warn!(id = %blob.id, error = %e, "failed to write blob");
                     all_ok = false;
                 }

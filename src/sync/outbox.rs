@@ -137,31 +137,12 @@ async fn resolve_and_seal(
     file_path: &Path,
     scope: crate::blob::BlobScope,
 ) -> Result<Vec<u8>, String> {
-    let data = read_upload_plaintext(file_path).await?;
+    let data = crate::local_blob::read(file_path).await?;
     let resolved = db
         .resolve_blob_scope(scope)
         .await
         .map_err(|e| format!("cannot resolve blob scope: {e}"))?;
     Ok(cipher.read().unwrap().seal_scoped(resolved, &data))
-}
-
-/// Read an upload's local plaintext off the native filesystem.
-#[cfg(not(target_arch = "wasm32"))]
-async fn read_upload_plaintext(file_path: &Path) -> Result<Vec<u8>, String> {
-    tokio::fs::read(file_path)
-        .await
-        .map_err(|e| format!("cannot read local file {}: {e}", file_path.display()))
-}
-
-/// wasm has no native filesystem, so the local upload plaintext is unavailable
-/// here: a wasm upload-drain entry fails at this read (logged + recorded +
-/// skipped by the loop) rather than silently uploading nothing.
-#[cfg(target_arch = "wasm32")]
-async fn read_upload_plaintext(file_path: &Path) -> Result<Vec<u8>, String> {
-    Err(format!(
-        "wasm: no native filesystem to read the local upload blob (cannot read {})",
-        file_path.display()
-    ))
 }
 
 /// The result of one outbox drain pass.

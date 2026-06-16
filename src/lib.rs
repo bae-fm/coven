@@ -54,6 +54,9 @@ pub mod id_provider;
 pub mod join_code;
 pub mod keys;
 pub mod library_dir;
+// The device-local plaintext file behind each `BlobRef`: read on push, written on
+// pull. Native uses the filesystem; wasm uses OPFS. Documented at the module.
+pub mod local_blob;
 pub mod oauth;
 #[cfg(feature = "share-proxy")]
 pub mod share;
@@ -99,6 +102,13 @@ mod wasm_sync_test;
 // sync test helpers; see the module.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_runtime_test;
+
+// Headless proof that device-local blob storage works on OPFS: `local_blob`
+// round-trips directly, and a photo blob crosses two devices through the real
+// cycle (push reads it from OPFS, pull writes it to OPFS). Inside the crate
+// because it reaches crate-internal sync test helpers; see the module.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_blob_opfs_test;
 
 pub use database::Database;
 pub use sync::hlc::UpdatedAtStamper;

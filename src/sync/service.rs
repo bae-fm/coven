@@ -101,7 +101,7 @@ impl SyncService {
         if let Some(ref cs) = outgoing_cs {
             let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
             for blob in blob_plan.blobs_to_push(&changes) {
-                if !blob.local_path.exists() {
+                if !crate::local_blob::exists(&blob.local_path).await {
                     warn!(id = %blob.id, "blob file not found locally, skipping upload");
                     continue;
                 }
@@ -112,8 +112,9 @@ impl SyncService {
                     .resolve_blob_scope(blob.scope.clone())
                     .await
                     .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
-                let bytes = std::fs::read(&blob.local_path)
-                    .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+                let bytes = crate::local_blob::read(&blob.local_path)
+                    .await
+                    .map_err(SyncCycleError::AssetUpload)?;
                 storage
                     .put_blob(
                         &blob.namespace,
