@@ -213,7 +213,7 @@ impl WasmSyncRuntime {
     /// Alias for [`trigger`](Self::trigger), matching the host-facing "sync now"
     /// verb the facade exposes.
     pub fn sync_now(&self) {
-        self.wake.notify_one();
+        self.trigger();
     }
 
     /// Stop the loop after the in-flight cycle. Sets the run flag false and wakes
