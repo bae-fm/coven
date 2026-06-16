@@ -64,6 +64,21 @@ pub mod sync;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
+// Browser-only: the JS-callable facade (`CovenLibrary`) that assembles coven's
+// whole browser stack — OPFS storage, the `Database`, the cipher + blob-path
+// choices, the fetch-based S3 cloud home, and the event-loop sync runtime — behind
+// one `wasm_bindgen` object a web page drives. Documented at the module.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_facade;
+
+// Headless proof that the facade assembles a working library: two `CovenLibrary`
+// instances over one shared in-memory cloud converge through the public facade API
+// (`exec` / `query` / `start_sync` / `sync_now`), no live S3 needed. Inside the
+// crate because it reaches the crate-internal `from_home` seam and the
+// `#[cfg(test)]` in-memory cloud; see the module.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_facade_test;
+
 // Headless proof that the wasm `Database` persists on OPFS through coven's own
 // API. Inside the crate (not `tests/`) because it drives the crate-private
 // `take_changeset_and_suspend` capture path. Worker-only — see the module.

@@ -19,7 +19,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use futures_util::future::{select, Either};
 use gloo_timers::future::TimeoutFuture;
@@ -59,7 +59,14 @@ struct CycleInputs {
     storage: CloudSyncStorage,
     hlc: Rc<Hlc>,
     device_id: String,
-    cipher: Rc<RwLock<CloudCipher>>,
+    /// The at-rest cipher, shared with `storage` (the same `Arc<RwLock<CloudCipher>>`
+    /// the [`CloudSyncStorage`] seals/opens with, via its
+    /// [`shared_cipher`](CloudSyncStorage::shared_cipher)). One lock so a key
+    /// rotation through either is seen by both — the cycle re-seals control objects
+    /// under the rotated key while the storage reads/writes under it. `Arc` (not
+    /// `Rc`) because that is the type the storage exposes; on the single-threaded
+    /// browser runtime the choice is immaterial to behavior.
+    cipher: Arc<RwLock<CloudCipher>>,
     db: Database,
     user_keypair: UserKeypair,
     clock: ClockRef,
@@ -85,14 +92,16 @@ pub struct WasmSyncRuntime {
 impl WasmSyncRuntime {
     /// Assemble a runtime over the cycle's inputs. The [`Database`] and
     /// [`CloudSyncStorage`] are clone-shareable; the runtime takes ownership of
-    /// the clones the host hands it. Does not start the loop — call
+    /// the clones the host hands it. Pass the storage's own cipher lock
+    /// ([`CloudSyncStorage::shared_cipher`]) as `cipher` so the cycle and the
+    /// storage seal/open under one rotating key. Does not start the loop — call
     /// [`start`](Self::start).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         storage: CloudSyncStorage,
         device_id: String,
         hlc: Rc<Hlc>,
-        cipher: Rc<RwLock<CloudCipher>>,
+        cipher: Arc<RwLock<CloudCipher>>,
         db: Database,
         user_keypair: UserKeypair,
         clock: ClockRef,

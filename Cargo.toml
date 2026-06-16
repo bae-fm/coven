@@ -6,6 +6,10 @@ edition = "2021"
 [lib]
 name = "coven"
 path = "src/lib.rs"
+# `cdylib` builds the wasm module wasm-pack wraps for the browser facade
+# (`wasm_facade`); `rlib` keeps coven a normal Rust library so the native build,
+# `cargo test`, and crates that depend on coven (e.g. bae) link it as before.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -112,13 +116,21 @@ quick-xml = "0.40"
 # loop's thread + `tokio::time::sleep`.
 wasm-bindgen-futures = "0.4"
 gloo-timers = { version = "0.4", features = ["futures"] }
+# The JS-callable facade (`wasm_facade::CovenLibrary`). `wasm-bindgen` exposes the
+# struct + its async methods to JavaScript; `serde-wasm-bindgen` converts the JS
+# config object and the query result rows across the boundary without a hand-rolled
+# `JsValue` walk.
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+# Routes Rust panics to `console.error` so a panic in the browser surfaces with its
+# message and a stack instead of an opaque `unreachable`. The facade installs it in
+# `open`; it is shipped code (not just the test harness), so it is a normal dep.
+console_error_panic_hook = "0.1"
 
-# The headless wasm test (tests/wasm_opfs.rs) drives a real dedicated Worker in
-# Firefox to prove the connection persists through OPFS. None of these belong on
-# native, which tests the thread-actor path instead.
+# The headless wasm tests drive a real dedicated Worker in Firefox. Belongs only on
+# wasm; native tests the thread-actor path instead.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
-console_error_panic_hook = "0.1"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 apple-native-keyring-store = { version = "0.2", features = ["protected"] }

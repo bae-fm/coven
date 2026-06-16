@@ -19,7 +19,6 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 use gloo_timers::future::TimeoutFuture;
 use rusqlite::OptionalExtension;
@@ -61,6 +60,9 @@ fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> Wa
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
     );
+    // The runtime shares the storage's cipher lock (the same instance the storage
+    // seals/opens with), as the facade and native init do.
+    let cipher = storage.shared_cipher();
     // A library dir that never touches disk: this runs the changeset path, whose
     // only fs touch is best-effort changeset staging (logs and continues on
     // failure). No blobs, no snapshot bytes are read back.
@@ -70,7 +72,7 @@ fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> Wa
         storage,
         device_id.to_string(),
         Rc::new(Hlc::new(device_id.to_string())),
-        Rc::new(RwLock::new(CloudCipher::Plaintext)),
+        cipher,
         db,
         UserKeypair::generate(),
         Arc::new(SystemClock) as ClockRef,
