@@ -87,7 +87,11 @@ impl S3WasmCloudHome {
             endpoint,
             access_key,
             secret_key,
-            key_prefix,
+            // Normalize once at the source: store the prefix without a trailing
+            // slash (and drop an empty one), so neither full_key nor list re-trims.
+            key_prefix: key_prefix
+                .map(|p| p.trim_end_matches('/').to_string())
+                .filter(|p| !p.is_empty()),
             base_url,
         }
     }
@@ -195,7 +199,13 @@ fn range_header(start: u64, end: u64) -> String {
 /// surfaces.
 async fn status_error(op: &str, resp: Response) -> CloudHomeError {
     let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("could not read S3 error-response body for {op}: {e}");
+            String::new()
+        }
+    };
     CloudHomeError::Storage(format!("{op}: status {status} {body}"))
 }
 
@@ -443,10 +453,8 @@ impl CloudHome for S3WasmCloudHome {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
         let full_prefix = self.full_key(prefix);
-        let strip_prefix = self
-            .key_prefix
-            .as_ref()
-            .map(|p| format!("{}/", p.trim_end_matches('/')));
+        // key_prefix is already normalized (no trailing slash) at construction.
+        let strip_prefix = self.key_prefix.as_ref().map(|p| format!("{p}/"));
 
         let mut keys = Vec::new();
         let mut continuation_token: Option<String> = None;
@@ -478,14 +486,18 @@ impl CloudHome for S3WasmCloudHome {
 
             let page = parse_list_objects_v2(&body)?;
             for key in page.keys {
-                let stripped = match &strip_prefix {
-                    Some(p) => key
-                        .strip_prefix(p.as_str())
-                        .map(str::to_string)
-                        .unwrap_or(key),
-                    None => key,
-                };
-                keys.push(stripped);
+                match strip_prefix.as_deref() {
+                    // We queried S3 with this prefix, so every key should carry it;
+                    // a key that doesn't is anomalous — skip it loudly rather than
+                    // return a wrongly-prefixed key the caller can't resolve.
+                    Some(p) => match key.strip_prefix(p) {
+                        Some(stripped) => keys.push(stripped.to_string()),
+                        None => {
+                            warn!("S3 returned key {key:?} outside queried prefix {p:?}; skipping")
+                        }
+                    },
+                    None => keys.push(key),
+                }
             }
 
             match page.next_continuation_token {
@@ -763,7 +775,7 @@ mod tests {
         assert_eq!(
             headers
                 .get("x-amz-content-sha256")
-                .and_then(|v| v.to_str().ok()),
+                .map(|v| v.to_str().expect("x-amz-content-sha256 is valid ASCII")),
             Some("UNSIGNED-PAYLOAD"),
         );
     }
