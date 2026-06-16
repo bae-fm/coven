@@ -11,6 +11,7 @@ use aws_sdk_s3::config::ResponseChecksumValidation;
 use aws_sdk_s3::Client;
 use tracing::warn;
 
+use super::s3_common::{apply_prefix, s3_join_info};
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
 /// S3-backed cloud home.
@@ -220,14 +221,6 @@ const MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
 /// 5 MiB; 8 MiB keeps the part count (and request count) reasonable for large
 /// audio files while still giving several progress ticks.
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
-
-/// Prepend an optional prefix to a key. Trailing slashes on the prefix are normalized.
-fn apply_prefix(prefix: Option<&str>, key: &str) -> String {
-    match prefix {
-        Some(p) => format!("{}/{}", p.trim_end_matches('/'), key),
-        None => key.to_string(),
-    }
-}
 
 fn body_read_error<E>(context: &str, key: &str, err: E) -> CloudHomeError
 where
@@ -496,16 +489,14 @@ impl CloudHome for S3CloudHome {
     }
 
     async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        // S3 access is managed externally (IAM/pre-shared credentials).
-        // Return the owner's credentials so they can be embedded in the invite code.
-        Ok(CloudHomeJoinInfo::S3 {
-            bucket: self.bucket.clone(),
-            region: self.region.clone(),
-            endpoint: self.endpoint.clone(),
-            access_key: self.access_key.clone(),
-            secret_key: self.secret_key.clone(),
-            key_prefix: self.key_prefix.clone(),
-        })
+        Ok(s3_join_info(
+            self.bucket.clone(),
+            self.region.clone(),
+            self.endpoint.clone(),
+            self.access_key.clone(),
+            self.secret_key.clone(),
+            self.key_prefix.clone(),
+        ))
     }
 
     async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {

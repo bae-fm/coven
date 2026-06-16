@@ -95,6 +95,16 @@ jiff = { version = "0.2", features = ["js"] }
 # The fetch-based S3 backend builds and signs `http::Request`s directly (reqsign
 # signs the parts, reqwest's wasm Client sends them). Shares reqwest's `http` 1.x.
 http = "1"
+# URL-encoding for S3 object keys and query values (the fetch S3 backend builds
+# request URLs by hand). Pulled in transitively by reqsign already; named directly
+# so the encoding rule lives on a maintained crate instead of a hand-rolled scan.
+percent-encoding = "2.3"
+# ListObjectsV2 XML parsing for the fetch S3 backend. The response is untrusted
+# S3 output, so a real parser (entity expansion, namespace/attribute tolerance,
+# malformed-input errors) handles it instead of a hand-rolled tag scanner. In tree
+# transitively via reqsign; named directly here. Default features only — no serde,
+# no encoding_rs (S3 returns UTF-8).
+quick-xml = "0.40"
 
 # The headless wasm test (tests/wasm_opfs.rs) drives a real dedicated Worker in
 # Firefox to prove the connection persists through OPFS. None of these belong on
@@ -121,6 +131,8 @@ reqsign-core = "3"
 reqsign-aws-v4 = "3"
 jiff = "0.2"
 http = "1"
+percent-encoding = "2.3"
+quick-xml = "0.40"
 serial_test = "3.4.0"
 
 [features]

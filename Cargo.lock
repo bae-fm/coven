@@ -971,6 +971,8 @@ dependencies = [
  "keyring-core",
  "libsqlite3-sys",
  "open",
+ "percent-encoding",
+ "quick-xml",
  "rand 0.9.4",
  "reqsign-aws-v4",
  "reqsign-core",

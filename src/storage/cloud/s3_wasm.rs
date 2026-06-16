@@ -34,10 +34,15 @@
 
 use async_trait::async_trait;
 use http::{Method, Request};
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use reqsign_aws_v4::{RequestSigner, StaticCredentialProvider};
 use reqsign_core::{Context, Signer};
+use reqwest::Response;
 use tracing::warn;
 
+use super::s3_common::{apply_prefix, s3_join_info};
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
 /// S3-backed cloud home that signs requests and sends them over `fetch`.
@@ -92,15 +97,28 @@ impl S3WasmCloudHome {
         apply_prefix(self.key_prefix.as_deref(), key)
     }
 
-    /// Sign `request` with SigV4 and send it. Returns the reqwest response without
-    /// inspecting its status — callers map status codes to their own semantics.
-    async fn send(&self, request: Request<Vec<u8>>) -> Result<reqwest::Response, CloudHomeError> {
+    /// Sign `request`'s parts with SigV4, returning the request with the
+    /// `Authorization`, `x-amz-date`, and `x-amz-content-sha256` headers added.
+    /// The body is carried through untouched: it is signed `UNSIGNED-PAYLOAD`
+    /// because no `x-amz-content-sha256` header is set going in (see the module
+    /// docs). Split from `send` so the signing step is exercised directly by the
+    /// signature test on the same code path requests take in flight.
+    async fn signed_request(
+        &self,
+        request: Request<Vec<u8>>,
+    ) -> Result<Request<Vec<u8>>, CloudHomeError> {
         let (mut parts, body) = request.into_parts();
         self.signer
             .sign(&mut parts, None)
             .await
             .map_err(|e| CloudHomeError::Storage(format!("sign request: {e}")))?;
-        let signed = Request::from_parts(parts, body);
+        Ok(Request::from_parts(parts, body))
+    }
+
+    /// Sign `request` with SigV4 and send it. Returns the reqwest response without
+    /// inspecting its status — callers map status codes to their own semantics.
+    async fn send(&self, request: Request<Vec<u8>>) -> Result<Response, CloudHomeError> {
+        let signed = self.signed_request(request).await?;
         let req = reqwest::Request::try_from(signed)
             .map_err(|e| CloudHomeError::Storage(format!("build request: {e}")))?;
         self.client
@@ -163,43 +181,60 @@ fn list_url(
     url
 }
 
+/// Build the HTTP `Range` header value for a `read_range`. `start` is inclusive
+/// and `end` is exclusive (the `CloudHome` contract); the header is inclusive on
+/// both ends, so the upper bound is `end - 1`.
+fn range_header(start: u64, end: u64) -> String {
+    format!("bytes={start}-{}", end.saturating_sub(1))
+}
+
+/// Map a non-success response to a storage error, including the response body so
+/// the S3 error code/message is visible. `op` names the operation for the message
+/// (e.g. `"put heads/dev1.json"`). Reading the body can itself fail (a dropped
+/// connection mid-error); fall back to the empty string so the status still
+/// surfaces.
+async fn status_error(op: &str, resp: Response) -> CloudHomeError {
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    CloudHomeError::Storage(format!("{op}: status {status} {body}"))
+}
+
+/// Read a successful response's body into bytes. `ctx` names what is being read
+/// for the error message (e.g. `"read body for heads/dev1.json"`).
+async fn resp_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, CloudHomeError> {
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| CloudHomeError::Storage(format!("{ctx}: {e}")))?;
+    Ok(bytes.to_vec())
+}
+
+/// Everything outside the RFC 3986 unreserved set (`A-Za-z0-9-_.~`) is
+/// percent-encoded. `NON_ALPHANUMERIC` encodes every byte except `A-Za-z0-9`, so
+/// the four unreserved punctuation bytes are removed from it. This is AWS's
+/// URI-encoding rule (space → `%20`, never `+`); used for both path segments and
+/// query values, which S3 path-style addressing encodes identically.
+const S3_URI_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
 /// Percent-encode each segment of a key path while keeping the `/` separators.
 /// S3 treats the key as opaque bytes; the URL path must encode reserved/unsafe
 /// characters within a segment but leave the slashes that delimit the layout.
 fn encode_key_path(key: &str) -> String {
     key.split('/')
-        .map(encode_query_value)
+        .map(|segment| utf8_percent_encode(segment, S3_URI_ENCODE).to_string())
         .collect::<Vec<_>>()
         .join("/")
 }
 
-/// Percent-encode a string for use as a URL query value or path segment, encoding
-/// everything outside the RFC 3986 unreserved set. Matches AWS's URI-encoding
-/// rules (space → `%20`, not `+`).
+/// Percent-encode a string for use as a URL query value, encoding everything
+/// outside the RFC 3986 unreserved set (so `/` and `+` in continuation tokens
+/// become `%2F` / `%2B`).
 fn encode_query_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            other => {
-                out.push('%');
-                out.push_str(&format!("{other:02X}"));
-            }
-        }
-    }
-    out
-}
-
-/// Prepend an optional prefix to a key. Trailing slashes on the prefix are
-/// normalized. Identical to the native backend so both compute the same object
-/// keys for one library.
-fn apply_prefix(prefix: Option<&str>, key: &str) -> String {
-    match prefix {
-        Some(p) => format!("{}/{}", p.trim_end_matches('/'), key),
-        None => key.to_string(),
-    }
+    utf8_percent_encode(value, S3_URI_ENCODE).to_string()
 }
 
 /// One page of a ListObjectsV2 response: the object keys it lists and the
@@ -215,55 +250,106 @@ struct ListPage {
 /// `<NextContinuationToken>` is returned only when `<IsTruncated>true</IsTruncated>`,
 /// matching S3's contract that the token is meaningful exactly when more pages
 /// remain.
+///
+/// The body is an untrusted S3 response, so parsing goes through quick-xml: it
+/// expands entities, tolerates namespaces and attributes, and reports malformed
+/// input as an error instead of mis-scanning it. The element names matched here
+/// are matched on their local name, so a namespace-prefixed response parses the
+/// same as a bare one.
 fn parse_list_objects_v2(xml: &str) -> Result<ListPage, CloudHomeError> {
-    let keys = extract_tag_values(xml, "Key");
-    let is_truncated = extract_first_tag_value(xml, "IsTruncated")
-        .map(|v| v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let next_continuation_token = if is_truncated {
-        extract_first_tag_value(xml, "NextContinuationToken")
-    } else {
-        None
-    };
+    /// Which leaf element's text the reader is currently inside, if any. Only the
+    /// elements whose text this parser consumes are tracked.
+    enum In {
+        Key,
+        IsTruncated,
+        NextContinuationToken,
+        Other,
+    }
+
+    let mut reader = Reader::from_str(xml);
+    let mut keys = Vec::new();
+    let mut is_truncated = false;
+    let mut next_continuation_token: Option<String> = None;
+    let mut current = In::Other;
+    // An element's text can arrive as several `Text` events — quick-xml splits the
+    // run at each entity reference (`a&amp;b` → `a`, `&`, `b`). Accumulate the
+    // pieces and consume the whole on the matching `End`.
+    let mut text = String::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                current = match start.local_name().as_ref() {
+                    b"Key" => In::Key,
+                    b"IsTruncated" => In::IsTruncated,
+                    b"NextContinuationToken" => In::NextContinuationToken,
+                    _ => In::Other,
+                };
+                text.clear();
+            }
+            Ok(Event::Text(chunk)) => {
+                // quick-xml 0.40 emits text runs verbatim (no entities inside) and
+                // reports each `&entity;` as a separate `GeneralRef` event, so the
+                // text is plain — decode the bytes, no unescaping here.
+                let piece = chunk
+                    .decode()
+                    .map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?;
+                text.push_str(&piece);
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let resolved = if let Some(ch) = reference
+                    .resolve_char_ref()
+                    .map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?
+                {
+                    // A numeric character reference (`&#49;` / `&#x31;`).
+                    ch.to_string()
+                } else {
+                    // A named reference; S3 emits only the five XML predefined
+                    // entities. Anything else is malformed S3 output.
+                    let name = reference
+                        .decode()
+                        .map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?;
+                    match quick_xml::escape::resolve_predefined_entity(&name) {
+                        Some(value) => value.to_string(),
+                        None => {
+                            return Err(CloudHomeError::Storage(format!(
+                                "parse list XML: unknown entity &{name};"
+                            )));
+                        }
+                    }
+                };
+                text.push_str(&resolved);
+            }
+            Ok(Event::End(_)) => {
+                match current {
+                    In::Key => keys.push(std::mem::take(&mut text)),
+                    In::IsTruncated => is_truncated = text.trim().eq_ignore_ascii_case("true"),
+                    In::NextContinuationToken => {
+                        next_continuation_token = Some(std::mem::take(&mut text))
+                    }
+                    In::Other => {}
+                }
+                current = In::Other;
+                text.clear();
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => {
+                return Err(CloudHomeError::Storage(format!("parse list XML: {e}")));
+            }
+        }
+    }
+
+    // The token is meaningful only when the result is truncated; a server may
+    // echo a stale token on the final page.
+    if !is_truncated {
+        next_continuation_token = None;
+    }
+
     Ok(ListPage {
         keys,
         next_continuation_token,
     })
-}
-
-/// Collect the text content of every `<tag>…</tag>` element in `xml`, in document
-/// order, decoding XML entities. A minimal scanner sufficient for the flat,
-/// attribute-free ListBucketResult elements S3 returns; coven controls the keys it
-/// stores, so they hold no XML-hostile structure.
-fn extract_tag_values(xml: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let mut values = Vec::new();
-    let mut rest = xml;
-    while let Some(start) = rest.find(&open) {
-        let after_open = &rest[start + open.len()..];
-        let Some(end) = after_open.find(&close) else {
-            break;
-        };
-        values.push(decode_xml_entities(&after_open[..end]));
-        rest = &after_open[end + close.len()..];
-    }
-    values
-}
-
-/// Text content of the first `<tag>…</tag>` element, or `None` if absent.
-fn extract_first_tag_value(xml: &str, tag: &str) -> Option<String> {
-    extract_tag_values(xml, tag).into_iter().next()
-}
-
-/// Decode the five predefined XML entities S3 may emit in a key (e.g. `&amp;`).
-fn decode_xml_entities(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        // `&amp;` last so a literal `&amp;lt;` round-trips to `&lt;`, not `<`.
-        .replace("&amp;", "&")
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -309,13 +395,8 @@ impl CloudHome for S3WasmCloudHome {
         let total = data.len() as u64;
         let request = self.object_request(Method::PUT, &full, data)?;
         let resp = self.send(request).await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CloudHomeError::Storage(format!(
-                "put {key}: status {} {body}",
-                status.as_u16()
-            )));
+        if !resp.status().is_success() {
+            return Err(status_error(&format!("put {key}"), resp).await);
         }
         // fetch gives no streaming upload progress; report the whole size once the
         // PUT completes.
@@ -332,28 +413,18 @@ impl CloudHome for S3WasmCloudHome {
             return Err(CloudHomeError::NotFound(key.to_string()));
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CloudHomeError::Storage(format!(
-                "get {key}: status {} {body}",
-                status.as_u16()
-            )));
+            return Err(status_error(&format!("get {key}"), resp).await);
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("read body for {key}: {e}")))?;
-        Ok(bytes.to_vec())
+        resp_bytes(resp, &format!("read body for {key}")).await
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
         let full = self.full_key(key);
         let url = object_url(&self.base_url, &self.bucket, &full);
-        // `end` is exclusive; the HTTP Range header is inclusive on both ends.
-        let range = format!("bytes={start}-{}", end.saturating_sub(1));
         let request = Request::builder()
             .method(Method::GET)
             .uri(url)
-            .header(http::header::RANGE, range)
+            .header(http::header::RANGE, range_header(start, end))
             .body(Vec::new())
             .map_err(|e| CloudHomeError::Storage(format!("build range request for {key}: {e}")))?;
         let resp = self.send(request).await?;
@@ -365,17 +436,9 @@ impl CloudHome for S3WasmCloudHome {
         // the range answers 200 with the whole object, which is still the bytes the
         // caller asked to start at, so accept any success.
         if status != reqwest::StatusCode::PARTIAL_CONTENT && !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CloudHomeError::Storage(format!(
-                "get range {key}: status {} {body}",
-                status.as_u16()
-            )));
+            return Err(status_error(&format!("get range {key}"), resp).await);
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("read range body for {key}: {e}")))?;
-        Ok(bytes.to_vec())
+        resp_bytes(resp, &format!("read range body for {key}")).await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
@@ -444,11 +507,7 @@ impl CloudHome for S3WasmCloudHome {
         if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
             Ok(())
         } else {
-            let body = resp.text().await.unwrap_or_default();
-            Err(CloudHomeError::Storage(format!(
-                "delete {key}: status {} {body}",
-                status.as_u16()
-            )))
+            Err(status_error(&format!("delete {key}"), resp).await)
         }
     }
 
@@ -469,19 +528,15 @@ impl CloudHome for S3WasmCloudHome {
         }
     }
 
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        // S3 access is managed externally (IAM / pre-shared credentials), so this
-        // ignores the member and returns the owner's credentials to embed in the
-        // invite code — identical to the native backend.
-        let _ = member_id;
-        Ok(CloudHomeJoinInfo::S3 {
-            bucket: self.bucket.clone(),
-            region: self.region.clone(),
-            endpoint: self.endpoint.clone(),
-            access_key: self.access_key.clone(),
-            secret_key: self.secret_key.clone(),
-            key_prefix: self.key_prefix.clone(),
-        })
+    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        Ok(s3_join_info(
+            self.bucket.clone(),
+            self.region.clone(),
+            self.endpoint.clone(),
+            self.access_key.clone(),
+            self.secret_key.clone(),
+            self.key_prefix.clone(),
+        ))
     }
 
     async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
@@ -559,12 +614,7 @@ mod tests {
     #[test]
     fn range_header_is_inclusive_on_both_ends() {
         // end is exclusive in read_range; the header end is `end - 1`.
-        let start = 0u64;
-        let end = 24u64;
-        assert_eq!(
-            format!("bytes={start}-{}", end.saturating_sub(1)),
-            "bytes=0-23"
-        );
+        assert_eq!(range_header(0, 24), "bytes=0-23");
     }
 
     #[test]
@@ -642,13 +692,14 @@ mod tests {
         assert_eq!(page.keys, vec!["a/b&c/d<e>.enc".to_string()]);
     }
 
-    /// Build a signer with fixed credentials, sign a GET, and assert the
-    /// Authorization header has the SigV4 shape: algorithm, credential scope
-    /// ending in `/s3/aws4_request`, a non-empty SignedHeaders list, and a
-    /// 64-hex-character signature. The signing time comes from the wall clock
-    /// (reqsign exposes a fixed-time override only inside its own tests), so the
-    /// date inside the scope is not asserted — only the structure that proves the
-    /// request was signed for the S3 service in the configured region.
+    /// Build a request, run it through the real `signed_request` step `send` uses,
+    /// and assert the Authorization header has the SigV4 shape: algorithm,
+    /// credential scope ending in `/s3/aws4_request`, a non-empty SignedHeaders
+    /// list, and a 64-hex-character signature. The signing time comes from the
+    /// wall clock (reqsign exposes a fixed-time override only inside its own
+    /// tests), so the date inside the scope is not asserted — only the structure
+    /// that proves the request was signed for the S3 service in the configured
+    /// region.
     #[tokio::test]
     async fn sign_produces_sigv4_authorization_header() {
         let home = S3WasmCloudHome::new(
@@ -666,14 +717,10 @@ mod tests {
             .uri(url)
             .body(Vec::<u8>::new())
             .expect("build request");
-        let (mut parts, _body) = request.into_parts();
-        home.signer
-            .sign(&mut parts, None)
-            .await
-            .expect("sign request");
+        let signed = home.signed_request(request).await.expect("sign request");
+        let headers = signed.headers();
 
-        let auth = parts
-            .headers
+        let auth = headers
             .get(http::header::AUTHORIZATION)
             .expect("authorization header present")
             .to_str()
@@ -712,10 +759,9 @@ mod tests {
         );
 
         // x-amz-date and x-amz-content-sha256 are added by the signer.
-        assert!(parts.headers.contains_key("x-amz-date"));
+        assert!(headers.contains_key("x-amz-date"));
         assert_eq!(
-            parts
-                .headers
+            headers
                 .get("x-amz-content-sha256")
                 .and_then(|v| v.to_str().ok()),
             Some("UNSIGNED-PAYLOAD"),

@@ -21,6 +21,9 @@ pub mod oauth_session;
 pub mod onedrive;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod s3;
+// Pure helpers (prefix handling, join info) the native and browser S3 backends
+// share so both compute identical object keys and join info for one library.
+mod s3_common;
 // The browser's S3 backend: signs requests with SigV4 and sends them over
 // reqwest's `fetch` transport, since the native `aws-sdk-s3` is tokio/C-bound and
 // won't build for wasm. Shipped only on wasm; also compiled in native test builds
