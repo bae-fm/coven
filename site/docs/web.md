@@ -130,8 +130,8 @@ and sends it over the browser's `fetch`, so it needs no AWS SDK. Authentication 
 a static access key and secret — there is no OAuth.
 
 Google Drive and Dropbox **stay native**: their APIs don't return CORS headers a
-browser page can read, so a browser can't call them directly. OneDrive (and the
-OAuth redirect flow it needs) is future work.
+browser page can read, so a browser can't call them directly. OneDrive — and the
+OAuth redirect flow it needs in a browser — is not part of the browser build.
 
 ### Bucket CORS
 
@@ -195,5 +195,5 @@ unencrypted, browsable bucket for inspecting what coven writes).
 coven on the web is pre-1.0, like the rest of coven. The browser build runs the
 full sync engine — capture, push, pull, apply, snapshots, membership — over
 OPFS-backed SQLite and an S3 bucket, with the device identity persisted in the
-keystore. Google Drive, Dropbox, OneDrive, and the OAuth redirect flow remain
-native-only for now.
+keystore. S3 is the only browser cloud backend; Google Drive, Dropbox, OneDrive,
+and the OAuth redirect flow are native-only.
