@@ -127,6 +127,7 @@ export default defineConfig({
                         { text: 'Encryption', link: '/docs/encryption' },
                         { text: 'Storage', link: '/docs/storage' },
                         { text: 'Blobs', link: '/docs/blobs' },
+                        { text: 'Web', link: '/docs/web' },
                     ],
                 },
                 {

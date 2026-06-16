@@ -150,6 +150,8 @@ You own the app:
   sees.
 - [Storage](/docs/storage): the `CloudHome` trait and providers.
 - [Blobs](/docs/blobs): large files, the plan, outbox, retry.
+- [Web](/docs/web): running coven in a browser over wasm — OPFS, the keystore,
+  S3 over `fetch`.
 
 ## Status
 
