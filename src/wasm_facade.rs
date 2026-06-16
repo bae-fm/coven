@@ -246,8 +246,8 @@ impl CovenLibrary {
 
         // A library dir that never touches disk: the browser has none. The
         // changeset path's only fs touch is best-effort changeset staging, which
-        // logs and continues on failure; blobs and snapshots are out of scope for
-        // the demo facade (see the module-level notes).
+        // logs and continues on failure. This demo syncs rows only — its notes
+        // schema carries no blobs — so the dir is never read or written.
         let library_dir = LibraryDir::new(std::path::Path::new("/coven-browser"));
 
         let runtime = WasmSyncRuntime::new(
