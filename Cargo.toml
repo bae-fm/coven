@@ -144,6 +144,22 @@ web-sys = { version = "0.3", features = [
     # from a real OPFS failure, so it returns `Ok(false)` for the former and `Err`
     # for the latter instead of masking both as "absent".
     "DomException",
+    # WebCrypto + IndexedDB for the browser keystore (`wasm_keystore`): the device's
+    # Ed25519 identity is sealed with AES-GCM under a non-extractable `CryptoKey`
+    # that lives in IndexedDB, so the raw key never enters JS/wasm memory and a dump
+    # of IndexedDB yields only ciphertext.
+    "Crypto",
+    "SubtleCrypto",
+    "CryptoKey",
+    "AesKeyGenParams",
+    "AesGcmParams",
+    "IdbFactory",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbTransaction",
+    "IdbTransactionMode",
 ] }
 
 # The headless wasm tests drive a real dedicated Worker in Firefox. Belongs only on

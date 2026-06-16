@@ -61,6 +61,22 @@ impl UserKeypair {
         }
     }
 
+    /// Reconstruct a keypair from its 64-byte Ed25519 signing key (seed + public),
+    /// deriving the public key from it and validating that the bytes are a real
+    /// keypair. The single place stored signing-key bytes become a `UserKeypair` —
+    /// the keyring loader and the browser keystore both round-trip through it, so a
+    /// torn or corrupt signing key fails the same way wherever it was persisted.
+    pub fn from_signing_key_bytes(
+        signing_key: &[u8; SIGN_SECRETKEYBYTES],
+    ) -> Result<Self, KeyError> {
+        let sk = ed25519_dalek::SigningKey::from_keypair_bytes(signing_key)
+            .map_err(|e| KeyError::Crypto(format!("Invalid signing key bytes: {e}")))?;
+        Ok(Self {
+            signing_key: *signing_key,
+            public_key: sk.verifying_key().to_bytes(),
+        })
+    }
+
     /// Sign a message, returning a 64-byte detached signature.
     pub fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES] {
         let sk = ed25519_dalek::SigningKey::from_keypair_bytes(&self.signing_key)
@@ -407,14 +423,7 @@ impl KeyService {
             .try_into()
             .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
 
-        let sk = ed25519_dalek::SigningKey::from_keypair_bytes(&signing_key)
-            .map_err(|e| KeyError::Crypto(format!("Invalid signing key bytes: {e}")))?;
-        let public_key = sk.verifying_key().to_bytes();
-
-        Ok(Some(UserKeypair {
-            signing_key,
-            public_key,
-        }))
+        Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
     }
 
     /// Delete the global signing-key keyring entry. Test-only: production code

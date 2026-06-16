@@ -50,6 +50,7 @@ use crate::sync::hlc::Hlc;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
 use crate::wasm::install_browser_storage;
+use crate::wasm_keystore::BrowserKeystore;
 
 /// The config object JavaScript passes to [`CovenLibrary::open`].
 ///
@@ -128,12 +129,23 @@ impl CovenLibrary {
             config.key_prefix,
         ));
 
+        // Load (or, on first use, mint) this device's persistent signing identity
+        // from the browser keystore, so a reopened tab keeps the identity other
+        // members already trust rather than appearing as a new device each time.
+        let user_keypair = BrowserKeystore::open()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("open keystore: {e}")))?
+            .get_or_create_user_keypair()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("load device identity: {e}")))?;
+
         Self::from_home(
             home,
             cipher,
             blob_paths,
             &config.library_id,
             config.device_id,
+            user_keypair,
             production_schedule(),
         )
         .await
@@ -162,9 +174,10 @@ impl CovenLibrary {
     }
 
     /// Run a read query and return its rows as a JSON value: an array of objects,
-    /// one per row, keyed by column name. SQLite NULL maps to JSON `null`,
-    /// integers and reals to JSON numbers, text to JSON strings, and BLOBs to a
-    /// lossy UTF-8 string (the demo stores only text).
+    /// one per row, keyed by column name. SQLite NULL maps to JSON `null`, integers
+    /// and reals to JSON numbers, and text to JSON strings; a non-UTF-8 text or a
+    /// BLOB column is an error rather than a silently corrupted string (see
+    /// [`value_ref_to_json`]).
     pub async fn query(&self, sql: String) -> Result<JsValue, JsValue> {
         let rows = self
             .db
@@ -215,12 +228,18 @@ impl CovenLibrary {
     /// set, and builds (but does not start) the [`WasmSyncRuntime`] on `schedule`.
     /// `open` passes [`production_schedule`]; the headless test passes a short one
     /// so it converges quickly.
+    ///
+    /// The caller supplies `user_keypair` — `open` loads the device's persistent
+    /// identity from the [`BrowserKeystore`](crate::wasm_keystore::BrowserKeystore),
+    /// while the test passes a fresh one per device so two simulated devices have
+    /// distinct identities (a single origin keystore would hand both the same one).
     pub(crate) async fn from_home(
         home: Box<dyn CloudHome>,
         cipher: CloudCipher,
         blob_paths: BlobPathScheme,
         library_id: &str,
         device_id: String,
+        user_keypair: UserKeypair,
         schedule: WasmSyncSchedule,
     ) -> Result<CovenLibrary, String> {
         install_browser_storage()
@@ -256,11 +275,10 @@ impl CovenLibrary {
             Rc::new(Hlc::new(device_id)),
             cipher,
             db.clone(),
-            // A fresh signing keypair. A real encrypted, multi-writer library
-            // restores the member's persisted keypair from a keystore; a plaintext
-            // single-writer demo signs with an ephemeral one (the self-signature
-            // check still runs and passes).
-            UserKeypair::generate(),
+            // The device's signing identity. `open` loads it from the persistent
+            // browser keystore so a reopened tab keeps the identity other members
+            // trust; the headless test passes a fresh one per device.
+            user_keypair,
             // `Clock` is a plain `Send + Sync` sync trait, so its handle is an
             // `Arc` (`ClockRef`) even on the single-threaded browser runtime.
             std::sync::Arc::new(SystemClock) as ClockRef,

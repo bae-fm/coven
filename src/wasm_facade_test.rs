@@ -47,6 +47,10 @@ async fn open_library(
         BlobPathScheme::from_obfuscate(false),
         library_id,
         device_id.to_string(),
+        // A fresh identity per device: `open` would load one shared identity from the
+        // origin keystore, but these two simulated devices must sign as distinct
+        // members to model two tabs/devices converging.
+        crate::keys::UserKeypair::generate(),
         // Short cadence so the test converges quickly: a 10 ms startup grace and a
         // 50 ms idle interval, versus the facade's 3 s / 30 s production timings.
         WasmSyncSchedule {

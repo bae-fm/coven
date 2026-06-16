@@ -67,6 +67,13 @@ pub mod sync;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
+// Browser-only key persistence: the device's Ed25519 identity, sealed with a
+// non-extractable WebCrypto key in IndexedDB. The async counterpart of the native
+// `KeyService` (whose synchronous `keyring_core::Store` can't wrap async browser
+// crypto/storage). Documented at the module.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_keystore;
+
 // Browser-only: the JS-callable facade (`CovenLibrary`) that assembles coven's
 // whole browser stack — OPFS storage, the `Database`, the cipher + blob-path
 // choices, the fetch-based S3 cloud home, and the event-loop sync runtime — behind
@@ -109,6 +116,13 @@ mod wasm_runtime_test;
 // because it reaches crate-internal sync test helpers; see the module.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_blob_opfs_test;
+
+// Headless proof that the browser keystore persists the device identity: a keypair
+// minted on first `open` comes back byte-for-byte on a later `open`, and survives
+// the in-memory handle being dropped (so it really round-tripped through IndexedDB
+// + WebCrypto, not a cache). See the module.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_keystore_test;
 
 pub use database::Database;
 pub use sync::hlc::UpdatedAtStamper;
