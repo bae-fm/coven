@@ -77,6 +77,14 @@ mod wasm_opfs_test;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_sync_test;
 
+// Headless proof that the wasm sync RUNTIME (not a manual cycle call) drives two
+// devices to convergence off the browser event loop: each device's
+// `WasmSyncRuntime` ticks on `spawn_local` + gloo-timers, and a row written on
+// one converges to the other. Inside the crate because it reaches crate-internal
+// sync test helpers; see the module.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_runtime_test;
+
 pub use database::Database;
 pub use sync::hlc::UpdatedAtStamper;
 

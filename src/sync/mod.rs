@@ -60,3 +60,9 @@ pub mod sync_manager;
 pub(crate) mod test_helpers;
 #[cfg(test)]
 mod tests;
+// The browser sync runtime drives cycles off the single JS event loop
+// (`spawn_local` + gloo-timers), the wasm counterpart of the native thread-based
+// `sync_loop`. It holds the `!Send` wasm `Database` directly, so it builds only on
+// wasm.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_runtime;

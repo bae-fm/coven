@@ -105,13 +105,19 @@ percent-encoding = "2.3"
 # transitively via reqsign; named directly here. Default features only — no serde,
 # no encoding_rs (S3 returns UTF-8).
 quick-xml = "0.40"
+# The browser drives the sync runtime off its single event loop. `spawn_local`
+# runs the cycle loop as a `!Send` task on that loop (the wasm `Database` is
+# `!Send`); gloo-timers' `TimeoutFuture` (the `futures` feature makes it awaitable)
+# is the idle/backoff wait between cycles — the wasm counterpart of the native
+# loop's thread + `tokio::time::sleep`.
+wasm-bindgen-futures = "0.4"
+gloo-timers = { version = "0.4", features = ["futures"] }
 
 # The headless wasm test (tests/wasm_opfs.rs) drives a real dedicated Worker in
 # Firefox to prove the connection persists through OPFS. None of these belong on
 # native, which tests the thread-actor path instead.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
-wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
