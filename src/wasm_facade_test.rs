@@ -44,7 +44,7 @@ async fn open_library(
     let lib = CovenLibrary::from_home(
         home,
         CloudCipher::Plaintext,
-        BlobPathScheme::from_obfuscate(false),
+        BlobPathScheme::Plain,
         library_id,
         device_id.to_string(),
         // A fresh identity per device: `open` would load one shared identity from the

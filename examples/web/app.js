@@ -59,12 +59,11 @@ els.form.addEventListener("submit", (event) => {
     secret_key: form.get("secret_key").trim(),
     key_prefix: form.get("key_prefix").trim() || null,
     library_id: form.get("library_id").trim(),
-    // The simplest first config: a plaintext, browsable bucket with readable blob
-    // paths. Flip these on (and supply an `encryption_key_hex`) for an end-to-end
-    // encrypted home; see the README.
-    encrypted: false,
+    // The simplest first config: a browsable home — a plaintext bucket with
+    // readable blob paths. Switch to `storage: "opaque"` (and supply an
+    // `encryption_key_hex`) for an end-to-end encrypted home; see the README.
+    storage: "browsable",
     encryption_key_hex: null,
-    obfuscate_blob_paths: false,
     device_id: deviceId,
   };
   worker.postMessage({ type: "open", config });

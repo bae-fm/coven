@@ -6,12 +6,11 @@
 //! The code contains secrets (encryption key, S3 credentials). OAuth tokens are NOT included
 //! because they expire -- the user re-authenticates on restore.
 //!
-//! The encryption key (`ek`) is present for an encrypted home and absent for a
-//! plaintext one: `ek` present ⇒ encrypted, `ek` absent ⇒ plaintext.
-//!
-//! The blob-path scheme travels in `obf`: present and `false` for an unobfuscated
-//! (consumer-path) home, omitted for the default obfuscated one. A joining device
-//! must know the scheme to compute the same blob keys the source writes.
+//! The encryption key (`ek`) is present for an opaque home and absent for a
+//! browsable one, so `ek`'s presence *is* the home's storage mode: `ek` present
+//! ⇒ opaque (encrypted, obfuscated blob paths), `ek` absent ⇒ browsable
+//! (plaintext, readable blob paths). The restorer rebuilds both the cipher and
+//! the blob-path scheme from that one signal.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -26,8 +25,10 @@ pub struct RestoreCode {
     pub v: u8,
     /// Library ID (UUID).
     pub lid: String,
-    /// Encryption key (hex-encoded, 64 chars), present only for an encrypted
-    /// home. Absent ⇒ a plaintext home, restored with `CloudCipher::Plaintext`.
+    /// Encryption key (hex-encoded, 64 chars), present only for an opaque home.
+    /// Its presence is the home's storage mode: present ⇒ opaque (the restorer
+    /// builds `CloudCipher::Encrypted` + `BlobPathScheme::Hashed`); absent ⇒
+    /// browsable (`CloudCipher::Plaintext` + `BlobPathScheme::Plain`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ek: Option<String>,
     /// Library display name.
@@ -36,15 +37,6 @@ pub struct RestoreCode {
     pub provider: RestoreProvider,
     /// Ed25519 signing key, base64url-encoded, 64 bytes. Required.
     pub sk: String,
-    /// Whether blob objects use the obfuscated content-addressed layout. Omitted
-    /// (and decoded back to `true`) for the default obfuscated home; present and
-    /// `false` for an unobfuscated (consumer-path) one. The restorer rebuilds the
-    /// matching [`crate::sync::cloud_storage::BlobPathScheme`] from this.
-    #[serde(
-        default = "crate::config::default_obfuscate_blob_paths",
-        skip_serializing_if = "crate::config::is_default_obfuscate_blob_paths"
-    )]
-    pub obf: bool,
 }
 
 /// Cloud provider details. Each variant carries only the fields needed for that provider.
@@ -188,7 +180,6 @@ mod tests {
                 secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             },
             sk: test_sk(),
-            obf: true,
         }
     }
 
@@ -233,7 +224,6 @@ mod tests {
             name: "CloudKit Library".to_string(),
             provider: RestoreProvider::CloudKit,
             sk: test_sk(),
-            obf: true,
         };
         let encoded = encode_restore_code(&code);
         let decoded = decode_restore_code(&encoded).unwrap();
@@ -252,7 +242,6 @@ mod tests {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
             },
             sk: test_sk(),
-            obf: true,
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
@@ -274,7 +263,6 @@ mod tests {
                 folder_path: "/Apps/your-app/My Library".to_string(),
             },
             sk: test_sk(),
-            obf: true,
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
@@ -297,7 +285,6 @@ mod tests {
                 folder_id: "folder-id-456".to_string(),
             },
             sk: test_sk(),
-            obf: true,
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
@@ -378,7 +365,6 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
-            obf: true,
         };
         let json = serde_json::to_string(&code).unwrap();
         // None fields should not appear in the JSON
@@ -388,10 +374,10 @@ mod tests {
         assert!(json.contains("name"));
     }
 
-    /// A plaintext home's restore code carries no encryption key: `ek` is `None`,
+    /// A browsable home's restore code carries no encryption key: `ek` is `None`,
     /// so the field is omitted from the JSON, and it round-trips back to `None`.
     #[test]
-    fn plaintext_code_omits_ek() {
+    fn browsable_code_omits_ek() {
         let code = RestoreCode {
             v: 1,
             lid: "lib-plain".to_string(),
@@ -406,59 +392,31 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
-            obf: true,
         };
         let json = serde_json::to_string(&code).unwrap();
         assert!(
             !json.contains("\"ek\""),
-            "a plaintext home's code must omit ek: {json}"
+            "a browsable home's code must omit ek: {json}"
         );
 
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         assert_eq!(decoded.ek, None, "ek round-trips back to None");
     }
 
-    /// An encrypted home's restore code carries the key: `ek` is `Some`, present
-    /// in the JSON, and round-trips intact.
+    /// An opaque home's restore code carries the key: `ek` is `Some`, present in
+    /// the JSON, and round-trips intact.
     #[test]
-    fn encrypted_code_includes_ek() {
+    fn opaque_code_includes_ek() {
         let code = sample_s3_code();
         assert!(code.ek.is_some());
         let json = serde_json::to_string(&code).unwrap();
         assert!(
             json.contains("\"ek\""),
-            "an encrypted home's code must include ek: {json}"
+            "an opaque home's code must include ek: {json}"
         );
 
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         assert_eq!(decoded.ek, code.ek, "ek round-trips intact");
-    }
-
-    /// An unobfuscated home's restore code carries `obf = false` (present in the
-    /// JSON) and round-trips to `false`; the default (obfuscated) code omits the
-    /// field and decodes back to `true`.
-    #[test]
-    fn obf_round_trips_and_default_is_omitted() {
-        let mut code = sample_s3_code();
-        code.obf = false;
-        let json = serde_json::to_string(&code).unwrap();
-        assert!(
-            json.contains("\"obf\""),
-            "an unobfuscated home's code must carry obf: {json}"
-        );
-        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
-        assert!(!decoded.obf, "obf=false round-trips");
-
-        // The default (obfuscated) code omits the field and decodes back to true.
-        let default_code = sample_s3_code();
-        assert!(default_code.obf, "sample is obfuscated by default");
-        let json = serde_json::to_string(&default_code).unwrap();
-        assert!(
-            !json.contains("\"obf\""),
-            "an obfuscated (default) code omits obf: {json}"
-        );
-        let decoded = decode_restore_code(&encode_restore_code(&default_code)).unwrap();
-        assert!(decoded.obf, "absent obf decodes to true");
     }
 
     #[test]

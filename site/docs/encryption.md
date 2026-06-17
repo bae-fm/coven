@@ -79,7 +79,7 @@ opaque byte store. It sees:
   keys/{member_pubkey}.enc               library key wrapped to each member
   ```
 
-  (These are the paths of an encrypted home. A plaintext home — see below — drops
+  (These are the paths of an opaque home. A browsable home — see below — drops
   the `.enc` suffix, so the same objects are at `changes/{device_id}/{seq}`,
   `snapshot.db`, and so on.)
 
@@ -112,49 +112,70 @@ so two coven-based apps on one machine never read or overwrite each other's keys
 It is required, not defaulted: a getter called before the host sets it panics
 rather than fall back to a shared name.
 
-## The optional plaintext cloud home
+## Opaque and browsable homes
 
-Encryption at rest is the default, but a library can opt into a **plaintext cloud
-home**: one that stores every object in the clear. This is a per-library choice
-recorded as `cloud_home.encrypted` in the config (`true` by default). It is for a
-library whose contents are not secret and whose owner wants the bucket to be
-browsable — a reader can open `snapshot.db` or a blob directly without the library
-key.
+Everything above describes an **opaque home** — the default. A library can
+instead be created as a **browsable home**, which stores every object in the
+clear. This is one per-library choice, `cloud_home.storage`, set when the home is
+created and fixed thereafter (it determines how every object is written).
 
-The seam is `CloudCipher`, which a `CloudSyncStorage` holds in place of a raw
-`EncryptionService`:
+This choice is about whether what's stored is *legible*, not about who can reach
+it. It is **not** access control: the storage provider's own access control (the
+bucket's credentials, the account's sign-in) applies either way. "Browsable" does
+not mean open to the world — it means that anyone who already has access to the
+bucket sees the actual files instead of ciphertext.
 
-- `CloudCipher::Encrypted(key)` seals every object under the library key (the
-  behavior described everywhere above) and stores it with the `.enc` suffix.
-- `CloudCipher::Plaintext` stores every object verbatim and drops the `.enc`
-  suffix, so the layout uses bare names (`snapshot.db`, `heads/{device}.json`,
-  `changes/{device}/{seq}`, …).
+- An **opaque home** (`storage: opaque`, the default) seals every object under
+  the library key and stores it with the `.enc` suffix, and keys each blob by its
+  content-addressed shard `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access
+  sees only ciphertext under opaque keys.
+- A **browsable home** (`storage: browsable`) stores every object verbatim with
+  no `.enc` suffix (bare names like `snapshot.db`, `heads/{device}.json`,
+  `changes/{device}/{seq}`) and stores each blob at the consumer's own readable
+  path `{namespace}/{cloud_path}`. Anyone with bucket access can open
+  `snapshot.db` or a blob directly without any key — which is the point: it is for
+  a library whose contents are not secret and whose owner wants to read the bucket
+  by name (e.g. inspect it in the storage console).
 
-A plaintext home changes only what happens at rest. Changesets, snapshots, the
-snapshot metadata, the min-schema marker, membership entries, and blobs are all
-stored as their plaintext bytes; everything else — the sync protocol, the HLC
-register, the row-level gate — is unchanged.
+The one choice drives two mechanisms together — the at-rest cipher and the
+blob-path scheme, both held by a `CloudSyncStorage`:
 
-Two capabilities require encryption and are unavailable on a plaintext home:
+- `CloudCipher::Encrypted(key)` (opaque) seals every object under the library key
+  (the behavior described everywhere above); `CloudCipher::Plaintext` (browsable)
+  stores every object verbatim and drops the `.enc` suffix.
+- `BlobPathScheme::Hashed` (opaque) keys a blob by its content-addressed shard;
+  `BlobPathScheme::Plain` (browsable) keys it at the readable `cloud_path` the
+  consumer supplies (see [blobs](blobs.md#browsable-home-blob-paths)).
+
+The storage mode changes only what happens at rest. Changesets, snapshots, the
+snapshot metadata, the min-schema marker, membership entries, and blobs are
+stored sealed (opaque) or verbatim (browsable); everything else — the sync
+protocol, the HLC register, the row-level gate — is unchanged.
+
+Two capabilities exist only on an opaque home:
 
 - **Restore codes** carry the library key (`ek`) so a second device can read the
-  bucket. A plaintext home has no key, so its restore code omits `ek` entirely.
-  On restore, the absence of `ek` selects `CloudCipher::Plaintext`; its presence
-  selects `CloudCipher::Encrypted`.
+  bucket. A browsable home has no key, so its restore code omits `ek` entirely.
+  The presence of `ek` *is* the home's storage mode: present ⇒ opaque (rebuilt as
+  `CloudCipher::Encrypted` + `BlobPathScheme::Hashed`), absent ⇒ browsable
+  (`CloudCipher::Plaintext` + `BlobPathScheme::Plain`).
 - **Sharing** (inviting and removing members) wraps and rotates the library key.
-  With no key there is nothing to wrap or rotate, so a member-removal key rotation
-  on a plaintext home is a clear error ("sharing requires an encrypted cloud
-  home") rather than a silent no-op.
+  With no key there is nothing to wrap or rotate, so a member operation on a
+  browsable home is a clear error ("sharing requires an opaque cloud home")
+  rather than a silent no-op. An invite is therefore always for an opaque home,
+  and the invite code carries no storage flag.
 
-The two modes at a glance:
+The two kinds of home at a glance:
 
-| | Encrypted (default) | Plaintext |
+| | Opaque (default) | Browsable |
 | --- | --- | --- |
-| Config `cloud_home.encrypted` | `true` | `false` |
+| Config `cloud_home.storage` | `opaque` | `browsable` |
 | Restore-code `ek` | `Some(hex)` | absent |
 | Runtime cipher | `CloudCipher::Encrypted(key)` | `CloudCipher::Plaintext` |
+| Blob-path scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
 | Object bytes at rest | sealed (XChaCha20-Poly1305) | verbatim |
 | Object-key suffix | `.enc` | none |
+| Blob key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
 | Sharing (invite / remove member) | available | error |
 
 ## Chunked encryption

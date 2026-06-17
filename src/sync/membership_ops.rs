@@ -72,7 +72,6 @@ pub async fn invite_member(
     encryption_key: &[u8; 32],
     library_id: &str,
     library_name: &str,
-    obfuscate_blob_paths: bool,
 ) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
     let user_pubkey_hex = hex::encode(user_keypair.public_key);
 
@@ -150,7 +149,6 @@ pub async fn invite_member(
         library_name: library_name.to_string(),
         join_info,
         owner_pubkey: user_pubkey_hex,
-        obfuscate_blob_paths,
     })
 }
 

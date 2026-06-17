@@ -39,12 +39,14 @@ fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<(), String> {
 
 /// High-level sync manager.
 ///
-/// Always has a valid EncryptionService — if no encryption key exists,
-/// don't create a SyncManager at all.
+/// Holds an `EncryptionService` for an opaque home and `None` for a browsable
+/// (plaintext) one — a browsable home has no library key. The at-rest cipher is
+/// chosen per cycle from the home's [`HomeStorage`](crate::config::HomeStorage),
+/// so the service is consulted only on an opaque home.
 pub struct SyncManager {
     config_provider: ConfigProvider,
     key_service: KeyService,
-    encryption_service: EncryptionService,
+    encryption_service: Option<EncryptionService>,
     db: Database,
     clock: ClockRef,
     blob_plan: Arc<dyn BlobPlan>,
@@ -90,7 +92,7 @@ impl SyncManager {
     pub fn new(
         config_provider: ConfigProvider,
         key_service: KeyService,
-        encryption_service: EncryptionService,
+        encryption_service: Option<EncryptionService>,
         db: Database,
         clock: ClockRef,
         blob_plan: Arc<dyn BlobPlan>,
@@ -111,8 +113,8 @@ impl SyncManager {
         }
     }
 
-    pub fn encryption_service(&self) -> &EncryptionService {
-        &self.encryption_service
+    pub fn encryption_service(&self) -> Option<&EncryptionService> {
+        self.encryption_service.as_ref()
     }
 
     pub fn cloud_home(&self) -> Option<Arc<dyn CloudHome>> {
@@ -153,11 +155,16 @@ impl SyncManager {
             return;
         }
 
-        // The home's at-rest cipher: encrypted (the manager's library key) or
-        // plaintext, per config. Built here so the sync loop and storage share
-        // one instance — a member removal rotates the key in place through it.
-        let cipher = if config.cloud_home.encrypted {
-            CloudCipher::Encrypted(self.encryption_service.clone())
+        // The home's at-rest cipher: an opaque home seals under the manager's
+        // library key, a browsable home stores in the clear. Built here so the
+        // sync loop and storage share one instance — a member removal rotates the
+        // key in place through it.
+        let cipher = if config.cloud_home.storage.is_opaque() {
+            let enc = self
+                .encryption_service
+                .clone()
+                .expect("an opaque cloud home must be built with an encryption service");
+            CloudCipher::Encrypted(enc)
         } else {
             CloudCipher::Plaintext
         };
@@ -301,13 +308,9 @@ impl SyncManager {
             .try_into()
             .map_err(|_| "Encryption key wrong length".to_string())?;
 
-        let (library_id, library_name, obfuscate_blob_paths) = {
+        let (library_id, library_name) = {
             let config = (self.config_provider)();
-            (
-                config.library_id.clone(),
-                config.library_name.clone(),
-                config.cloud_home.obfuscate_blob_paths,
-            )
+            (config.library_id.clone(), config.library_name.clone())
         };
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
@@ -323,7 +326,6 @@ impl SyncManager {
             &key_bytes,
             &library_id,
             &library_name,
-            obfuscate_blob_paths,
         )
         .await
         .map_err(|e| e.0)?;

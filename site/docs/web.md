@@ -54,9 +54,8 @@ const lib = await CovenLibrary.open({
   secret_key: '…',
   key_prefix: null,
   library_id: 'my-library',  // names the OPFS database; distinct per library on an origin
-  encrypted: false,          // true requires encryption_key_hex (64 hex chars)
+  storage: 'browsable',      // 'opaque' requires encryption_key_hex (64 hex chars)
   encryption_key_hex: null,
-  obfuscate_blob_paths: false,
   device_id: 'tab-a',        // each tab/device must use a distinct id
 })
 
@@ -109,8 +108,8 @@ can decrypt in-page but never be exported. A reopened tab loads the same identit
 so other members keep trusting it rather than seeing a new device each time.
 
 The signing identity is the only secret the keystore persists. The at-rest
-encryption key (for an [encrypted home](encryption.md)) and the cloud credentials
-are supplied by the page on each `open`.
+encryption key (for an [opaque home](encryption.md#opaque-and-browsable-homes))
+and the cloud credentials are supplied by the page on each `open`.
 
 ## Blobs in the browser
 
@@ -187,8 +186,8 @@ automatically.
 browser tabs through an S3 bucket, driving `CovenLibrary` end to end. Build the
 wasm module as above, serve the crate root over HTTP (OPFS needs a real origin,
 not a `file://` URL), configure the bucket's CORS, and open the page in two tabs.
-Its `README.md` has the step-by-step, including the simplest first config (an
-unencrypted, browsable bucket for inspecting what coven writes).
+Its `README.md` has the step-by-step, including the simplest first config (a
+browsable bucket for inspecting what coven writes).
 
 ## Status
 

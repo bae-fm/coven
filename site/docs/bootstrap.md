@@ -36,11 +36,10 @@ in one pass:
    changeset filter uses, so the snapshot carries the exact same set of rows the
    changeset path would have sent. See [Local data](local-data.md) for the gate.
 4. A second `VACUUM` reclaims the pages freed by those deletes, then the bytes are
-   read and sealed by the home's cipher. On an encrypted home that means
-   encrypting with the library key and storing the snapshot at `snapshot.db.enc`;
-   on a [plaintext home](encryption.md#the-optional-plaintext-cloud-home) the
-   bytes are stored verbatim at `snapshot.db`, so the snapshot is a directly
-   readable SQLite image.
+   read and sealed by the home's cipher. On an opaque home that means encrypting
+   with the library key and storing the snapshot at `snapshot.db.enc`; on a
+   [browsable home](encryption.md#opaque-and-browsable-homes) the bytes are stored
+   verbatim at `snapshot.db`, so the snapshot is a directly readable SQLite image.
 
 Because the snapshot and the changeset path share one gate, a device that
 bootstraps from a snapshot and a device that applied live changesets converge on
@@ -91,7 +90,7 @@ next policy check.
 objects and updates the device head:
 
 - the sealed snapshot blob (overwriting any previous one) — encrypted on an
-  encrypted home, stored verbatim on a plaintext one, and
+  opaque home, stored verbatim on a browsable one, and
 - per-device cursor metadata as
   [`SnapshotMeta`](rustdoc:struct:coven::sync::snapshot::SnapshotMeta), holding a
   `device_id -> seq` map and an RFC 3339 `created_at` timestamp.
@@ -112,7 +111,7 @@ the restore flow (the owner recovering the library on new hardware). Both call
    below), and fetching it before writing anything means a torn bucket leaves no
    half-written database on disk.
 2. Download the snapshot blob, open it through the home's cipher (decrypt on an
-   encrypted home; pass through on a plaintext one), and write the resulting bytes
+   opaque home; pass through on a browsable one), and write the resulting bytes
    directly to `target_path`. There is no migration replay: the snapshot bytes
    *are* the database file.
 3. Return a

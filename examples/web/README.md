@@ -72,17 +72,16 @@ form; adapt the syntax for MinIO/R2/etc.):
 
 ## 4. The simplest first config
 
-In the page's form, leave the library **unencrypted with readable blob paths** —
-that is what the form does by default (`encrypted: false`,
-`obfuscate_blob_paths: false`). The bucket is then browsable: every object is
-stored in the clear under a readable key, so you can inspect what coven writes
-(`heads/`, `changes/`, your `notes` rows in the changesets) directly in the S3
-console while debugging.
+In the page's form, leave the library **browsable** — that is what the form does
+by default (`storage: "browsable"`). A browsable home is plaintext with readable
+blob paths: every object is stored in the clear under a readable key, so anyone
+with bucket access (you, here) can inspect what coven writes (`heads/`, `changes/`,
+your `notes` rows in the changesets) directly in the S3 console while debugging.
 
-For an end-to-end-encrypted home instead, set `encrypted: true` and supply a
+For an end-to-end-encrypted home instead, set `storage: "opaque"` and supply a
 64-hex-character (32-byte) `encryption_key_hex` shared by every tab/device — coven
-seals every object under that key. (The form does not expose this; edit
-`app.js`'s `config` object to try it.)
+seals every object under that key and uses obfuscated, content-addressed blob
+paths. (The form does not expose this; edit `app.js`'s `config` object to try it.)
 
 **Never commit real credentials.** The form takes the access key and secret key at
 runtime; nothing here stores or ships them.

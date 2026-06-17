@@ -201,24 +201,22 @@ reconnect message.
 live one level up, in `CloudSyncStorage`, which wraps any `dyn CloudHome`: it
 seals on the way down, opens on the way up, and owns the mapping from sync
 concepts (a device's changeset seq, a blob id, a member's wrapped key) to the
-flat keys the trait stores. How it seals — and the key suffix — comes from the
-home's `CloudCipher`:
+flat keys the trait stores. Both how it seals (the `CloudCipher`) and how it keys
+blobs (the `BlobPathScheme`) come from the home's
+[storage mode](encryption.md#opaque-and-browsable-homes) — one choice, set when
+the home is created:
 
-- An **encrypted** home (the default) encrypts every object under the library key
+- An **opaque** home (the default) encrypts every object under the library key
   and stores it with the `.enc` suffix (`snapshot.db.enc`,
-  `heads/{device}.json.enc`, `changes/{device}/{seq}.enc`, …). A provider sees
-  `changes/dev1/42.enc` and a blob of ciphertext; it never sees a todo title or an
-  attachment's bytes.
-- A **plaintext** home stores every object verbatim and drops the suffix, so the
+  `heads/{device}.json.enc`, `changes/{device}/{seq}.enc`, …), and keys each blob
+  by its content-addressed shard `{namespace}/{ab}/{cd}/{id}`. A provider sees
+  `changes/dev1/42.enc` and a blob of ciphertext under an opaque key; it never
+  sees a todo title or an attachment's bytes.
+- A **browsable** home stores every object verbatim and drops the suffix, so the
   same objects are at bare names (`snapshot.db`, `heads/{device}.json`,
-  `changes/{device}/{seq}`, …). The bucket is browsable; the provider sees the
-  actual bytes.
-
-Blob objects are keyed `{namespace}/{ab}/{cd}/{id}` by default — content-addressed
-and sharded by the id — or `{namespace}/{cloud_path}` for an
-[unobfuscated home](blobs.md#unobfuscated-blob-paths), which stores each blob at
-the consumer's readable path so the bucket is browsable by name. The blob-path
-scheme is independent of the at-rest cipher above.
+  `changes/{device}/{seq}`, …), and stores each blob at the consumer's readable
+  [`{namespace}/{cloud_path}`](blobs.md#browsable-home-blob-paths). Anyone with
+  bucket access reads the actual bytes by name.
 
 ## Lifecycle
 

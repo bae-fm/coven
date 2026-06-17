@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::blob::BlobPlan;
-use crate::config::{CloudProvider, Config, ConfigError};
+use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::join_code::InviteCode;
@@ -236,15 +236,13 @@ pub async fn join_library(
     let encryption_key_hex = hex::encode(encryption_key);
 
     // Step 3: Create the sync storage with the real encryption key. Joining a
-    // shared library only makes sense over an encrypted home — the invite wraps
-    // the library key — so the cipher is always `Encrypted` here. The blob-path
-    // scheme is independent of the cipher: the invite conveys it so the joiner
-    // computes the same blob keys the owner writes.
+    // shared library only makes sense over an opaque home — the invite wraps the
+    // library key — so the home is always opaque here: the cipher is `Encrypted`
+    // and the blob-path scheme is `Hashed`, matching what the owner writes.
     on_status("Downloading library snapshot...");
     let encryption = EncryptionService::new(&encryption_key_hex)?;
     let cipher = CloudCipher::Encrypted(encryption);
-    let obfuscate_blob_paths = code.obfuscate_blob_paths;
-    let blob_paths = BlobPathScheme::from_obfuscate(obfuscate_blob_paths);
+    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
     let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths);
 
     // Step 4: Create library directory using the invite code's library_id.
@@ -262,7 +260,6 @@ pub async fn join_library(
         &storage,
         &cipher,
         &encryption_key_hex,
-        obfuscate_blob_paths,
         &library_dir,
         &library_id,
         &device_id,
@@ -288,7 +285,6 @@ async fn bootstrap_and_save(
     storage: &CloudSyncStorage,
     cipher: &CloudCipher,
     encryption_key_hex: &str,
-    obfuscate_blob_paths: bool,
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
@@ -344,7 +340,6 @@ async fn bootstrap_and_save(
         library_name,
         join_info,
         cipher,
-        obfuscate_blob_paths,
     );
 
     config.save_to_config_yaml()?;
@@ -479,11 +474,9 @@ pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> CloudHomeCred
     }
 }
 
-/// Build the Config struct from join/restore parameters. The cipher records
-/// whether this home is encrypted (a library key is stored, with its
-/// fingerprint) or plaintext (`encrypted = false`, no key, no fingerprint).
-/// `obfuscate_blob_paths` records the home's blob-path scheme (the source
-/// conveyed it in the invite/restore code), independent of the cipher.
+/// Build the Config struct from join/restore parameters. The cipher records the
+/// home's storage mode: `Encrypted` ⇒ opaque (a library key is stored, with its
+/// fingerprint), `Plaintext` ⇒ browsable (no key, no fingerprint).
 pub(crate) fn build_config(
     library_id: &str,
     device_id: &str,
@@ -491,7 +484,6 @@ pub(crate) fn build_config(
     library_name: &str,
     join_info: &CloudHomeJoinInfo,
     cipher: &CloudCipher,
-    obfuscate_blob_paths: bool,
 ) -> Config {
     let mut config = Config::with_defaults(
         library_id.to_string(),
@@ -500,16 +492,14 @@ pub(crate) fn build_config(
         library_name.to_string(),
     );
 
-    config.cloud_home.obfuscate_blob_paths = obfuscate_blob_paths;
-
     match cipher {
         CloudCipher::Encrypted(enc) => {
-            config.cloud_home.encrypted = true;
+            config.cloud_home.storage = HomeStorage::Opaque;
             config.encryption_key_stored = true;
             config.encryption_key_fingerprint = Some(enc.fingerprint());
         }
         CloudCipher::Plaintext => {
-            config.cloud_home.encrypted = false;
+            config.cloud_home.storage = HomeStorage::Browsable;
             config.encryption_key_stored = false;
             config.encryption_key_fingerprint = None;
         }

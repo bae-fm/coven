@@ -36,13 +36,13 @@ pub struct BlobRef {
     pub id: String,                 // blob id, typically the attachment row's id
     pub local_path: PathBuf,        // source on push, destination on pull
     pub scope: BlobScope,           // Master | Derived(scope_id) | Item(item_id)
-    pub cloud_path: Option<String>, // readable path for the unobfuscated scheme
+    pub cloud_path: Option<String>, // readable path for a browsable home
 }
 ```
 
-`cloud_path` is only consulted by an [unobfuscated home](#unobfuscated-blob-paths);
-the default obfuscated home ignores it, so leave it `None` unless the home is
-configured for readable paths.
+`cloud_path` is only consulted by a [browsable home](#browsable-home-blob-paths);
+an opaque home (the default) ignores it, so leave it `None` unless the home is
+browsable.
 
 The same row appearing in two changesets is two calls and should return a fresh
 `BlobRef` each time; coven does not cache across calls. `local_path` is plaintext
@@ -95,8 +95,8 @@ A blob reaches the cloud one of two ways. A `BlobRef` returned from
 `blobs_to_push` is uploaded by the cycle itself, inside `sync`, before the
 envelope: coven reads `local_path`, resolves the ref's `scope` to a key (master,
 a derived key, or — for `Item(item_id)` — the item key from the `item_keys`
-table), encrypts under it, and writes to `{namespace}/{ab}/{cd}/{id}` (or, on an
-[unobfuscated home](#unobfuscated-blob-paths), to the ref's `cloud_path`). That
+table), encrypts under it, and writes to `{namespace}/{ab}/{cd}/{id}` (or, on a
+[browsable home](#browsable-home-blob-paths), to the ref's `cloud_path`). That
 path is synchronous and reports no progress. The `cloud_outbox` queue described below
 is the separate, durable path, with retry and progress; it carries the same
 `BlobScope` and resolves it the same way when it drains.
@@ -198,13 +198,12 @@ flat prefix that the storage layer would have to list in a single call. The
 cloud provider sees this path and the encrypted bytes, never the plaintext file
 or its contents.
 
-## Unobfuscated blob paths
+## Browsable-home blob paths
 
-By default coven names a blob object by its id, so the bucket holds opaque,
-content-addressed keys. A home can instead be configured to store each blob at a
-readable path the consumer supplies — set
-[`CloudHomeConfig::obfuscate_blob_paths`](rustdoc:struct:coven::config::CloudHomeConfig)
-to `false`. Then a blob is stored verbatim at:
+The content-addressed layout above is how an **opaque home** keys its blobs: by
+id, so the bucket holds opaque shard keys. A **browsable home** (see
+[`HomeStorage`](encryption.md#opaque-and-browsable-homes)) instead stores each
+blob verbatim at a readable path the consumer supplies:
 
 ```
 {namespace}/{cloud_path}
@@ -213,33 +212,32 @@ to `false`. Then a blob is stored verbatim at:
 where `cloud_path` is the value on the blob's
 [`BlobRef`](rustdoc:struct:coven::blob::BlobRef), e.g.
 `attachments/Project Plan/diagram.png` instead of
-`attachments/0e/f7/0ef7…`. The bucket is then browsable: someone listing it sees
-the names the consumer chose.
+`attachments/0e/f7/0ef7…`. Anyone with bucket access then sees the names the
+consumer chose. This is one half of what `storage: browsable` selects — the other
+half is that the same home stores its objects in the clear (see
+[encryption](encryption.md#opaque-and-browsable-homes)); the two are one choice,
+not two.
 
 coven never invents these names. The consumer owns them and supplies `cloud_path`
-on every blob it pushes; an unobfuscated home with a blob carrying no `cloud_path`
-is a surfaced error, never a silent fall back to the hashed layout. The scheme is
-independent of [encryption](encryption.md): an unobfuscated home can still seal
-each object at rest, or not. It is recorded per home and conveyed in the invite
-and restore codes, so a joining or restoring device computes the same blob keys
-the owner writes.
+on every blob it pushes; a browsable home with a blob carrying no `cloud_path` is
+a surfaced error, never a silent fall back to the hashed layout. The scheme is
+conveyed by the restore code (a browsable home's code omits the library key `ek`,
+so the restorer rebuilds the readable scheme from its absence), so a restoring
+device computes the same blob keys the owner writes. A home cannot be both
+browsable and shared: sharing (the `share-proxy` feature) recomputes a blob's key
+from its id, which only an opaque home's content-addressed layout supports.
 
-The default stays obfuscated, matching every existing home. Sharing (the
-`share-proxy` feature) is inherently obfuscated: it recomputes a blob's key from
-its id, which only the content-addressed layout supports.
-
-The audio path was already consumer-controlled regardless of this setting: a host
-enqueues an audio upload with an explicit `cloud_key` (see
+The audio path was already consumer-controlled regardless of the storage mode: a
+host enqueues an audio upload with an explicit `cloud_key` (see
 [How a blob moves out](#how-a-blob-moves-out)), and the outbox drain writes to
-that key verbatim. `obfuscate_blob_paths` governs only the changeset-driven blobs
-above (images and the like), which coven keys itself.
+that key verbatim. The storage mode governs only the changeset-driven blobs above
+(images and the like), which coven keys itself.
 
 The two schemes at a glance:
 
-| | Hashed (default) | Plain |
+| | Opaque home (default) | Browsable home |
 | --- | --- | --- |
-| Config `cloud_home.obfuscate_blob_paths` | `true` | `false` |
-| Invite-/restore-code flag | obfuscated (omitted) | spelled out (`false`) |
+| Config `cloud_home.storage` | `opaque` | `browsable` |
 | Runtime scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
 | `BlobRef.cloud_path` | ignored (leave `None`) | required |
 | Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |

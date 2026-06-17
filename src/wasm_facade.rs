@@ -39,6 +39,7 @@ use wasm_bindgen::prelude::*;
 use crate::blob::{BlobPlan, BlobRef};
 use crate::changeset::RowChange;
 use crate::clock::{ClockRef, SystemClock};
+use crate::config::HomeStorage;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -57,12 +58,12 @@ use crate::wasm_keystore::BrowserKeystore;
 /// The S3 fields name the bucket the library lives in; `endpoint` is set for an
 /// S3-compatible service (MinIO, Backblaze, R2, Google Cloud Storage's S3 API)
 /// and left unset for AWS. `library_id` names the library (it derives the OPFS
-/// filename and must be distinct per library on one origin). `encrypted` selects
-/// an end-to-end-encrypted home — then `encryption_key_hex` (64 hex chars = a
-/// 32-byte key) is required — versus a plaintext, browsable bucket.
-/// `obfuscate_blob_paths` selects content-addressed shard keys versus the app's
-/// own readable blob paths. `device_id` identifies this writer in the sync
-/// protocol (each tab/device must use a distinct one).
+/// filename and must be distinct per library on one origin). `storage` is
+/// `"opaque"` (end-to-end-encrypted with obfuscated, content-addressed blob keys
+/// — then `encryption_key_hex`, 64 hex chars = a 32-byte key, is required) or
+/// `"browsable"` (a plaintext bucket at readable blob paths). `device_id`
+/// identifies this writer in the sync protocol (each tab/device must use a
+/// distinct one).
 #[derive(Deserialize)]
 struct OpenConfig {
     bucket: String,
@@ -74,10 +75,9 @@ struct OpenConfig {
     #[serde(default)]
     key_prefix: Option<String>,
     library_id: String,
-    encrypted: bool,
+    storage: HomeStorage,
     #[serde(default)]
     encryption_key_hex: Option<String>,
-    obfuscate_blob_paths: bool,
     device_id: String,
 }
 
@@ -116,9 +116,9 @@ impl CovenLibrary {
 
         // Build the cipher first so a bad/missing encryption key fails before any
         // storage or database side effects.
-        let cipher = build_cipher(config.encrypted, config.encryption_key_hex.as_deref())
+        let cipher = build_cipher(config.storage, config.encryption_key_hex.as_deref())
             .map_err(|e| JsValue::from_str(&e))?;
-        let blob_paths = BlobPathScheme::from_obfuscate(config.obfuscate_blob_paths);
+        let blob_paths = BlobPathScheme::for_storage(config.storage);
 
         let home: Box<dyn CloudHome> = Box::new(S3WasmCloudHome::new(
             config.bucket,
@@ -307,14 +307,14 @@ fn production_schedule() -> WasmSyncSchedule {
     }
 }
 
-/// Build the at-rest [`CloudCipher`] from the config's `encrypted` flag.
+/// Build the at-rest [`CloudCipher`] from the home's [`HomeStorage`].
 ///
-/// An encrypted home requires a 64-hex-char (32-byte) key; its absence or a parse
+/// An opaque home requires a 64-hex-char (32-byte) key; its absence or a parse
 /// failure is an error, never a silent fall back to plaintext (which would write
-/// the library's data to the bucket in the clear). A plaintext home takes no key.
-fn build_cipher(encrypted: bool, key_hex: Option<&str>) -> Result<CloudCipher, String> {
-    if encrypted {
-        let hex = key_hex.ok_or("encrypted home requires `encryption_key_hex`")?;
+/// the library's data to the bucket in the clear). A browsable home takes no key.
+fn build_cipher(storage: HomeStorage, key_hex: Option<&str>) -> Result<CloudCipher, String> {
+    if storage.is_opaque() {
+        let hex = key_hex.ok_or("opaque home requires `encryption_key_hex`")?;
         let service =
             EncryptionService::new(hex).map_err(|e| format!("invalid encryption_key_hex: {e}"))?;
         Ok(CloudCipher::Encrypted(service))

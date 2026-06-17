@@ -302,10 +302,11 @@ pub fn generate_restore_code(
         SetupError("No cloud provider configured. Set up sync first.".to_string())
     })?;
 
-    // An encrypted home carries its library key in the restore code so a second
-    // device can read the bucket; a plaintext home has no key (`ek` is omitted),
-    // and the restorer rebuilds a `CloudCipher::Plaintext` from its absence.
-    let ek = if config.cloud_home.encrypted {
+    // An opaque home carries its library key in the restore code so a second
+    // device can read the bucket; a browsable home has no key (`ek` is omitted),
+    // and the restorer rebuilds the browsable (plaintext, readable) home from its
+    // absence.
+    let ek = if config.cloud_home.storage.is_opaque() {
         Some(
             key_service
                 .get_encryption_key()
@@ -396,23 +397,22 @@ pub fn generate_restore_code(
         name: config.library_name.clone(),
         provider,
         sk: URL_SAFE_NO_PAD.encode(keypair.signing_key),
-        obf: config.cloud_home.obfuscate_blob_paths,
     };
 
     Ok(encode_restore_code(&code))
 }
 
-/// Build the [`CloudCipher`] a library's config selects: an encrypted home seals
-/// every object under the keyring's library key; a plaintext home
-/// (`cloud_home.encrypted == false`) stores objects in the clear.
+/// Build the [`CloudCipher`] a library's config selects: an opaque home seals
+/// every object under the keyring's library key; a browsable home
+/// (`cloud_home.storage == Browsable`) stores objects in the clear.
 ///
-/// A plaintext home has no library key, so it never reads the keyring — the
+/// A browsable home has no library key, so it never reads the keyring — the
 /// absence of a key there is expected, not an error.
 pub fn build_cloud_cipher(
     config: &Config,
     key_service: &KeyService,
 ) -> Result<CloudCipher, String> {
-    if !config.cloud_home.encrypted {
+    if config.cloud_home.storage.is_browsable() {
         return Ok(CloudCipher::Plaintext);
     }
     let key = key_service
@@ -454,7 +454,7 @@ pub async fn create_sync_storage(
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
         cloud_home,
         cipher,
-        BlobPathScheme::from_obfuscate(config.cloud_home.obfuscate_blob_paths),
+        BlobPathScheme::for_storage(config.cloud_home.storage),
     ))
 }
 

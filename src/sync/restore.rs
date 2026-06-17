@@ -1,8 +1,8 @@
 //! Restore an existing library from cloud storage.
 //!
 //! Unlike join (which unwraps the encryption key from an invite), restore takes
-//! the encryption key directly from the user — present for an encrypted home,
-//! absent for a plaintext one. Unlike join, restore sets
+//! the encryption key directly from the user — present for an opaque home,
+//! absent for a browsable one. Unlike join, restore sets
 //! `cloudkit_is_shared = false` because the restorer is the owner.
 
 use std::path::Path;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::blob::BlobPlan;
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, HomeStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::keys::{KeyError, KeyService};
 use crate::library_dir::LibraryDir;
@@ -197,7 +197,6 @@ async fn build_cloud_home(
 pub async fn restore_from_cloud(
     library_id: &str,
     encryption_key_hex: Option<&str>,
-    obfuscate_blob_paths: bool,
     library_name: &str,
     synced_tables: &[SyncedTable],
     source: RestoreSource,
@@ -211,8 +210,15 @@ pub async fn restore_from_cloud(
         return Err(RestoreError::Database("Library ID is required".to_string()));
     }
 
-    // A key present ⇒ an encrypted home (validate it and build the cipher); a key
-    // absent ⇒ a plaintext home (`CloudCipher::Plaintext`, no key to validate).
+    // The key's presence is the home's storage mode: a key present ⇒ an opaque
+    // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
+    // (plaintext, readable blob paths). The cipher and the blob-path scheme both
+    // follow from it, so this device computes the same blob keys the source wrote.
+    let storage = if encryption_key_hex.is_some() {
+        HomeStorage::Opaque
+    } else {
+        HomeStorage::Browsable
+    };
     let cipher = match encryption_key_hex {
         Some(key_hex) => {
             if key_hex.len() != 64 {
@@ -231,9 +237,7 @@ pub async fn restore_from_cloud(
         None => CloudCipher::Plaintext,
     };
 
-    // The source's blob-path scheme, from the restore code, so this device
-    // computes the same blob keys the source wrote.
-    let blob_paths = BlobPathScheme::from_obfuscate(obfuscate_blob_paths);
+    let blob_paths = BlobPathScheme::for_storage(storage);
 
     let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
 
@@ -252,7 +256,6 @@ pub async fn restore_from_cloud(
         &storage,
         &cipher,
         encryption_key_hex,
-        obfuscate_blob_paths,
         &library_dir,
         library_id,
         &device_id,
@@ -359,7 +362,6 @@ pub async fn restore_from_code(
     let config = restore_from_cloud(
         &parsed.lid,
         parsed.ek.as_deref(),
-        parsed.obf,
         &parsed.name,
         synced_tables,
         source,
@@ -387,7 +389,6 @@ async fn bootstrap_and_save(
     storage: &CloudSyncStorage,
     cipher: &CloudCipher,
     encryption_key_hex: Option<&str>,
-    obfuscate_blob_paths: bool,
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
@@ -428,8 +429,8 @@ async fn bootstrap_and_save(
         info!("Applied {changesets_applied} changesets since snapshot");
     }
 
-    // Step 5: Save the encryption key to the keyring — only for an encrypted
-    // home. A plaintext home has no key to store.
+    // Step 5: Save the encryption key to the keyring — only for a private home.
+    // A public home has no key to store.
     on_status("Saving configuration...");
     if let Some(key_hex) = encryption_key_hex {
         key_service.set_encryption_key(key_hex)?;
@@ -439,8 +440,8 @@ async fn bootstrap_and_save(
     let credentials = derive_credentials(join_info);
     key_service.set_cloud_home_credentials(&credentials)?;
 
-    // Step 7: Create and save config. The cipher records whether this home is
-    // encrypted (key stored + fingerprint) or plaintext (`encrypted = false`).
+    // Step 7: Create and save config. The cipher records the home's storage mode:
+    // opaque (key stored + fingerprint) or browsable (no key).
     let mut config = build_config(
         library_id,
         device_id,
@@ -448,7 +449,6 @@ async fn bootstrap_and_save(
         library_name,
         join_info,
         cipher,
-        obfuscate_blob_paths,
     );
 
     // Restore is done by the owner — CloudKit uses the private database.

@@ -25,22 +25,24 @@ pub enum CloudCipher {
     Plaintext,
 }
 
-/// How a cloud home names its blob objects. This is independent of the at-rest
-/// [`CloudCipher`]: a home can be encrypted or plaintext under either scheme.
+/// How a cloud home names its blob objects. Paired with the at-rest
+/// [`CloudCipher`] by the home's [`HomeStorage`](crate::config::HomeStorage): an
+/// opaque home is `Hashed` + encrypted, a browsable home is `Plain` + plaintext.
 #[derive(Clone, Copy)]
 pub enum BlobPathScheme {
-    /// Content-addressed shard `{namespace}/{ab}/{cd}/{id}` (the default).
+    /// Content-addressed shard `{namespace}/{ab}/{cd}/{id}` (an opaque home).
     Hashed,
-    /// The consumer's own readable path, verbatim: `{namespace}/{cloud_path}`.
-    /// The consumer must supply `cloud_path` on every blob; coven errors otherwise.
+    /// The consumer's own readable path, verbatim: `{namespace}/{cloud_path}`
+    /// (a browsable home). The consumer must supply `cloud_path` on every blob;
+    /// coven errors otherwise.
     Plain,
 }
 
 impl BlobPathScheme {
-    /// Map a home's `obfuscate_blob_paths` flag (config, restore code, invite
-    /// code) to a scheme: obfuscated ⇒ `Hashed`, otherwise `Plain`.
-    pub fn from_obfuscate(obfuscate: bool) -> Self {
-        if obfuscate {
+    /// The blob-path scheme a home's storage mode selects: an opaque home
+    /// obfuscates (`Hashed`), a browsable home is readable (`Plain`).
+    pub fn for_storage(storage: crate::config::HomeStorage) -> Self {
+        if storage.is_opaque() {
             BlobPathScheme::Hashed
         } else {
             BlobPathScheme::Plain

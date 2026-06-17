@@ -25,6 +25,43 @@ impl CloudProvider {
     }
 }
 
+/// How a cloud home stores its objects: opaque (encrypted, unreadable to anyone
+/// who can read the bucket) or browsable (stored in the clear at readable paths).
+/// This is *not* about who can reach the bucket — the storage provider's own
+/// access control applies either way; it is about whether what they store is
+/// legible. The host picks it once, when it creates the home; it cannot change
+/// later (it determines how every object is written). One choice drives two
+/// mechanisms together:
+///
+/// - `Opaque` (the default): every object is encrypted at rest under the library
+///   key (the `.enc` suffix) and blobs use coven's content-addressed path
+///   `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access sees only ciphertext
+///   under opaque keys. Sharing a library (inviting members) requires an opaque
+///   home, because it wraps and rotates the library key.
+/// - `Browsable`: every object is stored in the clear (no `.enc` suffix) and
+///   blobs use the consumer-supplied readable path `{namespace}/{cloud_path}`, so
+///   anyone with bucket access can read the actual files by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomeStorage {
+    Opaque,
+    Browsable,
+}
+
+impl HomeStorage {
+    /// An opaque home is encrypted at rest and obfuscates its blob paths; a
+    /// browsable home does neither.
+    pub fn is_opaque(self) -> bool {
+        matches!(self, HomeStorage::Opaque)
+    }
+
+    /// Whether this home stores its objects in the clear at readable paths (the
+    /// inverse of [`Self::is_opaque`]).
+    pub fn is_browsable(self) -> bool {
+        matches!(self, HomeStorage::Browsable)
+    }
+}
+
 /// The cloud home: which provider backs sync and its per-provider settings.
 /// One cohesive unit — connecting picks a provider and fills its fields;
 /// disconnecting resets the whole thing to default.
@@ -52,43 +89,21 @@ pub struct CloudHomeConfig {
     /// Whether this library's CloudKit zone is shared (joiner) vs owned (creator).
     #[serde(default)]
     pub cloudkit_is_shared: bool,
-    /// Whether objects are encrypted at rest. A plaintext home stores every object
-    /// in the clear and drops the `.enc` suffix so the bucket is browsable.
+    /// How this home stores its objects: opaque ([`HomeStorage::Opaque`]) or
+    /// browsable ([`HomeStorage::Browsable`]). Drives both the at-rest cipher and
+    /// the blob-path scheme — see [`HomeStorage`].
     ///
-    /// Defaults to `true`: the default home is encrypted, and an on-disk config
-    /// written before this field existed describes an encrypted home, so an
-    /// absent value reads back as `true`.
-    #[serde(default = "default_encrypted")]
-    pub encrypted: bool,
-    /// Whether blob objects use coven's obfuscated content-addressed path
-    /// (`{namespace}/{ab}/{cd}/{id}`). When false, blobs use the consumer-supplied
-    /// readable path so the bucket is browsable.
-    ///
-    /// Defaults to `true`: the default home obfuscates blob paths, and an on-disk
-    /// config written before this field existed describes an obfuscated home, so
-    /// an absent value reads back as `true`. Independent of [`Self::encrypted`].
-    #[serde(default = "default_obfuscate_blob_paths")]
-    pub obfuscate_blob_paths: bool,
+    /// Defaults to `Opaque`: the default home is encrypted with obfuscated blob
+    /// paths, and an on-disk config written before this field existed describes
+    /// such a home, so an absent value reads back as `Opaque`.
+    #[serde(default = "default_storage")]
+    pub storage: HomeStorage,
 }
 
-/// The default for [`CloudHomeConfig::encrypted`]: every home is encrypted unless
-/// explicitly opted out.
-fn default_encrypted() -> bool {
-    true
-}
-
-/// The default for [`CloudHomeConfig::obfuscate_blob_paths`]: every home uses the
-/// content-addressed blob layout unless explicitly opted out. Shared with the
-/// restore code and invite code, which carry the same flag to a joining device.
-pub(crate) fn default_obfuscate_blob_paths() -> bool {
-    true
-}
-
-/// `skip_serializing_if` predicate for the `obfuscate_blob_paths` flag in the
-/// restore/invite codes: omit it when it holds the default ([`true`]) so a code
-/// only spells the flag out for an unobfuscated home.
-pub(crate) fn is_default_obfuscate_blob_paths(obfuscate: &bool) -> bool {
-    *obfuscate
+/// The default for [`CloudHomeConfig::storage`]: every home is opaque (encrypted)
+/// unless the host explicitly creates a browsable one.
+fn default_storage() -> HomeStorage {
+    HomeStorage::Opaque
 }
 
 impl Default for CloudHomeConfig {
@@ -104,8 +119,7 @@ impl Default for CloudHomeConfig {
             onedrive_drive_id: None,
             onedrive_folder_id: None,
             cloudkit_is_shared: false,
-            encrypted: default_encrypted(),
-            obfuscate_blob_paths: default_obfuscate_blob_paths(),
+            storage: default_storage(),
         }
     }
 }
