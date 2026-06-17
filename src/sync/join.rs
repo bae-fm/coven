@@ -61,6 +61,10 @@ async fn build_cloud_home_for_join(
 ) -> Result<Box<dyn CloudHome>, JoinError> {
     use crate::storage::cloud::*;
 
+    // Consumed only by the oauth provider arms below.
+    #[cfg(not(feature = "oauth-providers"))]
+    let _ = (&lib_ks, &oauth_cancel, &clock);
+
     match join_info {
         CloudHomeJoinInfo::S3 {
             bucket,
@@ -82,6 +86,7 @@ async fn build_cloud_home_for_join(
             Ok(Box::new(s3))
         }
 
+        #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             info!("Authorizing with Google Drive...");
             let tokens = crate::oauth::authorize_provider(
@@ -101,6 +106,7 @@ async fn build_cloud_home_for_join(
             )))
         }
 
+        #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
             info!("Authorizing with Dropbox...");
             let tokens = crate::oauth::authorize_provider(
@@ -120,6 +126,7 @@ async fn build_cloud_home_for_join(
             )))
         }
 
+        #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::OneDrive {
             drive_id,
             folder_id,
@@ -143,6 +150,12 @@ async fn build_cloud_home_for_join(
             )))
         }
 
+        #[cfg(not(feature = "oauth-providers"))]
+        CloudHomeJoinInfo::GoogleDrive { .. }
+        | CloudHomeJoinInfo::Dropbox { .. }
+        | CloudHomeJoinInfo::OneDrive { .. } => Err(JoinError::Database(
+            "OAuth cloud providers are not supported in this build".to_string(),
+        )),
         CloudHomeJoinInfo::CloudKit { .. } => {
             let ops = cloudkit_ops
                 .ok_or_else(|| JoinError::Database("CloudKit driver not provided".to_string()))?;

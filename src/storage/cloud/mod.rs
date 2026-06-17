@@ -11,13 +11,13 @@
 // Apple-only. No concrete backend compiles for wasm.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cloudkit;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub mod dropbox;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub mod google_drive;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub mod oauth_session;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub mod onedrive;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod s3;
@@ -170,7 +170,7 @@ pub trait CloudHome: crate::MaybeThreadSafe {
 }
 
 /// Extract the OAuth token JSON from cloud home credentials, or return a storage error.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 fn require_oauth_token(
     key_service: &crate::keys::KeyService,
     provider_name: &str,
@@ -186,7 +186,7 @@ fn require_oauth_token(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 fn parse_oauth_tokens(
     key_service: &crate::keys::KeyService,
     provider_name: &str,
@@ -208,6 +208,10 @@ pub async fn create_cloud_home(
     clock: crate::clock::ClockRef,
 ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
     use crate::config::CloudProvider;
+
+    // `clock` is consumed only by the oauth backends; S3 and CloudKit don't use it.
+    #[cfg(not(feature = "oauth-providers"))]
+    let _ = &clock;
 
     match config.cloud_home.provider {
         Some(CloudProvider::S3) | None => {
@@ -247,6 +251,7 @@ pub async fn create_cloud_home(
             .await?;
             Ok(Box::new(s3))
         }
+        #[cfg(feature = "oauth-providers")]
         Some(CloudProvider::GoogleDrive) => {
             let folder_id = config
                 .cloud_home
@@ -263,6 +268,7 @@ pub async fn create_cloud_home(
                 clock,
             )))
         }
+        #[cfg(feature = "oauth-providers")]
         Some(CloudProvider::Dropbox) => {
             let folder_path = config
                 .cloud_home
@@ -279,6 +285,7 @@ pub async fn create_cloud_home(
                 clock,
             )))
         }
+        #[cfg(feature = "oauth-providers")]
         Some(CloudProvider::OneDrive) => {
             let drive_id = config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
                 CloudHomeError::Storage("OneDrive drive ID not configured".to_string())
@@ -298,6 +305,12 @@ pub async fn create_cloud_home(
                 key_service.clone(),
                 clock,
             )))
+        }
+        #[cfg(not(feature = "oauth-providers"))]
+        Some(CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive) => {
+            Err(CloudHomeError::Storage(
+                "OAuth cloud providers are not supported in this build".to_string(),
+            ))
         }
         Some(CloudProvider::CloudKit) => Err(CloudHomeError::Storage(
             "CloudKit requires the native Swift driver; construct via the host's Swift layer"

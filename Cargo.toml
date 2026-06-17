@@ -2,6 +2,7 @@
 name = "coven"
 version = "0.0.0-dev"
 edition = "2021"
+license = "Apache-2.0"
 
 [lib]
 name = "coven"
@@ -50,7 +51,9 @@ tokio = { version = "1.0", features = ["full"] }
 rusqlite = { version = "0.40", features = ["session", "bundled"] }
 libsqlite3-sys = { version = "0.38.0", features = ["session", "bundled"] }
 axum = "0.7"
-open = "5.3"
+# The system-browser launcher for the desktop OAuth flow — used only by the
+# native `oauth::authorize`, so it is optional and pulled in by `oauth-providers`.
+open = { version = "5.3", optional = true }
 dirs = "5.0"
 aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
 aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rt-tokio", "sigv4a"] }
@@ -190,6 +193,13 @@ serial_test = "3.4.0"
 
 [features]
 test-utils = []
+# The consumer-cloud OAuth backends (Google Drive, Dropbox, OneDrive) and the
+# browser-based authorization flow. Off by default: the default build is
+# S3-only, and the oauth backend modules plus the `open` browser-launcher drop
+# out of the dependency tree. CloudKit is deliberately NOT gated here — coven's
+# `cloudkit` module is free Rust glue whose only non-free part (the CloudKit
+# framework) lives in the host's Swift driver, so it is gated at the app layer.
+oauth-providers = ["dep:open"]
 # The item-sharing capability: the `share` module's `ShareProxy` type (mints and
 # revokes item shares over any CloudHome) plus its `BlobId` logical ref. Off by
 # default; sharing is not a storage backend and adds no CloudProvider variant

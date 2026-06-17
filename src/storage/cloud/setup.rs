@@ -3,7 +3,9 @@
 //! Contains the OAuth sign-in flows for Google Drive, Dropbox, and OneDrive,
 //! as well as managed service signup/login, disconnect, and account display logic.
 
-#[cfg(not(target_arch = "wasm32"))]
+// `info` is used only by the native-only oauth sign-in flows (also gated on
+// `oauth-providers`); `warn` by the always-present account-display path.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 use tracing::info;
 use tracing::warn;
 
@@ -18,8 +20,9 @@ use crate::sync::cloud_storage::CloudCipher;
 /// own config (coven never writes the host's config).
 ///
 /// Native-only: drives coven's localhost-callback OAuth flow ([`crate::oauth::authorize`]),
-/// which binds a TCP port and opens a browser — neither exists on wasm.
-#[cfg(not(target_arch = "wasm32"))]
+/// which binds a TCP port and opens a browser — neither exists on wasm. Also gated
+/// on `oauth-providers`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_google_drive(
     key_service: &KeyService,
     library_name: &str,
@@ -117,8 +120,8 @@ pub async fn sign_in_google_drive(
 /// Dropbox OAuth sign-in: authorize, create the library folder, save tokens to
 /// the keyring. Returns the folder path for the host to persist in its config.
 ///
-/// Native-only (see [`sign_in_google_drive`]).
-#[cfg(not(target_arch = "wasm32"))]
+/// Native-only (see [`sign_in_google_drive`]); also gated on `oauth-providers`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_dropbox(
     key_service: &KeyService,
     library_name: &str,
@@ -176,8 +179,8 @@ pub async fn sign_in_dropbox(
 /// folder, save tokens to the keyring. Returns `(drive_id, folder_id)` for the
 /// host to persist in its config.
 ///
-/// Native-only (see [`sign_in_google_drive`]).
-#[cfg(not(target_arch = "wasm32"))]
+/// Native-only (see [`sign_in_google_drive`]); also gated on `oauth-providers`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_onedrive(
     key_service: &KeyService,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,

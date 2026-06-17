@@ -95,6 +95,10 @@ async fn build_cloud_home(
 ) -> Result<(CloudHomeJoinInfo, Box<dyn CloudHome>), RestoreError> {
     use crate::storage::cloud::*;
 
+    // Consumed only by the oauth provider arms below.
+    #[cfg(not(feature = "oauth-providers"))]
+    let _ = (library_id, &clock);
+
     match source {
         RestoreSource::S3 {
             bucket,
@@ -133,6 +137,7 @@ async fn build_cloud_home(
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
 
+        #[cfg(feature = "oauth-providers")]
         RestoreSource::GoogleDrive { folder_id, tokens } => {
             let ks = KeyService::new(library_id.to_string());
             let home =
@@ -141,6 +146,7 @@ async fn build_cloud_home(
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
 
+        #[cfg(feature = "oauth-providers")]
         RestoreSource::Dropbox {
             folder_path,
             tokens,
@@ -153,6 +159,7 @@ async fn build_cloud_home(
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
 
+        #[cfg(feature = "oauth-providers")]
         RestoreSource::OneDrive {
             drive_id,
             folder_id,
@@ -172,6 +179,13 @@ async fn build_cloud_home(
             };
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
+
+        #[cfg(not(feature = "oauth-providers"))]
+        RestoreSource::GoogleDrive { .. }
+        | RestoreSource::Dropbox { .. }
+        | RestoreSource::OneDrive { .. } => Err(RestoreError::Database(
+            "OAuth cloud providers are not supported in this build".to_string(),
+        )),
     }
 }
 

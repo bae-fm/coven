@@ -38,3 +38,7 @@ The host owns its schema and domain; coven owns the sync layer.
 ## Status
 
 Pre-1.0.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

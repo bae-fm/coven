@@ -11,8 +11,9 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-// `info`/`warn` are used only by the native-only localhost-callback `authorize`.
-#[cfg(not(target_arch = "wasm32"))]
+// `info`/`warn` are used only by the native-only localhost-callback `authorize`,
+// which is gated on `oauth-providers` too.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 use tracing::{info, warn};
 
 /// OAuth provider configuration.
@@ -87,11 +88,12 @@ pub enum OAuthError {
 }
 
 /// Guards the localhost OAuth-callback server task — native-only, like
-/// [`authorize`], the only thing that spawns that task.
-#[cfg(not(target_arch = "wasm32"))]
+/// [`authorize`], the only thing that spawns that task; also gated on
+/// `oauth-providers`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 impl AbortOnDrop {
     fn new(handle: tokio::task::JoinHandle<()>) -> Self {
         Self(Some(handle))
@@ -105,7 +107,7 @@ impl AbortOnDrop {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         if let Some(h) = self.0.take() {
@@ -249,8 +251,9 @@ pub fn build_authorize_url(
 /// Native-only: binds a localhost TCP port (`tokio::net`), serves the callback
 /// with axum, and opens the system browser (`open`) — none of which exist on
 /// wasm. The browser captures the redirect itself via the pure
-/// [`build_authorize_url`] + [`exchange_code`] pair.
-#[cfg(not(target_arch = "wasm32"))]
+/// [`build_authorize_url`] + [`exchange_code`] pair. Also gated on
+/// `oauth-providers` (it pulls in `open`).
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn authorize(
     config: &OAuthConfig,
     cancel: tokio::sync::watch::Receiver<bool>,
@@ -469,8 +472,8 @@ pub async fn refresh(
 /// (S3, CloudKit) that don't.
 ///
 /// Native-only: reads each provider's config off its native-only backend type
-/// (`GoogleDriveCloudHome::oauth_config()` etc.).
-#[cfg(not(target_arch = "wasm32"))]
+/// (`GoogleDriveCloudHome::oauth_config()` etc.); also gated on `oauth-providers`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 fn oauth_config_for_provider(
     provider: crate::config::CloudProvider,
 ) -> Result<OAuthConfig, OAuthError> {
@@ -492,8 +495,8 @@ fn oauth_config_for_provider(
 /// OAuth; other providers return an error.
 ///
 /// Native-only: uses [`authorize`]'s localhost-callback flow and the native-only
-/// [`oauth_config_for_provider`].
-#[cfg(not(target_arch = "wasm32"))]
+/// [`oauth_config_for_provider`]; also gated on `oauth-providers`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn authorize_provider(
     provider: crate::config::CloudProvider,
     cancel: tokio::sync::watch::Receiver<bool>,
@@ -508,8 +511,9 @@ pub async fn authorize_provider(
 /// [`exchange_code_for_provider`].
 ///
 /// Native-only: depends on [`oauth_config_for_provider`], whose per-provider
-/// config lives on the native-only cloud-backend types.
-#[cfg(not(target_arch = "wasm32"))]
+/// config lives on the native-only cloud-backend types; also gated on
+/// `oauth-providers`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub fn build_authorize_request_for_provider(
     provider: crate::config::CloudProvider,
     redirect_uri: &str,
@@ -521,9 +525,10 @@ pub fn build_authorize_request_for_provider(
 /// tokens. `redirect_uri` and `verifier` must match the originating
 /// [`build_authorize_request_for_provider`] call.
 ///
-/// Native-only for the same reason as [`build_authorize_request_for_provider`].
-/// The pure [`exchange_code`] it delegates to is available on wasm directly.
-#[cfg(not(target_arch = "wasm32"))]
+/// Native-only for the same reason as [`build_authorize_request_for_provider`];
+/// also gated on `oauth-providers`. The pure [`exchange_code`] it delegates to is
+/// available on wasm directly.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn exchange_code_for_provider(
     provider: crate::config::CloudProvider,
     code: &str,
