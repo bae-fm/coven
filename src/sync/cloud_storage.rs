@@ -52,6 +52,29 @@ impl BlobPathScheme {
 }
 
 impl CloudCipher {
+    /// The at-rest cipher a home's storage mode selects: an opaque home seals
+    /// under its library key (`Encrypted`), a browsable home stores in the clear
+    /// (`Plaintext`). The sibling of [`BlobPathScheme::for_storage`] — together
+    /// they map a [`HomeStorage`](crate::config::HomeStorage) to its
+    /// (path scheme, at-rest cipher) pair.
+    ///
+    /// `encryption` is the library master service; it is required for (and only
+    /// consulted on) an opaque home. `None` is returned only for an opaque home
+    /// with no service (a locked library) — a browsable home is always
+    /// `Plaintext` regardless. A host streaming a managed blob via
+    /// [`BlobRangeReader`] builds the reader with this cipher so a read applies
+    /// the same protection the upload sealed under.
+    pub fn for_storage(
+        storage: crate::config::HomeStorage,
+        encryption: Option<EncryptionService>,
+    ) -> Option<Self> {
+        if storage.is_opaque() {
+            encryption.map(CloudCipher::Encrypted)
+        } else {
+            Some(CloudCipher::Plaintext)
+        }
+    }
+
     /// Protect a control object (heads, changesets, snapshot, snapshot_meta,
     /// min_schema, membership) for storage. Encrypted seals under the library
     /// key; plaintext returns the bytes unchanged.
@@ -635,7 +658,35 @@ impl SyncStorage for CloudSyncStorage {
 mod tests {
     use super::*;
     use crate::blob::ResolvedScope;
+    use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
+
+    /// `CloudCipher::for_storage` maps a home's storage mode to its at-rest
+    /// cipher: an opaque home seals under the supplied library key, a browsable
+    /// home is always plaintext (ignoring any key), and an opaque home with no
+    /// key — a locked library — has no cipher. This is the same mapping
+    /// `SyncManager::start_sync` builds the sync loop with, so reads through a
+    /// `BlobRangeReader` and writes through the outbox agree on the protection.
+    #[test]
+    fn for_storage_maps_mode_to_cipher() {
+        let master = EncryptionService::new_with_key(&[4u8; 32]);
+
+        assert!(matches!(
+            CloudCipher::for_storage(HomeStorage::Opaque, Some(master.clone())),
+            Some(CloudCipher::Encrypted(_))
+        ));
+        // A browsable home is plaintext even if a key is on hand.
+        assert!(matches!(
+            CloudCipher::for_storage(HomeStorage::Browsable, Some(master)),
+            Some(CloudCipher::Plaintext)
+        ));
+        assert!(matches!(
+            CloudCipher::for_storage(HomeStorage::Browsable, None),
+            Some(CloudCipher::Plaintext)
+        ));
+        // An opaque home with no key (a locked library) has no cipher.
+        assert!(CloudCipher::for_storage(HomeStorage::Opaque, None).is_none());
+    }
 
     /// A `ResolvedScope::Key` blob is encrypted under the explicit (item) key, not
     /// the master: it round-trips with that key and the master key cannot read

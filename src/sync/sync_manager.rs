@@ -121,6 +121,19 @@ impl SyncManager {
         self.cloud_home.read().unwrap().clone()
     }
 
+    /// The at-rest cipher this home applies to its blob objects, derived from the
+    /// configured storage mode (see [`CloudCipher::for_storage`]): `Encrypted`
+    /// under the library key for an opaque home, `Plaintext` for a browsable one.
+    /// `None` only for an opaque home with no encryption service (a locked
+    /// library). A host streaming a managed blob builds a
+    /// [`BlobRangeReader`](crate::sync::cloud_storage::BlobRangeReader) with this
+    /// so a read applies the same protection the upload sealed under — the same
+    /// cipher this manager builds the sync loop with in `start_sync`.
+    pub fn blob_cipher(&self) -> Option<CloudCipher> {
+        let config = (self.config_provider)();
+        CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
+    }
+
     pub fn sync_loop_handle(&self) -> Option<Arc<SyncLoopHandle>> {
         self.sync_loop_handle.read().unwrap().clone()
     }
@@ -159,15 +172,9 @@ impl SyncManager {
         // library key, a browsable home stores in the clear. Built here so the
         // sync loop and storage share one instance — a member removal rotates the
         // key in place through it.
-        let cipher = if config.cloud_home.storage.is_opaque() {
-            let enc = self
-                .encryption_service
-                .clone()
+        let cipher =
+            CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
                 .expect("an opaque cloud home must be built with an encryption service");
-            CloudCipher::Encrypted(enc)
-        } else {
-            CloudCipher::Plaintext
-        };
 
         // Initialize sync loop. The synced-table set is owned by the Database, so
         // init_sync reads it from there rather than from a separately-held copy.
