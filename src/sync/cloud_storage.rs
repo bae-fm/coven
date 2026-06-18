@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
+use tokio::sync::OnceCell;
 use tracing::warn;
 
 use super::storage::{DeviceHead, StorageError, SyncStorage};
@@ -209,6 +210,128 @@ pub(crate) fn encryption_for_scope(
         crate::blob::ResolvedScope::Master => master.clone(),
         crate::blob::ResolvedScope::Derived(s) => master.derive_scoped(&s),
         crate::blob::ResolvedScope::Key(k) => EncryptionService::from_key(k),
+    }
+}
+
+/// Reads plaintext byte ranges from a single stored blob without fetching the
+/// whole object — the ranged analogue of [`CloudSyncStorage::get_blob`].
+///
+/// On an encrypted home a blob is `[nonce: 24 bytes][encrypted chunks…]` (see
+/// [`EncryptionService::encrypt`]). Serving a plaintext range needs the nonce
+/// plus only the chunks covering it, never the whole object, so the 24-byte
+/// nonce is fetched once on the first read and reused: streaming a blob in N
+/// windows issues one nonce read, not N. On a plaintext home the blob is stored
+/// verbatim, so a range is read straight through with no nonce or decryption.
+///
+/// The blob's [`ResolvedScope`](crate::blob::ResolvedScope) is resolved to its
+/// key the same way `get_blob` resolves it (see [`encryption_for_scope`]), so a
+/// reader serves master-, derived-, and item-key-scoped blobs alike — not only
+/// master-key ones. A host that streams a large blob (audio playback, or pinning
+/// a file window by window) builds one of these instead of downloading and
+/// decrypting the whole object.
+pub struct BlobRangeReader {
+    home: Arc<dyn CloudHome>,
+    /// The scope's key for an encrypted home, resolved once at construction;
+    /// `None` for a plaintext home (the blob is read verbatim).
+    encryption: Option<EncryptionService>,
+    /// The blob's cloud object key (see [`CloudSyncStorage::blob_key`]).
+    key: String,
+    /// Plaintext length of the blob. Ranges are validated against it, and the
+    /// encrypted chunk range is clamped to the matching blob length.
+    source_size: u64,
+    /// The 24-byte base nonce of an encrypted blob, read once on first use.
+    nonce: OnceCell<Vec<u8>>,
+}
+
+impl BlobRangeReader {
+    /// Build a reader for the blob stored at `key` (see
+    /// [`CloudSyncStorage::blob_key`]), `source_size` plaintext bytes long.
+    /// `cipher` and `scope` are how the home protects this blob: an encrypted
+    /// home resolves `scope` to its key once here; a plaintext home ignores
+    /// `scope` and reads verbatim.
+    pub fn new(
+        home: Arc<dyn CloudHome>,
+        cipher: &CloudCipher,
+        scope: crate::blob::ResolvedScope,
+        key: String,
+        source_size: u64,
+    ) -> Self {
+        let encryption = match cipher {
+            CloudCipher::Encrypted(master) => Some(encryption_for_scope(scope, master)),
+            CloudCipher::Plaintext => None,
+        };
+        BlobRangeReader {
+            home,
+            encryption,
+            key,
+            source_size,
+            nonce: OnceCell::new(),
+        }
+    }
+
+    /// Read exactly `len` plaintext bytes starting at `offset`. An out-of-range
+    /// request errors rather than truncating.
+    pub async fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, StorageError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = offset.checked_add(len).ok_or_else(|| {
+            StorageError::S3(format!("blob range overflow: offset={offset}, len={len}"))
+        })?;
+        if end > self.source_size {
+            return Err(StorageError::S3(format!(
+                "blob range {offset}..{end} exceeds blob size {}",
+                self.source_size
+            )));
+        }
+
+        let encryption = match &self.encryption {
+            Some(encryption) => encryption,
+            // Plaintext home: the blob is stored verbatim, so the plaintext range
+            // is exactly the stored byte range — no nonce, no chunking.
+            None => {
+                return self
+                    .home
+                    .read_range(&self.key, offset, end)
+                    .await
+                    .map_err(StorageError::from);
+            }
+        };
+
+        use crate::encryption::{
+            encrypted_blob_len_for_plaintext, encrypted_chunk_range, CHUNK_SIZE,
+        };
+
+        let nonce = self.nonce().await?;
+
+        let (chunk_start, mut chunk_end) = encrypted_chunk_range(offset, end);
+        chunk_end = chunk_end.min(encrypted_blob_len_for_plaintext(self.source_size));
+        let encrypted_chunks = self
+            .home
+            .read_range(&self.key, chunk_start, chunk_end)
+            .await
+            .map_err(StorageError::from)?;
+
+        let first_chunk_index = offset / CHUNK_SIZE as u64;
+        encryption
+            .decrypt_range_with_offset(nonce, &encrypted_chunks, first_chunk_index, offset, end)
+            .map_err(|e| StorageError::Decryption(format!("blob range {offset}..{end}: {e}")))
+    }
+
+    /// The cached 24-byte base nonce, read from the encrypted blob's header on
+    /// first use and reused for every later range read.
+    async fn nonce(&self) -> Result<&[u8], StorageError> {
+        use crate::encryption::NONCE_SIZE;
+        let nonce = self
+            .nonce
+            .get_or_try_init(|| async {
+                self.home
+                    .read_range(&self.key, 0, NONCE_SIZE as u64)
+                    .await
+                    .map_err(StorageError::from)
+            })
+            .await?;
+        Ok(nonce)
     }
 }
 
@@ -797,5 +920,185 @@ mod tests {
                 .is_err(),
             "put_blob for a plain home with no cloud_path must error, not silently hash",
         );
+    }
+
+    /// A `BlobRangeReader` over an encrypted home recovers an arbitrary plaintext
+    /// sub-range — here one that straddles a 64 KB chunk boundary — by fetching
+    /// only the covering chunks plus the one-time nonce, never the whole blob.
+    #[tokio::test]
+    async fn blob_range_reader_decrypts_a_multi_chunk_sub_range() {
+        let home = InMemoryCloudHome::new();
+        let master = EncryptionService::new_with_key(&[5u8; 32]);
+        let storage = CloudSyncStorage::new(
+            Box::new(home.clone()),
+            CloudCipher::Encrypted(master.clone()),
+            BlobPathScheme::Hashed,
+        );
+
+        // Larger than two 64 KB chunks so a window can straddle a boundary.
+        let plaintext: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+        storage
+            .put_blob(
+                "audio",
+                "track1",
+                ResolvedScope::Master,
+                None,
+                plaintext.clone(),
+            )
+            .await
+            .expect("put_blob");
+
+        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
+            .expect("blob_key");
+        let reader = BlobRangeReader::new(
+            Arc::new(home.clone()) as Arc<dyn CloudHome>,
+            &CloudCipher::Encrypted(master),
+            ResolvedScope::Master,
+            key,
+            plaintext.len() as u64,
+        );
+
+        // A window straddling the 65_536-byte chunk boundary.
+        let (offset, len) = (60_000u64, 20_000u64);
+        let got = reader.read(offset, len).await.expect("ranged read");
+        assert_eq!(
+            got,
+            &plaintext[offset as usize..(offset + len) as usize],
+            "ranged read across a chunk boundary recovers the plaintext window",
+        );
+
+        // A second read reuses the cached nonce and still decrypts correctly.
+        let tail = reader.read(149_000, 1_000).await.expect("second read");
+        assert_eq!(tail, &plaintext[149_000..150_000]);
+    }
+
+    /// On a plaintext home the blob is stored verbatim, so a `BlobRangeReader`
+    /// returns the requested byte range straight through, with no key.
+    #[tokio::test]
+    async fn blob_range_reader_reads_a_plaintext_blob_verbatim() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Box::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Hashed,
+        );
+        let plaintext: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        storage
+            .put_blob(
+                "audio",
+                "track1",
+                ResolvedScope::Master,
+                None,
+                plaintext.clone(),
+            )
+            .await
+            .expect("put_blob");
+
+        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
+            .expect("blob_key");
+        let reader = BlobRangeReader::new(
+            Arc::new(home.clone()) as Arc<dyn CloudHome>,
+            &CloudCipher::Plaintext,
+            ResolvedScope::Master,
+            key,
+            plaintext.len() as u64,
+        );
+        let got = reader.read(40_000, 10_000).await.expect("ranged read");
+        assert_eq!(got, &plaintext[40_000..50_000]);
+    }
+
+    /// The reader resolves the blob's scope to its key: a blob sealed under a
+    /// derived key reads back through a reader with the same derived scope, while
+    /// a reader with the wrong scope (master) cannot decrypt it.
+    #[tokio::test]
+    async fn blob_range_reader_resolves_the_blob_scope() {
+        let home = InMemoryCloudHome::new();
+        let master = EncryptionService::new_with_key(&[7u8; 32]);
+        let cipher = CloudCipher::Encrypted(master);
+        let storage = CloudSyncStorage::new(
+            Box::new(home.clone()),
+            cipher.clone(),
+            BlobPathScheme::Hashed,
+        );
+
+        let scope_id = "release-42".to_string();
+        let plaintext: Vec<u8> = (0..80_000u32).map(|i| (i % 251) as u8).collect();
+        storage
+            .put_blob(
+                "audio",
+                "track1",
+                ResolvedScope::Derived(scope_id.clone()),
+                None,
+                plaintext.clone(),
+            )
+            .await
+            .expect("put_blob");
+
+        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
+            .expect("blob_key");
+        let home_arc = Arc::new(home.clone()) as Arc<dyn CloudHome>;
+
+        let derived = BlobRangeReader::new(
+            home_arc.clone(),
+            &cipher,
+            ResolvedScope::Derived(scope_id),
+            key.clone(),
+            plaintext.len() as u64,
+        );
+        assert_eq!(
+            derived.read(10_000, 20_000).await.expect("derived read"),
+            &plaintext[10_000..30_000],
+            "the matching derived scope decrypts the range",
+        );
+
+        let wrong = BlobRangeReader::new(
+            home_arc,
+            &cipher,
+            ResolvedScope::Master,
+            key,
+            plaintext.len() as u64,
+        );
+        assert!(
+            wrong.read(10_000, 20_000).await.is_err(),
+            "the master scope must not decrypt a derived-scoped blob",
+        );
+    }
+
+    /// A read past the blob's plaintext length is a surfaced error, not a
+    /// truncated read; a zero-length read is an empty result, not an error.
+    #[tokio::test]
+    async fn blob_range_reader_rejects_an_out_of_range_read() {
+        let home = InMemoryCloudHome::new();
+        let master = EncryptionService::new_with_key(&[9u8; 32]);
+        let storage = CloudSyncStorage::new(
+            Box::new(home.clone()),
+            CloudCipher::Encrypted(master.clone()),
+            BlobPathScheme::Hashed,
+        );
+        let plaintext = b"a short blob".to_vec();
+        storage
+            .put_blob(
+                "audio",
+                "track1",
+                ResolvedScope::Master,
+                None,
+                plaintext.clone(),
+            )
+            .await
+            .expect("put_blob");
+        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
+            .expect("blob_key");
+        let reader = BlobRangeReader::new(
+            Arc::new(home) as Arc<dyn CloudHome>,
+            &CloudCipher::Encrypted(master),
+            ResolvedScope::Master,
+            key,
+            plaintext.len() as u64,
+        );
+        assert!(
+            reader.read(8, 100).await.is_err(),
+            "a range past the blob length must error",
+        );
+        assert!(reader.read(0, 0).await.expect("empty read").is_empty());
     }
 }
