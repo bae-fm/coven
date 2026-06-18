@@ -213,9 +213,8 @@ logged and skipped.
 
 Every outgoing changeset carries the local
 [`SCHEMA_VERSION`](rustdoc:const:coven::sync::push::SCHEMA_VERSION), a constant
-bumped whenever the on-disk shape of synced tables changes. Storage may also hold
-a `min_schema_version`, the floor every reader must meet. Two cases, handled
-differently:
+bumped whenever the on-disk shape of synced tables changes. Pull enforces it two
+ways:
 
 - **Hard floor.** If the local `SCHEMA_VERSION` is below storage's
   `min_schema_version`, pull returns
@@ -223,10 +222,14 @@ differently:
   and syncs nothing. Its `Display` is the message shown to the user: update the
   app to keep syncing. This is permanent until the user upgrades.
 - **Per-changeset skip.** A single changeset whose `schema_version` is above the
-  local one is skipped: it is counted in `PullResult::skipped_schema` and its
-  cursor advances past it so it is not re-fetched. The signal is transient,
-  surfaced once through `SyncLoopStatus::error` and cleared next cycle. Once the
-  user upgrades, a fresh snapshot reconciles the rows that were skipped.
+  local one is skipped (counted in `PullResult::skipped_schema`); the device
+  leaves its cursor where it is and stops pulling that device for the cycle. The
+  cursor is deliberately *not* advanced, so once the app upgrades the next cycle
+  re-fetches from that sequence and applies it.
+
+How migrations, this version number, the `min_schema_version` floor, and
+snapshots fit together — with worked examples for additive vs. structural
+changes — is its own page: [Schema evolution](/docs/schema-evolution).
 
 ## Lifecycle
 

@@ -120,9 +120,11 @@ export default defineConfig({
                     text: 'Docs',
                     items: [
                         { text: 'Overview', link: '/docs/' },
+                        { text: 'Comparison', link: '/docs/comparison' },
                         { text: 'Sync', link: '/docs/sync-model' },
                         { text: 'Local data', link: '/docs/local-data' },
                         { text: 'Bootstrap', link: '/docs/bootstrap' },
+                        { text: 'Schema evolution', link: '/docs/schema-evolution' },
                         { text: 'Sharing', link: '/docs/sharing' },
                         { text: 'Encryption', link: '/docs/encryption' },
                         { text: 'Storage', link: '/docs/storage' },
