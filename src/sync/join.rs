@@ -15,7 +15,6 @@ use crate::encryption::{EncryptionError, EncryptionService};
 use crate::join_code::InviteCode;
 use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
 use crate::library_dir::LibraryDir;
-use crate::oauth::OAuthError;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::invite::{unwrap_library_key, InviteError};
@@ -44,26 +43,36 @@ pub enum JoinError {
     Io(#[from] std::io::Error),
     #[error("database: {0}")]
     Database(String),
-    #[error("oauth: {0}")]
-    OAuth(#[from] OAuthError),
+}
+
+/// The invite names an OAuth provider, so joining needs a token the caller
+/// fetched via the host OAuth flow first — the same precondition restore has.
+#[cfg(feature = "oauth-providers")]
+fn require_join_oauth(
+    oauth_tokens: Option<crate::oauth::OAuthTokens>,
+    provider_name: &str,
+) -> Result<crate::oauth::OAuthTokens, JoinError> {
+    oauth_tokens
+        .ok_or_else(|| JoinError::Database(format!("{provider_name} join requires an OAuth token")))
 }
 
 /// Build a CloudHome from a JoinInfo for the join flow.
 ///
-/// For OAuth providers, runs the OAuth authorization flow inline and saves
-/// credentials to the library-scoped keyring.
+/// For OAuth providers, the caller supplies the tokens — fetched via the host's
+/// OAuth flow before calling join, the same way restore does — and they are
+/// saved to the library-scoped keyring.
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
     lib_ks: &KeyService,
+    oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: crate::clock::ClockRef,
 ) -> Result<Box<dyn CloudHome>, JoinError> {
     use crate::storage::cloud::*;
 
     // Consumed only by the oauth provider arms below.
     #[cfg(not(feature = "oauth-providers"))]
-    let _ = (&lib_ks, &oauth_cancel, &clock);
+    let _ = (&lib_ks, &oauth_tokens, &clock);
 
     match join_info {
         CloudHomeJoinInfo::S3 {
@@ -88,13 +97,7 @@ async fn build_cloud_home_for_join(
 
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
-            info!("Authorizing with Google Drive...");
-            let tokens = crate::oauth::authorize_provider(
-                CloudProvider::GoogleDrive,
-                oauth_cancel.clone(),
-                clock.as_ref(),
-            )
-            .await?;
+            let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
             let token_json = serde_json::to_string(&tokens)
                 .map_err(|e| JoinError::Database(format!("Failed to serialize tokens: {e}")))?;
             lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
@@ -108,13 +111,7 @@ async fn build_cloud_home_for_join(
 
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
-            info!("Authorizing with Dropbox...");
-            let tokens = crate::oauth::authorize_provider(
-                CloudProvider::Dropbox,
-                oauth_cancel.clone(),
-                clock.as_ref(),
-            )
-            .await?;
+            let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
             let token_json = serde_json::to_string(&tokens)
                 .map_err(|e| JoinError::Database(format!("Failed to serialize tokens: {e}")))?;
             lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
@@ -131,13 +128,7 @@ async fn build_cloud_home_for_join(
             drive_id,
             folder_id,
         } => {
-            info!("Authorizing with OneDrive...");
-            let tokens = crate::oauth::authorize_provider(
-                CloudProvider::OneDrive,
-                oauth_cancel.clone(),
-                clock.as_ref(),
-            )
-            .await?;
+            let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
             let token_json = serde_json::to_string(&tokens)
                 .map_err(|e| JoinError::Database(format!("Failed to serialize tokens: {e}")))?;
             lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
@@ -166,15 +157,16 @@ async fn build_cloud_home_for_join(
 
 /// Join a shared library using an invite code string.
 ///
-/// Handles everything: decode invite, get keypair, build cloud home (including
-/// OAuth flows), run the join protocol, and set as active library.
+/// Handles everything: decode invite, get keypair, build cloud home (using
+/// caller-provided OAuth tokens for the providers that need them), run the join
+/// protocol, and set as active library.
 #[allow(clippy::too_many_arguments)]
 pub async fn join_from_invite_code(
     invite_code_str: &str,
     app_dir: &Path,
     synced_tables: &[SyncedTable],
+    oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
@@ -187,7 +179,7 @@ pub async fn join_from_invite_code(
     let lib_ks = KeyService::new(code.library_id.clone());
 
     let cloud_home =
-        build_cloud_home_for_join(&code.join_info, &lib_ks, cloudkit_ops, oauth_cancel, clock)
+        build_cloud_home_for_join(&code.join_info, &lib_ks, oauth_tokens, cloudkit_ops, clock)
             .await?;
 
     let config = join_library(
