@@ -19,8 +19,10 @@ pub enum CloudProvider {
 }
 
 impl CloudProvider {
-    /// Whether this provider requires an OAuth email/account for setup.
-    pub fn needs_email(&self) -> bool {
+    /// Whether connecting, restoring, or joining on this provider requires
+    /// running an OAuth flow first — true for the account-based consumer clouds
+    /// (Google Drive, Dropbox, OneDrive), false for S3 and CloudKit.
+    pub fn needs_oauth(&self) -> bool {
         matches!(self, Self::GoogleDrive | Self::Dropbox | Self::OneDrive)
     }
 }

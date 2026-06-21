@@ -70,6 +70,9 @@ pub struct InviteCodeInfo {
     pub library_name: String,
     pub owner_pubkey: String,
     pub cloud_provider: crate::config::CloudProvider,
+    /// Whether the joining device must run an OAuth flow before joining, so the
+    /// host fetches the token first — mirrors `RestoreCodeInfo::needs_oauth`.
+    pub needs_oauth: bool,
 }
 
 /// Decode an invite code and return UI-ready info.
@@ -80,6 +83,7 @@ pub fn decode_invite_code_info(code: &str) -> Result<InviteCodeInfo, JoinCodeErr
         library_id: invite.library_id,
         library_name: invite.library_name,
         owner_pubkey: invite.owner_pubkey,
+        needs_oauth: cloud_provider.needs_oauth(),
         cloud_provider,
     })
 }
