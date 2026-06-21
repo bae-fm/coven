@@ -35,18 +35,16 @@ pub struct JoinRequestCode {
     pub email: Option<String>,
 }
 
-/// Generate a join request code containing this device's Ed25519 public key.
+/// Generate a join request code containing this device's Ed25519 public key,
+/// and optionally a contact email the inviter can use to recognize the device.
 /// Creates a keypair if one doesn't exist yet.
-pub fn generate_join_request(
-    needs_email: bool,
-    email: String,
-) -> Result<String, crate::keys::KeyError> {
+pub fn generate_join_request(email: Option<String>) -> Result<String, crate::keys::KeyError> {
     let global_ks = crate::keys::KeyService::new("global".to_string());
     let keypair = global_ks.get_or_create_user_keypair()?;
 
     let code = JoinRequestCode {
         public_key: hex::encode(keypair.public_key),
-        email: if needs_email { Some(email) } else { None },
+        email,
     };
 
     Ok(encode_join_request(&code))
