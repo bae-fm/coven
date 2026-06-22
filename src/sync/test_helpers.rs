@@ -273,6 +273,10 @@ pub struct MockSyncStorage {
     /// fresh keypair; a membership test that needs the head/floor attributed to a
     /// specific member constructs the mock with [`Self::with_keypair`].
     keypair: UserKeypair,
+    /// When set, `list_membership_entries` returns an error — to exercise the
+    /// fail-closed path where membership can't even be listed (#88), instead of
+    /// silently disabling authorization for the cycle.
+    fail_membership_list: std::sync::atomic::AtomicBool,
 }
 
 impl MockSyncStorage {
@@ -291,7 +295,16 @@ impl MockSyncStorage {
             snapshot_meta: Mutex::new(None),
             min_schema_version: Mutex::new(None),
             keypair,
+            fail_membership_list: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Make `list_membership_entries` fail, so a test can assert the cycle fails
+    /// closed (refuses to apply changesets) when membership can't be listed,
+    /// rather than falling open to "no chain, accept everything" (#88).
+    pub fn fail_membership_listing(&self) {
+        self.fail_membership_list
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Store a changeset in the mock storage (simulates what push would do). The
@@ -505,6 +518,12 @@ impl SyncStorage for MockSyncStorage {
     }
 
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        if self
+            .fail_membership_list
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StorageError::S3("injected membership-list failure".into()));
+        }
         let objects = self.objects.lock().unwrap();
         let mut entries = Vec::new();
 
