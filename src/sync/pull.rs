@@ -467,7 +467,7 @@ async fn resolve_membership_authorization(
             // empty re-list mid-cycle is an anomalous transient. Keep judging
             // against the cycle-start chain we already hold — the keyed grant GET
             // below resolves the gap regardless of what the list returns.
-            debug!("membership re-list came back empty mid-cycle; keeping the cycle-start chain");
+            warn!("membership re-list came back empty mid-cycle; keeping the cycle-start chain");
             current.clone()
         }
         Err(()) => return MembershipJudgment::Indeterminate,
