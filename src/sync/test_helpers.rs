@@ -205,19 +205,11 @@ pub fn bootstrap_chain(owner: &UserKeypair) -> MembershipChain {
     chain
 }
 
-/// A signed founder (first) membership entry for `kp`.
+/// A signed founder (first) membership entry for `kp`. Thin alias over the
+/// production [`crate::sync::membership::founder_entry`] so tests and production
+/// build the founder identically.
 pub fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
-    let pk_hex = pubkey_hex(kp);
-    let mut entry = MembershipEntry {
-        action: MembershipAction::Add,
-        user_pubkey: pk_hex.clone(),
-        role: MemberRole::Owner,
-        timestamp: timestamp.to_string(),
-        author_pubkey: pk_hex,
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, kp);
-    entry
+    crate::sync::membership::founder_entry(kp, timestamp)
 }
 
 /// A signed entry where `author` adds/removes `subject` with `role`.
@@ -620,6 +612,35 @@ pub async fn pull_into(
     )
     .await
     .expect("pull");
+    db.resume_session().await.expect("resume after pull");
+    r
+}
+
+/// Like [`pull_into`] but returns the `pull_changes` result without unwrapping, so
+/// a test can assert a [`crate::sync::pull::PullError`]. Suspends/resumes the
+/// capture session around it just like `pull_into`.
+#[allow(clippy::type_complexity)]
+pub async fn pull_into_result(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    cursors: &HashMap<String, u64>,
+    library_dir: &crate::library_dir::LibraryDir,
+    blob_plan: &dyn crate::blob::BlobPlan,
+) -> Result<(HashMap<String, u64>, crate::sync::pull::PullResult), crate::sync::pull::PullError> {
+    db.take_changeset_and_suspend()
+        .await
+        .expect("suspend before pull");
+    let r = pull_changes(
+        db,
+        &test_synced_tables(),
+        storage,
+        device_id,
+        cursors,
+        library_dir,
+        blob_plan,
+    )
+    .await;
     db.resume_session().await.expect("resume after pull");
     r
 }

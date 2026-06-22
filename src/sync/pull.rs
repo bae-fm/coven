@@ -122,20 +122,48 @@ pub async fn pull_changes(
 
     let heads = storage.list_heads().await.map_err(PullError::Storage)?;
 
-    // Load the current membership chain (if any) to validate changeset
-    // authorship. A solo library has no chain, so this stays None and the
-    // validation below is skipped.
+    // The library's established owner, pinned at create/join/restore (issue #102).
+    // `Some` for an opaque (encrypted) library — its membership chain is anchored
+    // to this pubkey; `None` for a browsable library, which has no chain and is
+    // open by design.
+    let owner_pubkey = db
+        .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .await
+        .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
+
+    // Load the current membership chain to validate changeset authorship, anchored
+    // to the pinned owner. For an owner-pinned (opaque) library a chain whose
+    // founder isn't that owner — or a chain that has been wiped entirely — is a
+    // takeover attempt (#95/#104), so we refuse the cycle rather than trust it. A
+    // browsable library has no owner pinned and legitimately has no chain.
     let membership_chain: Option<MembershipChain> = match storage.list_membership_entries().await {
         Ok(entries) if !entries.is_empty() => {
             match super::membership_ops::download_chain(storage, &entries).await {
-                Ok(chain) => Some(chain),
+                Ok(chain) => {
+                    if let Some(owner) = &owner_pubkey {
+                        if !chain.is_founded_by(owner) {
+                            return Err(PullError::MembershipTampered(format!(
+                                "chain founder {:?} is not the pinned owner {owner}",
+                                chain.founder_pubkey()
+                            )));
+                        }
+                    }
+                    Some(chain)
+                }
                 Err(e) => {
                     warn!("failed to load membership chain for validation: {e}");
                     None
                 }
             }
         }
-        Ok(_) => None,
+        Ok(_) => {
+            if let Some(owner) = &owner_pubkey {
+                return Err(PullError::MembershipTampered(format!(
+                    "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
+                )));
+            }
+            None
+        }
         Err(e) => {
             warn!("failed to list membership entries for validation: {e}");
             None
@@ -520,6 +548,10 @@ pub enum PullError {
         local_version: u32,
         min_version: u32,
     },
+    /// The membership chain is not anchored to the library's pinned owner — it was
+    /// wiped and/or refounded under a different key (an owner-takeover attempt,
+    /// issue #95). The cycle is refused rather than trusting the tampered chain.
+    MembershipTampered(String),
 }
 
 impl std::fmt::Display for PullError {
@@ -535,6 +567,7 @@ impl std::fmt::Display for PullError {
                 f,
                 "Update the app to keep syncing — this library was upgraded by a newer device (schema v{min_version}; you have v{local_version})."
             ),
+            PullError::MembershipTampered(e) => write!(f, "membership chain tampered: {e}"),
         }
     }
 }

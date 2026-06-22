@@ -621,23 +621,15 @@ pub async fn init_sync(
         }
     };
 
-    if existing_keys.is_empty() {
-        // Check if membership entries exist (shared library upgrade path).
-        let membership_entries = match storage.list_membership_entries().await {
-            Ok(entries) => entries,
-            Err(e) => {
-                warn!("Failed to list membership entries: {e}");
-                return None;
-            }
-        };
+    let our_pk = hex::encode(user_keypair.public_key);
 
-        if membership_entries.is_empty() {
-            // Solo library — just write our own key.
-            let user_pk = hex::encode(user_keypair.public_key);
-
+    if cipher.is_plaintext() {
+        // Browsable (plaintext) home: no membership chain — open by design. Keep
+        // only the device's own auth-key marker, as before.
+        if existing_keys.is_empty() {
             if let Err(e) = cloud_home
                 .write(
-                    &format!("auth/keys/{user_pk}"),
+                    &format!("auth/keys/{our_pk}"),
                     vec![],
                     &crate::storage::cloud::no_progress(),
                 )
@@ -646,21 +638,25 @@ pub async fn init_sync(
                 warn!("Failed to write auth key: {e}");
                 return None;
             }
-        } else {
-            // Shared library — download chain and write keys for all current members.
-            match super::membership_ops::download_chain(&storage, &membership_entries).await {
-                Ok(chain) => {
-                    if let Err(e) =
-                        super::membership_ops::sync_authorized_keys(cloud_home, &chain).await
-                    {
-                        warn!("Failed to bootstrap auth keys from membership chain: {e}");
-                        return None;
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to download membership chain for auth key bootstrap: {e}");
-                    return None;
-                }
+        }
+    } else {
+        // Opaque (encrypted) home: every library has an owner-anchored membership
+        // chain from creation (issue #102). Establish it on first connect, and on
+        // every connect verify the chain is still founded by the pinned owner —
+        // refusing a missing or refounded chain as a takeover attempt (#95/#104).
+        let chain = match ensure_owner_anchored_chain(&storage, db, &user_keypair, &hlc).await {
+            Ok(chain) => chain,
+            Err(e) => {
+                error!("Membership chain bootstrap/anchor failed: {e}");
+                return None;
+            }
+        };
+        // First-time auth-key bootstrap from the chain. (Refreshing the auth-key
+        // set on every cycle is #85/#87, not this change.)
+        if existing_keys.is_empty() {
+            if let Err(e) = super::membership_ops::sync_authorized_keys(cloud_home, &chain).await {
+                error!("Failed to bootstrap auth keys from membership chain: {e}");
+                return None;
             }
         }
     }
@@ -674,6 +670,88 @@ pub async fn init_sync(
         cipher: cipher_lock,
         user_keypair,
     })
+}
+
+/// Establish or verify the owner-anchored membership chain for an opaque library
+/// (issue #102).
+///
+/// - First cloud connect of a *created* library (no chain, no pinned owner): this
+///   device is the owner, so it writes the founder Owner entry and pins itself.
+/// - A library with a chain but no pinned owner yet (joined libraries pin at join;
+///   this is the observed-first transitional case): adopt the founder as owner.
+/// - Otherwise: anchor — the chain's founder must equal the pinned owner, else the
+///   chain was wiped and refounded (a takeover), and we refuse.
+///
+/// Returns the validated chain for auth-key bootstrap, or an error to abort sync.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn ensure_owner_anchored_chain(
+    storage: &dyn SyncStorage,
+    db: &Database,
+    owner_keypair: &UserKeypair,
+    hlc: &Hlc,
+) -> Result<crate::sync::membership::MembershipChain, String> {
+    use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let our_pk = hex::encode(owner_keypair.public_key);
+    let pinned = db
+        .get_sync_state(OWNER_PUBKEY_STATE_KEY)
+        .await
+        .map_err(|e| format!("read pinned owner: {e}"))?;
+    let entries = storage
+        .list_membership_entries()
+        .await
+        .map_err(|e| format!("list membership entries: {e}"))?;
+
+    if entries.is_empty() {
+        match pinned {
+            None => {
+                // Created library, first connect: we are the owner. Found + pin.
+                let ts = hlc.now().to_string();
+                super::membership_ops::write_founder_entry(storage, owner_keypair, &ts)
+                    .await
+                    .map_err(|e| e.0)?;
+                db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &our_pk)
+                    .await
+                    .map_err(|e| format!("pin owner: {e}"))?;
+                info!(owner = %our_pk, "Founded library: wrote owner-anchored founder entry");
+                crate::sync::membership::MembershipChain::from_entries(vec![
+                    crate::sync::membership::founder_entry(owner_keypair, &ts),
+                ])
+                .map_err(|e| format!("build founder chain: {e}"))
+            }
+            Some(owner) => Err(format!(
+                "membership chain is missing but owner {owner} is pinned for this \
+                 library — refusing to re-found (wiped or tampered membership/*)"
+            )),
+        }
+    } else {
+        let chain = super::membership_ops::download_chain(storage, &entries)
+            .await
+            .map_err(|e| e.0)?;
+        let founder = chain
+            .founder_pubkey()
+            .ok_or_else(|| "loaded membership chain has no founder".to_string())?
+            .to_string();
+        match pinned {
+            None => {
+                db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder)
+                    .await
+                    .map_err(|e| format!("pin owner: {e}"))?;
+                warn!(
+                    owner = %founder,
+                    "Pinned library owner from the existing chain founder (no prior pin)"
+                );
+            }
+            Some(owner) if founder != owner => {
+                return Err(format!(
+                    "membership chain founder {founder} does not match the pinned \
+                     library owner {owner} — refusing (owner-takeover attempt)"
+                ));
+            }
+            Some(_) => {}
+        }
+        Ok(chain)
+    }
 }
 
 /// Components needed to run sync cycles.

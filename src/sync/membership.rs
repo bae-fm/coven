@@ -84,6 +84,24 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
     serde_json::to_vec(&canonical).expect("canonical serialization cannot fail")
 }
 
+/// Build the founder entry of a library's membership chain: a self-signed `Add`
+/// of `owner` with the `Owner` role. Every library is founded by exactly one such
+/// entry at creation, and the chain is later anchored to `owner`'s pubkey so no
+/// one can wipe `membership/*` and refound themselves as Owner (issue #95).
+pub fn founder_entry(owner: &UserKeypair, timestamp: &str) -> MembershipEntry {
+    let pk_hex = hex::encode(owner.public_key);
+    let mut entry = MembershipEntry {
+        action: MembershipAction::Add,
+        user_pubkey: pk_hex.clone(),
+        role: MemberRole::Owner,
+        timestamp: timestamp.to_string(),
+        author_pubkey: pk_hex,
+        signature: String::new(),
+    };
+    sign_membership_entry(&mut entry, owner);
+    entry
+}
+
 /// Sign a membership entry with the given keypair.
 ///
 /// Sets `author_pubkey` and `signature` on the entry.
@@ -140,6 +158,21 @@ impl MembershipChain {
     /// Return the entries in the chain.
     pub fn entries(&self) -> &[MembershipEntry] {
         &self.entries
+    }
+
+    /// The pubkey of the founder (chain entry #1, the self-signed Owner Add), or
+    /// `None` for an empty chain. The library is anchored to this pubkey: a chain
+    /// whose founder is not the library's established owner is a takeover attempt
+    /// (issue #95), so callers compare this against the pinned owner pubkey.
+    pub fn founder_pubkey(&self) -> Option<&str> {
+        self.entries.first().map(|e| e.user_pubkey.as_str())
+    }
+
+    /// Whether this chain is founded by `owner_pubkey` — its entry #1 is an Owner
+    /// Add of exactly that pubkey. The anchoring check that prevents a wiped
+    /// `membership/*` from being refounded under an attacker's key.
+    pub fn is_founded_by(&self, owner_pubkey: &str) -> bool {
+        self.founder_pubkey() == Some(owner_pubkey)
     }
 
     /// Validate the entire chain.
@@ -292,6 +325,34 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].0, pubkey_hex(&owner));
         assert_eq!(members[0].1, MemberRole::Owner);
+    }
+
+    #[test]
+    fn founder_pubkey_identifies_the_anchor() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let owner_pk = pubkey_hex(&owner);
+        let chain = MembershipChain::from_entries(vec![
+            founder_entry(&owner, "0000000001000-0000-dev1"),
+            make_entry(
+                &owner,
+                MembershipAction::Add,
+                &member,
+                MemberRole::Member,
+                "0000000002000-0000-dev1",
+            ),
+        ])
+        .unwrap();
+
+        // The founder is entry #1's pubkey regardless of later members.
+        assert_eq!(chain.founder_pubkey(), Some(owner_pk.as_str()));
+        assert!(chain.is_founded_by(&owner_pk));
+        assert!(!chain.is_founded_by(&pubkey_hex(&member)));
+        assert!(!chain.is_founded_by("deadbeef"));
+
+        // An empty chain has no founder to anchor to.
+        assert_eq!(MembershipChain::new().founder_pubkey(), None);
+        assert!(!MembershipChain::new().is_founded_by(&owner_pk));
     }
 
     #[test]

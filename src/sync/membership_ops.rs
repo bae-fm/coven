@@ -10,10 +10,14 @@ use crate::keys::{KeyService, UserKeypair};
 
 use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
-use super::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
-};
+use super::membership::{founder_entry, MemberRole, MembershipChain, MembershipEntry};
 use super::storage::SyncStorage;
+
+/// `sync_state` key holding the hex Ed25519 pubkey of the library's established
+/// owner — pinned at create (the creator), join (the invite's owner), or restore.
+/// The membership chain is anchored to it: a chain whose founder differs is a
+/// takeover attempt and is rejected (issue #95).
+pub(crate) const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
 
 /// A member as seen by the caller.
 pub struct MemberInfo {
@@ -85,38 +89,19 @@ pub async fn invite_member(
         .await
         .map_err(|e| MembershipOpsError(format!("Failed to list membership entries: {e}")))?;
 
-    let mut chain = if entry_keys.is_empty() {
-        // No membership chain yet -- bootstrap with a founder entry.
-        let mut founder = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: user_pubkey_hex.clone(),
-            role: MemberRole::Owner,
-            timestamp: hlc.now().to_string(),
-            author_pubkey: String::new(),
-            signature: String::new(),
-        };
-
-        sign_membership_entry(&mut founder, user_keypair);
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder.clone())
-            .map_err(|e| MembershipOpsError(format!("Failed to create founder entry: {e}")))?;
-
-        // Upload the founder entry to the storage.
-        let founder_bytes = serde_json::to_vec(&founder)
-            .map_err(|e| MembershipOpsError(format!("Failed to serialize founder entry: {e}")))?;
-        storage
-            .put_membership_entry(&user_pubkey_hex, 1, founder_bytes)
-            .await
-            .map_err(|e| MembershipOpsError(format!("Failed to upload founder entry: {e}")))?;
-
-        info!("Bootstrapped membership chain with founder entry");
-
-        chain
-    } else {
-        download_chain(storage, &entry_keys).await?
-    };
+    // The founder is written once, when a library is created and first connects
+    // its cloud (issue #102) — never lazily here. An empty listing at invite time
+    // means the chain is missing (a fresh library that never founded, or a wiped
+    // `membership/*`); bootstrapping a new founder on the spot is the takeover
+    // primitive #104 describes, so refuse instead.
+    if entry_keys.is_empty() {
+        return Err(MembershipOpsError(
+            "no membership chain to invite into: the library's founder entry is \
+             missing (it is established at library creation, not on invite)"
+                .to_string(),
+        ));
+    }
+    let mut chain = download_chain(storage, &entry_keys).await?;
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
@@ -234,6 +219,27 @@ pub fn apply_key_rotation(
         }
     };
     Ok(new_fingerprint)
+}
+
+/// Write a library's founder entry: chain entry #1, a self-signed Owner `Add` of
+/// `owner`, uploaded to `membership/{owner_pubkey}/1`. Called once, when a created
+/// library first connects its cloud, so every opaque library has an owner-anchored
+/// chain from the start (issue #102). The caller is responsible for only invoking
+/// this when no chain exists yet; this unconditionally writes seq 1.
+pub(crate) async fn write_founder_entry(
+    storage: &dyn SyncStorage,
+    owner: &UserKeypair,
+    timestamp: &str,
+) -> Result<(), MembershipOpsError> {
+    let entry = founder_entry(owner, timestamp);
+    let bytes = serde_json::to_vec(&entry)
+        .map_err(|e| MembershipOpsError(format!("Failed to serialize founder entry: {e}")))?;
+    storage
+        .put_membership_entry(&hex::encode(owner.public_key), 1, bytes)
+        .await
+        .map_err(|e| MembershipOpsError(format!("Failed to upload founder entry: {e}")))?;
+    info!("Wrote founder Owner entry for the library's membership chain");
+    Ok(())
 }
 
 /// Download and build a membership chain from the storage.
