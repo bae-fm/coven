@@ -177,6 +177,73 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
     assert_eq!(result.changesets_applied, 0);
 }
 
+/// A changeset whose envelope `changeset_size` disagrees with the actual trailing
+/// bytes is corrupt or tampered: it must be rejected, not applied. The size is one
+/// of the fields the signature covers, so a signed changeset whose bytes were
+/// altered after signing surfaces here (and at the signature check); an unsigned
+/// one is caught by this gate alone. Either way the bytes failed their own
+/// integrity check and the row must never land. The cursor is held back so a
+/// transient on-download corruption re-fetches next cycle.
+#[tokio::test]
+async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
+    let storage = MockSyncStorage::new();
+
+    // A real changeset from dev1, packed into an envelope whose `changeset_size`
+    // is deliberately wrong (one byte short of the actual payload), as a truncated
+    // or tampered download would be.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Corrupt', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    let env = envelope::ChangesetEnvelope {
+        device_id: "dev1".to_string(),
+        seq: 1,
+        schema_version: SCHEMA_VERSION,
+        message: String::new(),
+        timestamp: "2026-02-10T00:00:00Z".to_string(),
+        // The lie: the envelope claims one fewer byte than the payload carries.
+        changeset_size: cs.len() - 1,
+        author_pubkey: None,
+        membership_grant: None,
+        signature: None,
+    };
+    storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &cs));
+
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobSource,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert!(
+        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "a size-mismatched changeset must not be applied",
+    );
+    // The cursor ADVANCES past the bad seq. A size mismatch that survives the
+    // signature check is a permanent buggy/inconsistent encoder, not a transient
+    // download glitch (truncation in transit fails the signature), so holding would
+    // re-fetch the same bad object every cycle and stall this device's pull forever
+    // — a single bad changeset would halt the whole fleet's sync. Skipping it
+    // (logged at error) keeps the fleet syncing; the row's data, if real, recovers
+    // via a later snapshot from a device that produced consistent bytes.
+    assert_eq!(
+        updated.get("dev1"),
+        Some(&1),
+        "cursor advances past a permanently-bad size-mismatched changeset",
+    );
+}
+
 #[tokio::test]
 async fn blob_round_trips_through_storage_via_blob_plan() {
     let storage = MockSyncStorage::new();
