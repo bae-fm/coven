@@ -134,16 +134,21 @@ pub fn lww_conflict_handler(
                 return ConflictAction::SQLITE_CHANGESET_OMIT;
             };
             let uat = cols.updated_at;
-            let incoming = item
-                .new_value(uat)
-                .ok()
-                .and_then(value_ref_to_string)
-                .and_then(|s| Timestamp::parse(&s));
-            let local = item
-                .conflict(uat)
-                .ok()
-                .and_then(value_ref_to_string)
-                .and_then(|s| Timestamp::parse(&s));
+            // Read each side's `_updated_at` and parse it to an HLC `Timestamp`. A
+            // rusqlite error reading the column (an API failure on a known column,
+            // genuinely exceptional) is logged distinctly from a value that is simply
+            // absent or doesn't parse — the latter falls through to the `_` arm below.
+            let read_stamp = |v: Result<rusqlite::types::ValueRef, rusqlite::Error>, side: &str| {
+                match v {
+                    Ok(value) => value_ref_to_string(value).and_then(|s| Timestamp::parse(&s)),
+                    Err(e) => {
+                        warn!(table, side, error = %e, "failed to read _updated_at column for conflict resolution");
+                        None
+                    }
+                }
+            };
+            let incoming = read_stamp(item.new_value(uat), "incoming");
+            let local = read_stamp(item.conflict(uat), "local");
 
             match (incoming, local) {
                 (Some(inc), Some(loc)) => {
