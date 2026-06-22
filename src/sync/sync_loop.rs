@@ -172,6 +172,11 @@ impl SyncLoopHandle {
                                         "{} changes from a newer app version were skipped. Update the app to apply them.",
                                         result.skipped_schema,
                                     ))
+                                } else if result.skipped_unauthorized > 0 {
+                                    Some(format!(
+                                        "{} changes in shared storage could not be verified against the current membership and were skipped.",
+                                        result.skipped_unauthorized,
+                                    ))
                                 } else if result.asset_downloads_failed {
                                     Some("Some files failed to download, will retry".to_string())
                                 } else {

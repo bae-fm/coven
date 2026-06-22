@@ -462,9 +462,14 @@ async fn resolve_membership_authorization(
     // authorizes this author.
     let fresh = match reload_chain(storage).await {
         Ok(Some(chain)) => chain,
-        // No chain now (would be a separate, transient anomaly mid-cycle): fall
-        // back to the cycle-start chain so we still consult the named grant below.
-        Ok(None) => current.clone(),
+        Ok(None) => {
+            // The chain is append-only and was non-empty at cycle start, so an
+            // empty re-list mid-cycle is an anomalous transient. Keep judging
+            // against the cycle-start chain we already hold — the keyed grant GET
+            // below resolves the gap regardless of what the list returns.
+            debug!("membership re-list came back empty mid-cycle; keeping the cycle-start chain");
+            current.clone()
+        }
         Err(()) => return MembershipJudgment::Indeterminate,
     };
     if fresh.can_write_now(author) {
@@ -481,9 +486,18 @@ async fn resolve_membership_authorization(
     let entry = match storage.get_membership_entry(&coord.author, coord.seq).await {
         Ok(bytes) => match serde_json::from_slice::<MembershipEntry>(&bytes) {
             Ok(entry) => entry,
-            // The named object exists but isn't a parseable entry — a bogus claim,
-            // not a reason to stall.
-            Err(_) => return MembershipJudgment::Unauthorized,
+            // The named object exists but isn't a parseable membership entry — a
+            // bogus or corrupt claim. Log the cause and reject; not a reason to stall.
+            Err(e) => {
+                warn!(
+                    grant_author = %coord.author,
+                    grant_seq = coord.seq,
+                    error = %e,
+                    "membership grant entry the changeset names did not parse; \
+                     treating the changeset as unauthorized"
+                );
+                return MembershipJudgment::Unauthorized;
+            }
         },
         // A keyed GET is strongly consistent: NotFound means the claimed grant
         // does not exist, so the changeset is forged.
@@ -493,14 +507,33 @@ async fn resolve_membership_authorization(
     };
 
     // Merge the named grant into the fresh chain and re-judge against the whole,
-    // so a Remove we already hold still revokes write, and a missing intermediate
-    // entry surfaces as "not consistently readable" rather than a false grant.
+    // so a Remove we already hold still revokes write.
     let mut entries = fresh.entries().to_vec();
     entries.push(entry);
     match MembershipChain::from_entries(entries) {
         Ok(merged) if merged.can_write_now(author) => MembershipJudgment::Authorized(merged),
         Ok(_) => MembershipJudgment::Unauthorized,
-        Err(_) => MembershipJudgment::Indeterminate,
+        // The fresh chain plus the fetched grant did not form a valid chain: the
+        // named grant is invalid (bad signature, or signed by someone who is not a
+        // current owner) and so does not establish this author's write access. Treat
+        // it as unauthorized — skip and advance — NEVER indeterminate. Indeterminate
+        // is reserved strictly for storage *read* failures (handled above); routing
+        // a validation failure there would let a member plant a parseable-but-invalid
+        // entry, name it as the grant, and stall every other device's pull forever —
+        // the exact failure this fix prevents. The rare cost is a genuinely-lagging
+        // intermediate entry (an owner who was themselves only just added); those
+        // rows still reach this device through the snapshot channel, so nothing is
+        // lost.
+        Err(e) => {
+            warn!(
+                grant_author = %coord.author,
+                grant_seq = coord.seq,
+                error = %e,
+                "membership chain did not validate after merging the named grant; \
+                 treating the changeset as unauthorized"
+            );
+            MembershipJudgment::Unauthorized
+        }
     }
 }
 

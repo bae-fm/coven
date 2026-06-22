@@ -267,6 +267,12 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
             "Skipped changes from a newer app version; update the app to apply them",
         );
     }
+    if result.skipped_unauthorized > 0 {
+        error!(
+            count = result.skipped_unauthorized,
+            "Skipped changes in shared storage that could not be verified against the current membership",
+        );
+    }
 
     Ok(result.resume_drain_promptly)
 }

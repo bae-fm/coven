@@ -737,6 +737,94 @@ async fn pull_skips_signed_changeset_whose_grant_coordinate_does_not_exist() {
     );
 }
 
+/// The stall case the fix must NOT reintroduce: a signed changeset whose grant
+/// names an entry that EXISTS and parses but is invalid (a self-signed Add by a
+/// non-owner). Merging it makes chain validation fail; that must be treated as
+/// unauthorized (skip + advance), never as indeterminate — otherwise a member who
+/// can write a bogus membership object stalls every other device's pull forever.
+#[tokio::test]
+async fn pull_skips_signed_changeset_whose_grant_entry_is_invalid_without_stalling() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let attacker = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let attacker_pk = hex::encode(attacker.public_key);
+
+    // The real chain: founder only.
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    // A bogus, validly-self-signed Add the attacker plants at (attacker, 1): it
+    // parses and its signature verifies, but the attacker is not an owner, so it
+    // cannot authorize a write. Hidden from LIST so the cycle-start chain loads
+    // clean (founder-only) and we exercise the grant-resolution path, not the
+    // separate cycle-start fail-open.
+    let bogus = make_entry(
+        &attacker,
+        MembershipAction::Add,
+        &attacker,
+        MemberRole::Member,
+        "0000000002000-0000-attacker",
+    );
+    storage
+        .put_membership_entry(&attacker_pk, 1, serde_json::to_vec(&bogus).unwrap())
+        .await
+        .unwrap();
+    storage.hide_membership_from_list(&attacker_pk, 1);
+
+    // The attacker signs a changeset and names its bogus self-Add as the grant.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Forged', NULL, '0000000003000-0000-attacker', '2026-01-01')",
+        ],
+    )
+    .await;
+    let grant = MembershipCoord {
+        author: attacker_pk.clone(),
+        seq: 1,
+    };
+    let packed = envelope::pack_signed(
+        "devAttacker",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &attacker,
+        Some(grant),
+        &cs,
+    );
+    storage.put_changeset_packed("devAttacker", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.skipped_unauthorized, 1);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    // The crucial anti-stall assertion: the cursor ADVANCES past the bogus
+    // changeset rather than staying put and re-failing every cycle.
+    assert_eq!(
+        updated.get("devAttacker"),
+        Some(&1),
+        "an invalid grant must skip+advance, never stall the pull"
+    );
+}
+
 /// The push side binds an outgoing changeset to this device's own membership
 /// grant, so a puller in the lag window can resolve it.
 #[tokio::test]
