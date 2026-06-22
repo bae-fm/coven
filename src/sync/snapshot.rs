@@ -2471,25 +2471,24 @@ mod authorization_tests {
         );
     }
 
-    /// Old, pre-signing snapshot metadata (a bare cursor map, no `author_pubkey` /
-    /// `signature`) is the shape an older bucket holds. It must not be silently
-    /// adopted: against the signed `SnapshotMetaJson` shape the old JSON fails to
-    /// parse, so bootstrap refuses with the parse error rather than treating an
-    /// unsigned, unauthored catalog as trusted.
+    /// Snapshot metadata lacking the signed fields — a bare cursor map with no
+    /// `author_pubkey`/`signature` — must not be adopted: it fails to deserialize
+    /// into `SnapshotMetaJson`, so bootstrap refuses with the parse error rather
+    /// than treating an unsigned, unauthored catalog as trusted.
     #[tokio::test]
-    async fn bootstrap_refuses_old_unsigned_meta() {
+    async fn bootstrap_refuses_unsigned_meta() {
         let owner = UserKeypair::generate();
         let storage = MockSyncStorage::new();
         found_chain(&storage, &owner).await;
         storage.put_snapshot(fake_snapshot()).await.unwrap();
 
-        // The legacy meta: a bare cursor map, none of the signing fields.
-        let legacy = serde_json::json!({
+        // Metadata with none of the signing fields: a bare cursor map.
+        let unsigned = serde_json::json!({
             "cursors": { "owner-dev": 1 },
             "created_at": "2026-01-01T00:00:00Z",
         });
         storage
-            .put_snapshot_meta(serde_json::to_vec(&legacy).unwrap())
+            .put_snapshot_meta(serde_json::to_vec(&unsigned).unwrap())
             .await
             .unwrap();
 
@@ -2497,7 +2496,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
             .await
-            .expect_err("an old unsigned meta must not be adopted");
+            .expect_err("unsigned metadata must not be adopted");
         // The unsigned shape lacks the signed fields, so it fails to parse — refused
         // before any signature/authorization step, never silently accepted.
         assert!(
