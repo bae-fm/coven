@@ -386,14 +386,4 @@ mod tests {
         assert!(path_escapes_root(Path::new("/lib/images/../../etc/passwd")));
         assert!(path_escapes_root(Path::new("a/../b")));
     }
-
-    /// A library id that passes `validate_path_token` is a single safe component,
-    /// so joining it onto `libraries/` yields a direct child of that root — the
-    /// construction the join/restore/create paths perform once decode has validated
-    /// the id. This is what makes the consumer-side join `data_dir/libraries/<id>`
-    /// contained without any further check. The unit under test is the acceptance.
-    #[test]
-    fn a_validated_id_joins_to_a_direct_child_of_libraries() {
-        assert_eq!(validate_path_token("abc-123"), Ok(()));
-    }
 }

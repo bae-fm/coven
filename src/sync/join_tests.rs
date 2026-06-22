@@ -145,9 +145,8 @@ async fn join_accepts_a_normal_library_id_past_decode() {
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    let ks = crate::keys::KeyService::new("join-test".to_string());
-    let _ = ks.delete_user_keypair_for_test();
-    ks.get_or_create_user_keypair()
+    crate::keys::KeyService::new("join-test".to_string())
+        .get_or_create_user_keypair()
         .expect("seed the device user keypair");
 
     // End to end the join still fails — the S3 endpoint above is bogus — but it
