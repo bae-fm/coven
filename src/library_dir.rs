@@ -25,8 +25,15 @@ pub enum PathTokenError {
     /// directory would descend into (or, with a leading separator, replace) the
     /// path rather than name a single child.
     Separator,
-    /// The token is or contains a `..` component, which climbs to the parent.
+    /// The token is exactly `..`, which names the parent of the directory it is
+    /// joined onto rather than a child. A trailing `..` component is normalized
+    /// away when the path is resolved, so the join lands on the parent.
     ParentDir,
+    /// The token is exactly `.`, which names the directory it is joined onto
+    /// itself rather than a child. Like `..`, a trailing `.` component is
+    /// normalized away, so `libraries/.` resolves to `libraries`'s parent (the
+    /// data dir) — an escape just as `..` is.
+    CurDir,
     /// The token contains a NUL byte, which truncates the path at the OS boundary.
     NulByte,
     /// The token contains a `:`, which on Windows names an alternate data stream
@@ -35,9 +42,6 @@ pub enum PathTokenError {
     /// The dash-stripped id is too short, or splits a multi-byte char, to take the
     /// two leading byte-pairs the `{ab}/{cd}` partition prefix needs.
     Unindexable,
-    /// The path built from the token is not a direct child of the directory it was
-    /// joined onto — the containment check behind token validation refused it.
-    Escapes,
 }
 
 impl std::fmt::Display for PathTokenError {
@@ -46,6 +50,7 @@ impl std::fmt::Display for PathTokenError {
             PathTokenError::Empty => write!(f, "path token is empty"),
             PathTokenError::Separator => write!(f, "path token contains a path separator"),
             PathTokenError::ParentDir => write!(f, "path token contains a parent reference"),
+            PathTokenError::CurDir => write!(f, "path token is a current-directory reference"),
             PathTokenError::NulByte => write!(f, "path token contains a NUL byte"),
             PathTokenError::Colon => write!(f, "path token contains a colon"),
             PathTokenError::Unindexable => {
@@ -53,9 +58,6 @@ impl std::fmt::Display for PathTokenError {
                     f,
                     "id is too short or misaligned to form a partition prefix"
                 )
-            }
-            PathTokenError::Escapes => {
-                write!(f, "path is not a direct child of its root directory")
             }
         }
     }
@@ -65,10 +67,15 @@ impl std::error::Error for PathTokenError {}
 
 /// Reject a single untrusted path token (a blob `id`/`namespace`, or a
 /// `library_id`/`lid`) that could escape the directory it is joined onto. A safe
-/// token names exactly one child: no separator, no `..`, no NUL, no `:` (a Windows
-/// stream/drive reference), non-empty. The single gate every path builder runs an
-/// untrusted token through, so traversal is refused before any on-disk or cloud
-/// path is formed.
+/// token names exactly one child: no separator, no `..`, no `.`, no NUL, no `:` (a
+/// Windows stream/drive reference), non-empty. The single gate every path builder
+/// and every code decoder runs an untrusted token through, so traversal is refused
+/// before any on-disk or cloud path is formed — and a decoded id is a safe single
+/// component by the time any consumer joins it onto a directory.
+///
+/// Both `.` and `..` are refused: each is a directory-relative reference that a
+/// trailing path component normalizes away, so joining either onto `dir` resolves
+/// to `dir` itself or its parent rather than to a child of `dir`.
 pub fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
     if token.is_empty() {
         return Err(PathTokenError::Empty);
@@ -85,31 +92,10 @@ pub fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
     if token == ".." {
         return Err(PathTokenError::ParentDir);
     }
-    Ok(())
-}
-
-/// Build the on-disk path for a library directory, `data_dir/libraries/<library_id>`,
-/// from an untrusted `library_id`.
-///
-/// `library_id` arrives from a pasted invite or restore code — both unsigned — so
-/// it is attacker-controlled. Joined verbatim onto a path it could climb out of
-/// `libraries/` (`..`), name a sibling tree, or, as an absolute path, replace the
-/// base entirely; the caller then creates, writes, and on a bootstrap failure
-/// recursively deletes that directory. So the id is refused unless it names a
-/// single safe path component, and the built path is asserted to be a direct child
-/// of `libraries/` — making an escaped library directory unrepresentable before
-/// any filesystem op runs. The two checks are independent: `validate_path_token`
-/// rejects the bad id; the containment assert is the second line, a pure lexical
-/// check (no filesystem access, so no symlink/TOCTOU dependency) that holds even
-/// if the path were formed some other way.
-pub fn library_dir_under(data_dir: &Path, library_id: &str) -> Result<LibraryDir, PathTokenError> {
-    validate_path_token(library_id)?;
-    let libraries_root = data_dir.join("libraries");
-    let path = libraries_root.join(library_id);
-    if path.parent() != Some(libraries_root.as_path()) {
-        return Err(PathTokenError::Escapes);
+    if token == "." {
+        return Err(PathTokenError::CurDir);
     }
-    Ok(LibraryDir::new(path))
+    Ok(())
 }
 
 /// Reject an untrusted `cloud_path` (the consumer's readable object key under the
@@ -242,18 +228,19 @@ impl LibraryDir {
     /// The caller is responsible for encryption key setup and calling
     /// `Config::save_active_library()` afterward.
     ///
-    /// `library_id` is routed through [`library_dir_under`] so the directory is a
-    /// validated, contained child of `libraries/` by construction — the same gate
-    /// the untrusted join/restore ids pass, holding regardless of where the id came
-    /// from.
+    /// `library_id` is device-generated here (trusted), but it still has to name a
+    /// single directory under `libraries/`, so it passes the same
+    /// [`validate_path_token`] gate the untrusted join/restore ids pass — a
+    /// malformed id fails loudly rather than forming a stray path.
     pub fn create(
         data_dir: &Path,
         library_id: String,
         library_name: String,
         ids: &dyn crate::id_provider::IdProvider,
     ) -> Result<Config, ConfigError> {
-        let library_dir = library_dir_under(data_dir, &library_id)
+        validate_path_token(&library_id)
             .map_err(|e| ConfigError::Config(format!("invalid library id: {e}")))?;
+        let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
         std::fs::create_dir_all(&*library_dir)?;
 
         let device_id = ids.new_id();
@@ -346,8 +333,9 @@ mod tests {
 
     /// `validate_path_token` accepts an ordinary single token and rejects each
     /// escape shape: separators (`/` and `\`), a leading slash (an absolute path),
-    /// a bare `..`, a NUL, a `:` (a Windows alternate-data-stream / drive-relative
-    /// reference), and the empty string.
+    /// a bare `..` and a bare `.` (both directory-relative references that
+    /// normalize away to land off a child), a NUL, a `:` (a Windows
+    /// alternate-data-stream / drive-relative reference), and the empty string.
     #[test]
     fn validate_path_token_accepts_safe_and_rejects_escapes() {
         assert_eq!(validate_path_token("abc123"), Ok(()));
@@ -356,9 +344,28 @@ mod tests {
         assert_eq!(validate_path_token("a\\b"), Err(PathTokenError::Separator));
         assert_eq!(validate_path_token("/abs"), Err(PathTokenError::Separator));
         assert_eq!(validate_path_token(".."), Err(PathTokenError::ParentDir));
+        assert_eq!(validate_path_token("."), Err(PathTokenError::CurDir));
         assert_eq!(validate_path_token("a\0b"), Err(PathTokenError::NulByte));
         assert_eq!(validate_path_token("foo:bar"), Err(PathTokenError::Colon));
         assert_eq!(validate_path_token("c:"), Err(PathTokenError::Colon));
+    }
+
+    /// A lone `.` is rejected just as `..` is: a trailing `.` component is
+    /// normalized away when the path resolves, so `libraries/.` would land on
+    /// `libraries`'s parent (the data dir) rather than name a child of `libraries/`
+    /// — an escape. `Path::parent` makes this concrete: the parent of
+    /// `libraries/.` is `libraries`'s parent, not `libraries` itself.
+    #[test]
+    fn validate_path_token_rejects_lone_current_dir() {
+        assert_eq!(validate_path_token("."), Err(PathTokenError::CurDir));
+        // The escape this prevents: joined verbatim, a `.` id does not name a child.
+        let libraries_root = Path::new("/data/libraries");
+        let joined = libraries_root.join(".");
+        assert_ne!(
+            joined.parent(),
+            Some(libraries_root),
+            "`libraries/.` must not resolve to a child of the libraries root",
+        );
     }
 
     /// A `cloud_path` is a readable object key, so an interior `/` is legitimate
@@ -389,37 +396,18 @@ mod tests {
         assert!(path_escapes_root(Path::new("a/../b")));
     }
 
-    /// A normal library id resolves to a direct child of `libraries/` under the
-    /// data dir — the legitimate first-time join/restore/create layout.
+    /// A library id that passes `validate_path_token` is a single safe component,
+    /// so joining it onto `libraries/` yields a direct child of that root — the
+    /// construction the join/restore/create paths perform once decode has validated
+    /// the id. This is what makes the consumer-side join `data_dir/libraries/<id>`
+    /// contained without any further check.
     #[test]
-    fn library_dir_under_builds_a_contained_child_for_a_normal_id() {
-        let data_dir = Path::new("/data");
-        let dir = library_dir_under(data_dir, "abc-123").expect("normal id");
-        assert_eq!(&*dir, Path::new("/data/libraries/abc-123"));
-        assert_eq!(dir.parent(), Some(Path::new("/data/libraries")));
-    }
-
-    /// A `..`, an absolute path, a separator, or an empty id is refused before any
-    /// path is used — the token check fires, so the directory never escapes the
-    /// libraries root.
-    #[test]
-    fn library_dir_under_rejects_traversal_ids() {
-        let data_dir = Path::new("/data");
-        assert_eq!(
-            library_dir_under(data_dir, "../../../../tmp/evil").unwrap_err(),
-            PathTokenError::Separator,
-        );
-        assert_eq!(
-            library_dir_under(data_dir, "..").unwrap_err(),
-            PathTokenError::ParentDir,
-        );
-        assert_eq!(
-            library_dir_under(data_dir, "/tmp/evil").unwrap_err(),
-            PathTokenError::Separator,
-        );
-        assert_eq!(
-            library_dir_under(data_dir, "").unwrap_err(),
-            PathTokenError::Empty,
-        );
+    fn a_validated_id_joins_to_a_direct_child_of_libraries() {
+        let id = "abc-123";
+        assert_eq!(validate_path_token(id), Ok(()));
+        let libraries_root = Path::new("/data/libraries");
+        let dir = libraries_root.join(id);
+        assert_eq!(dir, Path::new("/data/libraries/abc-123"));
+        assert_eq!(dir.parent(), Some(libraries_root));
     }
 }

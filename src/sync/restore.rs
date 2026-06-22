@@ -68,13 +68,6 @@ pub enum RestoreError {
     Io(#[from] std::io::Error),
     #[error("database: {0}")]
     Database(String),
-    /// The restore code's `lid` is not a safe path component, so it cannot name a
-    /// library directory. The restore code is unsigned, so a `lid` carrying `..`, a
-    /// separator, or an absolute path would put the directory coven creates (and
-    /// recursively deletes on bootstrap failure) outside the libraries root —
-    /// refused here before any filesystem op.
-    #[error("invalid library id in restore code: {0}")]
-    InvalidLibraryId(crate::library_dir::PathTokenError),
 }
 
 impl From<JoinError> for RestoreError {
@@ -217,15 +210,10 @@ pub async fn restore_from_cloud(
     make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
-    // Validate the untrusted `library_id` before any work. The restore code is
-    // unsigned, so `lid` is attacker-controlled, and it becomes the name of a
-    // directory coven creates and — on a bootstrap failure — recursively deletes.
-    // Reject it here, before the cloud home is built and well before any filesystem
-    // op, so a crafted code never reaches a path operation with an unvalidated id.
-    // The empty case this subsumes was the only prior check; `validate_path_token`
-    // rejects empty along with every traversal shape. The directory build below
-    // re-checks and adds a containment assertion (defense in depth).
-    crate::library_dir::validate_path_token(library_id).map_err(RestoreError::InvalidLibraryId)?;
+    // `library_id` is a safe single path component: `decode_restore_code` rejects
+    // any `lid` that isn't, so the directory it names below stays under
+    // `libraries/`. (A non-empty id is part of that guarantee — the decoder rejects
+    // the empty string too.)
 
     // The key's presence is the home's storage mode: a key present ⇒ an opaque
     // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
@@ -260,13 +248,11 @@ pub async fn restore_from_cloud(
 
     let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, keypair.clone());
 
-    // Create library directory. The id passed validation above; `library_dir_under`
-    // re-validates and asserts the built path is a direct child of `libraries/` —
-    // the containment guard behind the token check — before any directory is
-    // created.
+    // Create the library directory under `libraries/`, named by the restore code's
+    // `lid`. The decode guaranteed the id is a safe single component, so the
+    // directory is a direct child of `libraries/` and cannot escape it.
     let device_id = ids.new_id();
-    let library_dir = crate::library_dir::library_dir_under(app_dir, library_id)
-        .map_err(RestoreError::InvalidLibraryId)?;
+    let library_dir = LibraryDir::new(app_dir.join("libraries").join(library_id));
     std::fs::create_dir_all(&*library_dir)?;
     // The host's blob source is bound to the library dir we just created.
     let blob_source = make_blob_source(&library_dir);

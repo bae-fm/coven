@@ -79,6 +79,14 @@ pub enum RestoreCodeError {
         "This restore code was made with a newer version of the app (v{0}). Update the app to use it."
     )]
     UnsupportedVersion(u8),
+    /// The restore code's `lid` is not a safe path component, so it cannot name a
+    /// library directory under `libraries/`. The code is unsigned and anyone can
+    /// craft one, so the id is refused here at decode rather than reaching a path
+    /// operation.
+    #[error(
+        "The library id in this restore code is invalid. Regenerate it on the source device. ({0})"
+    )]
+    InvalidLibraryId(crate::library_dir::PathTokenError),
 }
 
 /// Encode a `RestoreCode` into a prefixed base64url string.
@@ -102,6 +110,14 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     if code.v != 1 {
         return Err(RestoreCodeError::UnsupportedVersion(code.v));
     }
+    // A restore code is unsigned, so `lid` is attacker-controlled. It becomes the
+    // name of a directory the restorer creates under `libraries/` and recursively
+    // deletes on a bootstrap failure, so a value carrying `..`, a separator, or an
+    // absolute path would put that create/delete outside the libraries root. Reject
+    // it the moment the code is parsed: a decoded `RestoreCode` always carries a
+    // `lid` that is a single safe path component.
+    crate::library_dir::validate_path_token(&code.lid)
+        .map_err(RestoreCodeError::InvalidLibraryId)?;
     Ok(code)
 }
 

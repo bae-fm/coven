@@ -43,13 +43,6 @@ pub enum JoinError {
     Io(#[from] std::io::Error),
     #[error("database: {0}")]
     Database(String),
-    /// The invite code's `library_id` is not a safe path component, so it cannot
-    /// name a library directory. The invite is unsigned and anyone can craft one,
-    /// so a `library_id` carrying `..`, a separator, or an absolute path would put
-    /// the directory coven creates (and recursively deletes on bootstrap failure)
-    /// outside the libraries root — refused here before any filesystem op.
-    #[error("invalid library id in invite code: {0}")]
-    InvalidLibraryId(crate::library_dir::PathTokenError),
 }
 
 /// The invite names an OAuth provider, so joining needs a token the caller
@@ -222,17 +215,11 @@ pub async fn join_library(
     make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
-    // Step 0: Validate the untrusted `library_id` before any work. The invite code
-    // is unsigned, so `library_id` is attacker-controlled, and it becomes the name
-    // of a directory coven creates and — on a bootstrap failure — recursively
-    // deletes. Reject it here, before the network unwrap and well before any
-    // filesystem op, so a crafted code never reaches a path operation with an
-    // unvalidated id. The directory build below re-checks and adds a containment
-    // assertion (defense in depth via `library_dir_under`).
-    crate::library_dir::validate_path_token(&code.library_id)
-        .map_err(JoinError::InvalidLibraryId)?;
+    // `code.library_id` is a safe single path component: `crate::join_code::decode`
+    // rejects any id that isn't, so a decoded `InviteCode` never carries a traversal
+    // id and the directory it names below stays under `libraries/`.
 
-    // Step 1: Load user keypair (must already exist — the inviter wrapped the
+    // Load user keypair (must already exist — the inviter wrapped the
     // library key for this public key).
     on_status("Loading keypair...");
     let user_keypair = key_service.get_user_keypair()?;
@@ -251,10 +238,10 @@ pub async fn join_library(
     .await?;
     let encryption_key_hex = hex::encode(encryption_key);
 
-    // Step 3: Create the sync storage with the real encryption key. Joining a
-    // shared library only makes sense over an opaque home — the invite wraps the
-    // library key — so the home is always opaque here: the cipher is `Encrypted`
-    // and the blob-path scheme is `Hashed`, matching what the owner writes.
+    // Create the sync storage with the real encryption key. Joining a shared
+    // library only makes sense over an opaque home — the invite wraps the library
+    // key — so the home is always opaque here: the cipher is `Encrypted` and the
+    // blob-path scheme is `Hashed`, matching what the owner writes.
     on_status("Downloading library snapshot...");
     let encryption = EncryptionService::new(&encryption_key_hex)?;
     let cipher = CloudCipher::Encrypted(encryption);
@@ -264,14 +251,12 @@ pub async fn join_library(
     let storage =
         CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, user_keypair.clone());
 
-    // Step 4: Create library directory using the invite code's library_id. The id
-    // passed validation at step 0; `library_dir_under` re-validates and asserts the
-    // built path is a direct child of `libraries/` — the containment guard behind
-    // the token check — before any directory is created.
+    // Create the library directory under `libraries/`, named by the invite's
+    // `library_id`. The decode guaranteed the id is a safe single component, so the
+    // directory is a direct child of `libraries/` and cannot escape it.
     let library_id = code.library_id;
     let device_id = ids.new_id();
-    let library_dir = crate::library_dir::library_dir_under(data_dir, &library_id)
-        .map_err(JoinError::InvalidLibraryId)?;
+    let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
     std::fs::create_dir_all(&*library_dir)?;
     // The host's blob source is bound to the library dir we just created.
     let blob_source = make_blob_source(&library_dir);
