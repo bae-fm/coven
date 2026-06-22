@@ -447,13 +447,14 @@ pub(crate) async fn open_db_and_pull(
                 .map_err(|e| {
                     JoinError::Database(format!("restore: failed to load chain to pin owner: {e}"))
                 })?;
-            if let Some(founder) = chain.founder_pubkey() {
-                db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
-                    .await
-                    .map_err(|e| {
-                        JoinError::Database(format!("Failed to pin library owner: {e}"))
-                    })?;
-            }
+            // A validated chain always has a founder (validation rejects an empty
+            // chain), so this is defensive — but fail loud rather than skip the pin.
+            let founder = chain.founder_pubkey().ok_or_else(|| {
+                JoinError::Database("restore: loaded chain has no founder to pin".to_string())
+            })?;
+            db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
+                .await
+                .map_err(|e| JoinError::Database(format!("Failed to pin library owner: {e}")))?;
         }
     }
 
