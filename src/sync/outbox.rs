@@ -241,7 +241,10 @@ pub async fn process_uploads(
                     // a host bug, not attacker data; record it as this entry's
                     // failure and keep draining the rest rather than aborting.
                     let msg = format!("invalid upload file id: {e}");
-                    warn!("Upload failed for {}: {msg}", entry.cloud_key);
+                    warn!(
+                        "Upload failed for {} (file_id {file_id}): {msg}",
+                        entry.cloud_key
+                    );
                     record_failure(db, &entry, file_id, &msg, now, observer).await;
                     continue;
                 }

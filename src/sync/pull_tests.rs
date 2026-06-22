@@ -1581,10 +1581,10 @@ mod blob_path_traversal {
     use crate::blob::ResolvedScope;
 
     /// A blob whose `id` climbs out of the photo directory with `..` must NOT have
-    /// its bytes written outside that directory. Before the boundary check the
-    /// puller resolved `dir.join(id)` to a path above `dir` and wrote the
-    /// downloaded bytes there (the arbitrary-file-write RCE); after it the row is
-    /// refused as bad data, nothing is written outside, and the apply is held.
+    /// its bytes written outside that directory. Without the boundary check
+    /// `dir.join(id)` resolves to a path above `dir` and the downloaded bytes land
+    /// there (an arbitrary-file-write RCE); the check refuses such a row as bad
+    /// data, so nothing is written outside the directory and the apply is held.
     #[tokio::test]
     async fn traversal_id_does_not_write_outside_the_blob_dir() {
         let storage = MockSyncStorage::new();
@@ -1659,11 +1659,11 @@ mod blob_path_traversal {
     }
 
     /// A blob id too short to form the `{ab}/{cd}` partition prefix (the
-    /// dash-stripped id is under four chars, or splits a multi-byte char) panicked
-    /// the path builder's byte slice — one planted row would crash every pulling
-    /// device. End to end it must be refused as bad data: the row does not apply
-    /// and the cursor holds. (The slice itself is proven non-panicking by the
-    /// `hashed_path` unit tests in `library_dir`.)
+    /// dash-stripped id is under four chars, or splits a multi-byte char) cannot
+    /// index the prefix's byte slice, so the path builder refuses it. End to end
+    /// it is bad data: the row does not apply and the cursor holds. (The slice
+    /// itself is proven non-panicking by the `hashed_path` unit tests in
+    /// `library_dir`.)
     #[tokio::test]
     async fn unindexable_id_is_refused_not_panicked() {
         let storage = MockSyncStorage::new();
@@ -1674,7 +1674,8 @@ mod blob_path_traversal {
             &[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-                // `id = "a"` dash-strips to "a"; `&hex[..2]` would panic on it.
+                // `id = "a"` dash-strips to "a", too short for the `&hex[..2]`
+                // prefix slice, so the path builder refuses it.
                 "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
                  VALUES ('a', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
             ],
@@ -1701,8 +1702,8 @@ mod blob_path_traversal {
     }
 
     /// A normal blob id still round-trips: the boundary check rejects only ids that
-    /// could escape the blob dir or can't be partitioned, and writes a well-formed
-    /// blob under its directory exactly as before.
+    /// could escape the blob dir or can't be partitioned, and a well-formed id
+    /// writes its blob under the blob directory at its partitioned path.
     #[tokio::test]
     async fn normal_id_still_writes_under_the_blob_dir() {
         let storage = MockSyncStorage::new();

@@ -25,6 +25,9 @@ pub enum BlobPathError {
     ParentDir,
     /// The token contains a NUL byte, which truncates the path at the OS boundary.
     NulByte,
+    /// The token contains a `:`, which on Windows names an alternate data stream
+    /// (`file:stream`) or a drive-relative reference (`c:dir`) rather than a child.
+    Colon,
     /// The dash-stripped id is too short, or splits a multi-byte char, to take the
     /// two leading byte-pairs the `{ab}/{cd}` partition prefix needs.
     Unindexable,
@@ -37,6 +40,7 @@ impl std::fmt::Display for BlobPathError {
             BlobPathError::Separator => write!(f, "blob path token contains a path separator"),
             BlobPathError::ParentDir => write!(f, "blob path token contains a parent reference"),
             BlobPathError::NulByte => write!(f, "blob path token contains a NUL byte"),
+            BlobPathError::Colon => write!(f, "blob path token contains a colon"),
             BlobPathError::Unindexable => {
                 write!(
                     f,
@@ -51,9 +55,9 @@ impl std::error::Error for BlobPathError {}
 
 /// Reject a single untrusted path token (a blob `id` or `namespace`) that could
 /// escape the directory it is joined onto. A safe token names exactly one child:
-/// no separator, no `..`, no NUL, non-empty. The single gate every path builder
-/// runs an untrusted token through, so traversal is refused before any on-disk or
-/// cloud path is formed.
+/// no separator, no `..`, no NUL, no `:` (a Windows stream/drive reference),
+/// non-empty. The single gate every path builder runs an untrusted token through,
+/// so traversal is refused before any on-disk or cloud path is formed.
 pub fn validate_path_token(token: &str) -> Result<(), BlobPathError> {
     if token.is_empty() {
         return Err(BlobPathError::Empty);
@@ -63,6 +67,9 @@ pub fn validate_path_token(token: &str) -> Result<(), BlobPathError> {
     }
     if token.contains('/') || token.contains('\\') {
         return Err(BlobPathError::Separator);
+    }
+    if token.contains(':') {
+        return Err(BlobPathError::Colon);
     }
     if token == ".." {
         return Err(BlobPathError::ParentDir);
@@ -253,8 +260,8 @@ mod tests {
         );
     }
 
-    /// An id too short to take the `{ab}/{cd}` prefix used to panic the byte slice
-    /// — one planted row would crash every pulling device. It is now refused.
+    /// An id too short to take the `{ab}/{cd}` prefix cannot index a two-byte
+    /// shard, so it is rejected as `Unindexable` rather than slicing past its end.
     #[test]
     fn hashed_path_refuses_a_short_id_instead_of_panicking() {
         assert_eq!(
@@ -298,7 +305,8 @@ mod tests {
 
     /// `validate_path_token` accepts an ordinary single token and rejects each
     /// escape shape: separators (`/` and `\`), a leading slash (an absolute path),
-    /// a bare `..`, a NUL, and the empty string.
+    /// a bare `..`, a NUL, a `:` (a Windows alternate-data-stream / drive-relative
+    /// reference), and the empty string.
     #[test]
     fn validate_path_token_accepts_safe_and_rejects_escapes() {
         assert_eq!(validate_path_token("abc123"), Ok(()));
@@ -308,6 +316,8 @@ mod tests {
         assert_eq!(validate_path_token("/abs"), Err(BlobPathError::Separator));
         assert_eq!(validate_path_token(".."), Err(BlobPathError::ParentDir));
         assert_eq!(validate_path_token("a\0b"), Err(BlobPathError::NulByte));
+        assert_eq!(validate_path_token("foo:bar"), Err(BlobPathError::Colon));
+        assert_eq!(validate_path_token("c:"), Err(BlobPathError::Colon));
     }
 
     /// A `cloud_path` is a readable object key, so an interior `/` is legitimate
