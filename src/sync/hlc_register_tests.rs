@@ -364,6 +364,163 @@ async fn returned_stamper_shares_seeded_clock() {
     assert!(s3 > s2, "stamper {s3} must outrank prior clock {s2}");
 }
 
+/// A grossly-future incoming `_updated_at` must neither win last-writer-wins nor
+/// ratchet the receiver's HLC. A peer whose wall clock is broken (or a buggy
+/// client) can stamp a row years ahead; as a raw string that value beats every
+/// honest stamp and, once applied, drags the receiver's clock up to it so every
+/// later local write inherits the skew. The receiver bounds an incoming stamp to
+/// its own wall time plus a generous offline allowance and refuses one beyond it.
+///
+/// Receiver B's wall clock is pinned at a known millis. A pre-existing local row
+/// carries an honest stamp at that time; A's incoming row carries a stamp ten
+/// years in the future. The honest local row must survive the merge, and B's HLC
+/// must stay near wall time rather than jumping ten years ahead.
+#[tokio::test]
+async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
+    let storage = MockSyncStorage::new();
+
+    // B's wall clock is pinned at t = 1_700_000_000_000 (a 2023 millis).
+    let b_wall: u64 = 1_700_000_000_000;
+    let b_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), move || b_wall));
+
+    // B already holds an honest local edit of n1, stamped at its own wall time.
+    let b_local_stamp = format!("{b_wall:013}-0000-dev-b");
+    let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
+    exec(
+        &db_b,
+        &format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'B honest', NULL, '{b_local_stamp}', '2026-01-01')"
+        ),
+    )
+    .await;
+
+    // A publishes a competing edit of n1 stamped ten years in the future — far
+    // beyond any legitimate offline skew.
+    let a_future_ms = b_wall + 10 * 365 * 24 * 60 * 60 * 1000;
+    let a_future_stamp = format!("{a_future_ms:013}-0000-dev-a");
+    let db_a = open_test_db();
+    let cs_a = capture_bytes(
+        &db_a,
+        &[&format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'A far future', NULL, '{a_future_stamp}', '2026-01-01')"
+        )],
+    )
+    .await;
+    storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
+
+    // B pulls A's changeset.
+    let (_cursors, result) = pull_into(
+        &db_b,
+        &storage,
+        "dev-b",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    // (a) LWW: the grossly-future row must NOT win — B's honest local edit stands.
+    assert_eq!(
+        query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "B honest",
+        "a grossly-future incoming _updated_at won LWW over an honest local stamp",
+    );
+
+    // (b) clock ratchet: the pull must not carry the far-future stamp as the value
+    // to advance the HLC past — it stays unset because the only applied row's stamp
+    // was rejected as grossly-future.
+    assert!(
+        result.max_applied_updated_at.is_none(),
+        "a grossly-future incoming stamp was collected to ratchet the HLC: {:?}",
+        result.max_applied_updated_at,
+    );
+
+    // And the live clock is not skewed: B's next stamp sorts near its wall time,
+    // far below the ten-years-future incoming value.
+    let next = b_hlc.now().to_string();
+    assert!(
+        next.as_str() < a_future_stamp.as_str(),
+        "B's clock ratcheted past a grossly-future incoming stamp: next={next} \
+         incoming={a_future_stamp}",
+    );
+}
+
+/// A legitimately-skewed incoming stamp — within the offline allowance — still
+/// applies and wins normally. Devices are offline for long stretches, so a stamp
+/// days ahead of the receiver's wall clock is honest and must not be rejected.
+/// Receiver B is at wall time; A's incoming edit is stamped a few days ahead
+/// (well inside the allowance). A's edit must win LWW and advance B's clock.
+#[tokio::test]
+async fn legitimately_skewed_incoming_still_wins_and_advances() {
+    let storage = MockSyncStorage::new();
+
+    let b_wall: u64 = 1_700_000_000_000;
+    let b_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), move || b_wall));
+
+    // B holds an honest local edit at its own wall time.
+    let b_local_stamp = format!("{b_wall:013}-0000-dev-b");
+    let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
+    exec(
+        &db_b,
+        &format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'B honest', NULL, '{b_local_stamp}', '2026-01-01')"
+        ),
+    )
+    .await;
+
+    // A's edit is stamped three days ahead — a plausible cross-device clock spread,
+    // well within the offline-skew allowance.
+    let a_ms = b_wall + 3 * 24 * 60 * 60 * 1000;
+    let a_stamp = format!("{a_ms:013}-0000-dev-a");
+    let db_a = open_test_db();
+    let cs_a = capture_bytes(
+        &db_a,
+        &[&format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'A skewed', NULL, '{a_stamp}', '2026-01-01')"
+        )],
+    )
+    .await;
+    storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
+
+    let (_cursors, result) = pull_into(
+        &db_b,
+        &storage,
+        "dev-b",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    // A's causally-later (within-allowance) edit wins.
+    assert_eq!(
+        query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "A skewed",
+        "a legitimately-skewed incoming edit failed to win LWW",
+    );
+
+    // And it advances B's clock past the applied stamp, so B's next write sorts
+    // after A's.
+    assert_eq!(
+        result.max_applied_updated_at,
+        Some(Timestamp::parse(&a_stamp).unwrap()),
+        "a within-allowance applied stamp was not collected to advance the HLC",
+    );
+    if let Some(max) = &result.max_applied_updated_at {
+        b_hlc.advance_past(max);
+    }
+    let next = b_hlc.now().to_string();
+    assert!(
+        next.as_str() > a_stamp.as_str(),
+        "B's clock did not advance past a legitimately-skewed applied stamp: \
+         next={next} applied={a_stamp}",
+    );
+}
+
 /// Regression: a sync cycle that errors mid-span — after the capture has
 /// suspended the session but before the span completes — must still re-attach the
 /// capture session. The `Database` (and its actor) outlive the cycle and are

@@ -2216,7 +2216,8 @@ mod tests {
         // Apply cycle 2's output to a fresh peer: complete consistent subtree.
         let peer = conn();
         create_synced_schema(&peer);
-        apply_changeset_lww(&peer, &out2, &tables).expect("apply to peer");
+        apply_changeset_lww(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
+            .expect("apply to peer");
         assert!(
             row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
             "peer has the note"
@@ -2430,7 +2431,8 @@ mod tests {
 
     /// Apply a changeset with the production LWW path, scoped to the album set.
     fn apply_album(c: &Connection, bytes: &[u8]) {
-        apply_changeset_lww(c, bytes, &album_tables()).expect("apply album changeset");
+        apply_changeset_lww(c, bytes, &album_tables(), crate::sync::hlc::now_wall_ms())
+            .expect("apply album changeset");
     }
 
     /// The inferred keep-children of `tbl`, as `(child, fk column name)`, sorted.
