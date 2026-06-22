@@ -9,22 +9,156 @@
 //! the owner's snapshot with its own.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::clock::SystemClock;
+use crate::config::Config;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
+use crate::id_provider::SequentialIdProvider;
+use crate::join_code::{encode, InviteCode, JoinCodeError};
 use crate::keys::UserKeypair;
+use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::join::open_db_and_pull;
+use crate::sync::join::{join_from_invite_code, open_db_and_pull, JoinError};
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SNAPSHOT_BLOB_BACKFILL_PENDING,
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
+
+/// An invite code carrying an attacker-chosen `library_id` is the path-traversal
+/// vector: the code is unsigned, and the id becomes a directory the joiner creates
+/// and — on a bootstrap failure — recursively deletes. The id is refused the moment
+/// the code is decoded, so a crafted code never reaches the directory step: decode
+/// fails, nothing is created outside the libraries root, and no network or
+/// filesystem work runs.
+fn invite_code_with_library_id(library_id: &str) -> InviteCode {
+    InviteCode {
+        library_id: library_id.to_string(),
+        library_name: "Evil".to_string(),
+        join_info: CloudHomeJoinInfo::S3 {
+            bucket: "b".to_string(),
+            region: "us-east-1".to_string(),
+            // Port 1 / loopback: nothing listens, so a connect fails at once. A
+            // normal id reaches the network unwrap and fails here fast, instead of
+            // resolving a real AWS endpoint.
+            endpoint: Some("http://127.0.0.1:1".to_string()),
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+            key_prefix: None,
+        },
+        owner_pubkey: "deadbeef".to_string(),
+    }
+}
+
+/// Drive the full join path for an invite code string and return its result. Uses
+/// an app dir under `tmp` and no-op blob source; a malicious id fails at decode
+/// before any cloud home is built, so the cloud details never matter.
+async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Config, JoinError> {
+    let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
+    join_from_invite_code(
+        code_str,
+        app_dir,
+        &test_synced_tables(),
+        None,
+        None,
+        Arc::new(SystemClock),
+        ids,
+        |_| Box::new(NoopBlobSource),
+        |_| {},
+    )
+    .await
+}
+
+/// Every traversal-shaped `library_id` is refused at the decode boundary: `decode`
+/// returns `JoinCodeError::InvalidLibraryId`, so a decoded `InviteCode` never
+/// carries a traversal id. Driven end to end, the decode error propagates as
+/// `JoinError::Database` and the join creates nothing outside the libraries root.
+///
+/// The cases share one mechanism and differ only in the malicious id and the
+/// directory it would escape to, so they run as a table:
+/// - `../escape`: `app_dir/libraries/../escape` resolves to `app_dir/escape`.
+/// - an absolute path: `libraries`.join("/abs") == "/abs" replaces the base.
+/// - `.`: a trailing `.` normalizes away, so `libraries/.` lands on the data dir.
+#[tokio::test]
+async fn join_rejects_traversal_library_id_at_decode() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+    // The absolute case escapes to a path *inside* the temp dir, so even a
+    // regressed guard never writes to a real shared location.
+    let parent_escape = app_dir.join("escape");
+    let abs_escape = app_dir.join("abs_escape");
+    let abs_id = abs_escape.to_str().expect("utf8 path").to_string();
+
+    let cases: [(&str, Option<&std::path::Path>); 3] = [
+        ("../escape", Some(parent_escape.as_path())),
+        (&abs_id, Some(abs_escape.as_path())),
+        (".", None),
+    ];
+
+    for (library_id, escape_target) in cases {
+        let encoded = encode(&invite_code_with_library_id(library_id));
+        assert!(
+            matches!(
+                crate::join_code::decode(&encoded),
+                Err(JoinCodeError::InvalidLibraryId(_))
+            ),
+            "decode must refuse `{library_id}` with InvalidLibraryId",
+        );
+
+        let result = join_result_for(&encoded, app_dir).await;
+        assert!(
+            matches!(result, Err(JoinError::Database(_))),
+            "`{library_id}` must fail the join with the propagated decode error, got {result:?}",
+        );
+        if let Some(target) = escape_target {
+            assert!(
+                !target.exists(),
+                "join must not create an escape directory at {}",
+                target.display(),
+            );
+        }
+    }
+}
+
+/// A normal `library_id` decodes and the join reaches the cloud step, where it
+/// fails on the unreachable endpoint (`JoinError::Invite`, from the wrapped-key
+/// download) rather than on the id — proving the decoder rejects only unsafe ids
+/// and the directory the join would create sits under `libraries/`.
+///
+/// Join reads the device's user keypair from the keyring before the cloud download,
+/// so a keypair must exist for execution to reach the cloud. The user keypair is one
+/// process-wide keyring account, so this seeds it under `SIGNING_KEY_GUARD` to keep
+/// a parallel test from deleting it mid-join; the guard is held across the join await
+/// (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so the
+/// blocking `std` lock never deadlocks against another task on this runtime).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn join_accepts_a_normal_library_id_past_decode() {
+    let encoded = encode(&invite_code_with_library_id("abc-123"));
+    let decoded = crate::join_code::decode(&encoded).expect("a normal id decodes");
+    assert_eq!(decoded.library_id, "abc-123");
+
+    crate::keys::test_keyring::install();
+    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+    crate::keys::KeyService::new("join-test".to_string())
+        .get_or_create_user_keypair()
+        .expect("seed the device user keypair");
+
+    // End to end the join still fails — the S3 endpoint above is bogus — but it
+    // fails at the cloud read past the decode boundary, not at the id.
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+    let result = join_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(result, Err(JoinError::Invite(_))),
+        "the bogus cloud endpoint must fail the join at the cloud read, got {result:?}",
+    );
+}
 
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {

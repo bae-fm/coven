@@ -215,7 +215,17 @@ pub async fn join_library(
     make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
-    // Step 1: Load user keypair (must already exist — the inviter wrapped the
+    // A function that reaches `remove_dir_all` validates its own id: this guards
+    // the destructive `libraries/<id>` create/delete against any direct caller,
+    // independent of the decode-time check that validates untrusted input up front.
+    crate::library_dir::validate_path_token(&code.library_id)
+        .map_err(|e| JoinError::Database(format!("invalid library id: {e}")))?;
+
+    // `code.library_id` is a safe single path component: `crate::join_code::decode`
+    // rejects any id that isn't, so a decoded `InviteCode` never carries a traversal
+    // id and the directory it names below stays under `libraries/`.
+
+    // Load user keypair (must already exist — the inviter wrapped the
     // library key for this public key).
     on_status("Loading keypair...");
     let user_keypair = key_service.get_user_keypair()?;
@@ -234,10 +244,10 @@ pub async fn join_library(
     .await?;
     let encryption_key_hex = hex::encode(encryption_key);
 
-    // Step 3: Create the sync storage with the real encryption key. Joining a
-    // shared library only makes sense over an opaque home — the invite wraps the
-    // library key — so the home is always opaque here: the cipher is `Encrypted`
-    // and the blob-path scheme is `Hashed`, matching what the owner writes.
+    // Create the sync storage with the real encryption key. Joining a shared
+    // library only makes sense over an opaque home — the invite wraps the library
+    // key — so the home is always opaque here: the cipher is `Encrypted` and the
+    // blob-path scheme is `Hashed`, matching what the owner writes.
     on_status("Downloading library snapshot...");
     let encryption = EncryptionService::new(&encryption_key_hex)?;
     let cipher = CloudCipher::Encrypted(encryption);
@@ -247,7 +257,9 @@ pub async fn join_library(
     let storage =
         CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, user_keypair.clone());
 
-    // Step 4: Create library directory using the invite code's library_id.
+    // Create the library directory under `libraries/`, named by the invite's
+    // `library_id`. The decode guaranteed the id is a safe single component, so the
+    // directory is a direct child of `libraries/` and cannot escape it.
     let library_id = code.library_id;
     let device_id = ids.new_id();
     let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));

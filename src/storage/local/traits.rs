@@ -13,11 +13,11 @@ pub enum StorageError {
     #[error("Database error: {0}")]
     Database(String),
     /// The file id does not form a safe content-addressed path (see
-    /// [`crate::library_dir::BlobPathError`]). For local managed storage the id is
+    /// [`crate::library_dir::PathTokenError`]). For local managed storage the id is
     /// device-generated, so this is a programmer error surfaced loudly, never a
     /// silent mis-shard.
     #[error("invalid blob id: {0}")]
-    InvalidId(#[from] crate::library_dir::BlobPathError),
+    InvalidId(#[from] crate::library_dir::PathTokenError),
 }
 
 /// Progress callback type: (bytes_written, total_bytes)

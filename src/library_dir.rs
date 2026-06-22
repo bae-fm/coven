@@ -4,25 +4,36 @@ use tracing::info;
 
 use crate::config::{Config, ConfigError};
 
-/// Why a string is not a safe blob path token.
+/// Why a string is not a safe path token.
 ///
-/// A blob's `id`/`namespace` is interpolated into both its on-disk file path and
-/// its cloud object key. Those values arrive in an incoming changeset authored by
-/// any write-capable member, so an unconstrained one could climb out of the
-/// library directory (`..`, a path separator, an absolute leading slash) and make
-/// every pulling device write attacker-chosen bytes to an arbitrary file, or — too
-/// short / not aligned to a char boundary — crash the partition-prefix slice. A
-/// token that trips any of these is bad data, refused before a path is built.
+/// An untrusted string becomes a path component in several places: a blob's
+/// `id`/`namespace` (interpolated into its on-disk file path and cloud object
+/// key), and a `library_id`/`lid` from an unsigned invite or restore code (the
+/// name of a directory under `libraries/`). All arrive from outside — an incoming
+/// changeset authored by any write-capable member, or a pasted code anyone can
+/// craft — so an unconstrained one could climb out of the directory it is joined
+/// onto (`..`, a path separator, an absolute leading slash) and make a pulling or
+/// joining device read, write, or recursively delete an arbitrary location, or —
+/// too short / not aligned to a char boundary — crash a blob's partition-prefix
+/// slice. A string that trips any of these is bad data, refused before a path is
+/// built or used.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlobPathError {
+pub enum PathTokenError {
     /// The token is empty — no file name to write, no key to form.
     Empty,
     /// The token contains a path separator (`/` or `\`), so joining it onto a
     /// directory would descend into (or, with a leading separator, replace) the
     /// path rather than name a single child.
     Separator,
-    /// The token is or contains a `..` component, which climbs to the parent.
+    /// The token is exactly `..`, which names the parent of the directory it is
+    /// joined onto rather than a child. A trailing `..` component is normalized
+    /// away when the path is resolved, so the join lands on the parent.
     ParentDir,
+    /// The token is exactly `.`, which names the directory it is joined onto
+    /// itself rather than a child. Like `..`, a trailing `.` component is
+    /// normalized away, so `libraries/.` resolves to `libraries`'s parent (the
+    /// data dir) — an escape just as `..` is.
+    CurDir,
     /// The token contains a NUL byte, which truncates the path at the OS boundary.
     NulByte,
     /// The token contains a `:`, which on Windows names an alternate data stream
@@ -33,46 +44,56 @@ pub enum BlobPathError {
     Unindexable,
 }
 
-impl std::fmt::Display for BlobPathError {
+impl std::fmt::Display for PathTokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlobPathError::Empty => write!(f, "blob path token is empty"),
-            BlobPathError::Separator => write!(f, "blob path token contains a path separator"),
-            BlobPathError::ParentDir => write!(f, "blob path token contains a parent reference"),
-            BlobPathError::NulByte => write!(f, "blob path token contains a NUL byte"),
-            BlobPathError::Colon => write!(f, "blob path token contains a colon"),
-            BlobPathError::Unindexable => {
+            PathTokenError::Empty => write!(f, "path token is empty"),
+            PathTokenError::Separator => write!(f, "path token contains a path separator"),
+            PathTokenError::ParentDir => write!(f, "path token contains a parent reference"),
+            PathTokenError::CurDir => write!(f, "path token is a current-directory reference"),
+            PathTokenError::NulByte => write!(f, "path token contains a NUL byte"),
+            PathTokenError::Colon => write!(f, "path token contains a colon"),
+            PathTokenError::Unindexable => {
                 write!(
                     f,
-                    "blob id is too short or misaligned to form a partition prefix"
+                    "id is too short or misaligned to form a partition prefix"
                 )
             }
         }
     }
 }
 
-impl std::error::Error for BlobPathError {}
+impl std::error::Error for PathTokenError {}
 
-/// Reject a single untrusted path token (a blob `id` or `namespace`) that could
-/// escape the directory it is joined onto. A safe token names exactly one child:
-/// no separator, no `..`, no NUL, no `:` (a Windows stream/drive reference),
-/// non-empty. The single gate every path builder runs an untrusted token through,
-/// so traversal is refused before any on-disk or cloud path is formed.
-pub fn validate_path_token(token: &str) -> Result<(), BlobPathError> {
+/// Reject a single untrusted path token (a blob `id`/`namespace`, or a
+/// `library_id`/`lid`) that could escape the directory it is joined onto. A safe
+/// token names exactly one child: no separator, no `..`, no `.`, no NUL, no `:` (a
+/// Windows stream/drive reference), non-empty. The single gate every path builder
+/// and every code decoder runs an untrusted token through, so traversal is refused
+/// before any on-disk or cloud path is formed — and a decoded id is a safe single
+/// component by the time any consumer joins it onto a directory.
+///
+/// Both `.` and `..` are refused: each is a directory-relative reference that a
+/// trailing path component normalizes away, so joining either onto `dir` resolves
+/// to `dir` itself or its parent rather than to a child of `dir`.
+pub fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
     if token.is_empty() {
-        return Err(BlobPathError::Empty);
+        return Err(PathTokenError::Empty);
     }
     if token.contains('\0') {
-        return Err(BlobPathError::NulByte);
+        return Err(PathTokenError::NulByte);
     }
     if token.contains('/') || token.contains('\\') {
-        return Err(BlobPathError::Separator);
+        return Err(PathTokenError::Separator);
     }
     if token.contains(':') {
-        return Err(BlobPathError::Colon);
+        return Err(PathTokenError::Colon);
     }
     if token == ".." {
-        return Err(BlobPathError::ParentDir);
+        return Err(PathTokenError::ParentDir);
+    }
+    if token == "." {
+        return Err(PathTokenError::CurDir);
     }
     Ok(())
 }
@@ -84,24 +105,24 @@ pub fn validate_path_token(token: &str) -> Result<(), BlobPathError> {
 /// separator (an absolute key), a `\`, or a NUL still escape or truncate, so they
 /// are refused. The `cloud_path` never feeds a local file path, only the cloud
 /// object key, so this guards the keyspace, not the disk.
-pub fn validate_cloud_path(cloud_path: &str) -> Result<(), BlobPathError> {
+pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
     if cloud_path.is_empty() {
-        return Err(BlobPathError::Empty);
+        return Err(PathTokenError::Empty);
     }
     if cloud_path.contains('\0') {
-        return Err(BlobPathError::NulByte);
+        return Err(PathTokenError::NulByte);
     }
     if cloud_path.contains('\\') {
-        return Err(BlobPathError::Separator);
+        return Err(PathTokenError::Separator);
     }
     if cloud_path.starts_with('/') {
-        return Err(BlobPathError::Separator);
+        return Err(PathTokenError::Separator);
     }
     if Path::new(cloud_path)
         .components()
         .any(|c| c == Component::ParentDir)
     {
-        return Err(BlobPathError::ParentDir);
+        return Err(PathTokenError::ParentDir);
     }
     Ok(())
 }
@@ -151,21 +172,21 @@ impl LibraryDir {
     /// Both `prefix` and `id` are validated as single path tokens, and the id must
     /// be long enough (and char-boundary aligned) to take the two leading
     /// byte-pairs the prefix needs. An id that fails is bad data — it could escape
-    /// the directory or crash the slice — so this returns [`BlobPathError`] rather
+    /// the directory or crash the slice — so this returns [`PathTokenError`] rather
     /// than interpolating it or panicking; the caller refuses the blob.
-    pub fn hashed_path(prefix: &str, id: &str) -> Result<String, BlobPathError> {
+    pub fn hashed_path(prefix: &str, id: &str) -> Result<String, PathTokenError> {
         validate_path_token(prefix)?;
         validate_path_token(id)?;
         let hex = id.replace('-', "");
         if !(hex.is_char_boundary(2) && hex.is_char_boundary(4)) {
-            return Err(BlobPathError::Unindexable);
+            return Err(PathTokenError::Unindexable);
         }
         Ok(format!("{prefix}/{}/{}/{id}", &hex[..2], &hex[2..4]))
     }
 
     /// Hash-based image path: `images/{ab}/{cd}/{id}`. `Err` if `id` is not a safe,
     /// indexable blob token (see [`Self::hashed_path`]).
-    pub fn image_path(&self, id: &str) -> Result<PathBuf, BlobPathError> {
+    pub fn image_path(&self, id: &str) -> Result<PathBuf, PathTokenError> {
         Ok(self.path.join(Self::hashed_path("images", id)?))
     }
 
@@ -175,7 +196,7 @@ impl LibraryDir {
 
     /// Hash-based torrent file path: `torrents/{ab}/{cd}/{id}`. `Err` if
     /// `torrent_id` is not a safe, indexable blob token (see [`Self::hashed_path`]).
-    pub fn torrent_file_path(&self, torrent_id: &str) -> Result<PathBuf, BlobPathError> {
+    pub fn torrent_file_path(&self, torrent_id: &str) -> Result<PathBuf, PathTokenError> {
         Ok(self.path.join(Self::hashed_path("torrents", torrent_id)?))
     }
 
@@ -185,7 +206,7 @@ impl LibraryDir {
 
     /// Hash-based storage path: `storage/{ab}/{cd}/{file_id}`. `Err` if `file_id`
     /// is not a safe, indexable blob token (see [`Self::hashed_path`]).
-    pub fn storage_file_path(&self, file_id: &str) -> Result<PathBuf, BlobPathError> {
+    pub fn storage_file_path(&self, file_id: &str) -> Result<PathBuf, PathTokenError> {
         Ok(self.path.join(Self::hashed_path("storage", file_id)?))
     }
 
@@ -206,12 +227,19 @@ impl LibraryDir {
     ///
     /// The caller is responsible for encryption key setup and calling
     /// `Config::save_active_library()` afterward.
+    ///
+    /// `library_id` is device-generated here (trusted), but it still has to name a
+    /// single directory under `libraries/`, so it passes the same
+    /// [`validate_path_token`] gate the untrusted join/restore ids pass — a
+    /// malformed id fails loudly rather than forming a stray path.
     pub fn create(
         data_dir: &Path,
         library_id: String,
         library_name: String,
         ids: &dyn crate::id_provider::IdProvider,
     ) -> Result<Config, ConfigError> {
+        validate_path_token(&library_id)
+            .map_err(|e| ConfigError::Config(format!("invalid library id: {e}")))?;
         let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
         std::fs::create_dir_all(&*library_dir)?;
 
@@ -266,7 +294,7 @@ mod tests {
     fn hashed_path_refuses_a_short_id_instead_of_panicking() {
         assert_eq!(
             LibraryDir::hashed_path("images", "a"),
-            Err(BlobPathError::Unindexable),
+            Err(PathTokenError::Unindexable),
         );
     }
 
@@ -277,7 +305,7 @@ mod tests {
         // 'é' is two bytes; "aé" puts a char boundary failure at byte 2.
         assert_eq!(
             LibraryDir::hashed_path("images", "aé"),
-            Err(BlobPathError::Unindexable),
+            Err(PathTokenError::Unindexable),
         );
     }
 
@@ -287,37 +315,48 @@ mod tests {
     fn hashed_path_refuses_traversal_tokens() {
         assert_eq!(
             LibraryDir::hashed_path("images", "ab/../../etc/passwd"),
-            Err(BlobPathError::Separator),
+            Err(PathTokenError::Separator),
         );
         assert_eq!(
             LibraryDir::hashed_path("images", ".."),
-            Err(BlobPathError::ParentDir),
+            Err(PathTokenError::ParentDir),
         );
         assert_eq!(
             LibraryDir::hashed_path("images", "a\0b"),
-            Err(BlobPathError::NulByte),
+            Err(PathTokenError::NulByte),
         );
         assert_eq!(
             LibraryDir::hashed_path("im/ages", "abcd"),
-            Err(BlobPathError::Separator),
+            Err(PathTokenError::Separator),
         );
     }
 
     /// `validate_path_token` accepts an ordinary single token and rejects each
     /// escape shape: separators (`/` and `\`), a leading slash (an absolute path),
-    /// a bare `..`, a NUL, a `:` (a Windows alternate-data-stream / drive-relative
-    /// reference), and the empty string.
+    /// a bare `..` and a bare `.` (both directory-relative references that
+    /// normalize away to land off a child), a NUL, a `:` (a Windows
+    /// alternate-data-stream / drive-relative reference), and the empty string.
     #[test]
     fn validate_path_token_accepts_safe_and_rejects_escapes() {
         assert_eq!(validate_path_token("abc123"), Ok(()));
-        assert_eq!(validate_path_token(""), Err(BlobPathError::Empty));
-        assert_eq!(validate_path_token("a/b"), Err(BlobPathError::Separator));
-        assert_eq!(validate_path_token("a\\b"), Err(BlobPathError::Separator));
-        assert_eq!(validate_path_token("/abs"), Err(BlobPathError::Separator));
-        assert_eq!(validate_path_token(".."), Err(BlobPathError::ParentDir));
-        assert_eq!(validate_path_token("a\0b"), Err(BlobPathError::NulByte));
-        assert_eq!(validate_path_token("foo:bar"), Err(BlobPathError::Colon));
-        assert_eq!(validate_path_token("c:"), Err(BlobPathError::Colon));
+        assert_eq!(validate_path_token(""), Err(PathTokenError::Empty));
+        assert_eq!(validate_path_token("a/b"), Err(PathTokenError::Separator));
+        assert_eq!(validate_path_token("a\\b"), Err(PathTokenError::Separator));
+        assert_eq!(validate_path_token("/abs"), Err(PathTokenError::Separator));
+        assert_eq!(validate_path_token(".."), Err(PathTokenError::ParentDir));
+        assert_eq!(validate_path_token("."), Err(PathTokenError::CurDir));
+        assert_eq!(validate_path_token("a\0b"), Err(PathTokenError::NulByte));
+        assert_eq!(validate_path_token("foo:bar"), Err(PathTokenError::Colon));
+        assert_eq!(validate_path_token("c:"), Err(PathTokenError::Colon));
+    }
+
+    /// A lone `.` is rejected just as `..` is: a trailing `.` component is
+    /// normalized away when the path resolves, so `libraries/.` would land on
+    /// `libraries`'s parent (the data dir) rather than name a child of `libraries/`
+    /// — an escape. The unit under test is the rejection itself.
+    #[test]
+    fn validate_path_token_rejects_lone_current_dir() {
+        assert_eq!(validate_path_token("."), Err(PathTokenError::CurDir));
     }
 
     /// A `cloud_path` is a readable object key, so an interior `/` is legitimate
@@ -326,17 +365,17 @@ mod tests {
     #[test]
     fn validate_cloud_path_allows_nesting_but_rejects_escapes() {
         assert_eq!(validate_cloud_path("Artist - Album/cover.jpg"), Ok(()));
-        assert_eq!(validate_cloud_path(""), Err(BlobPathError::Empty));
+        assert_eq!(validate_cloud_path(""), Err(PathTokenError::Empty));
         assert_eq!(
             validate_cloud_path("../escape"),
-            Err(BlobPathError::ParentDir),
+            Err(PathTokenError::ParentDir),
         );
         assert_eq!(
             validate_cloud_path("a/../../escape"),
-            Err(BlobPathError::ParentDir),
+            Err(PathTokenError::ParentDir),
         );
-        assert_eq!(validate_cloud_path("/abs"), Err(BlobPathError::Separator));
-        assert_eq!(validate_cloud_path("a\\b"), Err(BlobPathError::Separator),);
+        assert_eq!(validate_cloud_path("/abs"), Err(PathTokenError::Separator));
+        assert_eq!(validate_cloud_path("a\\b"), Err(PathTokenError::Separator),);
     }
 
     /// `path_escapes_root` flags any local path that carries a `..` component (it

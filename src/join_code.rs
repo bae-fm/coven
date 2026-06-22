@@ -25,7 +25,17 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(s.trim())
         .map_err(|_| JoinCodeError::InvalidBase64)?;
-    serde_json::from_slice(&bytes).map_err(|e| JoinCodeError::InvalidJson(e.to_string()))
+    let code: InviteCode =
+        serde_json::from_slice(&bytes).map_err(|e| JoinCodeError::InvalidJson(e.to_string()))?;
+    // An invite is unsigned, so `library_id` is attacker-controlled. It becomes the
+    // name of a directory the joiner creates under `libraries/` and recursively
+    // deletes on a bootstrap failure, so a value carrying `..`, a separator, or an
+    // absolute path would put that create/delete outside the libraries root. Reject
+    // it the moment the code is parsed: a decoded `InviteCode` always carries a
+    // `library_id` that is a single safe path component.
+    crate::library_dir::validate_path_token(&code.library_id)
+        .map_err(JoinCodeError::InvalidLibraryId)?;
+    Ok(code)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,6 +102,12 @@ pub enum JoinCodeError {
     InvalidBase64,
     #[error("invalid invite code payload: {0}")]
     InvalidJson(String),
+    /// The invite's `library_id` is not a safe path component, so it cannot name a
+    /// library directory under `libraries/`. The invite is unsigned and anyone can
+    /// craft one, so the id is refused here at decode rather than reaching a path
+    /// operation.
+    #[error("invalid library id in invite code: {0}")]
+    InvalidLibraryId(crate::library_dir::PathTokenError),
 }
 
 #[cfg(test)]

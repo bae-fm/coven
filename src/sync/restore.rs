@@ -210,9 +210,16 @@ pub async fn restore_from_cloud(
     make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
-    if library_id.is_empty() {
-        return Err(RestoreError::Database("Library ID is required".to_string()));
-    }
+    // A function that reaches `remove_dir_all` validates its own id: this guards
+    // the destructive `libraries/<id>` create/delete against any direct caller,
+    // independent of the decode-time check that validates untrusted input up front.
+    crate::library_dir::validate_path_token(library_id)
+        .map_err(|e| RestoreError::Database(format!("invalid library id: {e}")))?;
+
+    // `library_id` is a safe single path component: `decode_restore_code` rejects
+    // any `lid` that isn't, so the directory it names below stays under
+    // `libraries/`. (A non-empty id is part of that guarantee — the decoder rejects
+    // the empty string too.)
 
     // The key's presence is the home's storage mode: a key present ⇒ an opaque
     // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
@@ -247,7 +254,9 @@ pub async fn restore_from_cloud(
 
     let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, keypair.clone());
 
-    // Create library directory.
+    // Create the library directory under `libraries/`, named by the restore code's
+    // `lid`. The decode guaranteed the id is a safe single component, so the
+    // directory is a direct child of `libraries/` and cannot escape it.
     let device_id = ids.new_id();
     let library_dir = LibraryDir::new(app_dir.join("libraries").join(library_id));
     std::fs::create_dir_all(&*library_dir)?;
