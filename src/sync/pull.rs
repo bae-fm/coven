@@ -970,6 +970,38 @@ pub(crate) async fn download_blobs(
 ) -> bool {
     let mut all_ok = true;
     for blob in blobs {
+        // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
+        // changeset authored by any write-capable member, and its `local_path` is
+        // built from those by the host. An id or namespace that is not a single
+        // safe path token, a cloud_path that escapes its prefix, or a local_path
+        // that climbs above its directory would write attacker-chosen bytes outside
+        // the library — refuse the blob as bad data before resolving or writing it,
+        // the same posture as any other failed blob in this loop. The token check
+        // makes traversal unrepresentable; the local_path check is the independent
+        // second line, in case the host built the path some other way.
+        if let Err(e) = crate::library_dir::validate_path_token(&blob.namespace) {
+            error!(id = %blob.id, namespace = %blob.namespace, "blob namespace is not a safe path token ({e}); refusing");
+            all_ok = false;
+            continue;
+        }
+        if let Err(e) = crate::library_dir::validate_path_token(&blob.id) {
+            error!(id = %blob.id, namespace = %blob.namespace, "blob id is not a safe path token ({e}); refusing");
+            all_ok = false;
+            continue;
+        }
+        if let Some(cloud_path) = blob.cloud_path.as_deref() {
+            if let Err(e) = crate::library_dir::validate_cloud_path(cloud_path) {
+                error!(id = %blob.id, cloud_path = %cloud_path, "blob cloud_path escapes its prefix ({e}); refusing");
+                all_ok = false;
+                continue;
+            }
+        }
+        if crate::library_dir::path_escapes_root(&blob.local_path) {
+            error!(id = %blob.id, path = %blob.local_path.display(), "blob local path climbs above its directory; refusing");
+            all_ok = false;
+            continue;
+        }
+
         match crate::local_blob::exists(&blob.local_path).await {
             // Already on disk — don't re-download.
             Ok(true) => continue,
