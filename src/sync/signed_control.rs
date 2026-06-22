@@ -88,7 +88,7 @@ impl HeadJson {
             self.snapshot_seq,
             self.last_sync.as_deref(),
         );
-        verify_detached(&self.author_pubkey, &self.signature, &payload)
+        keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
 
@@ -133,7 +133,7 @@ impl MinSchemaVersionJson {
 
     /// Verify the embedded signature against the embedded `author_pubkey`.
     pub fn verify(&self) -> bool {
-        verify_detached(
+        keys::verify_signature_hex(
             &self.author_pubkey,
             &self.signature,
             &min_schema_signing_payload(self.min_schema_version),
@@ -144,13 +144,6 @@ impl MinSchemaVersionJson {
 fn min_schema_signing_payload(version: u32) -> Vec<u8> {
     // A single integer field; its big-endian bytes are a canonical payload.
     version.to_be_bytes().to_vec()
-}
-
-/// Verify a hex-encoded detached Ed25519 signature over `payload`. Delegates to
-/// the shared [`keys::verify_signature_hex`] so both control-object shapes and the
-/// changeset envelope decode-and-verify identically.
-fn verify_detached(pk_hex: &str, sig_hex: &str, payload: &[u8]) -> bool {
-    keys::verify_signature_hex(pk_hex, sig_hex, payload)
 }
 
 #[cfg(test)]
