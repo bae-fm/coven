@@ -43,6 +43,7 @@ fn store_signed_changeset(
         timestamp: env_ts.to_string(),
         changeset_size: changeset_bytes.len(),
         author_pubkey: None,
+        membership_grant: None,
         signature: None,
     };
     envelope::sign_envelope(&mut env, author, changeset_bytes);

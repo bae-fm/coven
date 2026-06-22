@@ -58,6 +58,44 @@ pub struct MembershipEntry {
     pub signature: String,
 }
 
+/// Storage coordinate of a membership entry: the owner who signed it
+/// (`author`, an owner's pubkey) and that owner's per-author sequence number
+/// (`seq`). Together they are the entry's object key `membership/{author}/{seq}`.
+///
+/// A changeset names the coordinate of the entry that grants its author write
+/// access. A puller that does not yet see that entry (membership entries and
+/// changesets are separate, unordered object streams) can then fetch exactly that
+/// one object — a keyed GET is strongly consistent, unlike the LIST that rebuilds
+/// the chain each cycle — and resolve the gap deterministically instead of
+/// dropping the changeset as non-member.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MembershipCoord {
+    pub author: String,
+    pub seq: u64,
+}
+
+/// The coordinate of the entry that grants `pubkey` write access: the most
+/// recent (by causal timestamp) write-capable `Add` of `pubkey` among `entries`,
+/// each paired with the storage coordinate it was loaded from. Returns `None`
+/// when no such entry exists. A device embeds this in changesets it authors so a
+/// puller can name and fetch the exact entry that authorizes the write.
+///
+/// A later `Remove` or role downgrade is not consulted here — the puller merges
+/// the named entry into its own full chain and re-judges, so a revocation it
+/// already holds still wins. This only needs to name the granting entry.
+pub fn write_grant_coord(
+    entries: &[(MembershipCoord, MembershipEntry)],
+    pubkey: &str,
+) -> Option<MembershipCoord> {
+    entries
+        .iter()
+        .filter(|(_, e)| {
+            e.action == MembershipAction::Add && e.user_pubkey == pubkey && e.role.can_write()
+        })
+        .max_by(|(_, a), (_, b)| a.timestamp.cmp(&b.timestamp))
+        .map(|(coord, _)| coord.clone())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
     #[error("first entry must be a self-signed owner Add")]
@@ -292,6 +330,60 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].0, pubkey_hex(&owner));
         assert_eq!(members[0].1, MemberRole::Owner);
+    }
+
+    #[test]
+    fn write_grant_coord_names_the_latest_write_granting_add() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let follower = gen_keypair();
+
+        // Pairs as a puller holds them: each entry with the storage coordinate it
+        // was loaded from. Founder at (owner, 1); the owner then adds a member at
+        // (owner, 2) and a follower at (owner, 3).
+        let coord = |kp: &UserKeypair, seq| MembershipCoord {
+            author: pubkey_hex(kp),
+            seq,
+        };
+        let entries = vec![
+            (
+                coord(&owner, 1),
+                founder_entry(&owner, "0000000001000-0000-dev1"),
+            ),
+            (
+                coord(&owner, 2),
+                make_entry(
+                    &owner,
+                    MembershipAction::Add,
+                    &member,
+                    MemberRole::Member,
+                    "0000000002000-0000-dev1",
+                ),
+            ),
+            (
+                coord(&owner, 3),
+                make_entry(
+                    &owner,
+                    MembershipAction::Add,
+                    &follower,
+                    MemberRole::Follower,
+                    "0000000003000-0000-dev1",
+                ),
+            ),
+        ];
+
+        // The owner's grant is the founder entry; the member's is its Add.
+        assert_eq!(
+            write_grant_coord(&entries, &pubkey_hex(&owner)),
+            Some(coord(&owner, 1))
+        );
+        assert_eq!(
+            write_grant_coord(&entries, &pubkey_hex(&member)),
+            Some(coord(&owner, 2))
+        );
+        // A read-only follower has no write grant; nor does an outsider.
+        assert_eq!(write_grant_coord(&entries, &pubkey_hex(&follower)), None);
+        assert_eq!(write_grant_coord(&entries, "deadbeef"), None);
     }
 
     #[test]

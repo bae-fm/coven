@@ -12,6 +12,8 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
+use crate::sync::envelope;
+use crate::sync::membership::{MemberRole, MembershipAction, MembershipCoord};
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::service::{SyncCycleError, SyncService};
 use crate::sync::storage::SyncStorage;
@@ -580,8 +582,219 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
 
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    // The cursor still advances past the rejected seq so it isn't refetched.
+    // An unsigned changeset in a chain library is the genuinely-bad case: nothing
+    // can authorize it, so it is skipped and the cursor advances (the client must
+    // not get stuck on it) and the skip is surfaced for a UI warning.
+    assert_eq!(result.skipped_unauthorized, 1);
     assert_eq!(updated.get("dev1"), Some(&1));
+}
+
+/// The membership-lag case: an authorized member's changeset is pulled before the
+/// entry that authorizes them shows up in a LIST. The changeset names its grant
+/// coordinate, so the puller fetches that exact entry by key (strongly consistent)
+/// and applies the changeset instead of dropping it forever.
+#[tokio::test]
+async fn pull_applies_member_changeset_whose_authorizing_entry_lags_via_grant_coord() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let member = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+
+    // Chain: founder (owner) at (owner, 1); the owner then adds `member` at
+    // (owner, 2).
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+    let add_member = make_entry(
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "0000000002000-0000-owner",
+    );
+    storage
+        .put_membership_entry(&owner_pk, 2, serde_json::to_vec(&add_member).unwrap())
+        .await
+        .unwrap();
+    // The authorizing entry hasn't propagated to LIST yet — but a keyed GET serves
+    // it (read-after-write), which is exactly what the grant coordinate enables.
+    storage.hide_membership_from_list(&owner_pk, 2);
+
+    // The member authors a signed changeset bound to its grant coordinate (owner, 2).
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromMember', NULL, '0000000003000-0000-member', '2026-01-01')",
+        ],
+    )
+    .await;
+    let grant = MembershipCoord {
+        author: owner_pk.clone(),
+        seq: 2,
+    };
+    let packed = envelope::pack_signed(
+        "devMember",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &member,
+        Some(grant),
+        &cs,
+    );
+    storage.put_changeset_packed("devMember", 1, packed);
+
+    // The puller's cycle-start chain (from LIST) is founder-only, so the member
+    // looks unauthorized — but the grant coordinate resolves the gap.
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(
+        result.changesets_applied, 1,
+        "the member's changeset must apply once its grant entry is fetched by key"
+    );
+    assert_eq!(result.skipped_unauthorized, 0);
+    assert_eq!(updated.get("devMember"), Some(&1));
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+}
+
+/// The forged case: a signed changeset by a non-member that names a grant
+/// coordinate which does not exist. A keyed GET returns NotFound (authoritative),
+/// so the changeset is genuinely unauthorized — skipped, cursor advanced (not
+/// stuck), and surfaced.
+#[tokio::test]
+async fn pull_skips_signed_changeset_whose_grant_coordinate_does_not_exist() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let outsider = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    // An outsider signs a changeset and points its grant at an entry that does not
+    // exist.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Forged', NULL, '0000000001000-0000-x', '2026-01-01')",
+        ],
+    )
+    .await;
+    let bogus = MembershipCoord {
+        author: owner_pk.clone(),
+        seq: 99,
+    };
+    let packed = envelope::pack_signed(
+        "devX",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &outsider,
+        Some(bogus),
+        &cs,
+    );
+    storage.put_changeset_packed("devX", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.skipped_unauthorized, 1);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(
+        updated.get("devX"),
+        Some(&1),
+        "a forged changeset is skipped (cursor advances) so the client is not stuck"
+    );
+}
+
+/// The push side binds an outgoing changeset to this device's own membership
+/// grant, so a puller in the lag window can resolve it.
+#[tokio::test]
+async fn sync_binds_outgoing_changeset_to_our_membership_grant() {
+    let storage = MockSyncStorage::new();
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+
+    // A chain whose founder is this very device.
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    let db1 = open_test_db();
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Mine', NULL, 1, '0000000002000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db1
+        .take_changeset_and_suspend()
+        .await
+        .expect("capture outgoing");
+
+    let service = SyncService::new("dev1".to_string());
+    let (_t, ld) = temp_library_dir();
+    let result = service
+        .sync(
+            &db1,
+            &test_synced_tables(),
+            outgoing,
+            0,
+            &HashMap::new(),
+            &storage,
+            "2026-03-01T00:00:00Z",
+            "",
+            &owner,
+            &ld,
+            &NoopBlobPlan,
+        )
+        .await
+        .expect("sync");
+    db1.resume_session().await.expect("resume");
+
+    let packed = result.outgoing.expect("outgoing changeset").packed;
+    let (env, _cs) = envelope::unpack(&packed).expect("unpack");
+    assert_eq!(
+        env.membership_grant,
+        Some(MembershipCoord {
+            author: owner_pk,
+            seq: 1
+        }),
+        "the outgoing changeset must be bound to our founder grant"
+    );
+    assert_eq!(env.author_pubkey, Some(hex::encode(owner.public_key)));
 }
 
 mod schema_version_too_old_display {

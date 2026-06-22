@@ -6,6 +6,7 @@
 /// unpacking the binary portion (schema version, author, description).
 use serde::{Deserialize, Serialize};
 
+use super::membership::MembershipCoord;
 use crate::keys::{self, UserKeypair};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,6 +20,13 @@ pub struct ChangesetEnvelope {
     /// Hex-encoded Ed25519 public key of the author. None for unsigned changesets.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub author_pubkey: Option<String>,
+    /// The membership entry that authorizes this author to write, as its storage
+    /// coordinate. A puller that does not yet see that entry fetches it by this
+    /// coordinate to resolve a membership-propagation gap instead of skipping the
+    /// changeset as non-member. Covered by the signature, so it can't be forged.
+    /// None for a solo (no membership chain) library or an unsigned changeset.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub membership_grant: Option<MembershipCoord>,
     /// Hex-encoded detached Ed25519 signature over the envelope metadata and
     /// changeset bytes (see `signing_payload`). None for unsigned.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -27,7 +35,8 @@ pub struct ChangesetEnvelope {
 
 /// The envelope fields the signature covers, in declaration order. Excludes
 /// `author_pubkey`/`signature` (the signature's own outputs); the changeset
-/// bytes are appended in [`signing_payload`].
+/// bytes are appended in [`signing_payload`]. `membership_grant` is included so
+/// the authorizing position can't be re-stamped after signing.
 #[derive(Serialize)]
 struct SignedEnvelopeFields<'a> {
     device_id: &'a str,
@@ -36,6 +45,7 @@ struct SignedEnvelopeFields<'a> {
     message: &'a str,
     timestamp: &'a str,
     changeset_size: usize,
+    membership_grant: Option<&'a MembershipCoord>,
 }
 
 /// Canonical bytes a changeset signature covers: the authorization-relevant
@@ -50,6 +60,7 @@ fn signing_payload(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> Vec<u8> {
         message: &env.message,
         timestamp: &env.timestamp,
         changeset_size: env.changeset_size,
+        membership_grant: env.membership_grant.as_ref(),
     };
     let mut payload = serde_json::to_vec(&fields).expect("signed fields serialization cannot fail");
     payload.push(0);
@@ -115,6 +126,7 @@ pub fn pack_signed(
     message: &str,
     timestamp: &str,
     keypair: &UserKeypair,
+    membership_grant: Option<MembershipCoord>,
     changeset: &[u8],
 ) -> Vec<u8> {
     let mut env = ChangesetEnvelope {
@@ -125,6 +137,7 @@ pub fn pack_signed(
         timestamp: timestamp.to_string(),
         changeset_size: changeset.len(),
         author_pubkey: None,
+        membership_grant,
         signature: None,
     };
     sign_envelope(&mut env, keypair, changeset);
@@ -195,6 +208,7 @@ mod tests {
             timestamp: "2026-02-10T14:30:00Z".into(),
             changeset_size: 4096,
             author_pubkey: None,
+            membership_grant: None,
             signature: None,
         }
     }
@@ -333,6 +347,26 @@ mod tests {
         let mut rehomed = env.clone();
         rehomed.device_id = "other-device".to_string();
         assert!(!verify_changeset_signature(&rehomed, changeset_bytes));
+
+        // The authorizing membership position is bound too: re-stamping the grant
+        // after signing (to claim a different, e.g. higher-privilege, entry)
+        // invalidates the signature.
+        let mut signed_with_grant = test_envelope();
+        signed_with_grant.membership_grant = Some(crate::sync::membership::MembershipCoord {
+            author: "owner-pk".to_string(),
+            seq: 2,
+        });
+        sign_envelope(&mut signed_with_grant, &keypair, changeset_bytes);
+        assert!(verify_changeset_signature(
+            &signed_with_grant,
+            changeset_bytes
+        ));
+        let mut regranted = signed_with_grant.clone();
+        regranted.membership_grant = Some(crate::sync::membership::MembershipCoord {
+            author: "owner-pk".to_string(),
+            seq: 9,
+        });
+        assert!(!verify_changeset_signature(&regranted, changeset_bytes));
 
         // Unsigned envelope passes verification.
         let unsigned_env = test_envelope();

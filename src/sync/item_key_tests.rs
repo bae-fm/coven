@@ -227,6 +227,7 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         changeset_size: changeset.len(),
         author_pubkey: None,
+        membership_grant: None,
         signature: None,
     };
     let packed = envelope::pack(&env, &changeset);

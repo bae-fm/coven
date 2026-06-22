@@ -3,7 +3,7 @@
 /// These drive a real [`Database`] (one owned connection on its actor thread)
 /// over an in-memory connection carrying the synthetic test schema, so tests
 /// exercise the engine through the same path production does.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -271,6 +271,10 @@ pub struct MockSyncStorage {
     snapshot_meta: Mutex<Option<Vec<u8>>>,
     /// Minimum schema version marker (None = no minimum set).
     min_schema_version: Mutex<Option<u32>>,
+    /// Membership coordinates that `list_membership_entries` must omit even though
+    /// `get_membership_entry` still serves them — models the eventual-consistency
+    /// lag where a just-written entry is fetchable by key before it shows in a LIST.
+    membership_list_hidden: Mutex<HashSet<(String, u64)>>,
 }
 
 impl MockSyncStorage {
@@ -281,7 +285,18 @@ impl MockSyncStorage {
             snapshot: Mutex::new(None),
             snapshot_meta: Mutex::new(None),
             min_schema_version: Mutex::new(None),
+            membership_list_hidden: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Hide a membership entry from `list_membership_entries` while still serving
+    /// it from `get_membership_entry`, modeling the propagation lag where a
+    /// just-written entry is readable by key before a LIST reflects it.
+    pub fn hide_membership_from_list(&self, author_pubkey: &str, seq: u64) {
+        self.membership_list_hidden
+            .lock()
+            .unwrap()
+            .insert((author_pubkey.to_string(), seq));
     }
 
     /// Store a changeset in the mock storage (simulates what push would do).
@@ -300,6 +315,7 @@ impl MockSyncStorage {
             timestamp: "2026-02-10T00:00:00Z".to_string(),
             changeset_size: changeset_bytes.len(),
             author_pubkey: None,
+            membership_grant: None,
             signature: None,
         };
         let packed = envelope::pack(&env, changeset_bytes);
@@ -464,6 +480,7 @@ impl SyncStorage for MockSyncStorage {
 
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
         let objects = self.objects.lock().unwrap();
+        let hidden = self.membership_list_hidden.lock().unwrap();
         let mut entries = Vec::new();
 
         for key in objects.keys() {
@@ -471,7 +488,9 @@ impl SyncStorage for MockSyncStorage {
                 if let Some(slash_pos) = rest.rfind('/') {
                     let author = &rest[..slash_pos];
                     if let Ok(seq) = rest[slash_pos + 1..].parse::<u64>() {
-                        entries.push((author.to_string(), seq));
+                        if !hidden.contains(&(author.to_string(), seq)) {
+                            entries.push((author.to_string(), seq));
+                        }
                     }
                 }
             }
