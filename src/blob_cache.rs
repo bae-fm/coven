@@ -22,14 +22,31 @@
 //! populates `cache/`); [`open_blob_stream`] serves a plaintext byte range for a
 //! host streaming or seeking (a miss range-reads + decrypts from the cloud but
 //! populates nothing — a partial file would be read as the whole blob, since
-//! presence is the only truth). [`clear_cache`] drops all of `cache/` in one
-//! sweep — it does not evict selectively by a size budget; a pinned blob (in
-//! `pinned/`) is exempt because it lives in the other folder.
+//! presence is the only truth).
+//!
+//! The cache has a size budget, `max_cache_size`, the host sets per device (see
+//! [`Database::set_max_cache_size`]). It counts **only** the files under `cache/`
+//! — `pinned/` is structurally exempt, since the sweep never looks there. After
+//! every populate ([`read_blob`]'s miss-write and [`write_blob`]),
+//! [`evict_to_budget`] sums the `cache/` files and, if their total exceeds the
+//! budget, deletes the oldest by modification time until the total is back under
+//! it. Modification time is the recency proxy — there is no `last_accessed`
+//! column, the same folder-truth trade-off the whole cache makes; pinning already
+//! retains the blobs the user chose to keep local. With the budget unset eviction is off and the cache
+//! grows without bound. [`clear_cache`] drops all of `cache/` in one sweep
+//! regardless of the budget; a pinned blob (in `pinned/`) survives either way
+//! because it lives in the other folder.
 
 use crate::blob::{BlobRef, BlobSync};
 use crate::database::Database;
 use crate::library_dir::{LibraryDir, PathTokenError};
 use crate::sync::storage::{StorageError, SyncStorage};
+
+/// `sync_state` key holding the device-local cache-size budget in bytes (a single
+/// decimal value, not per-blob accounting). Absent ⇒ no budget ⇒ eviction off.
+/// Read/written through [`Database::get_max_cache_size`] /
+/// [`Database::set_max_cache_size`].
+pub const MAX_CACHE_SIZE_STATE_KEY: &str = "max_cache_size";
 
 /// Why a blob-cache operation failed.
 #[derive(Debug)]
@@ -80,7 +97,15 @@ impl From<StorageError> for BlobCacheError {
 /// before the push reads it. It is NOT for an unmanaged (invisible-to-coven) file or
 /// a cloud-only source that stays external: those are never ingested, only read by
 /// the push from [`BlobRef::local_path`].
+///
+/// After the bytes land, [`evict_to_budget`] runs so a stage that pushes `cache/`
+/// over `max_cache_size` evicts its oldest files back under budget (a no-op when
+/// no budget is set). The just-written file is passed as `protect`, so it is
+/// excluded from eviction — this stage can never drop the very bytes it produced.
+/// Eviction is best-effort: the stage has already succeeded, so an eviction failure
+/// is logged and swallowed, not returned (see below).
 pub async fn write_blob(
+    db: &Database,
     library_dir: &LibraryDir,
     blob: &BlobRef,
     bytes: &[u8],
@@ -88,7 +113,23 @@ pub async fn write_blob(
     let dest = library_dir.cache_blob_path(&blob.id)?;
     crate::local_blob::write_atomic(&dest, bytes)
         .await
-        .map_err(BlobCacheError::Io)
+        .map_err(BlobCacheError::Io)?;
+    // Staging into `cache/` may have pushed it over budget; evict the oldest files
+    // back under it, never the file just written (passed as `protect`). A no-op when
+    // no budget is set.
+    //
+    // Eviction is best-effort and must not fail the stage: the write above already
+    // succeeded, so the bytes are durably in `cache/`. The cache being briefly over
+    // its budget is not wrong state — it self-corrects on the next populate's sweep —
+    // so failing a successful stage because cleanup failed would be wrong. Log and
+    // continue.
+    if let Err(e) = evict_to_budget(db, library_dir, Some(&dest)).await {
+        tracing::warn!(
+            "write_blob: staged {} but eviction failed (cache may be over budget until the next populate): {e}",
+            dest.display()
+        );
+    }
+    Ok(())
 }
 
 /// Read a blob's whole contents, serving the local file on a hit and fetching from
@@ -98,7 +139,9 @@ pub async fn write_blob(
 /// the entire test, no table consulted. A miss resolves the blob's scope to its
 /// encryption key, downloads + decrypts it via [`SyncStorage::get_blob`], writes it
 /// atomically to `cache/<id>` (unpinned — a plain read populates the evictable
-/// cache, never the protected one), and returns the bytes it just fetched.
+/// cache, never the protected one), and returns the bytes it just fetched. The
+/// post-populate [`evict_to_budget`] sweep is best-effort: a fetch that succeeded
+/// returns its bytes even if eviction then fails (logged, not returned).
 pub async fn read_blob(
     db: &Database,
     library_dir: &LibraryDir,
@@ -130,6 +173,22 @@ pub async fn read_blob(
     crate::local_blob::write_atomic(&cache, &bytes)
         .await
         .map_err(BlobCacheError::Io)?;
+    // The populate may have pushed `cache/` over budget; evict the oldest files
+    // back under it, never the file just written (passed as `protect`) — so this
+    // read's own sweep can't drop the bytes it just fetched, which it returns below.
+    // A no-op when no budget is set.
+    //
+    // Eviction is best-effort and must not fail the read: the fetch + cache write
+    // above already succeeded, so we have the bytes to return. The cache being
+    // briefly over its budget is not wrong state — it self-corrects on the next
+    // populate's sweep — so failing a successful read because cleanup failed would be
+    // wrong. Log and return the bytes anyway.
+    if let Err(e) = evict_to_budget(db, library_dir, Some(&cache)).await {
+        tracing::warn!(
+            "read_blob: populated {} but eviction failed (cache may be over budget until the next populate): {e}",
+            cache.display()
+        );
+    }
     Ok(bytes)
 }
 
@@ -344,6 +403,120 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
     }
 }
 
+/// Evict the oldest files from `storage/cache/` until its total size is back within
+/// the device's `max_cache_size` budget. The cache layer's size enforcement, run
+/// synchronously after every populate ([`read_blob`]'s miss-write, [`write_blob`]).
+///
+/// The budget counts **only** the files under `cache/` — `pinned/` is never walked,
+/// so a pinned (or system-pinned `Mirrored`) blob is structurally exempt and can
+/// never be evicted. With no budget set this is a no-op: the cache is unlimited
+/// until the host opts into one.
+///
+/// Recency is the file's modification time. There is no `last_accessed` column —
+/// the same folder-truth trade-off the whole cache makes — so the oldest-written
+/// file is evicted first; pinning, not access tracking, is how a blob is kept.
+///
+/// `protect` is the file a just-finished populate wrote (the trigger passes its
+/// `cache/<id>` path; a bare sweep passes `None`): it is **excluded from the
+/// candidates outright**, never deleted, so the populate that triggered this sweep
+/// can't evict the very bytes it just produced. Its size still counts toward the
+/// total it must fit under, so if that one file alone exceeds the budget the cache
+/// is left holding exactly it and over budget by that much — the caller still gets
+/// its bytes, and the next populate's sweep is unaffected. This makes survival
+/// structural rather than reliant on mtime granularity (two writes within one
+/// filesystem mtime tick would otherwise be unordered).
+///
+/// If every evictable candidate is deleted and the total is still over budget — the
+/// protected in-use file alone exceeds `max_cache_size` — this returns `Ok(())` (the
+/// file being served can't be evicted), but logs that the cache stays over budget
+/// because a single in-use blob is larger than the whole budget. It is surfaced, not
+/// silently reported as if the budget were met.
+///
+/// A file that has vanished by the time it is deleted (a concurrent `clear_cache`
+/// or sweep already removed it) is the one legitimate skip — logged at debug, its
+/// now-absent bytes dropped from the running total. Every other stat or delete
+/// failure is surfaced, never swallowed: a cache that can't be measured or trimmed
+/// must fail loudly, not silently drift over budget.
+pub async fn evict_to_budget(
+    db: &Database,
+    library_dir: &LibraryDir,
+    protect: Option<&std::path::Path>,
+) -> Result<(), BlobCacheError> {
+    let budget = match db
+        .get_max_cache_size()
+        .await
+        .map_err(|e| BlobCacheError::Io(format!("read max_cache_size: {e}")))?
+    {
+        Some(budget) => budget,
+        // No budget set — the cache is unlimited, so there is nothing to enforce.
+        None => return Ok(()),
+    };
+
+    let mut entries = collect_cache_files(&library_dir.cache_dir()).await?;
+    // The protected file's bytes count toward the total it must fit under, but it is
+    // never a deletion candidate — drop it from the list, not the sum.
+    let mut total: u64 = entries.iter().map(|(_, _, size)| size).sum();
+    if let Some(protect) = protect {
+        entries.retain(|(path, _, _)| path.as_path() != protect);
+    }
+    if total <= budget {
+        return Ok(());
+    }
+
+    // Oldest modification time first: that file is evicted first. A stable sort is
+    // fine — files with the same mtime are interchangeable for the budget, and the
+    // just-written file (the one survival depends on) is already excluded above.
+    entries.sort_by_key(|(_, mtime, _)| *mtime);
+
+    // Each `size` here was part of the `total` sum above, so subtracting it as its
+    // file is evicted can't underflow as long as that invariant holds. `checked_sub`
+    // rather than `saturating_sub`: flooring at 0 would mask a genuine accounting
+    // miscount (a `size` not actually in the sum), so a violation panics loudly
+    // instead of silently mis-measuring the cache.
+    for (path, _mtime, size) in entries {
+        if total <= budget {
+            break;
+        }
+        let subtract = |total: u64| {
+            total.checked_sub(size).unwrap_or_else(|| {
+                panic!(
+                    "evict accounting underflow at {}: size {size} > running total {total} \
+                     (invariant: every cache file's size was summed into the total)",
+                    path.display()
+                )
+            })
+        };
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => total = subtract(total),
+            // The file is already gone (a concurrent sweep/clear). Its bytes are no
+            // longer on disk, so drop them from the total and move on — the one
+            // legitimate skip, not a masked failure.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("evict: {} already gone, skipping", path.display());
+                total = subtract(total);
+            }
+            Err(e) => {
+                return Err(BlobCacheError::Io(format!(
+                    "evict cache file {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    // Every evictable candidate is gone and the cache is still over budget: the
+    // protected in-use file alone exceeds `max_cache_size`. We can't evict the file
+    // being served, so return Ok — but surface that the budget is unmet rather than
+    // reporting success silently.
+    if total > budget {
+        tracing::warn!(
+            "evict: cache stays {} bytes over budget ({total} > {budget}) — a single in-use blob exceeds the whole cache budget",
+            total - budget
+        );
+    }
+    Ok(())
+}
+
 /// Resolve a blob's scope to its encryption key and download + decrypt its bytes
 /// from the cloud. Shared by the read-miss and pin-from-absent paths.
 ///
@@ -399,4 +572,86 @@ async fn rename_within_storage(
             to.display()
         ))
     })
+}
+
+/// Walk `cache/` and return every file as `(path, mtime, size)` — the input to a
+/// budget eviction. The cache stores files under a two-level shard tree
+/// (`cache/{ab}/{cd}/<id>`), so this descends directories with an explicit stack
+/// and collects only the leaf files; `pinned/` is a sibling root and is never
+/// reached.
+///
+/// An absent `cache/` means nothing has been cached yet — an empty result, not an
+/// error (the same posture `clear_cache` takes on a missing dir). Every other
+/// failure to read a directory or stat a file is surfaced: the budget cannot be
+/// enforced over a cache it cannot fully measure, so a measurement failure fails
+/// loudly rather than under-counting and leaving the cache silently over budget.
+async fn collect_cache_files(
+    cache_dir: &std::path::Path,
+) -> Result<Vec<(std::path::PathBuf, std::time::SystemTime, u64)>, BlobCacheError> {
+    let mut files = Vec::new();
+    let mut dirs = vec![cache_dir.to_path_buf()];
+
+    while let Some(dir) = dirs.pop() {
+        let mut read_dir = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            // No cache dir (or a shard dir removed mid-walk) — nothing more to
+            // measure down this branch. A legitimate skip, but logged so it is not
+            // silent.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(
+                    "collect_cache_files: {} absent, skipping (empty cache or concurrently-removed shard)",
+                    dir.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                return Err(BlobCacheError::Io(format!(
+                    "read cache dir {}: {e}",
+                    dir.display()
+                )));
+            }
+        };
+
+        loop {
+            let entry = match read_dir.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(BlobCacheError::Io(format!(
+                        "read cache dir entry under {}: {e}",
+                        dir.display()
+                    )));
+                }
+            };
+            let path = entry.path();
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                // The entry vanished between listing and stat (a concurrent
+                // clear/sweep) — it no longer occupies the cache, so it drops out of
+                // the measurement. A legitimate skip, but logged so it is not silent.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!(
+                        "collect_cache_files: {} vanished between listing and stat, skipping",
+                        path.display()
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    return Err(BlobCacheError::Io(format!(
+                        "stat cache entry {}: {e}",
+                        path.display()
+                    )));
+                }
+            };
+            if metadata.is_dir() {
+                dirs.push(path);
+            } else {
+                let mtime = metadata.modified().map_err(|e| {
+                    BlobCacheError::Io(format!("modified time of {}: {e}", path.display()))
+                })?;
+                files.push((path, mtime, metadata.len()));
+            }
+        }
+    }
+    Ok(files)
 }

@@ -451,6 +451,38 @@ impl Database {
         .await
     }
 
+    /// The device-local cache-size budget in bytes, or `None` if the host has not
+    /// set one. `None` means unlimited — eviction is off and the cache grows
+    /// without bound; the host opts into a budget by calling
+    /// [`Self::set_max_cache_size`]. Stored as a single decimal value under
+    /// [`crate::blob_cache::MAX_CACHE_SIZE_STATE_KEY`] in `sync_state` (config, not
+    /// per-blob accounting — the cache's truth is still the folder on disk).
+    pub async fn get_max_cache_size(&self) -> Result<Option<u64>, DbError> {
+        match self
+            .get_sync_state(crate::blob_cache::MAX_CACHE_SIZE_STATE_KEY)
+            .await?
+        {
+            Some(raw) => raw.parse::<u64>().map(Some).map_err(|e| {
+                DbError(format!(
+                    "max_cache_size in sync_state is not a byte count: {e}"
+                ))
+            }),
+            None => Ok(None),
+        }
+    }
+
+    /// Set the device-local cache-size budget in bytes. Once set, a populate that
+    /// pushes `storage/cache/` over this total evicts its oldest files (by mtime)
+    /// back under it; `pinned/` is never counted or touched. Stored under
+    /// [`crate::blob_cache::MAX_CACHE_SIZE_STATE_KEY`] in `sync_state`.
+    pub async fn set_max_cache_size(&self, max_bytes: u64) -> Result<(), DbError> {
+        self.set_sync_state(
+            crate::blob_cache::MAX_CACHE_SIZE_STATE_KEY,
+            &max_bytes.to_string(),
+        )
+        .await
+    }
+
     // ---- Bookkeeping: sync_cursors ----
 
     pub(crate) async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {
