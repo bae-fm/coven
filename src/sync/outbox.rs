@@ -234,7 +234,18 @@ pub async fn process_uploads(
 
         let file_path = match source_path {
             Some(p) => std::path::PathBuf::from(p),
-            None => library_dir.join(crate::storage::local::storage_path(file_id)),
+            None => match crate::storage::local::storage_path(file_id) {
+                Ok(rel) => library_dir.join(rel),
+                Err(e) => {
+                    // A locally-enqueued upload id that can't form a storage path is
+                    // a host bug, not attacker data; record it as this entry's
+                    // failure and keep draining the rest rather than aborting.
+                    let msg = format!("invalid upload file id: {e}");
+                    warn!("Upload failed for {}: {msg}", entry.cloud_key);
+                    record_failure(db, &entry, file_id, &msg, now, observer).await;
+                    continue;
+                }
+            },
         };
 
         // Read the local plaintext, resolve the scope to a key (an `Item` scope

@@ -108,24 +108,25 @@ impl ShareManifest {
     /// has no id-derivable key, so share-proxy always uses the hashed layout.
     pub fn allows(&self, cloud_key: &str) -> bool {
         self.blobs.iter().any(|b| {
-            // `blob_key` → `hashed_path` indexes `&hex[..2]`/`&hex[2..4]` on the
-            // dash-stripped id and panics if it is under 4 chars or splits a
-            // multi-byte char. This runs on the unauthenticated server gate
-            // against host-supplied refs read from a manifest that may have been
-            // tampered with in the cloud, so a panic here is a denial of service.
-            // A real coven cloud key always has at least two leading byte-pairs,
-            // so a ref that can't be indexed there can never match one.
-            let hex = b.id.replace('-', "");
-            if !(hex.is_char_boundary(2) && hex.is_char_boundary(4)) {
-                warn!(
-                    namespace = %b.namespace,
-                    id = %b.id,
-                    "share manifest ref is not an indexable coven blob id; skipping"
-                );
-                return false;
-            }
+            // This runs on the unauthenticated server gate against host-supplied
+            // refs read from a manifest that may have been tampered with in the
+            // cloud. `hashed_path` refuses a ref whose id can't form a safe,
+            // indexable cloud key (a traversal token, or one too short / misaligned
+            // to take the `{ab}/{cd}` prefix) — exactly the bad data a panic-prone
+            // slice would crash on. A real coven cloud key always has those leading
+            // byte-pairs, so a refused ref can never match one.
             // Share-proxy always uses the hashed layout (see the doc comment).
-            crate::library_dir::LibraryDir::hashed_path(&b.namespace, &b.id) == cloud_key
+            match crate::library_dir::LibraryDir::hashed_path(&b.namespace, &b.id) {
+                Ok(key) => key == cloud_key,
+                Err(e) => {
+                    warn!(
+                        namespace = %b.namespace,
+                        id = %b.id,
+                        "share manifest ref is not a usable coven blob id ({e}); skipping"
+                    );
+                    false
+                }
+            }
         })
     }
 }

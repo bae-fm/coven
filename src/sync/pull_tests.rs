@@ -1567,3 +1567,183 @@ mod schema_version_too_old_display {
         assert!(msg.contains("v3"), "missing current version: {msg}");
     }
 }
+
+/// A pulled blob's `id` is the primary key of a row authored by any write-capable
+/// member (or anyone with the bucket credential). It is interpolated into the
+/// blob's local file path, so an unconstrained `id` lets a member's row direct a
+/// blob write to an attacker-chosen file outside the library directory — an
+/// arbitrary file write that clobbers config/rc/binaries on every pulling device.
+/// The pull must treat an `id` (or namespace/cloud_path) that could escape the
+/// library directory, or that can't form a partition prefix, as bad data: refuse
+/// the write, skip the row, surface it — never write outside, never panic.
+mod blob_path_traversal {
+    use super::*;
+    use crate::blob::ResolvedScope;
+
+    /// A blob whose `id` climbs out of the photo directory with `..` must NOT have
+    /// its bytes written outside that directory. Before the boundary check the
+    /// puller resolved `dir.join(id)` to a path above `dir` and wrote the
+    /// downloaded bytes there (the arbitrary-file-write RCE); after it the row is
+    /// refused as bad data, nothing is written outside, and the apply is held.
+    #[tokio::test]
+    async fn traversal_id_does_not_write_outside_the_blob_dir() {
+        let storage = MockSyncStorage::new();
+
+        // The attacker's blob bytes, planted in the cloud under the malicious id's
+        // flat mock key (the same key the puller's `get_blob` computes for it). No
+        // local file is written on the source side, so nothing escapes here.
+        let evil_bytes = b"OWNED".to_vec();
+        storage
+            .put_blob(
+                "photos",
+                "x/../../../PWNED",
+                ResolvedScope::Master,
+                None,
+                evil_bytes,
+            )
+            .await
+            .expect("plant evil blob in the cloud");
+
+        // The source's changeset adds a note + a photo row whose id is the
+        // traversal string. (The mock stored the blob above; this is the row that
+        // references it.)
+        let db1 = open_test_db();
+        let cs = capture_bytes(
+            &db1,
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+                 VALUES ('x/../../../PWNED', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        )
+        .await;
+        storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+        // The puller's blob dir is `root/lib/photos`; the sentinel target sits at
+        // `root/PWNED`, outside it. The malicious id `x/../../../PWNED` joined onto
+        // the blob dir normalizes to exactly that sentinel.
+        let root = tempfile::tempdir().expect("root");
+        let photos = root.path().join("lib").join("photos");
+        std::fs::create_dir_all(&photos).expect("create photo dir");
+        let sentinel = root.path().join("PWNED");
+        assert_eq!(
+            photos.join("x/../../../PWNED"),
+            root.path().join("lib/photos/x/../../../PWNED"),
+            "the malicious join targets the sentinel above the blob dir",
+        );
+
+        let dst_plan = PhotoBlobSource {
+            dir: photos.clone(),
+        };
+        let db2 = open_test_db();
+        let (_t, ld) = temp_library_dir();
+        let (updated, result) =
+            pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan).await;
+
+        // The write was refused: nothing landed at the sentinel, nor anywhere
+        // outside the blob dir.
+        assert!(
+            !sentinel.exists(),
+            "a traversal blob id must not write outside the blob dir (wrote {})",
+            sentinel.display(),
+        );
+        // It is bad data, so the row that carries it is not applied and the cursor
+        // does not advance — the same posture as any other failed-blob changeset.
+        assert!(
+            result.asset_downloads_failed,
+            "a refused blob fails the changeset's downloads",
+        );
+        assert_eq!(result.changesets_applied, 0, "the bad row is not applied");
+        assert_eq!(updated.get("dev1"), None, "the cursor is held for retry");
+    }
+
+    /// A blob id too short to form the `{ab}/{cd}` partition prefix (the
+    /// dash-stripped id is under four chars, or splits a multi-byte char) panicked
+    /// the path builder's byte slice — one planted row would crash every pulling
+    /// device. End to end it must be refused as bad data: the row does not apply
+    /// and the cursor holds. (The slice itself is proven non-panicking by the
+    /// `hashed_path` unit tests in `library_dir`.)
+    #[tokio::test]
+    async fn unindexable_id_is_refused_not_panicked() {
+        let storage = MockSyncStorage::new();
+
+        let db1 = open_test_db();
+        let cs = capture_bytes(
+            &db1,
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+                // `id = "a"` dash-strips to "a"; `&hex[..2]` would panic on it.
+                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+                 VALUES ('a', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        )
+        .await;
+        storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+        let dst_photos = tempfile::tempdir().expect("dst photos");
+        let dst_plan = PhotoBlobSource {
+            dir: dst_photos.path().to_path_buf(),
+        };
+        let db2 = open_test_db();
+        let (_t, ld) = temp_library_dir();
+        // The pull completes (no panic); the unindexable row is refused.
+        let (updated, result) =
+            pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan).await;
+
+        assert!(
+            result.asset_downloads_failed,
+            "an unindexable blob id fails the changeset's downloads instead of panicking",
+        );
+        assert_eq!(result.changesets_applied, 0, "the bad row is not applied");
+        assert_eq!(updated.get("dev1"), None, "the cursor is held for retry");
+    }
+
+    /// A normal blob id still round-trips: the boundary check rejects only ids that
+    /// could escape the blob dir or can't be partitioned, and writes a well-formed
+    /// blob under its directory exactly as before.
+    #[tokio::test]
+    async fn normal_id_still_writes_under_the_blob_dir() {
+        let storage = MockSyncStorage::new();
+
+        storage
+            .put_blob(
+                "photos",
+                "p1",
+                ResolvedScope::Master,
+                None,
+                b"PHOTOBYTES".to_vec(),
+            )
+            .await
+            .expect("plant blob");
+
+        let db1 = open_test_db();
+        let cs = capture_bytes(
+            &db1,
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+                 VALUES ('p1', 'n1', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        )
+        .await;
+        storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+        let dst_photos = tempfile::tempdir().expect("dst photos");
+        let dst_plan = PhotoBlobSource {
+            dir: dst_photos.path().to_path_buf(),
+        };
+        let db2 = open_test_db();
+        let (_t, ld) = temp_library_dir();
+        let (updated, result) =
+            pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan).await;
+
+        assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
+        assert!(!result.asset_downloads_failed);
+        assert_eq!(updated.get("dev1"), Some(&1));
+        let written = std::fs::read(dst_photos.path().join("p1")).expect("blob written");
+        assert_eq!(written, b"PHOTOBYTES", "the blob lands under its directory");
+    }
+}

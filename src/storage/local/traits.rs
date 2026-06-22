@@ -12,6 +12,12 @@ pub enum StorageError {
     Cloud(String),
     #[error("Database error: {0}")]
     Database(String),
+    /// The file id does not form a safe content-addressed path (see
+    /// [`crate::library_dir::BlobPathError`]). For local managed storage the id is
+    /// device-generated, so this is a programmer error surfaced loudly, never a
+    /// silent mis-shard.
+    #[error("invalid blob id: {0}")]
+    InvalidId(#[from] crate::library_dir::BlobPathError),
 }
 
 /// Progress callback type: (bytes_written, total_bytes)
@@ -47,7 +53,7 @@ impl BlobStore {
         let total_bytes = data.len();
         on_progress(0, total_bytes);
 
-        let rel_path = storage_path(file_id);
+        let rel_path = storage_path(file_id)?;
         let path = self.library_dir.join(&rel_path);
 
         if let Some(parent) = path.parent() {
@@ -84,7 +90,7 @@ impl BlobStore {
         let total_bytes = tokio::fs::metadata(source).await?.len() as usize;
         on_progress(0, total_bytes);
 
-        let rel_path = storage_path(file_id);
+        let rel_path = storage_path(file_id)?;
         let path = self.library_dir.join(&rel_path);
 
         if let Some(parent) = path.parent() {
@@ -157,7 +163,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dest_path = temp.path().join(storage_path(file_id));
+        let dest_path = temp.path().join(storage_path(file_id).expect("valid id"));
         let dest_bytes = tokio::fs::read(&dest_path).await.unwrap();
         assert_eq!(dest_bytes, source_bytes, "destination equals source");
 

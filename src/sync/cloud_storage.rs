@@ -200,7 +200,7 @@ impl CloudSyncStorage {
     ) -> Result<String, StorageError> {
         match scheme {
             BlobPathScheme::Hashed => {
-                Ok(crate::library_dir::LibraryDir::hashed_path(namespace, id))
+                Ok(crate::library_dir::LibraryDir::hashed_path(namespace, id)?)
             }
             BlobPathScheme::Plain => {
                 let path = cloud_path.ok_or_else(|| {
@@ -208,6 +208,8 @@ impl CloudSyncStorage {
                         "unobfuscated blob-path home requires a cloud_path for blob {namespace}/{id}"
                     ))
                 })?;
+                crate::library_dir::validate_path_token(namespace)?;
+                crate::library_dir::validate_cloud_path(path)?;
                 Ok(format!("{namespace}/{path}"))
             }
         }
