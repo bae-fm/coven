@@ -678,6 +678,65 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
     );
 }
 
+/// `list_membership_entries` itself failing (a flaky LIST, not bad chain data) on
+/// an owner-pinned library must abort the cycle, not fall open to "no chain,
+/// accept everything" — the first failure mode #88 names. A real chain and a
+/// changeset are staged so the old fall-open behavior would load no chain and
+/// apply the changeset unvalidated; the fail-closed path must instead surface the
+/// error and apply nothing.
+#[tokio::test]
+async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_library() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    // A founder entry + a changeset the owner authored: without the fail-closed
+    // guard the cycle would (fail to list, drop to chain=None, then) apply this.
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'X', NULL, '0000000001000-0000-owner', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset(&owner_pk, 1, &cs, SCHEMA_VERSION);
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    // Membership can't even be listed: the cycle must abort rather than continue
+    // with authorization silently disabled.
+    storage.fail_membership_listing();
+
+    let result = pull_into_result(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(PullError::Storage(_))),
+        "a membership-list failure on an owner-pinned library must abort the cycle, got {:?}",
+        result.map(|_| ()),
+    );
+    assert!(
+        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "nothing is applied when membership cannot be verified",
+    );
+}
+
 /// The positive case: a chain founded by the pinned owner is accepted, and a
 /// changeset signed by that owner applies.
 #[tokio::test]
