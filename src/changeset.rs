@@ -86,6 +86,51 @@ pub fn walk(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, String> {
     Ok(changes)
 }
 
+/// For every INSERT of `table`, return `(text column `text_col`, raw bytes of
+/// blob column `blob_col`)`. Unlike [`walk`], the blob column keeps its exact
+/// bytes rather than the lossy UTF-8 rendering [`walk`] produces — needed to
+/// recover binary key material a changeset carries (coven's `item_keys`) before
+/// the changeset is applied, so an item-scoped blob can be downloaded ahead of
+/// the apply (issue #111). Only INSERTs are considered: a content key is minted
+/// once (`INSERT OR IGNORE`) and never updated or deleted.
+pub fn insert_text_blob_pairs(
+    changeset_bytes: &[u8],
+    table: &str,
+    text_col: usize,
+    blob_col: usize,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if changeset_bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let input: &mut dyn std::io::Read = &mut &changeset_bytes[..];
+    let mut iter =
+        ChangesetIter::start_strm(&input).map_err(|e| format!("changeset start failed: {e}"))?;
+
+    let mut out = Vec::new();
+    while let Some(item) = iter
+        .next()
+        .map_err(|e| format!("changeset next failed: {e}"))?
+    {
+        let op = item.op().map_err(|e| format!("changeset op failed: {e}"))?;
+        if op.table_name() != table || op.code() != Action::SQLITE_INSERT {
+            continue;
+        }
+        let Some(text) = item.new_value(text_col).ok().and_then(value_ref_to_string) else {
+            continue;
+        };
+        // The blob column must be an actual BLOB; anything else (NULL, a stray
+        // text/integer) is not key material and is skipped.
+        let bytes = match item.new_value(blob_col) {
+            Ok(ValueRef::Blob(b)) => b.to_vec(),
+            _ => continue,
+        };
+        out.push((text, bytes));
+    }
+
+    Ok(out)
+}
+
 /// Extract a column value from a changeset item following the op's old/new
 /// semantics. An absent column (unchanged in an update) reads as an
 /// `InvalidColumnIndex` error from rusqlite, which maps to `None`.

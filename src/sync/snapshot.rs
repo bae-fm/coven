@@ -470,7 +470,13 @@ pub(crate) async fn reconcile_snapshot_blobs(
     }
 
     let total = blobs.len();
-    let all_ok = crate::sync::pull::download_blobs(db, blobs, storage).await;
+    // No in-changeset key map here: a snapshot's blobs take their keys from the
+    // `item_keys` rows the snapshot itself carried into this DB, so resolution
+    // goes through the DB (issue #111's pull path uses the map for keys minted in
+    // the changeset being applied; the bootstrap has no such changeset).
+    let all_ok =
+        crate::sync::pull::download_blobs(db, blobs, storage, &std::collections::HashMap::new())
+            .await;
     if all_ok {
         info!(total, "snapshot blob reconciliation complete");
     } else {

@@ -395,6 +395,63 @@ pub async fn pull_changes(
                 continue;
             }
 
+            // Walk the changeset BEFORE applying it: the walk both drives blob
+            // downloads and is surfaced to the host for domain-event mapping, and a
+            // row must never be applied before its blobs are durable on disk
+            // (#111). A walk failure means we cannot know which blobs the changeset
+            // needs, so we cannot safely apply it -- skip it without applying or
+            // advancing the cursor (it surfaces, and retries next cycle). This is
+            // the bug the old "walk -> Vec::new()" substitution hid: it applied the
+            // rows and silently dropped their blobs.
+            let changes = match crate::changeset::walk(&changeset_bytes) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        "failed to walk changeset, skipping without applying: {e}"
+                    );
+                    result.asset_downloads_failed = true;
+                    break;
+                }
+            };
+
+            // The item content keys this changeset itself mints, recovered from its
+            // `item_keys` rows BEFORE applying, so an item-scoped blob's key is
+            // available without the changeset being applied first. Keys minted by
+            // earlier (already-applied) changesets are not here -- `download_blobs`
+            // falls back to the DB for those.
+            let in_changeset_keys = match item_keys_in_changeset(&changeset_bytes) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        "failed to read item_keys from changeset, skipping without applying: {e}"
+                    );
+                    result.asset_downloads_failed = true;
+                    break;
+                }
+            };
+
+            // Download + fsync every referenced blob BEFORE applying any row. If
+            // any fails, skip the whole changeset -- nothing applied, cursor not
+            // advanced -- and stop this device's pull so a later seq's success
+            // can't carry the cursor past the failed seq (its blobs would then
+            // never be re-fetched). The next cycle resumes at this seq.
+            let blobs_ok =
+                download_changeset_blobs(db, &changes, blob_plan, storage, &in_changeset_keys)
+                    .await;
+            if !blobs_ok {
+                warn!(
+                    "Blob download failed for {}/{}, not applying; cursor not advanced",
+                    head.device_id, seq
+                );
+                result.asset_downloads_failed = true;
+                break;
+            }
+
+            // Every referenced blob is now durable on disk: apply the changeset.
             let apply_result = {
                 let schema = schema.clone();
                 let bytes = changeset_bytes.clone();
@@ -402,22 +459,6 @@ pub async fn pull_changes(
                     .await
                     .map_err(|e| PullError::Apply(e.0))?
             };
-
-            // Walk the applied changeset once: it drives blob downloads and is
-            // surfaced to the host for domain-event mapping.
-            let changes = match crate::changeset::walk(&changeset_bytes) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Failed to walk changeset: {e}");
-                    Vec::new()
-                }
-            };
-
-            // Download any blobs the changeset references. If any download fails,
-            // don't advance the cursor — retry next cycle. Resolution reads
-            // `item_keys` AFTER the apply above committed this (or an earlier)
-            // changeset's key rows, so an `Item(id)`-scoped blob finds its key.
-            let blobs_ok = download_changeset_blobs(db, &changes, blob_plan, storage).await;
 
             if apply_result.had_fk_violations {
                 deferred.push(DeferredChangeset {
@@ -433,21 +474,7 @@ pub async fn pull_changes(
             result.row_changes.extend(changes);
 
             pulled_any = true;
-            if blobs_ok {
-                updated_cursors.insert(head.device_id.clone(), seq);
-            } else {
-                warn!(
-                    "Blob download failed for {}/{}, cursor not advanced; stopping \
-                     this device's pull so a later seq can't carry the cursor past it",
-                    head.device_id, seq
-                );
-                result.asset_downloads_failed = true;
-                // Stop here: do NOT continue to seq+1. A later seq's success would
-                // overwrite this device's cursor past the failed seq, so its blobs
-                // would never be re-fetched. Leaving the cursor at the last fully
-                // succeeded seq makes the next cycle resume at this one.
-                break;
-            }
+            updated_cursors.insert(head.device_id.clone(), seq);
         }
 
         if pulled_any {
@@ -532,20 +559,74 @@ fn advance_max_updated_at(
     }
 }
 
+/// Build the `item_id -> 32-byte content key` map an incoming changeset mints in
+/// its own `item_keys` rows, recovered BEFORE the changeset is applied so an
+/// item-scoped blob can be downloaded ahead of the apply (issue #111). A key
+/// column that isn't exactly 32 bytes is bad data: it is logged and dropped, so
+/// the blob falls back to the DB key — and fails the download if none exists,
+/// which skips the changeset rather than encrypting under a wrong key.
+fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8; 32]>, String> {
+    let mut map = HashMap::new();
+    for (item_id, key) in
+        crate::changeset::insert_text_blob_pairs(changeset_bytes, "item_keys", 0, 1)?
+    {
+        match <[u8; 32]>::try_from(key.as_slice()) {
+            Ok(k) => {
+                map.insert(item_id, k);
+            }
+            Err(_) => warn!(
+                item_id = %item_id,
+                len = key.len(),
+                "item_keys row has a non-32-byte key, ignoring"
+            ),
+        }
+    }
+    Ok(map)
+}
+
 /// Download blobs a changeset references. Returns true if all succeeded.
 /// The host's [`BlobPlan`] decides which row-changes carry blobs, their cloud
 /// namespace/scope, and the local destination path; the per-blob download runs
 /// through [`download_blobs`].
 ///
-/// By this point the changeset's `item_keys` rows are committed (the apply ran
-/// first), so an `Item(id)`-scoped blob resolves its key.
+/// `in_changeset_keys` are the item keys this changeset itself mints, so an
+/// `Item(id)`-scoped blob resolves its key WITHOUT the changeset having been
+/// applied first (issue #111) — the download precedes the apply.
 async fn download_changeset_blobs(
     db: &Database,
     changes: &[RowChange],
     blob_plan: &dyn BlobPlan,
     storage: &dyn SyncStorage,
+    in_changeset_keys: &HashMap<String, [u8; 32]>,
 ) -> bool {
-    download_blobs(db, blob_plan.blobs_to_pull(changes), storage).await
+    download_blobs(
+        db,
+        blob_plan.blobs_to_pull(changes),
+        storage,
+        in_changeset_keys,
+    )
+    .await
+}
+
+/// Resolve a blob's public scope to its internal key scope WITHOUT requiring the
+/// minting changeset to be applied first: an `Item(id)` scope takes its key from
+/// `in_changeset_keys` (keys this changeset mints) when present, else from the DB
+/// (keys minted by earlier, already-applied changesets, or carried by a
+/// snapshot). `Master`/`Derived` need no key lookup. This is what lets the pull
+/// download an item-scoped blob before applying the changeset (issue #111).
+async fn resolve_pull_scope(
+    scope: crate::blob::BlobScope,
+    in_changeset_keys: &HashMap<String, [u8; 32]>,
+    db: &Database,
+) -> Result<crate::blob::ResolvedScope, crate::database::DbError> {
+    use crate::blob::{BlobScope, ResolvedScope};
+    match scope {
+        BlobScope::Item(item_id) => match in_changeset_keys.get(&item_id) {
+            Some(key) => Ok(ResolvedScope::Key(*key)),
+            None => db.resolve_blob_scope(BlobScope::Item(item_id)).await,
+        },
+        other => db.resolve_blob_scope(other).await,
+    }
 }
 
 /// Download each blob in `blobs` to its `local_path`, decrypting via storage
@@ -553,17 +634,21 @@ async fn download_changeset_blobs(
 /// succeeded. Skips blobs whose local file already exists.
 ///
 /// Each blob's public scope is resolved to the internal key scope here — not in
-/// [`BlobPlan`], which has no DB. A blob whose item key is missing is a failed
-/// download (logged, `all_ok = false`) so a caller that gates on the result can
-/// retry once the key row has landed.
+/// [`BlobPlan`], which has no DB — via [`resolve_pull_scope`], which consults
+/// `in_changeset_keys` (item keys the current changeset mints) before the DB so
+/// resolution does not depend on the changeset being applied. A blob whose item
+/// key is missing is a failed download (logged, `all_ok = false`) so a caller
+/// that gates on the result can retry once the key row has landed.
 ///
 /// Shared by the incremental pull (per applied changeset) and the snapshot
-/// bootstrap backfill (per row in the freshly bootstrapped DB), so the
-/// download/decrypt/write path lives in one place.
+/// bootstrap backfill (per row in the freshly bootstrapped DB, where
+/// `in_changeset_keys` is empty and keys come from the DB the snapshot carried),
+/// so the download/decrypt/write path lives in one place.
 pub(crate) async fn download_blobs(
     db: &Database,
     blobs: Vec<crate::blob::BlobRef>,
     storage: &dyn SyncStorage,
+    in_changeset_keys: &HashMap<String, [u8; 32]>,
 ) -> bool {
     let mut all_ok = true;
     for blob in blobs {
@@ -578,7 +663,7 @@ pub(crate) async fn download_blobs(
             }
         }
 
-        let resolved = match db.resolve_blob_scope(blob.scope.clone()).await {
+        let resolved = match resolve_pull_scope(blob.scope.clone(), in_changeset_keys, db).await {
             Ok(r) => r,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot resolve blob scope, skipping download");
