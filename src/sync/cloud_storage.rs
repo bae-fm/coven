@@ -394,7 +394,7 @@ impl SyncStorage for CloudSyncStorage {
             // decrypt, so it can't pollute sync status or drive a per-seq fetch
             // loop. The author the signature is bound to is surfaced so the
             // caller can run the membership (authorization) check.
-            if !head_json.verify() {
+            if !head_json.verify(device_id) {
                 warn!("skipping head {device_id} with an invalid signature");
                 continue;
             }
@@ -404,7 +404,7 @@ impl SyncStorage for CloudSyncStorage {
                 seq: head_json.seq,
                 snapshot_seq: head_json.snapshot_seq,
                 last_sync: head_json.last_sync,
-                author_pubkey: Some(head_json.author_pubkey),
+                author_pubkey: head_json.author_pubkey,
             });
         }
 
@@ -441,6 +441,7 @@ impl SyncStorage for CloudSyncStorage {
         timestamp: &str,
     ) -> Result<(), StorageError> {
         let head = HeadJson::signed(
+            device_id,
             seq,
             snapshot_seq,
             Some(timestamp.to_string()),
@@ -555,7 +556,7 @@ impl SyncStorage for CloudSyncStorage {
 
         Ok(Some(MinSchemaVersion {
             version: parsed.min_schema_version,
-            author_pubkey: Some(parsed.author_pubkey),
+            author_pubkey: parsed.author_pubkey,
         }))
     }
 
@@ -848,8 +849,8 @@ mod tests {
         assert_eq!(heads[0].device_id, "ours");
         assert_eq!(heads[0].seq, 9);
         assert_eq!(
-            heads[0].author_pubkey.as_deref(),
-            Some(hex::encode(keypair.public_key).as_str()),
+            heads[0].author_pubkey,
+            hex::encode(keypair.public_key),
             "the verified author is surfaced to the caller",
         );
     }
@@ -874,10 +875,7 @@ mod tests {
         let got = storage.get_min_schema_version().await.expect("get floor");
         let got = got.expect("a signed floor is present");
         assert_eq!(got.version, 7);
-        assert_eq!(
-            got.author_pubkey.as_deref(),
-            Some(hex::encode(keypair.public_key).as_str()),
-        );
+        assert_eq!(got.author_pubkey, hex::encode(keypair.public_key));
 
         // Overwrite it with a forged floor (valid shape, bad signature): it is
         // treated as absent.

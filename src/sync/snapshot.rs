@@ -638,7 +638,7 @@ mod tests {
                     seq: *seq,
                     snapshot_seq: *snap,
                     last_sync: None,
-                    author_pubkey: None,
+                    author_pubkey: String::new(),
                 })
                 .collect())
         }
@@ -734,7 +734,7 @@ mod tests {
                 .unwrap()
                 .map(|version| MinSchemaVersion {
                     version,
-                    author_pubkey: None,
+                    author_pubkey: String::new(),
                 }))
         }
 

@@ -42,12 +42,11 @@ pub struct DeviceHead {
     /// was added.
     pub last_sync: Option<String>,
     /// Hex-encoded Ed25519 public key the head's signature verified against, set
-    /// by [`SyncStorage::list_heads`] once the embedded signature is checked.
-    /// The caller uses it to decide whether the head's author is a current member
-    /// (the authorization check the chain backs). Always `Some` for a head read
-    /// from storage (every head is signed regardless of the at-rest cipher);
-    /// `Option` only because heads the status-UI tests build by hand carry none.
-    pub author_pubkey: Option<String>,
+    /// by [`SyncStorage::list_heads`] once the embedded signature is checked. The
+    /// caller uses it to decide whether the head's author is a current member (the
+    /// authorization check the chain backs). Every head is signed regardless of the
+    /// at-rest cipher, so a head read from storage always carries its author.
+    pub author_pubkey: String,
 }
 
 /// A verified `min_schema_version`: the version plus the public key its
@@ -57,10 +56,9 @@ pub struct DeviceHead {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinSchemaVersion {
     pub version: u32,
-    /// Hex-encoded Ed25519 public key the signature verified against. Always
-    /// `Some` for a floor read from storage (it is always signed); `Option` only
-    /// so a mock that stores a bare version can omit it.
-    pub author_pubkey: Option<String>,
+    /// Hex-encoded Ed25519 public key the signature verified against. A floor read
+    /// from storage is always signed, so it always carries its author.
+    pub author_pubkey: String,
 }
 
 /// Error type for storage operations.

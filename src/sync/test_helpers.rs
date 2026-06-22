@@ -340,7 +340,7 @@ impl MockSyncStorage {
     /// but reusable by the changeset-fabrication helpers. Signs with the mock's
     /// keypair and stores the resulting `HeadJson` JSON bytes.
     fn publish_head(&self, device_id: &str, seq: u64, snapshot_seq: Option<u64>) {
-        let head = HeadJson::signed(seq, snapshot_seq, None, &self.keypair);
+        let head = HeadJson::signed(device_id, seq, snapshot_seq, None, &self.keypair);
         let bytes = serde_json::to_vec(&head).expect("serialize head");
         self.heads
             .lock()
@@ -358,9 +358,10 @@ impl SyncStorage for MockSyncStorage {
         for (device_id, bytes) in heads.iter() {
             let head: HeadJson = serde_json::from_slice(bytes)
                 .map_err(|e| StorageError::S3(format!("parse head {device_id}: {e}")))?;
-            // Mirror the cloud: a head whose signature doesn't verify is skipped,
-            // not returned.
-            if !head.verify() {
+            // Mirror the cloud: a head whose signature doesn't verify against its
+            // slot is skipped, not returned — and logged, like production.
+            if !head.verify(device_id) {
+                tracing::warn!("skipping head {device_id} with an invalid signature");
                 continue;
             }
             out.push(DeviceHead {
@@ -368,7 +369,7 @@ impl SyncStorage for MockSyncStorage {
                 seq: head.seq,
                 snapshot_seq: head.snapshot_seq,
                 last_sync: head.last_sync,
-                author_pubkey: Some(head.author_pubkey),
+                author_pubkey: head.author_pubkey,
             });
         }
         Ok(out)
@@ -461,13 +462,14 @@ impl SyncStorage for MockSyncStorage {
         };
         let parsed: MinSchemaVersionJson = serde_json::from_slice(bytes)
             .map_err(|e| StorageError::S3(format!("parse min_schema_version: {e}")))?;
-        // Mirror the cloud: an unverifiable floor is treated as absent.
+        // Mirror the cloud: an unverifiable floor is treated as absent, and logged.
         if !parsed.verify() {
+            tracing::warn!("ignoring min_schema_version with an invalid signature");
             return Ok(None);
         }
         Ok(Some(MinSchemaVersion {
             version: parsed.min_schema_version,
-            author_pubkey: Some(parsed.author_pubkey),
+            author_pubkey: parsed.author_pubkey,
         }))
     }
 

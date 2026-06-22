@@ -200,10 +200,7 @@ pub async fn pull_changes(
         .map_err(PullError::Storage)?
     {
         let honor = match membership_chain.as_ref() {
-            Some(chain) => min
-                .author_pubkey
-                .as_deref()
-                .is_some_and(|pk| is_current_owner(chain, pk)),
+            Some(chain) => is_current_owner(chain, &min.author_pubkey),
             None => true,
         };
         if honor {
@@ -223,36 +220,29 @@ pub async fn pull_changes(
     }
 
     // List heads, then drop any the membership chain doesn't authorize. A head is
-    // a signed control object (`list_heads` verified its signature and surfaced the
-    // author); when a chain is present, a head whose author is not a current member
-    // is a forgery that would otherwise pollute sync status and drive a per-seq
-    // fetch loop, so it is skipped here. Our own head is always kept — the pull
-    // loop skips our device_id anyway, and we trust what we wrote. With no chain
+    // a signed control object (`list_heads` verified its signature is valid for the
+    // slot and surfaced the author); when a chain is present, a head whose author
+    // is not a current member is a forgery that would otherwise pollute sync status
+    // and drive a per-seq fetch loop, so it is skipped here. Our own head goes
+    // through the same gate — its author is this device, a current member, so it is
+    // kept (and dropped if this device was removed, which is correct). With no chain
     // (browsable) every head is kept, as before.
     let heads = storage.list_heads().await.map_err(PullError::Storage)?;
     let heads: Vec<DeviceHead> = heads
         .into_iter()
-        .filter(|head| {
-            if head.device_id == our_device_id {
-                return true;
-            }
-            match membership_chain.as_ref() {
-                Some(chain) => {
-                    let authorized = head
-                        .author_pubkey
-                        .as_deref()
-                        .is_some_and(|pk| is_current_member(chain, pk));
-                    if !authorized {
-                        warn!(
-                            device_id = %head.device_id,
-                            author = ?head.author_pubkey,
-                            "skipping head not authored by a current member"
-                        );
-                    }
-                    authorized
+        .filter(|head| match membership_chain.as_ref() {
+            Some(chain) => {
+                let authorized = is_current_member(chain, &head.author_pubkey);
+                if !authorized {
+                    warn!(
+                        device_id = %head.device_id,
+                        author = %head.author_pubkey,
+                        "skipping head not authored by a current member"
+                    );
                 }
-                None => true,
+                authorized
             }
+            None => true,
         })
         .collect();
 
