@@ -267,6 +267,14 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
             "Skipped changes from a newer app version; update the app to apply them",
         );
     }
+    // A rejected-unauthorized changeset is forged or from a removed member — an
+    // integrity event, surfaced at error level the same way.
+    if result.rejected_unauthorized > 0 {
+        error!(
+            count = result.rejected_unauthorized,
+            "Rejected changes from an unauthorized device (forged or removed member)",
+        );
+    }
 
     Ok(result.resume_drain_promptly)
 }

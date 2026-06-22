@@ -36,6 +36,11 @@ pub struct SyncCycleResult {
     /// cursor advanced past them, so the count is per-cycle (transient) — it
     /// surfaces once and clears once the user updates the client.
     pub skipped_schema: u64,
+    /// Changesets skipped because their author is not a write-capable member,
+    /// judged against the exact membership entry they are signed under (forged or
+    /// revoked, not a propagation lag). The cursor advanced past them so the
+    /// device isn't stuck; the count is per-cycle and surfaces as a warning.
+    pub rejected_unauthorized: u64,
     /// Number of other devices seen in the sync storage.
     pub other_device_count: usize,
     /// RFC 3339 timestamp of when this cycle completed.
@@ -546,6 +551,7 @@ pub async fn run_single_sync_cycle(
     Ok(SyncCycleResult {
         changesets_applied: sync_result.pull.changesets_applied,
         skipped_schema: sync_result.pull.skipped_schema,
+        rejected_unauthorized: sync_result.pull.rejected_unauthorized.len() as u64,
         other_device_count,
         sync_time: now,
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,
