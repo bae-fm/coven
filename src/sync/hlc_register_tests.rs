@@ -417,7 +417,7 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
         "dev-b",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -492,7 +492,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
         "dev-b",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
