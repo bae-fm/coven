@@ -84,11 +84,11 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
     }
 }
 
-impl From<crate::library_dir::BlobPathError> for StorageError {
+impl From<crate::library_dir::PathTokenError> for StorageError {
     /// A blob id/namespace/cloud_path that can't form a safe object key is bad
     /// data, surfaced so the caller refuses the blob rather than reaching storage
     /// with a key that could escape its prefix.
-    fn from(e: crate::library_dir::BlobPathError) -> Self {
+    fn from(e: crate::library_dir::PathTokenError) -> Self {
         StorageError::S3(format!("unsafe blob path: {e}"))
     }
 }

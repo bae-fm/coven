@@ -14,17 +14,122 @@ use std::sync::RwLock;
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
-use crate::keys::UserKeypair;
+use crate::id_provider::SequentialIdProvider;
+use crate::join_code::InviteCode;
+use crate::keys::{KeyService, UserKeypair};
+use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::join::open_db_and_pull;
+use crate::sync::join::{join_library, open_db_and_pull, JoinError};
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SNAPSHOT_BLOB_BACKFILL_PENDING,
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
+
+/// An invite code carrying an attacker-chosen `library_id` is the path-traversal
+/// vector: the code is unsigned, the id becomes a directory coven creates and — on
+/// a bootstrap failure — recursively deletes. `join_library` must refuse a `..`
+/// id before any filesystem op, creating nothing outside the libraries root, and
+/// fail with the typed invalid-library-id error rather than proceeding to
+/// create_dir_all / remove_dir_all on the escaped path.
+#[tokio::test]
+async fn join_rejects_parent_dir_library_id_before_touching_disk() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let data_dir = tmp.path();
+    // `data_dir/libraries/../escape` resolves to `data_dir/escape` — outside the
+    // libraries root.
+    let escape_target = data_dir.join("escape");
+
+    let code = InviteCode {
+        library_id: "../escape".to_string(),
+        library_name: "Evil".to_string(),
+        join_info: CloudHomeJoinInfo::S3 {
+            bucket: "b".to_string(),
+            region: "r".to_string(),
+            endpoint: None,
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+            key_prefix: None,
+        },
+        owner_pubkey: "deadbeef".to_string(),
+    };
+
+    let key_service = KeyService::new("global".to_string());
+    let ids = SequentialIdProvider::new("dev");
+    let result = join_library(
+        data_dir,
+        code,
+        &test_synced_tables(),
+        &key_service,
+        Box::new(InMemoryCloudHome::new()),
+        &ids,
+        |_| Box::new(NoopBlobSource),
+        |_| {},
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(JoinError::InvalidLibraryId(_))),
+        "a traversal library_id must be refused with the invalid-library-id error, got {result:?}",
+    );
+    assert!(
+        !escape_target.exists(),
+        "join must not create a directory outside the libraries root at {}",
+        escape_target.display(),
+    );
+}
+
+/// An absolute `library_id` escapes by replacing the base (`libraries`.join("/abs")
+/// == "/abs"). It must be refused before any filesystem op.
+#[tokio::test]
+async fn join_rejects_absolute_library_id_before_touching_disk() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let data_dir = tmp.path();
+    let abs_escape = data_dir.join("abs_escape");
+    let abs_id = abs_escape.to_str().expect("utf8 path").to_string();
+
+    let code = InviteCode {
+        library_id: abs_id,
+        library_name: "Evil".to_string(),
+        join_info: CloudHomeJoinInfo::S3 {
+            bucket: "b".to_string(),
+            region: "r".to_string(),
+            endpoint: None,
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+            key_prefix: None,
+        },
+        owner_pubkey: "deadbeef".to_string(),
+    };
+
+    let key_service = KeyService::new("global".to_string());
+    let ids = SequentialIdProvider::new("dev");
+    let result = join_library(
+        data_dir,
+        code,
+        &test_synced_tables(),
+        &key_service,
+        Box::new(InMemoryCloudHome::new()),
+        &ids,
+        |_| Box::new(NoopBlobSource),
+        |_| {},
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(JoinError::InvalidLibraryId(_))),
+        "an absolute library_id must be refused with the invalid-library-id error, got {result:?}",
+    );
+    assert!(
+        !abs_escape.exists(),
+        "join must not create a directory at an absolute library_id path {}",
+        abs_escape.display(),
+    );
+}
 
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {

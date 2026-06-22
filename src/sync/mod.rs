@@ -38,6 +38,8 @@ pub mod push;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod restore;
 pub mod restore_code;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod restore_tests;
 pub mod service;
 pub mod session;
 pub mod signed_control;
