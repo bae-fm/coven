@@ -187,14 +187,11 @@ pub async fn unwrap_library_key(
 
     // Authenticate the wrapped key against the owner the invite pins before
     // adopting anything. A failure here is a substituted, forged, or relocated
-    // key — refuse it loudly rather than decrypt whatever bytes are present.
+    // key, or a corrupt object — refuse it loudly, surfacing which, rather than
+    // decrypt whatever bytes are present.
     let sealed = wrapped
         .verify_and_unwrap(library_id, &pubkey_hex, expected_owner)
-        .ok_or_else(|| {
-            InviteError::Crypto(
-                "wrapped library key is not authentically signed by the library owner".to_string(),
-            )
-        })?;
+        .map_err(|e| InviteError::Crypto(format!("wrapped library key: {e}")))?;
 
     // Decrypt with our X25519 keys.
     let x25519_pk = keypair.to_x25519_public_key();
@@ -403,13 +400,14 @@ mod tests {
         assert_eq!(unwrapped, encryption_key);
     }
 
-    /// The substitution attack from the security issue: a bucket writer who is
-    /// not the library owner seals a key of their choosing to the joiner's public
-    /// key (which is public) and signs it with their own identity, overwriting the
-    /// invite's wrapped-key object. The joiner must refuse to adopt it — a sealed
-    /// box authenticates only the recipient, so without the owner-signature check
-    /// the joiner would take the attacker's key and the attacker could read
-    /// everything it encrypts.
+    /// A joiner adopts only a library key the owner it pins signed; a key signed
+    /// by anyone else is refused. A bucket writer who is not the owner can seal a
+    /// key of their choosing to the joiner's public key (which is public), sign it
+    /// with their own identity, and overwrite the invite's wrapped-key object — a
+    /// sealed box authenticates only its recipient, not its author. Without
+    /// verifying the owner's signature the joiner would take that attacker's key
+    /// and the attacker could read everything it encrypts; this test enforces that
+    /// it does not.
     #[tokio::test]
     async fn unwrap_refuses_key_not_signed_by_owner() {
         let owner = gen_keypair();

@@ -163,20 +163,23 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
 /// Ed25519 pubkey). It is part of the signed payload — not stored in the JSON —
 /// so a validly-signed key for one member cannot be relocated to another
 /// member's slot, mirroring how [`HeadJson`] binds its `device_id`.
+///
+/// Unlike [`HeadJson`], no author is stored: the only key whose signature this
+/// object may bear is the owner the joiner already pins (the chain founder),
+/// which the verifier is handed directly. There is no second valid signer to
+/// distinguish, so the signature is checked straight against that pinned owner.
 #[derive(Serialize, Deserialize)]
 pub struct WrappedLibraryKey {
     /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the library key.
     pub sealed: String,
-    /// Hex-encoded Ed25519 public key of the owner that wrapped and signed this key.
-    pub author_pubkey: String,
-    /// Hex-encoded detached signature over [`WrappedKeyFields`].
+    /// Hex-encoded detached signature over [`WrappedKeyFields`], produced by the owner.
     pub signature: String,
 }
 
 /// The wrapped-key fields the signature covers, in declaration order. Excludes
-/// `author_pubkey`/`signature` (the signature's own outputs). Includes
-/// `library_id` (so a key can't be replayed into a different library) and
-/// `recipient_pubkey` (the slot, so a key can't be relocated to another member).
+/// `signature` (the signature's own output). Includes `library_id` (so a key
+/// can't be replayed into a different library) and `recipient_pubkey` (the slot,
+/// so a key can't be relocated to another member).
 #[derive(Serialize)]
 struct WrappedKeyFields<'a> {
     library_id: &'a str,
@@ -184,11 +187,30 @@ struct WrappedKeyFields<'a> {
     sealed: &'a str,
 }
 
+/// Why a [`WrappedLibraryKey`] could not be authenticated and unwrapped. Named
+/// per reason so the caller can surface *why* an adoption was refused — a
+/// substituted/forged key (the signature does not verify against the pinned
+/// owner) is distinct from a corrupt object (the sealed box is not valid hex) —
+/// rather than collapsing both into one opaque failure.
+#[derive(Debug, thiserror::Error)]
+pub enum WrappedKeyError {
+    /// The signature does not verify against the pinned owner over
+    /// `(library_id, recipient_pubkey, sealed)`. Covers a box signed by anyone
+    /// other than the owner, a payload tampered after signing (different library,
+    /// slot, or sealed bytes), and a malformed signature or owner pubkey — all
+    /// indistinguishable here and all meaning "not authentically the owner's".
+    #[error("signature does not verify against the pinned library owner")]
+    SignatureMismatch,
+    /// The signature verified, but the sealed-box field is not valid hex, so
+    /// there are no bytes to decrypt — a corrupt object, not an attack.
+    #[error("sealed box is not valid hex")]
+    MalformedSealed,
+}
+
 impl WrappedLibraryKey {
     /// Wrap `sealed` (a sealed box of the library key, already encrypted to
-    /// `recipient_pubkey`) and sign the binding with `owner`: fills
-    /// `author_pubkey` with the owner's public key and `signature` with the
-    /// detached signature over the canonical payload.
+    /// `recipient_pubkey`) and sign the binding with `owner`: fills `signature`
+    /// with the owner's detached signature over the canonical payload.
     pub fn signed(
         library_id: &str,
         recipient_pubkey: &str,
@@ -200,32 +222,29 @@ impl WrappedLibraryKey {
         let sig = owner.sign(&payload);
         WrappedLibraryKey {
             sealed: sealed_hex,
-            author_pubkey: hex::encode(owner.public_key),
             signature: hex::encode(sig),
         }
     }
 
     /// Verify this wrapped key was authentically produced by `expected_owner`
     /// (the chain founder the invite pins) for `recipient_pubkey` in
-    /// `library_id`, and return the sealed-box bytes to decrypt. Fails closed if
-    /// the embedded author isn't the expected owner, if the signature doesn't
-    /// cover these exact bytes/slot/library, or if any field is malformed —
-    /// every one of which is a substituted or relocated key that must not be
-    /// adopted.
+    /// `library_id`, and return the sealed-box bytes to decrypt. Verifies the
+    /// signature directly against `expected_owner` — the only key whose
+    /// signature this object may bear — over the binding `(library_id,
+    /// recipient_pubkey, sealed)`. Fails closed, naming why, if the signature
+    /// doesn't verify against that owner (a substituted, forged, or relocated
+    /// key) or the sealed box is malformed; neither must be adopted.
     pub fn verify_and_unwrap(
         &self,
         library_id: &str,
         recipient_pubkey: &str,
         expected_owner: &str,
-    ) -> Option<Vec<u8>> {
-        if self.author_pubkey != expected_owner {
-            return None;
-        }
+    ) -> Result<Vec<u8>, WrappedKeyError> {
         let payload = wrapped_key_signing_payload(library_id, recipient_pubkey, &self.sealed);
-        if !keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload) {
-            return None;
+        if !keys::verify_signature_hex(expected_owner, &self.signature, &payload) {
+            return Err(WrappedKeyError::SignatureMismatch);
         }
-        hex::decode(&self.sealed).ok()
+        hex::decode(&self.sealed).map_err(|_| WrappedKeyError::MalformedSealed)
     }
 }
 
@@ -348,77 +367,97 @@ mod tests {
         let sealed = vec![1u8, 2, 3, 4, 5];
         let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed.clone(), &owner);
 
-        assert_eq!(wrapped.author_pubkey, owner_hex);
-
         // Round-trips through JSON and yields the sealed bytes back.
         let json = serde_json::to_vec(&wrapped).expect("serialize wrapped key");
         let parsed: WrappedLibraryKey = serde_json::from_slice(&json).expect("parse wrapped key");
         assert_eq!(
-            parsed.verify_and_unwrap("lib", "recipient-pk", &owner_hex),
-            Some(sealed),
+            parsed
+                .verify_and_unwrap("lib", "recipient-pk", &owner_hex)
+                .unwrap(),
+            sealed,
         );
     }
 
     #[test]
-    fn wrapped_key_rejects_wrong_owner_and_rebinding() {
+    fn wrapped_key_signed_by_non_owner_is_refused() {
+        // The object is signed by some key, but the joiner verifies against the
+        // owner it pins (the chain founder). A box the owner did not sign — here
+        // signed by a different key, the shape of a bucket writer substituting an
+        // attacker-chosen key — fails to verify against that owner and is refused.
+        let signer = UserKeypair::generate();
+        let pinned_owner = UserKeypair::generate();
+        let pinned_owner_hex = hex::encode(pinned_owner.public_key);
+        let sealed = vec![9u8; 32];
+        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed, &signer);
+
+        assert!(
+            matches!(
+                wrapped.verify_and_unwrap("lib", "recipient-pk", &pinned_owner_hex),
+                Err(WrappedKeyError::SignatureMismatch),
+            ),
+            "a key not signed by the pinned owner must be refused",
+        );
+    }
+
+    #[test]
+    fn wrapped_key_rejects_rebinding() {
         let owner = UserKeypair::generate();
-        let other = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key);
-        let other_hex = hex::encode(other.public_key);
         let sealed = vec![9u8; 32];
         let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed, &owner);
-
-        // A different expected owner: a substituted box signed by a non-owner
-        // (or claiming the owner without their key) is refused.
-        assert_eq!(
-            wrapped.verify_and_unwrap("lib", "recipient-pk", &other_hex),
-            None,
-            "must reject when the expected owner is not the signer",
-        );
 
         // The signature binds the library and the recipient slot: changing either
         // at verify time fails, so a key can't be replayed cross-library or
         // relocated to another member's slot.
-        assert_eq!(
-            wrapped.verify_and_unwrap("other-lib", "recipient-pk", &owner_hex),
-            None,
+        assert!(
+            matches!(
+                wrapped.verify_and_unwrap("other-lib", "recipient-pk", &owner_hex),
+                Err(WrappedKeyError::SignatureMismatch),
+            ),
             "must reject a key replayed into a different library",
         );
-        assert_eq!(
-            wrapped.verify_and_unwrap("lib", "other-recipient", &owner_hex),
-            None,
+        assert!(
+            matches!(
+                wrapped.verify_and_unwrap("lib", "other-recipient", &owner_hex),
+                Err(WrappedKeyError::SignatureMismatch),
+            ),
             "must reject a key relocated to another recipient's slot",
         );
     }
 
     #[test]
-    fn wrapped_key_rejects_a_forged_author_claim() {
-        // A box sealed and signed by an attacker, then re-labeled to claim the
-        // owner's pubkey, must fail: the signature no longer matches the claimed
-        // author.
-        let attacker = UserKeypair::generate();
-        let owner = UserKeypair::generate();
-        let owner_hex = hex::encode(owner.public_key);
-
-        let mut wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", vec![7u8; 8], &attacker);
-        wrapped.author_pubkey = owner_hex.clone();
-        assert_eq!(
-            wrapped.verify_and_unwrap("lib", "recipient-pk", &owner_hex),
-            None,
-            "a forged author claim with an attacker's signature must be refused",
-        );
-    }
-
-    #[test]
-    fn wrapped_key_malformed_fields_fail_closed() {
+    fn wrapped_key_malformed_signature_fails_closed() {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key);
         let mut wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", vec![1u8; 4], &owner);
 
+        // A signature that isn't valid hex can't verify against the owner.
         wrapped.signature = "not-hex!!".to_string();
-        assert_eq!(
+        assert!(matches!(
             wrapped.verify_and_unwrap("lib", "recipient-pk", &owner_hex),
-            None,
-        );
+            Err(WrappedKeyError::SignatureMismatch),
+        ));
+    }
+
+    #[test]
+    fn wrapped_key_malformed_sealed_is_distinguished() {
+        // A correctly owner-signed object whose sealed field is not valid hex:
+        // the signature verifies (it is taken over the malformed bytes), but
+        // there is nothing to decrypt. This is a corrupt object, surfaced as a
+        // reason distinct from a signature mismatch.
+        let owner = UserKeypair::generate();
+        let owner_hex = hex::encode(owner.public_key);
+
+        let mut wrapped = WrappedLibraryKey {
+            sealed: "not-hex!!".to_string(),
+            signature: String::new(),
+        };
+        let payload = wrapped_key_signing_payload("lib", "recipient-pk", &wrapped.sealed);
+        wrapped.signature = hex::encode(owner.sign(&payload));
+
+        assert!(matches!(
+            wrapped.verify_and_unwrap("lib", "recipient-pk", &owner_hex),
+            Err(WrappedKeyError::MalformedSealed),
+        ));
     }
 }
