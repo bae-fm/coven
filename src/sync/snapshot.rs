@@ -8,16 +8,19 @@
 ///
 /// Snapshot creation policy: after every N changesets (default 100) or
 /// T hours (default 24) since the last snapshot.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use super::cloud_storage::CloudCipher;
+use super::membership_ops::download_chain;
 use super::session::SyncedTable;
+use super::signed_control::SnapshotMetaJson;
 use super::storage::{StorageError, SyncStorage};
+use crate::keys::UserKeypair;
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
@@ -46,16 +49,31 @@ pub enum SnapshotError {
     /// excludes gated-false subtrees (the changeset gate cuts them too).
     #[error("failed to scope snapshot down to shareable data: {0}")]
     ClearFailed(String),
+    /// The snapshot metadata's signature does not verify against its embedded
+    /// author. The bucket is untrusted, so an unsigned, forged, or tampered meta
+    /// (changed cursors, creation time, or DB hash) is refused rather than adopted
+    /// — `meta.cursors` are control input and the DB image is the whole catalog.
+    #[error("snapshot metadata signature does not verify")]
+    MetaSignatureInvalid,
+    /// The downloaded snapshot DB's hash does not match the hash the (verified)
+    /// metadata commits to. The DB image was substituted after the meta was
+    /// signed, or the two objects are from different pushes — either way the
+    /// catalog is not the one its author signed, so it is refused.
+    #[error("snapshot DB hash does not match the signed metadata")]
+    DbHashMismatch,
+    /// The snapshot's author is not authorized to publish a catalog image: not a
+    /// current write-capable member of the library's membership chain, or the
+    /// chain itself is not anchored to the library's owner (a wiped/refounded
+    /// chain). The snapshot is refused rather than adopted.
+    #[error("snapshot author is not an authorized member: {0}")]
+    UnauthorizedAuthor(String),
 }
 
-/// Metadata stored alongside a snapshot in `snapshot_meta.json{suffix}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotMeta {
-    /// Per-device cursors at snapshot time: device_id -> head seq.
-    /// A bootstrapping device uses these as initial sync_cursors.
-    pub cursors: HashMap<String, u64>,
-    /// RFC 3339 timestamp when the snapshot was created.
-    pub created_at: String,
+/// SHA-256 of a snapshot's stored (sealed) bytes, hex-encoded. The hash the
+/// signed [`SnapshotMetaJson`] commits to, so the same bytes that round-trip
+/// through `put_snapshot`/`get_snapshot` are what the signature binds.
+fn snapshot_db_hash(sealed: &[u8]) -> String {
+    hex::encode(Sha256::digest(sealed))
 }
 
 /// Result of bootstrapping from a snapshot.
@@ -202,19 +220,29 @@ fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
 
 /// Upload a snapshot to the sync storage and update the device head.
 ///
-/// Also uploads per-device cursor metadata (`snapshot_meta.json{suffix}`) so
-/// that bootstrapping devices know where each device was at snapshot time, and
-/// GC can safely delete only changesets covered by the snapshot.
+/// Also uploads signed per-device cursor metadata (`snapshot_meta.json{suffix}`)
+/// so that bootstrapping devices know where each device was at snapshot time, and
+/// GC can safely delete only changesets covered by the snapshot. The metadata is
+/// signed by `keypair` over both the cursors and the snapshot DB's hash, so a
+/// bootstrapping/GC reader can authenticate that one author published both halves
+/// (the catalog image and its cursors) — the bucket is untrusted and the shared
+/// at-rest cipher proves only confidentiality, not authorship.
 pub async fn push_snapshot(
     storage: &dyn SyncStorage,
     sealed_snapshot: Vec<u8>,
     device_id: &str,
     applied_cursors: HashMap<String, u64>,
     current_seq: u64,
+    keypair: &UserKeypair,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(), SnapshotError> {
     let size = sealed_snapshot.len();
     let timestamp = clock.now().to_rfc3339();
+
+    // Hash the exact bytes we store, before they move into `put_snapshot`. The
+    // signed meta commits to this hash, so a reader that downloads the snapshot
+    // re-hashes those same bytes and detects a substituted image.
+    let db_hash = snapshot_db_hash(&sealed_snapshot);
 
     // Upload snapshot (overwrites previous).
     storage.put_snapshot(sealed_snapshot).await?;
@@ -224,14 +252,11 @@ pub async fn push_snapshot(
     // other devices' published heads, which may be ahead of what we pulled.
     // Claiming coverage we don't have lets GC delete un-snapshotted changesets
     // that no future restore can recover.
-    let mut cursors = applied_cursors;
+    let mut cursors: BTreeMap<String, u64> = applied_cursors.into_iter().collect();
     // Our own current_seq is included (our head hasn't been updated yet).
     cursors.insert(device_id.to_string(), current_seq);
 
-    let meta = SnapshotMeta {
-        cursors: cursors.clone(),
-        created_at: timestamp.clone(),
-    };
+    let meta = SnapshotMetaJson::signed(cursors, timestamp.clone(), db_hash, keypair);
     let meta_json =
         serde_json::to_vec(&meta).map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
 
@@ -283,9 +308,89 @@ pub fn should_create_snapshot(
     false
 }
 
+/// Parse, signature-verify, and authorize a snapshot's metadata.
+///
+/// The bucket is untrusted: the at-rest cipher proves only confidentiality, so a
+/// meta object that decrypts could still have been written by anyone with the
+/// credential. This authenticates it the same way a changeset is authenticated:
+///
+/// 1. Parse the signed [`SnapshotMetaJson`].
+/// 2. Verify the author's signature over the cursors + creation time + DB hash —
+///    a forged, unsigned, or tampered meta is refused.
+/// 3. Authorize the author against the library's membership chain: the author
+///    must be a current write-capable member (Owner or Member — a snapshot is a
+///    catalog write, so a read-only Follower may not author one), and, when an
+///    owner is pinned, the chain must be anchored to that owner. A chain-less
+///    (browsable/open) library has no membership to authorize against, so a
+///    snapshot there is accepted on its signature alone (it is open by design,
+///    exactly as the pull keeps every head when no chain exists).
+///
+/// `owner_pubkey` is the library's established owner (the chain founder the
+/// invite pins) when known — `Some` on the join path. `None` on the restore path
+/// (the owner is adopted trust-on-first-use from the chain's own founder after
+/// the pull), so the chain is anchored to whatever founder it self-validates to.
+/// Either way the author must be a current write-capable member of that chain.
+async fn authorize_snapshot_meta(
+    storage: &dyn SyncStorage,
+    meta_json: &[u8],
+    owner_pubkey: Option<&str>,
+) -> Result<SnapshotMetaJson, SnapshotError> {
+    let meta: SnapshotMetaJson = serde_json::from_slice(meta_json)
+        .map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
+
+    if !meta.verify() {
+        return Err(SnapshotError::MetaSignatureInvalid);
+    }
+
+    // Load the membership chain to authorize the author, anchored to the pinned
+    // owner when one is known. This mirrors the changeset path's authorization:
+    // signature proves who, the chain proves whether they may write.
+    let entries = storage
+        .list_membership_entries()
+        .await
+        .map_err(SnapshotError::Bucket)?;
+
+    if entries.is_empty() {
+        // No chain. For an owner-pinned (opaque) library this is a wiped
+        // `membership/*` — a takeover attempt — so refuse. A library with no
+        // pinned owner is browsable/open and legitimately has no chain.
+        if let Some(owner) = owner_pubkey {
+            return Err(SnapshotError::UnauthorizedAuthor(format!(
+                "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
+            )));
+        }
+        return Ok(meta);
+    }
+
+    let chain = download_chain(storage, &entries)
+        .await
+        .map_err(|e| SnapshotError::UnauthorizedAuthor(format!("chain failed to load: {e}")))?;
+
+    if let Some(owner) = owner_pubkey {
+        if !chain.is_founded_by(owner) {
+            return Err(SnapshotError::UnauthorizedAuthor(format!(
+                "chain founder {:?} is not the pinned owner {owner}",
+                chain.founder_pubkey()
+            )));
+        }
+    }
+
+    if !chain.can_write_now(&meta.author_pubkey) {
+        return Err(SnapshotError::UnauthorizedAuthor(format!(
+            "author {} is not a current write-capable member",
+            meta.author_pubkey
+        )));
+    }
+
+    Ok(meta)
+}
+
 /// Delete changesets that are superseded by a snapshot.
 ///
-/// Reads snapshot metadata to get per-device cursors at snapshot time.
+/// Reads snapshot metadata to get per-device cursors at snapshot time. The
+/// metadata is authenticated first ([`authorize_snapshot_meta`]) — its cursors
+/// are control input that decides what is deleted fleet-wide, so an unsigned or
+/// non-member-authored meta is refused, never consumed.
 /// For each device, only deletes changesets with seq <= the device's cursor
 /// in the snapshot. This ensures changesets pushed AFTER the snapshot are
 /// preserved, even if their seq is below another device's snapshot seq.
@@ -307,8 +412,11 @@ pub async fn garbage_collect(storage: &dyn SyncStorage) -> Result<GcResult, Snap
         Err(e) => return Err(SnapshotError::Bucket(e)),
     };
 
-    let meta: SnapshotMeta = serde_json::from_slice(&meta_json)
-        .map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
+    // Authenticate the metadata before trusting its cursors to drive deletion.
+    // GC runs over the whole bucket with no caller-pinned owner, so the chain is
+    // anchored to its own founder; the author must be a current write-capable
+    // member of it.
+    let meta = authorize_snapshot_meta(storage, &meta_json, None).await?;
 
     let heads = storage.list_heads().await?;
     let mut deleted = 0u64;
@@ -370,34 +478,55 @@ pub struct GcResult {
 
 /// Bootstrap a new device from a snapshot.
 ///
-/// Downloads the snapshot, opens it through the home's [`CloudCipher`]
-/// (decrypting for an encrypted home, verbatim for a plaintext one), and writes
-/// the plaintext database to `target_path`. The caller should then open this as
-/// their local database and pull any changesets newer than the per-device
-/// cursors in the result.
+/// Downloads the snapshot and its metadata, authenticates BOTH before touching
+/// disk, opens the DB through the home's [`CloudCipher`] (decrypting for an
+/// encrypted home, verbatim for a plaintext one), and writes the plaintext
+/// database to `target_path`. The caller should then open this as their local
+/// database and pull any changesets newer than the per-device cursors in the
+/// result.
+///
+/// The bucket is untrusted, so a snapshot is held to the same authorship bar as a
+/// changeset before it is adopted:
+///
+/// - The signed metadata's author signature must verify (a forged, unsigned, or
+///   tampered meta — including a poisoned cursor — is refused).
+/// - The downloaded DB's hash must match what that signed meta commits to (a
+///   substituted catalog image is refused).
+/// - The author must be a current write-capable member of the membership chain,
+///   anchored to `owner_pubkey` when it is pinned (`Some` on join, where the
+///   invite pins the founder; `None` on restore, where the chain is anchored to
+///   its own founder and the owner is adopted trust-on-first-use after the pull).
+///
+/// Any failure refuses loudly with a typed [`SnapshotError`] and writes nothing
+/// to `target_path`, so a forged snapshot can never be adopted.
 ///
 /// Returns a `BootstrapResult` with per-device cursors so the caller knows
 /// where to start pulling changesets from each device.
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
     cipher: &CloudCipher,
+    owner_pubkey: Option<&str>,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
-    // Download both the snapshot blob and its per-device cursor metadata
-    // before touching disk. `push_snapshot` writes the metadata immediately
-    // after the snapshot blob, so its absence here means the bucket is in
-    // a torn state (e.g., a previous push failed between the two uploads).
-    // We refuse to bootstrap from incomplete data, and we fetch metadata
-    // first so we don't leave a half-written DB on the target path.
+    // Download the metadata and authenticate it before touching disk.
+    // `push_snapshot` writes the metadata immediately after the snapshot blob, so
+    // its absence here means the bucket is in a torn state (e.g., a previous push
+    // failed between the two uploads). We refuse to bootstrap from incomplete or
+    // unauthenticated data, and we verify everything before writing so we never
+    // leave a half-written or forged DB on the target path.
     let meta_json = storage
         .get_snapshot_meta()
         .await
         .map_err(SnapshotError::Bucket)?;
-    let meta: SnapshotMeta = serde_json::from_slice(&meta_json)
-        .map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
-    let cursors = meta.cursors;
+    let meta = authorize_snapshot_meta(storage, &meta_json, owner_pubkey).await?;
 
+    // Download the snapshot and confirm it is the exact image the (now
+    // authenticated) author signed, before opening or writing it.
     let sealed = storage.get_snapshot().await?;
+    if snapshot_db_hash(&sealed) != meta.db_hash {
+        return Err(SnapshotError::DbHashMismatch);
+    }
+
     let plaintext = cipher
         .open(&sealed)
         .map_err(|e| SnapshotError::Decryption(e.to_string()))?;
@@ -407,6 +536,7 @@ pub async fn bootstrap_from_snapshot(
     }
     std::fs::write(target_path, &plaintext)?;
 
+    let cursors: HashMap<String, u64> = meta.cursors.into_iter().collect();
     info!(
         num_devices = cursors.len(),
         db_size = plaintext.len(),
@@ -825,6 +955,40 @@ mod tests {
         CloudCipher::Encrypted(EncryptionService::new_with_key(&[0x42u8; 32]))
     }
 
+    /// The keypair the snapshot tests push and sign with, when they don't care
+    /// who the author is (round-trip, cursor-honesty, GC). It is not registered in
+    /// any chain, so these tests bootstrap with `owner = None` and an empty
+    /// membership listing — the open-library path that authorizes on the signature
+    /// alone. The membership-authorization tests build their own chained mock.
+    fn test_keypair() -> UserKeypair {
+        UserKeypair::generate()
+    }
+
+    /// Build signed snapshot metadata over `cursors`, committing to `db_hash`, and
+    /// store it. The single meta-signing helper the snapshot tests use when they
+    /// set cursors directly without going through `push_snapshot`.
+    ///
+    /// GC tests pass a placeholder `db_hash` (GC never fetches the snapshot DB —
+    /// only the signature over the cursors is checked). Bootstrap tests pass the
+    /// hash of the snapshot bytes they stored, so the DB-image check passes.
+    async fn put_signed_meta(
+        storage: &MockSyncStorage,
+        cursors: HashMap<String, u64>,
+        db_hash: &str,
+        keypair: &UserKeypair,
+    ) {
+        let meta = SnapshotMetaJson::signed(
+            cursors.into_iter().collect(),
+            "2026-02-10T00:00:00Z".to_string(),
+            db_hash.to_string(),
+            keypair,
+        );
+        storage
+            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
+            .await
+            .unwrap();
+    }
+
     // ---- should_create_snapshot tests ----
 
     #[test]
@@ -960,13 +1124,14 @@ mod tests {
             "devA",
             HashMap::new(),
             1,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, &enc, &target)
+        bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1043,13 +1208,14 @@ mod tests {
             "devA",
             HashMap::new(),
             1,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, &enc, &target)
+        bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1123,13 +1289,14 @@ mod tests {
             "devA",
             HashMap::new(),
             1,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, &enc, &target)
+        bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1175,6 +1342,7 @@ mod tests {
             "dev-1",
             applied,
             42,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
@@ -1193,7 +1361,7 @@ mod tests {
         let meta_json = storage
             .get_stored_snapshot_meta()
             .expect("metadata should be written");
-        let meta: SnapshotMeta = serde_json::from_slice(&meta_json).unwrap();
+        let meta: SnapshotMetaJson = serde_json::from_slice(&meta_json).unwrap();
         assert_eq!(meta.cursors.get("dev-1"), Some(&42));
         assert_eq!(meta.cursors.get("dev-2"), Some(&15));
         assert_eq!(meta.cursors.len(), 2);
@@ -1217,14 +1385,13 @@ mod tests {
         assert_eq!(storage.changeset_count(), 8);
 
         // Snapshot metadata: dev-a was at seq 3, dev-b was at seq 2.
-        let meta = SnapshotMeta {
-            cursors: HashMap::from([("dev-a".to_string(), 3), ("dev-b".to_string(), 2)]),
-            created_at: "2026-02-10T00:00:00Z".to_string(),
-        };
-        storage
-            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
-            .await
-            .unwrap();
+        put_signed_meta(
+            &storage,
+            HashMap::from([("dev-a".to_string(), 3), ("dev-b".to_string(), 2)]),
+            "00",
+            &test_keypair(),
+        )
+        .await;
 
         let result = garbage_collect(&storage).await.expect("gc");
 
@@ -1247,14 +1414,13 @@ mod tests {
         storage.add_changeset("dev-a", 10, vec![10]);
 
         // Snapshot metadata says dev-a was at seq 5 -- changeset 10 is newer.
-        let meta = SnapshotMeta {
-            cursors: HashMap::from([("dev-a".to_string(), 5)]),
-            created_at: "2026-02-10T00:00:00Z".to_string(),
-        };
-        storage
-            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
-            .await
-            .unwrap();
+        put_signed_meta(
+            &storage,
+            HashMap::from([("dev-a".to_string(), 5)]),
+            "00",
+            &test_keypair(),
+        )
+        .await;
 
         let result = garbage_collect(&storage).await.expect("gc");
 
@@ -1290,18 +1456,18 @@ mod tests {
             create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
         let storage = MockSyncStorage::new();
+        let db_hash = snapshot_db_hash(&encrypted);
         storage.put_snapshot(encrypted).await.unwrap();
-        let meta = SnapshotMeta {
-            cursors: HashMap::from([("dev-1".to_string(), 10), ("dev-2".to_string(), 7)]),
-            created_at: "2026-02-10T00:00:00Z".to_string(),
-        };
-        storage
-            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
-            .await
-            .unwrap();
+        put_signed_meta(
+            &storage,
+            HashMap::from([("dev-1".to_string(), 10), ("dev-2".to_string(), 7)]),
+            &db_hash,
+            &test_keypair(),
+        )
+        .await;
 
         let target = temp.path().join("bootstrapped.db");
-        let result = bootstrap_from_snapshot(&storage, &enc, &target)
+        let result = bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect("bootstrap");
 
@@ -1324,7 +1490,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("nope.db");
 
-        let result = bootstrap_from_snapshot(&storage, &enc, &target).await;
+        let result = bootstrap_from_snapshot(&storage, &enc, None, &target).await;
 
         assert!(result.is_err());
         assert!(!target.exists());
@@ -1358,13 +1524,14 @@ mod tests {
             "dev-1",
             HashMap::new(),
             5,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
         .expect("push");
 
         let target = temp.path().join("device2.db");
-        let result = bootstrap_from_snapshot(&storage, &enc, &target)
+        let result = bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect("bootstrap");
         assert_eq!(result.cursors.get("dev-1"), Some(&5));
@@ -1485,14 +1652,13 @@ mod tests {
 
         // Snapshot taken when dev-a was at 50, dev-b was at 30.
         // (Dev-b pushed 31-35 after the snapshot.)
-        let meta = SnapshotMeta {
-            cursors: HashMap::from([("dev-a".to_string(), 50), ("dev-b".to_string(), 30)]),
-            created_at: "2026-02-10T00:00:00Z".to_string(),
-        };
-        storage
-            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
-            .await
-            .unwrap();
+        put_signed_meta(
+            &storage,
+            HashMap::from([("dev-a".to_string(), 50), ("dev-b".to_string(), 30)]),
+            "00",
+            &test_keypair(),
+        )
+        .await;
 
         let result = garbage_collect(&storage).await.expect("gc");
 
@@ -1525,14 +1691,13 @@ mod tests {
         }
 
         // Snapshot only knows about dev-a.
-        let meta = SnapshotMeta {
-            cursors: HashMap::from([("dev-a".to_string(), 5)]),
-            created_at: "2026-02-10T00:00:00Z".to_string(),
-        };
-        storage
-            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
-            .await
-            .unwrap();
+        put_signed_meta(
+            &storage,
+            HashMap::from([("dev-a".to_string(), 5)]),
+            "00",
+            &test_keypair(),
+        )
+        .await;
 
         let result = garbage_collect(&storage).await.expect("gc");
 
@@ -1571,7 +1736,7 @@ mod tests {
             .unwrap();
 
         let target = temp.path().join("torn.db");
-        let err = bootstrap_from_snapshot(&storage, &enc, &target)
+        let err = bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect_err("bootstrap must refuse torn bucket");
         assert!(
@@ -1637,13 +1802,14 @@ mod tests {
             "B",
             applied,
             0,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
         .expect("push");
 
         let meta_json = storage.get_stored_snapshot_meta().expect("meta");
-        let meta: SnapshotMeta = serde_json::from_slice(&meta_json).unwrap();
+        let meta: SnapshotMetaJson = serde_json::from_slice(&meta_json).unwrap();
         assert_eq!(
             meta.cursors.get("M"),
             Some(&k),
@@ -1657,7 +1823,7 @@ mod tests {
             .expect("K+1 must survive GC");
 
         let target = temp.path().join("device_c.db");
-        let boot = bootstrap_from_snapshot(&storage, &enc, &target)
+        let boot = bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect("bootstrap");
         let c_cursor = *boot.cursors.get("M").unwrap_or(&0);
@@ -1705,6 +1871,7 @@ mod tests {
             "owner",
             HashMap::new(),
             1,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
@@ -1712,7 +1879,7 @@ mod tests {
 
         // Device B bootstraps and has the note.
         let b_path = temp.path().join("b.db");
-        let b_boot = bootstrap_from_snapshot(&storage, &enc, &b_path)
+        let b_boot = bootstrap_from_snapshot(&storage, &enc, None, &b_path)
             .await
             .expect("b bootstrap");
         let db_b = open_db_at(&b_path);
@@ -1760,6 +1927,7 @@ mod tests {
             "B",
             b_cursors.clone(),
             0,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
@@ -1767,7 +1935,7 @@ mod tests {
 
         // Device C bootstraps + pulls and must also have the update.
         let c_path = temp.path().join("c.db");
-        let c_boot = bootstrap_from_snapshot(&storage, &enc, &c_path)
+        let c_boot = bootstrap_from_snapshot(&storage, &enc, None, &c_path)
             .await
             .expect("c bootstrap");
         let db_c = open_db_at(&c_path);
@@ -1803,6 +1971,7 @@ mod tests {
             "M",
             applied,
             2,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
@@ -1838,13 +2007,14 @@ mod tests {
             "self",
             applied,
             0,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
         .expect("push");
 
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, &enc, &target)
+        let boot = bootstrap_from_snapshot(&storage, &enc, None, &target)
             .await
             .expect("bootstrap");
         assert_eq!(boot.cursors.get("M"), Some(&7));
@@ -1867,17 +2037,349 @@ mod tests {
             "B",
             applied,
             0,
+            &test_keypair(),
             &crate::clock::SystemClock,
         )
         .await
         .expect("push");
 
         let meta_json = storage.get_stored_snapshot_meta().expect("meta");
-        let meta: SnapshotMeta = serde_json::from_slice(&meta_json).unwrap();
+        let meta: SnapshotMetaJson = serde_json::from_slice(&meta_json).unwrap();
         assert_eq!(
             meta.cursors.get("M"),
             Some(&4),
             "must record applied seq 4, not M's ahead head 9"
+        );
+    }
+}
+
+/// Snapshot authentication and authorization: a snapshot is held to the same bar
+/// as a changeset before a joining/restoring device adopts it. These drive the
+/// production-faithful [`crate::sync::test_helpers::MockSyncStorage`] (which
+/// stores a real membership chain and signs through the production helpers), so
+/// the forge they reproduce is exactly the bucket-writer attack — a non-member
+/// who can write the bucket plants a catalog image or poisons the cursors.
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use crate::encryption::EncryptionService;
+    use crate::keys::UserKeypair;
+    use crate::sync::membership::{founder_entry, MemberRole, MembershipAction};
+    use crate::sync::test_helpers::{make_entry, pubkey_hex, MockSyncStorage};
+
+    /// The encrypted-home cipher these tests seal snapshots under.
+    fn cipher() -> CloudCipher {
+        CloudCipher::Encrypted(EncryptionService::new_with_key(&[0x42u8; 32]))
+    }
+
+    /// A minimal sealed snapshot blob. The authorization checks operate on the
+    /// metadata signature, the DB-hash binding, and the chain — none of which need
+    /// a real SQLite image — so a fixed byte string stands in for the catalog.
+    /// (The full create→push→bootstrap DB round-trip is covered in the sibling
+    /// `tests` module; here the blob is just the thing the signature commits to.)
+    fn fake_snapshot() -> Vec<u8> {
+        cipher().seal(b"catalog-image-bytes")
+    }
+
+    /// Seed a one-owner founder chain into the mock and return the owner keypair.
+    async fn found_chain(storage: &MockSyncStorage, owner: &UserKeypair) {
+        let entry = founder_entry(owner, "0000000001000-0000-owner");
+        storage
+            .put_membership_entry(&pubkey_hex(owner), 1, serde_json::to_vec(&entry).unwrap())
+            .await
+            .unwrap();
+    }
+
+    /// A snapshot signed by a current member (the owner) bootstraps: the signature
+    /// verifies, the DB hash matches, and the author is a write-capable member of
+    /// the chain anchored to the pinned owner.
+    #[tokio::test]
+    async fn bootstrap_accepts_snapshot_signed_by_member() {
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "owner-dev",
+            HashMap::new(),
+            1,
+            &owner,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("owner pushes a signed snapshot");
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        let boot = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
+            .await
+            .expect("a member-signed snapshot is adopted");
+        assert_eq!(boot.cursors.get("owner-dev"), Some(&1));
+        assert!(
+            target.exists(),
+            "the DB image is written for a valid snapshot"
+        );
+    }
+
+    /// THE forge: a bucket writer who is not a member signs a snapshot with their
+    /// own key and overwrites the objects. The author is checked against the
+    /// membership chain, so the snapshot is refused and nothing is written — a
+    /// snapshot is adopted only from a current write-capable member.
+    #[tokio::test]
+    async fn bootstrap_refuses_snapshot_signed_by_non_member() {
+        let owner = UserKeypair::generate();
+        let outsider = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+
+        // The outsider forges a fully-signed snapshot+meta: valid signature, valid
+        // DB hash — only the AUTHOR is unauthorized. This is exactly what a
+        // bucket-write-capable non-member can produce.
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "evil-dev",
+            HashMap::from([("victim".to_string(), u64::MAX)]),
+            1,
+            &outsider,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("the forged objects are written to the bucket");
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        let err = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
+            .await
+            .expect_err("a non-member-signed snapshot must be refused");
+        assert!(
+            matches!(err, SnapshotError::UnauthorizedAuthor(_)),
+            "expected UnauthorizedAuthor, got {err:?}",
+        );
+        assert!(
+            !target.exists(),
+            "no DB is written when the snapshot author is unauthorized",
+        );
+    }
+
+    /// A read-only Follower holds the library key (so it can seal a snapshot) but
+    /// may not author a catalog image. A snapshot it signs is refused — the same
+    /// write/read split the changeset path enforces.
+    #[tokio::test]
+    async fn bootstrap_refuses_snapshot_signed_by_follower() {
+        let owner = UserKeypair::generate();
+        let follower = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+        // Owner adds the follower (read-only).
+        let add = make_entry(
+            &owner,
+            MembershipAction::Add,
+            &follower,
+            MemberRole::Follower,
+            "0000000002000-0000-owner",
+        );
+        storage
+            .put_membership_entry(&pubkey_hex(&owner), 2, serde_json::to_vec(&add).unwrap())
+            .await
+            .unwrap();
+
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "follower-dev",
+            HashMap::new(),
+            1,
+            &follower,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("the follower writes a signed snapshot");
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        let err = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
+            .await
+            .expect_err("a follower-signed snapshot must be refused");
+        assert!(
+            matches!(err, SnapshotError::UnauthorizedAuthor(_)),
+            "expected UnauthorizedAuthor, got {err:?}",
+        );
+        assert!(!target.exists());
+    }
+
+    /// The DB image and the metadata are bound by one signature: a bucket writer
+    /// who swaps the snapshot DB for a different image (leaving the owner's signed
+    /// meta in place) is caught by the DB-hash check, even though the author is a
+    /// real member. Nothing is written.
+    #[tokio::test]
+    async fn bootstrap_refuses_tampered_snapshot_db() {
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "owner-dev",
+            HashMap::new(),
+            1,
+            &owner,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("owner pushes a signed snapshot");
+
+        // Substitute the DB image after the fact; the signed meta (and its
+        // committed hash) are untouched, so the bytes no longer match.
+        storage
+            .put_snapshot(cipher().seal(b"a-different-forged-catalog"))
+            .await
+            .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        let err = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
+            .await
+            .expect_err("a substituted DB image must be refused");
+        assert!(
+            matches!(err, SnapshotError::DbHashMismatch),
+            "expected DbHashMismatch, got {err:?}",
+        );
+        assert!(!target.exists());
+    }
+
+    /// The cursors are control input (a bootstrapping device starts pulling each
+    /// peer past them), so they are signature-covered. An attacker who edits a
+    /// cursor in the owner's signed meta — the bootstrap-skip / GC-mass-delete
+    /// primitive — breaks the signature and the meta is refused.
+    #[tokio::test]
+    async fn bootstrap_refuses_cursor_poisoned_meta() {
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "owner-dev",
+            HashMap::from([("peer".to_string(), 5)]),
+            1,
+            &owner,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("owner pushes a signed snapshot");
+
+        // Take the owner's signed meta and poison a cursor, leaving the author and
+        // signature as the owner's. The signature no longer covers these bytes.
+        let meta_json = storage.get_snapshot_meta().await.unwrap();
+        let mut meta: SnapshotMetaJson = serde_json::from_slice(&meta_json).unwrap();
+        meta.cursors.insert("peer".to_string(), u64::MAX);
+        storage
+            .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
+            .await
+            .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        let err = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
+            .await
+            .expect_err("a cursor-poisoned meta must be refused");
+        assert!(
+            matches!(err, SnapshotError::MetaSignatureInvalid),
+            "expected MetaSignatureInvalid, got {err:?}",
+        );
+        assert!(!target.exists());
+    }
+
+    /// Restore pins no owner up front: the chain is anchored to its own founder and
+    /// the author must be a current write-capable member of it. A member-signed
+    /// snapshot is adopted (owner = None), while a non-member-signed one is still
+    /// refused — so the trust-on-first-use restore path is not a hole.
+    #[tokio::test]
+    async fn restore_path_authorizes_against_the_chains_own_founder() {
+        let owner = UserKeypair::generate();
+        let outsider = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+
+        // Member-signed snapshot: adopted even with no pinned owner.
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "owner-dev",
+            HashMap::new(),
+            1,
+            &owner,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("owner pushes a signed snapshot");
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("restore.db");
+        bootstrap_from_snapshot(&storage, &cipher(), None, &target)
+            .await
+            .expect("restore adopts a member-signed snapshot anchored to the chain founder");
+        assert!(target.exists());
+
+        // Now an outsider overwrites the snapshot. Even with no pinned owner, the
+        // author is judged against the chain and refused.
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "evil-dev",
+            HashMap::new(),
+            1,
+            &outsider,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("outsider overwrites the snapshot objects");
+
+        let target2 = temp.path().join("restore2.db");
+        let err = bootstrap_from_snapshot(&storage, &cipher(), None, &target2)
+            .await
+            .expect_err("restore must refuse a non-member-signed snapshot");
+        assert!(
+            matches!(err, SnapshotError::UnauthorizedAuthor(_)),
+            "expected UnauthorizedAuthor, got {err:?}",
+        );
+        assert!(!target2.exists());
+    }
+
+    /// GC trusts the metadata's cursors to decide what to delete fleet-wide, so it
+    /// authenticates the meta first. A meta signed by a non-member is refused
+    /// rather than consumed — closing the forged-cursor mass-delete primitive on
+    /// the GC path too.
+    #[tokio::test]
+    async fn gc_refuses_non_member_signed_meta() {
+        let owner = UserKeypair::generate();
+        let outsider = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "evil-dev",
+            HashMap::from([("victim".to_string(), u64::MAX)]),
+            1,
+            &outsider,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("outsider writes a forged meta");
+
+        let err = garbage_collect(&storage)
+            .await
+            .expect_err("GC must refuse a non-member-signed meta before deleting");
+        assert!(
+            matches!(err, SnapshotError::UnauthorizedAuthor(_)),
+            "expected UnauthorizedAuthor, got {err:?}",
         );
     }
 }

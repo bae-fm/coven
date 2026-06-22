@@ -181,9 +181,17 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         })
         .await
         .expect("owner empty snapshot");
-    push_snapshot(&storage, empty_snap, "A", HashMap::new(), 0, &SystemClock)
-        .await
-        .expect("push empty snapshot");
+    push_snapshot(
+        &storage,
+        empty_snap,
+        "A",
+        HashMap::new(),
+        0,
+        &UserKeypair::generate(),
+        &SystemClock,
+    )
+    .await
+    .expect("push empty snapshot");
 
     let cs1 = capture_bytes(
         &db_a,
@@ -201,7 +209,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     // Device B joins through the real path: bootstrap from the snapshot, then
     // pull the changesets published after it.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, &enc, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, &enc, None, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -296,9 +304,17 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         })
         .await
         .expect("owner snapshot");
-    push_snapshot(&storage, snapshot, "A", HashMap::new(), 1, &SystemClock)
-        .await
-        .expect("push snapshot");
+    push_snapshot(
+        &storage,
+        snapshot,
+        "A",
+        HashMap::new(),
+        1,
+        &UserKeypair::generate(),
+        &SystemClock,
+    )
+    .await
+    .expect("push snapshot");
 
     // The cover blob exists in the cloud (uploaded when A first imported the
     // album), keyed `photos/photo1` as `PhotoBlobSource` maps a cover row. The
@@ -325,7 +341,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     };
     let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, &enc, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, &enc, None, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -399,9 +415,17 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         })
         .await
         .expect("owner snapshot");
-    push_snapshot(&storage, snapshot, "A", HashMap::new(), 1, &SystemClock)
-        .await
-        .expect("push snapshot");
+    push_snapshot(
+        &storage,
+        snapshot,
+        "A",
+        HashMap::new(),
+        1,
+        &UserKeypair::generate(),
+        &SystemClock,
+    )
+    .await
+    .expect("push snapshot");
 
     // Unlike the happy-path test above, the cover blob is NOT in the cloud yet at
     // bootstrap time (e.g. A's upload of it hadn't landed). So the bootstrap's
@@ -414,7 +438,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     // folder, not the plan's `dir`.
     let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, &enc, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, &enc, None, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(

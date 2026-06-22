@@ -311,10 +311,14 @@ async fn bootstrap_and_save(
     blob_source: &dyn BlobSource,
     on_status: &impl Fn(&str),
 ) -> Result<Config, JoinError> {
-    // Step 5: Bootstrap from snapshot.
+    // Step 5: Bootstrap from snapshot. The snapshot is authenticated against the
+    // membership chain anchored to the founder the invite pins (`owner_pubkey`),
+    // exactly as the changeset pull is: a snapshot that is unsigned, signed by a
+    // non-member, or whose DB image was tampered with is refused, never adopted.
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
-    let bootstrap_result = bootstrap_from_snapshot(bucket_dyn, cipher, &db_path).await?;
+    let bootstrap_result =
+        bootstrap_from_snapshot(bucket_dyn, cipher, Some(owner_pubkey), &db_path).await?;
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",
