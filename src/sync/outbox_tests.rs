@@ -650,8 +650,8 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     let cloud = InMemoryCloudHome::new();
     let membership = MockSyncStorage::new();
 
-    // Device A invites device B: seals the master key to B's pubkey and records a
-    // signed membership entry.
+    // Device A invites device B: seals the master key to B's pubkey, signs the
+    // binding, and records a signed membership entry.
     create_invitation(
         &membership,
         &membership,
@@ -660,6 +660,7 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         &pubkey_hex(&joiner),
         MemberRole::Member,
         &master_key,
+        "lib-outbox",
         "0000000002000-0000-dev1",
     )
     .await
@@ -719,10 +720,16 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         "the per-release key decrypts the content"
     );
 
-    // --- Device B joins: unwraps the library master key with its own identity. ---
-    let joined_master = unwrap_library_key(&membership as &dyn CloudHome, &joiner)
-        .await
-        .expect("device B unwraps the library key by joining");
+    // --- Device B joins: unwraps the library master key with its own identity,
+    // authenticating it against the owner the invite pins. ---
+    let joined_master = unwrap_library_key(
+        &membership as &dyn CloudHome,
+        &joiner,
+        "lib-outbox",
+        &pubkey_hex(&owner),
+    )
+    .await
+    .expect("device B unwraps the library key by joining");
     assert_eq!(
         joined_master, master_key,
         "joining recovers the library master key"

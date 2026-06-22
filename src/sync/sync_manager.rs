@@ -353,6 +353,8 @@ impl SyncManager {
         // chain or re-wraps keys before the rotation fails.
         require_encrypted_home(sync_loop.cipher())?;
 
+        let library_id = (self.config_provider)().library_id.clone();
+
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
 
@@ -362,6 +364,7 @@ impl SyncManager {
             sync_loop.user_keypair(),
             sync_loop.hlc(),
             public_key_hex,
+            &library_id,
         )
         .await
         .map_err(|e| e.0)?;
