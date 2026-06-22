@@ -12,6 +12,9 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
+use crate::sync::envelope;
+use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+use crate::sync::pull::PullError;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::service::{SyncCycleError, SyncService};
 use crate::sync::storage::SyncStorage;
@@ -582,6 +585,175 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     // The cursor still advances past the rejected seq so it isn't refetched.
     assert_eq!(updated.get("dev1"), Some(&1));
+}
+
+/// Owner anchoring (issue #95/#102): a puller with a pinned owner refuses a chain
+/// whose founder is a different key — the wipe-and-refound takeover — rather than
+/// adopting it and authorizing the attacker.
+#[tokio::test]
+async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
+    let storage = MockSyncStorage::new();
+
+    // The attacker wiped membership/* and refounded themselves as Owner.
+    let attacker = UserKeypair::generate();
+    let forged = founder_entry(&attacker, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(
+            &hex::encode(attacker.public_key),
+            1,
+            serde_json::to_vec(&forged).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The puller has the real owner pinned (a different key).
+    let owner = UserKeypair::generate();
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key))
+        .await
+        .unwrap();
+
+    let result = pull_into_result(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(PullError::MembershipTampered(_))),
+        "a chain founded by a non-owner must be refused, got {:?}",
+        result.map(|_| ()),
+    );
+}
+
+/// Owner anchoring (issue #104/#102): a puller with a pinned owner refuses an
+/// empty membership listing — the chain was wiped — rather than falling open to
+/// "no chain, accept everything."
+#[tokio::test]
+async fn pull_refuses_wiped_membership_when_owner_pinned() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key))
+        .await
+        .unwrap();
+
+    let result = pull_into_result(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(PullError::MembershipTampered(_))),
+        "an empty chain with a pinned owner must be refused, got {:?}",
+        result.map(|_| ()),
+    );
+}
+
+/// The positive case: a chain founded by the pinned owner is accepted, and a
+/// changeset signed by that owner applies.
+#[tokio::test]
+async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    // The owner authors a signed changeset.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromOwner', NULL, '0000000001000-0000-owner', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devOwner",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &owner,
+        &cs,
+    );
+    storage.put_changeset_packed("devOwner", 1, packed);
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devOwner"), Some(&1));
+}
+
+/// The fail-open the auditor reproduced: a non-empty but MALFORMED chain (here a
+/// founder with a corrupt signature, so `download_chain` errors) on a pinned-owner
+/// library must be refused — not treated as "no chain, accept everything", which
+/// would let an attacker who wipes+refounds with junk get their changesets applied.
+#[tokio::test]
+async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
+    let storage = MockSyncStorage::new();
+
+    // A non-empty listing whose entry won't validate (broken founder signature).
+    let attacker = UserKeypair::generate();
+    let mut bad = founder_entry(&attacker, "2026-03-01T00:00:00Z");
+    bad.signature = "00".to_string();
+    storage
+        .put_membership_entry(
+            &hex::encode(attacker.public_key),
+            1,
+            serde_json::to_vec(&bad).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let owner = UserKeypair::generate();
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key))
+        .await
+        .unwrap();
+
+    let result = pull_into_result(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(PullError::MembershipTampered(_))),
+        "a malformed chain on a pinned-owner library must be refused, got {:?}",
+        result.map(|_| ()),
+    );
 }
 
 mod schema_version_too_old_display {

@@ -10,10 +10,14 @@ use crate::keys::{KeyService, UserKeypair};
 
 use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
-use super::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
-};
+use super::membership::{founder_entry, MemberRole, MembershipChain, MembershipEntry};
 use super::storage::SyncStorage;
+
+/// `sync_state` key holding the hex Ed25519 pubkey of the library's established
+/// owner — pinned at create (the creator), join (the invite's owner), or restore.
+/// The membership chain is anchored to it: a chain whose founder differs is a
+/// takeover attempt and is rejected (issue #95).
+pub(crate) const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
 
 /// A member as seen by the caller.
 pub struct MemberInfo {
@@ -85,38 +89,19 @@ pub async fn invite_member(
         .await
         .map_err(|e| MembershipOpsError(format!("Failed to list membership entries: {e}")))?;
 
-    let mut chain = if entry_keys.is_empty() {
-        // No membership chain yet -- bootstrap with a founder entry.
-        let mut founder = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: user_pubkey_hex.clone(),
-            role: MemberRole::Owner,
-            timestamp: hlc.now().to_string(),
-            author_pubkey: String::new(),
-            signature: String::new(),
-        };
-
-        sign_membership_entry(&mut founder, user_keypair);
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder.clone())
-            .map_err(|e| MembershipOpsError(format!("Failed to create founder entry: {e}")))?;
-
-        // Upload the founder entry to the storage.
-        let founder_bytes = serde_json::to_vec(&founder)
-            .map_err(|e| MembershipOpsError(format!("Failed to serialize founder entry: {e}")))?;
-        storage
-            .put_membership_entry(&user_pubkey_hex, 1, founder_bytes)
-            .await
-            .map_err(|e| MembershipOpsError(format!("Failed to upload founder entry: {e}")))?;
-
-        info!("Bootstrapped membership chain with founder entry");
-
-        chain
-    } else {
-        download_chain(storage, &entry_keys).await?
-    };
+    // The founder is written once, when a library is created and first connects
+    // its cloud (issue #102) — never lazily here. An empty listing at invite time
+    // means the chain is missing (a fresh library that never founded, or a wiped
+    // `membership/*`); bootstrapping a new founder on the spot is the takeover
+    // primitive #104 describes, so refuse instead.
+    if entry_keys.is_empty() {
+        return Err(MembershipOpsError(
+            "no membership chain to invite into: the library's founder entry is \
+             missing (it is established at library creation, not on invite)"
+                .to_string(),
+        ));
+    }
+    let mut chain = download_chain(storage, &entry_keys).await?;
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
@@ -143,12 +128,21 @@ pub async fn invite_member(
         warn!("Failed to sync authorized keys: {e}");
     }
 
+    // The invite anchors the joiner to the library's OWNER — the chain founder,
+    // not whichever Owner happens to send the invite. A second Owner inviting must
+    // still hand the joiner the founder's pubkey, or the joiner would pin the wrong
+    // owner and reject the (correctly founder-anchored) chain forever (issue #102).
+    let owner_pubkey = chain
+        .founder_pubkey()
+        .ok_or_else(|| MembershipOpsError("membership chain has no founder".to_string()))?
+        .to_string();
+
     // Build the invite code
     Ok(crate::join_code::InviteCode {
         library_id: library_id.to_string(),
         library_name: library_name.to_string(),
         join_info,
-        owner_pubkey: user_pubkey_hex,
+        owner_pubkey,
     })
 }
 
@@ -236,6 +230,27 @@ pub fn apply_key_rotation(
     Ok(new_fingerprint)
 }
 
+/// Write a library's founder entry: chain entry #1, a self-signed Owner `Add` of
+/// `owner`, uploaded to `membership/{owner_pubkey}/1`. Called once, when a created
+/// library first connects its cloud, so every opaque library has an owner-anchored
+/// chain from the start (issue #102). The caller is responsible for only invoking
+/// this when no chain exists yet; this unconditionally writes seq 1.
+pub(crate) async fn write_founder_entry(
+    storage: &dyn SyncStorage,
+    owner: &UserKeypair,
+    timestamp: &str,
+) -> Result<(), MembershipOpsError> {
+    let entry = founder_entry(owner, timestamp);
+    let bytes = serde_json::to_vec(&entry)
+        .map_err(|e| MembershipOpsError(format!("Failed to serialize founder entry: {e}")))?;
+    storage
+        .put_membership_entry(&hex::encode(owner.public_key), 1, bytes)
+        .await
+        .map_err(|e| MembershipOpsError(format!("Failed to upload founder entry: {e}")))?;
+    info!("Wrote founder Owner entry for the library's membership chain");
+    Ok(())
+}
+
 /// Download and build a membership chain from the storage.
 pub(crate) async fn download_chain(
     storage: &dyn SyncStorage,
@@ -320,3 +335,72 @@ pub async fn sync_authorized_keys(
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct MembershipOpsError(pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::hlc::Hlc;
+    use crate::sync::membership::MembershipAction;
+    use crate::sync::test_helpers::{founder_entry, make_entry, pubkey_hex, MockSyncStorage};
+
+    /// The invite anchors the joiner to the library FOUNDER, regardless of which
+    /// Owner sends it. A second Owner inviting must still hand over the founder's
+    /// pubkey, or the joiner pins the wrong owner and rejects the founder-anchored
+    /// chain forever (issue #102).
+    #[tokio::test]
+    async fn invite_carries_the_founder_not_the_inviting_owner() {
+        let founder = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let invitee = UserKeypair::generate();
+        let founder_pk = pubkey_hex(&founder);
+
+        // Chain: founder, then the founder adds `second_owner` as an Owner.
+        let storage = MockSyncStorage::new();
+        storage
+            .put_membership_entry(
+                &founder_pk,
+                1,
+                serde_json::to_vec(&founder_entry(&founder, "0000000001000-0000-f")).unwrap(),
+            )
+            .await
+            .unwrap();
+        let add_owner = make_entry(
+            &founder,
+            MembershipAction::Add,
+            &second_owner,
+            MemberRole::Owner,
+            "0000000002000-0000-f",
+        );
+        storage
+            .put_membership_entry(&founder_pk, 2, serde_json::to_vec(&add_owner).unwrap())
+            .await
+            .unwrap();
+
+        // The SECOND owner invites a new member. (MockSyncStorage is both the
+        // SyncStorage and the CloudHome.)
+        let hlc = Hlc::new("f".to_string());
+        let invite = invite_member(
+            &storage,
+            &storage,
+            &second_owner,
+            &hlc,
+            &pubkey_hex(&invitee),
+            MemberRole::Member,
+            &[7u8; 32],
+            "lib-1",
+            "Lib One",
+        )
+        .await
+        .expect("invite");
+
+        assert_eq!(
+            invite.owner_pubkey, founder_pk,
+            "the invite must carry the founder's pubkey",
+        );
+        assert_ne!(
+            invite.owner_pubkey,
+            pubkey_hex(&second_owner),
+            "not the inviting owner's pubkey",
+        );
+    }
+}

@@ -255,6 +255,7 @@ pub async fn join_library(
         &library_dir,
         &library_id,
         &device_id,
+        &code.owner_pubkey,
         synced_tables,
         &code.join_info,
         &code.library_name,
@@ -280,6 +281,7 @@ async fn bootstrap_and_save(
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
+    owner_pubkey: &str,
     synced_tables: &[SyncedTable],
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
@@ -305,6 +307,7 @@ async fn bootstrap_and_save(
         &db_path,
         synced_tables,
         device_id,
+        Some(owner_pubkey),
         bucket_dyn,
         &cursors,
         library_dir,
@@ -352,6 +355,7 @@ pub(crate) async fn open_db_and_pull(
     db_path: &Path,
     synced_tables: &[SyncedTable],
     device_id: &str,
+    owner_pubkey: Option<&str>,
     storage: &dyn SyncStorage,
     cursors: &HashMap<String, u64>,
     library_dir: &LibraryDir,
@@ -366,6 +370,17 @@ pub(crate) async fn open_db_and_pull(
     .map_err(|e| {
         JoinError::Database(format!("Failed to open database for changeset apply: {e}"))
     })?;
+
+    // Pin the library owner from the invite BEFORE the pull below loads and anchors
+    // the membership chain (issue #102). The pull then refuses a chain whose founder
+    // isn't this owner, so a tampered chain can't be adopted during join. `None`
+    // (restore, or a chain-less test) leaves the owner unpinned — restore pins it
+    // from the chain founder on first sync connect.
+    if let Some(owner) = owner_pubkey {
+        db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner)
+            .await
+            .map_err(|e| JoinError::Database(format!("Failed to pin library owner: {e}")))?;
+    }
 
     // Suspend the capture session so the apply during pull is not re-recorded.
     db.take_changeset_and_suspend()
@@ -408,6 +423,40 @@ pub(crate) async fn open_db_and_pull(
     )
     .await
     .map_err(JoinError::Pull)?;
+
+    // Restore passes no owner (it recovers an existing library this device may not
+    // have founded): adopt the owner from the chain's founder now, before the first
+    // sync connect anchors the chain. Without this the connect would find a chain
+    // founded by another key with no owner pinned and refuse it as foreign. This is
+    // trust-on-first-use, acceptable for restore because the restore code carries
+    // the bucket's own credentials — whoever holds it already controls the bucket.
+    // Join already pinned its owner from the invite, so it skips this.
+    if owner_pubkey.is_none() {
+        let entries = storage.list_membership_entries().await.map_err(|e| {
+            JoinError::Database(format!(
+                "restore: failed to list membership to pin owner: {e}"
+            ))
+        })?;
+        // An empty listing is a chain-less (plaintext/open) library — nothing to
+        // pin. A non-empty one must load and pin, or fail the restore loudly so it
+        // can be retried as a unit; leaving the owner unpinned and deferring to the
+        // first sync connect would be a silent self-heal.
+        if !entries.is_empty() {
+            let chain = crate::sync::membership_ops::download_chain(storage, &entries)
+                .await
+                .map_err(|e| {
+                    JoinError::Database(format!("restore: failed to load chain to pin owner: {e}"))
+                })?;
+            // A validated chain always has a founder (validation rejects an empty
+            // chain), so this is defensive — but fail loud rather than skip the pin.
+            let founder = chain.founder_pubkey().ok_or_else(|| {
+                JoinError::Database("restore: loaded chain has no founder to pin".to_string())
+            })?;
+            db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
+                .await
+                .map_err(|e| JoinError::Database(format!("Failed to pin library owner: {e}")))?;
+        }
+    }
 
     // Persist the post-bootstrap sync bookkeeping so the first real sync cycle
     // treats this device as a joiner, not a brand-new library. `bootstrap_from_snapshot`

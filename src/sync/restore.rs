@@ -414,10 +414,14 @@ async fn bootstrap_and_save(
     on_status("Applying recent changes...");
     let cursors = bootstrap_result.cursors;
 
+    // Restore leaves the owner unpinned: this is the user's own library and bucket,
+    // so the owner is adopted from the chain founder on first sync connect (issue
+    // #102), rather than asserted from the restore code.
     let changesets_applied = open_db_and_pull(
         &db_path,
         synced_tables,
         device_id,
+        None,
         bucket_dyn,
         &cursors,
         library_dir,

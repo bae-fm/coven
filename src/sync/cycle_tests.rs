@@ -272,3 +272,117 @@ async fn cycle_reports_resume_drain_promptly_when_drain_breaks_mid_batch() {
         "the second blob is left for the next cycle",
     );
 }
+
+/// Founder-at-creation + owner anchoring (issue #102): the first cloud connect of
+/// a created library writes the founder Owner entry and pins the owner; later
+/// connects anchor the chain to that pinned owner; and a wiped or refounded chain
+/// is refused as a takeover attempt.
+#[tokio::test]
+async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
+    use crate::sync::cycle::ensure_owner_anchored_chain;
+    use crate::sync::membership::founder_entry;
+    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let hlc = Hlc::new("owner-dev".to_string());
+    let db = open_test_db();
+
+    // First connect: empty storage, no pinned owner → found + pin.
+    let storage = MockSyncStorage::new();
+    let chain = ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+        .await
+        .expect("first connect founds the library");
+    assert!(chain.is_founded_by(&owner_pk));
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk.clone()),
+        "the owner is pinned in sync_state",
+    );
+    assert_eq!(
+        storage.list_membership_entries().await.unwrap().len(),
+        1,
+        "the founder entry is written to storage",
+    );
+
+    // Second connect on the same storage + db: anchors fine (founder == owner).
+    let again = ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+        .await
+        .expect("re-connect anchors to the pinned owner");
+    assert!(again.is_founded_by(&owner_pk));
+
+    // Wiped membership/* with the owner still pinned → refuse (do not re-found).
+    let wiped = MockSyncStorage::new();
+    assert!(
+        ensure_owner_anchored_chain(&wiped, &db, &owner, &hlc)
+            .await
+            .is_err(),
+        "an empty chain with a pinned owner is tampering, not a fresh library",
+    );
+
+    // Refounded under an attacker's key with the owner pinned → refuse.
+    let attacker = UserKeypair::generate();
+    let forged = MockSyncStorage::new();
+    let forged_founder = founder_entry(&attacker, "2026-03-01T00:00:00Z");
+    forged
+        .put_membership_entry(
+            &hex::encode(attacker.public_key),
+            1,
+            serde_json::to_vec(&forged_founder).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        ensure_owner_anchored_chain(&forged, &db, &owner, &hlc)
+            .await
+            .is_err(),
+        "a chain refounded under a different key is a takeover attempt",
+    );
+}
+
+/// Founding writes the cloud founder entry before pinning the owner, so a crash
+/// between the two leaves a chain founded by our own key with no pin. The next
+/// connect completes the pin (the founder is provably ours). A chain founded by a
+/// DIFFERENT key with no pin is a first-connect takeover seed and is refused — the
+/// branch that previously adopted any founder on trust.
+#[tokio::test]
+async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign() {
+    use crate::sync::cycle::ensure_owner_anchored_chain;
+    use crate::sync::membership_ops::{write_founder_entry, OWNER_PUBKEY_STATE_KEY};
+
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let hlc = Hlc::new("owner-dev".to_string());
+
+    // Cloud-first crash: our founder is in storage, but the pin never landed. The
+    // next connect completes it (founder == our key) and anchors.
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    write_founder_entry(&storage, &owner, "0000000001000-0000-owner")
+        .await
+        .unwrap();
+    let chain = ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+        .await
+        .expect("completes our own half-done founding");
+    assert!(chain.is_founded_by(&owner_pk));
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk),
+        "the pin is completed from our own founder",
+    );
+
+    // Foreign chain, no pin: an attacker seeded a chain under their own key before
+    // we ever connected. We neither founded it nor pinned an owner → refuse.
+    let attacker = UserKeypair::generate();
+    let fresh_db = open_test_db();
+    let seeded = MockSyncStorage::new();
+    write_founder_entry(&seeded, &attacker, "0000000001000-0000-attacker")
+        .await
+        .unwrap();
+    assert!(
+        ensure_owner_anchored_chain(&seeded, &fresh_db, &owner, &hlc)
+            .await
+            .is_err(),
+        "a foreign chain with no pinned owner must be refused, not adopted on trust",
+    );
+}
