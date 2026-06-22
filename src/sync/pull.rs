@@ -342,16 +342,25 @@ pub async fn pull_changes(
             let (env, changeset_bytes) =
                 envelope::unpack(&envelope_bytes).map_err(PullError::InvalidEnvelope)?;
 
-            // Validate that changeset_size in the envelope matches the actual
-            // bytes. A mismatch indicates corruption or a buggy encoder.
+            // The envelope's declared changeset_size must match the trailing
+            // bytes. The size is one of the fields the signature covers, so a
+            // signed changeset whose payload was altered after signing fails this
+            // (and the signature check below); an unsigned one is caught here
+            // alone. A mismatch means corrupt, truncated, or tampered bytes that
+            // failed their own integrity check, so the changeset is rejected
+            // rather than applied. The cursor is not advanced and this device's
+            // pull stops here: a transient on-download corruption then re-fetches
+            // next cycle instead of stranding the seq.
             if env.changeset_size != changeset_bytes.len() {
-                warn!(
+                error!(
                     device_id = %head.device_id,
                     seq,
                     expected = env.changeset_size,
                     actual = changeset_bytes.len(),
-                    "changeset_size mismatch in envelope"
+                    "changeset_size mismatch in envelope; rejecting (corrupt or tampered)"
                 );
+                result.asset_downloads_failed = true;
+                break;
             }
 
             // Schema version check: skip changesets from a newer schema.
