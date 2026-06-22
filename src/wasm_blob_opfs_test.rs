@@ -51,11 +51,16 @@ fn open_device(device_id: &str) -> Database {
 /// Run one full sync cycle for `device_id` over `storage`, with a `PhotoBlobSource`
 /// rooted at `blob_dir` so `note_photos` rows map to blobs there. Plaintext at
 /// rest, no live cloud home (changeset + blob I/O go through `storage`).
-async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str, blob_dir: &Path) {
+async fn run_cycle(
+    storage: &CloudSyncStorage,
+    db: &Database,
+    device_id: &str,
+    library_dir: &LibraryDir,
+    blob_dir: &Path,
+) {
     let cipher = RwLock::new(CloudCipher::Plaintext);
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new(device_id.to_string());
-    let library_dir = LibraryDir::new(std::path::Path::new("/coven-blob-test-libdir"));
     let blob_plan = PhotoBlobSource {
         dir: blob_dir.to_path_buf(),
     };
@@ -68,7 +73,7 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str, b
         db,
         &cipher,
         &keypair,
-        &library_dir,
+        library_dir,
         None,
         &blob_plan,
         None,
@@ -149,8 +154,13 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     console_error_panic_hook::set_once();
 
     let cloud = InMemoryCloudHome::new();
+    // Each device's upload-source dir (where A's photo plaintext lives, the push's
+    // source) and its own library dir (where B's pull writes the blob into the
+    // pinned cache, `storage/pinned/<id>` — coven-owned, distinct from the source).
     let dir_a = Path::new("/coven-blob-test/device-a");
     let dir_b = Path::new("/coven-blob-test/device-b");
+    let lib_a = LibraryDir::new(std::path::Path::new("/coven-blob-test/lib-a"));
+    let lib_b = LibraryDir::new(std::path::Path::new("/coven-blob-test/lib-b"));
 
     let db_a = open_device("device-a");
     let db_b = open_device("device-b");
@@ -182,24 +192,25 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
     );
-    run_cycle(&storage_a, &db_a, "device-a", dir_a).await;
+    run_cycle(&storage_a, &db_a, "device-a", &lib_a, dir_a).await;
 
-    // B has not pulled, so the blob is not on B's OPFS yet.
+    // B has not pulled, so the blob is not in B's pinned cache yet.
+    let b_pinned = lib_b.pinned_blob_path("photo-1").expect("pinned blob path");
     assert_eq!(
-        crate::local_blob::exists(&dir_b.join("photo-1")).await,
+        crate::local_blob::exists(&b_pinned).await,
         Ok(false),
-        "the photo must not be on B's OPFS before B syncs",
+        "the photo must not be in B's cache before B syncs",
     );
 
     // Device B: one cycle pulls A's changeset, applies the note + photo rows, and
-    // `download_blobs` writes the photo to B's OPFS.
+    // `download_blobs` writes the photo (a Mirrored blob) into B's pinned cache.
     let storage_b = CloudSyncStorage::new(
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
     );
-    run_cycle(&storage_b, &db_b, "device-b", dir_b).await;
+    run_cycle(&storage_b, &db_b, "device-b", &lib_b, dir_b).await;
 
     // The row crossed...
     let has_photo_row = db_b
@@ -215,12 +226,12 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         .expect("query note_photos on B");
     assert!(has_photo_row, "device B applied the note_photos row");
 
-    // ...and so did the blob bytes, written to B's OPFS by the pull.
+    // ...and so did the blob bytes, written into B's pinned cache by the pull.
     assert_eq!(
-        crate::local_blob::read(&dir_b.join("photo-1"))
+        crate::local_blob::read(&b_pinned)
             .await
             .expect("read photo from B's OPFS"),
         photo_bytes,
-        "the photo blob reached B's OPFS with its original bytes",
+        "the photo blob reached B's pinned cache with its original bytes",
     );
 }

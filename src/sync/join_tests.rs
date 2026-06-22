@@ -315,13 +315,15 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("seed cover blob");
 
     // Device B bootstraps from the snapshot, then runs the real bootstrap path
-    // with a plan that maps `note_photos` rows to blobs under B's library dir.
+    // with a plan that maps `note_photos` rows to blobs. A `Mirrored` blob is
+    // system-pinned on reconciliation, so it lands in B's pinned cache folder
+    // (`storage/pinned/<id>`), which coven owns — not the plan's `dir`, which is the
+    // push's upload source.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let blob_dir = lib_b.join("photos");
     let plan = PhotoBlobSource {
-        dir: blob_dir.clone(),
+        dir: lib_b.join("photos"),
     };
-    let expected_blob = blob_dir.join("photo1");
+    let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
     let boot = bootstrap_from_snapshot(&storage, &enc, &lib_b.db_path())
         .await
@@ -405,11 +407,12 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     // bootstrap time (e.g. A's upload of it hadn't landed). So the bootstrap's
     // download attempt fails.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let blob_dir = lib_b.join("photos");
     let plan = PhotoBlobSource {
-        dir: blob_dir.clone(),
+        dir: lib_b.join("photos"),
     };
-    let expected_blob = blob_dir.join("photo1");
+    // A reconciled `Mirrored` blob is system-pinned, so it lands in B's pinned cache
+    // folder, not the plan's `dir`.
+    let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
     let boot = bootstrap_from_snapshot(&storage, &enc, &lib_b.db_path())
         .await

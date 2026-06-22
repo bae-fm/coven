@@ -328,6 +328,18 @@ impl MockSyncStorage {
             .insert((author_pubkey.to_string(), seq));
     }
 
+    /// Remove a blob object from the mock cloud, keyed the same flat
+    /// `{namespace}/{id}` way [`Self::put_blob`] stores a no-`cloud_path` blob. Lets
+    /// a cache test delete the cloud copy after a read populated the local cache, to
+    /// prove a second read is served from disk (a re-fetch would now fail).
+    pub async fn delete_blob_object(&self, namespace: &str, id: &str) {
+        let key = blob_key(namespace, id, None);
+        assert!(
+            self.objects.lock().unwrap().remove(&key).is_some(),
+            "delete_blob_object: no mock cloud blob at {key} to delete (test-setup bug)",
+        );
+    }
+
     /// Store a changeset in the mock storage (simulates what push would do). The
     /// changeset itself is left unsigned (for tests exercising unsigned-changeset
     /// rejection); the device head it advances is signed by the mock's keypair.

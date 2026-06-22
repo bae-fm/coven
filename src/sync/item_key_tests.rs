@@ -340,14 +340,16 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     );
 
     // The item key replayed via the changeset, and the production
-    // `download_changeset_blobs` resolved it and wrote the decrypted blob to B.
+    // `download_changeset_blobs` resolved it and wrote the decrypted blob to B. A
+    // `Mirrored` blob is system-pinned on pull, so it lands in B's pinned cache
+    // (`storage/pinned/<id>`) — coven-owned — not the plan's `dir`.
     assert_eq!(
         db_b.item_key("note-1").await.expect("B post-pull read"),
         Some(item_key),
         "the item key replayed to device B via the changeset"
     );
-    let landed =
-        std::fs::read(dst.path().join("blob-1")).expect("the pull wrote the blob to B's disk");
+    let landed = std::fs::read(ld.pinned_blob_path("blob-1").expect("pinned path"))
+        .expect("the pull wrote the blob to B's disk");
     assert_eq!(
         landed, plaintext,
         "device B recovers the original audio — the pull resolved Item(id) and decrypted with the replayed item key"

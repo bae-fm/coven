@@ -128,7 +128,13 @@ pub struct BlobRef {
     pub namespace: String,
     /// Blob id (typically the id of the blob-bearing row).
     pub id: String,
-    /// Local plaintext file: the source on push, the destination on pull.
+    /// Local plaintext file the push reads to upload this blob — the **upload
+    /// source**, nothing more. It may live OUTSIDE coven's library dir (an
+    /// unmanaged-origin file the host imported in place for a cloud-only release) or
+    /// be a copy the host staged into the cache; coven reads it, never copies or
+    /// ingests it. It is NOT the pull destination: a pulled blob lands in the cache
+    /// (`storage/pinned/<id>` / `storage/cache/<id>`), which coven owns and builds
+    /// from the validated blob id — see [`crate::blob_cache`].
     pub local_path: PathBuf,
     /// Encryption scope for this blob.
     pub scope: BlobScope,

@@ -127,18 +127,6 @@ pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
     Ok(())
 }
 
-/// Whether `path` contains a parent-directory (`..`) component anywhere, which
-/// would let it climb above the directory its host placed it under. A blob's
-/// local file path is `host_dir` joined with a validated single-token id, so a
-/// legitimate one never contains `..`; one that does was either built from an
-/// unvalidated id or by a host that traversed, and writing through it could land
-/// outside the library. A pure lexical check (no filesystem access, so no
-/// symlink/TOCTOU dependency): the write boundary refuses such a path independent
-/// of how it was built, the second line of defense behind token validation.
-pub fn path_escapes_root(path: &Path) -> bool {
-    path.components().any(|c| c == Component::ParentDir)
-}
-
 /// Typed wrapper for a library directory path.
 ///
 /// Centralizes the on-disk layout so callers use methods instead of
@@ -165,6 +153,25 @@ impl LibraryDir {
         self.path.join("images")
     }
 
+    /// The two-level partition shard for `id`: `{ab}/{cd}/{id}`, where `{ab}`/`{cd}`
+    /// are the first two byte-pairs of the dash-stripped id. The single home for the
+    /// partition scheme — every blob path (cloud key and on-disk file, hashed or
+    /// pinned/cache) is this shard under some root.
+    ///
+    /// `id` is validated as a single path token and must be long enough (and
+    /// char-boundary aligned) to take the two leading byte-pairs. An id that fails
+    /// is bad data — it could escape the directory or crash the slice — so this
+    /// returns [`PathTokenError`] rather than interpolating it or panicking; the
+    /// caller refuses the blob.
+    fn id_shard(id: &str) -> Result<String, PathTokenError> {
+        validate_path_token(id)?;
+        let hex = id.replace('-', "");
+        if !(hex.is_char_boundary(2) && hex.is_char_boundary(4)) {
+            return Err(PathTokenError::Unindexable);
+        }
+        Ok(format!("{}/{}/{id}", &hex[..2], &hex[2..4]))
+    }
+
     /// Content-addressed relative path `{prefix}/{ab}/{cd}/{id}`, partitioning by
     /// the first two byte-pairs of the dash-stripped id. The single home for the
     /// partition scheme — shared by the local blob store and the cloud layout.
@@ -176,12 +183,7 @@ impl LibraryDir {
     /// than interpolating it or panicking; the caller refuses the blob.
     pub fn hashed_path(prefix: &str, id: &str) -> Result<String, PathTokenError> {
         validate_path_token(prefix)?;
-        validate_path_token(id)?;
-        let hex = id.replace('-', "");
-        if !(hex.is_char_boundary(2) && hex.is_char_boundary(4)) {
-            return Err(PathTokenError::Unindexable);
-        }
-        Ok(format!("{prefix}/{}/{}/{id}", &hex[..2], &hex[2..4]))
+        Ok(format!("{prefix}/{}", Self::id_shard(id)?))
     }
 
     /// Hash-based image path: `images/{ab}/{cd}/{id}`. `Err` if `id` is not a safe,
@@ -208,6 +210,38 @@ impl LibraryDir {
     /// is not a safe, indexable blob token (see [`Self::hashed_path`]).
     pub fn storage_file_path(&self, file_id: &str) -> Result<PathBuf, PathTokenError> {
         Ok(self.path.join(Self::hashed_path("storage", file_id)?))
+    }
+
+    /// A protected (budget-exempt) blob file: `storage/pinned/{ab}/{cd}/<id>`. The
+    /// cache's truth is the folder a blob's file lives in, not a table — a file
+    /// here is a kept-local blob (a `Mirrored` blob system-pinned on pull, or one
+    /// the user pinned for offline). `Err` if `id` is not a safe, indexable blob
+    /// token (see [`Self::id_shard`]).
+    pub fn pinned_blob_path(&self, id: &str) -> Result<PathBuf, PathTokenError> {
+        Ok(self
+            .path
+            .join("storage")
+            .join("pinned")
+            .join(Self::id_shard(id)?))
+    }
+
+    /// An opportunistic (evictable) blob file: `storage/cache/{ab}/{cd}/<id>`. A
+    /// file here is a cached-but-unpinned blob — fetched on read, droppable by
+    /// `clear_cache`. The folder it lives in, not a table, is what makes it
+    /// evictable rather than protected. `Err` if `id` is not a safe, indexable blob
+    /// token (see [`Self::id_shard`]).
+    pub fn cache_blob_path(&self, id: &str) -> Result<PathBuf, PathTokenError> {
+        Ok(self
+            .path
+            .join("storage")
+            .join("cache")
+            .join(Self::id_shard(id)?))
+    }
+
+    /// The evictable-cache root, `storage/cache`. `clear_cache` removes this whole
+    /// subtree (the pinned tree under `storage/pinned` is left untouched).
+    pub fn cache_dir(&self) -> PathBuf {
+        self.path.join("storage").join("cache")
     }
 
     pub fn pending_deletions_path(&self) -> PathBuf {
@@ -376,14 +410,5 @@ mod tests {
         );
         assert_eq!(validate_cloud_path("/abs"), Err(PathTokenError::Separator));
         assert_eq!(validate_cloud_path("a\\b"), Err(PathTokenError::Separator),);
-    }
-
-    /// `path_escapes_root` flags any local path that carries a `..` component (it
-    /// could land above its directory) and passes a plain `dir/child` path.
-    #[test]
-    fn path_escapes_root_flags_parent_components() {
-        assert!(!path_escapes_root(Path::new("/lib/images/ab/cd/id")));
-        assert!(path_escapes_root(Path::new("/lib/images/../../etc/passwd")));
-        assert!(path_escapes_root(Path::new("a/../b")));
     }
 }
