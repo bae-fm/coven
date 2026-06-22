@@ -51,7 +51,7 @@ fn open_db(device_id: &str) -> Database {
 /// actual encryption key is selected by the resolved scope, not this.
 fn storage_over(home: InMemoryCloudHome) -> CloudSyncStorage {
     CloudSyncStorage::new(
-        Box::new(home),
+        std::sync::Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
@@ -260,7 +260,7 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
 #[tokio::test]
 async fn changeset_replay_join_resolves_item_and_decrypts() {
     let storage = CloudSyncStorage::new(
-        Box::new(InMemoryCloudHome::new()),
+        std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
         BlobPathScheme::Hashed,
         UserKeypair::generate(),

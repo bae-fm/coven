@@ -187,7 +187,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         .expect("write photo to A's OPFS");
 
     let storage_a = CloudSyncStorage::new(
-        Box::new(cloud.clone()),
+        std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
@@ -205,7 +205,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     // Device B: one cycle pulls A's changeset, applies the note + photo rows, and
     // `download_blobs` writes the photo (a Mirrored blob) into B's pinned cache.
     let storage_b = CloudSyncStorage::new(
-        Box::new(cloud.clone()),
+        std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
         UserKeypair::generate(),

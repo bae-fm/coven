@@ -719,6 +719,20 @@ mod tests {
             Err(StorageError::NotFound(format!("{namespace}/{id}")))
         }
 
+        async fn read_blob_range(
+            &self,
+            namespace: &str,
+            id: &str,
+            _scope: crate::blob::ResolvedScope,
+            _cloud_path: Option<&str>,
+            _source_size: u64,
+            _offset: u64,
+            _len: u64,
+        ) -> Result<Vec<u8>, StorageError> {
+            // Snapshot tests never stream a blob; no object store to slice.
+            Err(StorageError::NotFound(format!("{namespace}/{id}")))
+        }
+
         async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError> {
             *self.snapshot.lock().unwrap() = Some(data);
             Ok(())

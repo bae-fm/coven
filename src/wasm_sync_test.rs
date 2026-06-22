@@ -53,7 +53,7 @@ fn open_device(device_id: &str) -> Database {
 /// `InMemoryCloudHome` are two devices on one bucket.
 fn storage_for(cloud: &InMemoryCloudHome) -> CloudSyncStorage {
     CloudSyncStorage::new(
-        Box::new(cloud.clone()),
+        std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
         UserKeypair::generate(),

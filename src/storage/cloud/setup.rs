@@ -459,7 +459,7 @@ pub async fn create_sync_storage(
         .map_err(|e| format!("Failed to load user keypair: {e}"))?;
 
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
-        cloud_home,
+        std::sync::Arc::from(cloud_home),
         cipher,
         BlobPathScheme::for_storage(config.cloud_home.storage),
         keypair,

@@ -481,6 +481,39 @@ impl SyncStorage for MockSyncStorage {
             .ok_or(StorageError::NotFound(key))
     }
 
+    async fn read_blob_range(
+        &self,
+        namespace: &str,
+        id: &str,
+        _scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        // The mock stores blobs as plaintext (no at-rest cipher in tests), so the
+        // plaintext range is exactly the stored byte range — the same slice the
+        // real `BlobRangeReader` would yield over a `Plaintext` home, which its
+        // own cloud_storage tests exercise against `InMemoryCloudHome` with real
+        // encryption. The bounds checks mirror `BlobRangeReader::read` so a miss
+        // here behaves identically whether the cloud is the mock or a real home.
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = offset.checked_add(len).ok_or_else(|| {
+            StorageError::S3(format!("blob range overflow: offset={offset}, len={len}"))
+        })?;
+        if end > source_size {
+            return Err(StorageError::S3(format!(
+                "blob range {offset}..{end} exceeds blob size {source_size}"
+            )));
+        }
+        let key = blob_key(namespace, id, cloud_path);
+        let objects = self.objects.lock().unwrap();
+        let stored = objects.get(&key).ok_or(StorageError::NotFound(key))?;
+        Ok(stored[offset as usize..end as usize].to_vec())
+    }
+
     async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError> {
         *self.snapshot.lock().unwrap() = Some(data);
         Ok(())

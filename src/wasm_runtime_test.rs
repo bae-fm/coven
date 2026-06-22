@@ -59,7 +59,7 @@ fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> Wa
     // runtime's cycle, as a real device has a single signing keypair.
     let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
-        Box::new(cloud.clone()),
+        Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
         keypair.clone(),
