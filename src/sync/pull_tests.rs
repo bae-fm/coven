@@ -248,9 +248,11 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
 async fn blob_round_trips_through_storage_via_blob_plan() {
     let storage = MockSyncStorage::new();
 
-    // Source: a note + a cover photo, with the photo file present locally.
+    // Source: a note + a cover photo, with the photo file present locally at its
+    // upload-source path (`PhotoBlobSource.dir/<id>`). The blob id is ≥4 chars so it
+    // forms the `{ab}/{cd}` cache shard.
     let src_photos = tempfile::tempdir().expect("src photos");
-    std::fs::write(src_photos.path().join("p1"), b"PHOTOBYTES").expect("write photo");
+    std::fs::write(src_photos.path().join("p1ab"), b"PHOTOBYTES").expect("write photo");
     let src_plan = PhotoBlobSource {
         dir: src_photos.path().to_path_buf(),
     };
@@ -262,7 +264,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
             "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-             VALUES ('p1', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+             VALUES ('p1ab', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
         ],
     )
     .await;
@@ -284,7 +286,10 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     }
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    // Destination pulls; its plan points photos at its own directory.
+    // Destination pulls. A `Mirrored` photo is system-pinned on pull, so it lands in
+    // the library dir's pinned cache (`storage/pinned/<id>`) — which coven owns and
+    // builds from the validated id — not the plan's `dir`, which serves as the
+    // push's upload source.
     let dst_photos = tempfile::tempdir().expect("dst photos");
     let dst_plan = PhotoBlobSource {
         dir: dst_photos.path().to_path_buf(),
@@ -296,7 +301,8 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    let downloaded = std::fs::read(dst_photos.path().join("p1")).expect("downloaded photo");
+    let downloaded =
+        std::fs::read(ld.pinned_blob_path("p1ab").expect("pinned path")).expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
 }
 
@@ -659,8 +665,10 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    let downloaded =
-        std::fs::read(dst_photos.path().join("p1cover")).expect("device B downloaded cover");
+    // A `Mirrored` cover is system-pinned on pull → it lands in B's pinned cache,
+    // not the plan's `dir`.
+    let downloaded = std::fs::read(ld.pinned_blob_path("p1cover").expect("pinned path"))
+        .expect("device B downloaded cover");
     assert_eq!(
         downloaded, plaintext,
         "device B recovers the source bytes from the readable plain-scheme key",
@@ -773,8 +781,10 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
         "WithPhoto"
     );
-    let downloaded =
-        std::fs::read(dst_photos.path().join("p1cover")).expect("device B downloaded photo");
+    // A `Mirrored` cover is system-pinned on pull → it lands in B's pinned cache,
+    // not the plan's `dir`.
+    let downloaded = std::fs::read(ld.pinned_blob_path("p1cover").expect("pinned path"))
+        .expect("device B downloaded photo");
     assert_eq!(
         downloaded, plaintext,
         "device B must recover the source bytes after decrypting with the shared key"
@@ -1702,8 +1712,8 @@ mod blob_path_traversal {
     }
 
     /// A normal blob id still round-trips: the boundary check rejects only ids that
-    /// could escape the blob dir or can't be partitioned, and a well-formed id
-    /// writes its blob under the blob directory at its partitioned path.
+    /// could escape the cache or can't be partitioned, and a well-formed id writes
+    /// its blob into the pinned cache at its partitioned `{ab}/{cd}/<id>` path.
     #[tokio::test]
     async fn normal_id_still_writes_under_the_blob_dir() {
         let storage = MockSyncStorage::new();
@@ -1711,7 +1721,7 @@ mod blob_path_traversal {
         storage
             .put_blob(
                 "photos",
-                "p1",
+                "p1ab",
                 ResolvedScope::Master,
                 None,
                 b"PHOTOBYTES".to_vec(),
@@ -1726,7 +1736,7 @@ mod blob_path_traversal {
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
                 "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-                 VALUES ('p1', 'n1', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
+                 VALUES ('p1ab', 'n1', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
             ],
         )
         .await;
@@ -1744,7 +1754,8 @@ mod blob_path_traversal {
         assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
         assert!(!result.asset_downloads_failed);
         assert_eq!(updated.get("dev1"), Some(&1));
-        let written = std::fs::read(dst_photos.path().join("p1")).expect("blob written");
-        assert_eq!(written, b"PHOTOBYTES", "the blob lands under its directory");
+        let written =
+            std::fs::read(ld.pinned_blob_path("p1ab").expect("pinned path")).expect("blob written");
+        assert_eq!(written, b"PHOTOBYTES", "the blob lands in the pinned cache");
     }
 }

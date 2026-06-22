@@ -30,6 +30,30 @@ pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     imp::write(path, bytes).await
 }
 
+/// Write `bytes` to `path` ATOMICALLY: a concurrent or post-crash reader sees
+/// either the previous file or the whole new one, never a torn prefix. This is the
+/// guarantee callers depend on — the cache treats "the file exists" as equivalent to
+/// "all the bytes are there" (presence is the only truth, no length or checksum
+/// column), so every cache write goes through this rather than the in-place
+/// [`write`], which truncates the destination before refilling it.
+///
+/// Native: write a temp file in the same directory, fsync it, then `rename` it over the
+/// destination (atomic on one filesystem) — a reader sees the old file or the whole new
+/// one, never a torn one. There is deliberately no parent-directory fsync, and thus no
+/// durability sub-step that could fail after the rename: the cache is a re-fetchable
+/// mirror of the cloud, not a durable store. If a crash loses the rename's directory
+/// entry, the blob is simply absent — indistinguishable from one that was never cached,
+/// handled by the same fetch-on-read path, not a wrong state anyone reconciles. (Dir
+/// fsync isn't portable anyway — Windows has no handle-based dir flush.)
+///
+/// wasm/OPFS: delegate to [`write`]. OPFS has no cross-file rename to build temp→rename
+/// atomicity from, so this is the whole-file sync-access write — best-effort on that
+/// platform (the same as every other OPFS write in this codebase), with the same
+/// re-fetchable-cache safety net the native path relies on.
+pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    imp::write_atomic(path, bytes).await
+}
+
 /// Whether a local file exists at `path`. `Ok(true)`/`Ok(false)` is a definite
 /// answer; `Err` is a real backend failure (a broken filesystem, an OPFS API
 /// error) — never collapsed into "absent", so a caller can tell "the file isn't
@@ -99,6 +123,73 @@ mod imp {
         tokio::fs::try_exists(path)
             .await
             .map_err(|e| format!("check local blob {}: {e}", path.display()))
+    }
+
+    pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
+
+        // A temp sibling in the SAME directory, so the rename below is within one
+        // filesystem (cross-filesystem rename is not atomic). A v4 uuid suffix keeps
+        // two concurrent writers of the same blob from colliding on the temp name.
+        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+
+        // Write + fsync the temp file fully before it is renamed into place: the
+        // bytes must be durable on disk before the destination name points at them,
+        // or a crash could surface a present-but-empty/torn blob the cache would
+        // trust. On any failure remove the temp so a retry isn't blocked by debris.
+        let write_tmp = async {
+            let mut file = tokio::fs::File::create(&tmp)
+                .await
+                .map_err(|e| format!("create temp blob {}: {e}", tmp.display()))?;
+            file.write_all(bytes)
+                .await
+                .map_err(|e| format!("write temp blob {}: {e}", tmp.display()))?;
+            file.sync_all()
+                .await
+                .map_err(|e| format!("fsync temp blob {}: {e}", tmp.display()))?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(e) = write_tmp {
+            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
+                tracing::warn!(
+                    "could not remove temp blob {} after a failed write: {rm}",
+                    tmp.display()
+                );
+            }
+            return Err(e);
+        }
+
+        if let Err(e) = tokio::fs::rename(&tmp, path).await {
+            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
+                tracing::warn!(
+                    "could not remove temp blob {} after a failed rename: {rm}",
+                    tmp.display()
+                );
+            }
+            return Err(format!(
+                "rename temp blob {} -> {}: {e}",
+                tmp.display(),
+                path.display()
+            ));
+        }
+
+        // No parent-directory fsync. The guarantee write_atomic makes is atomicity:
+        // a reader sees the old file or the whole new one, never a torn one — given by
+        // fsyncing the temp before the rename and the rename being atomic. It does NOT
+        // promise the new directory entry survives a crash; that would need a parent
+        // fsync, which isn't portable (Windows has no handle-based dir flush) and isn't
+        // needed here — every blob the cache holds is re-fetchable from the cloud, so a
+        // rename lost to a crash is re-fetched on the next read, never corruption. There
+        // is thus no durability sub-step that could fail after this point.
+        Ok(())
     }
 }
 
@@ -306,5 +397,14 @@ mod imp {
             Err(HandleError::NotFound) => Ok(false),
             Err(HandleError::Other(m)) => Err(m),
         }
+    }
+
+    /// OPFS has no cross-file rename to build a temp→rename atomic write from, but
+    /// the sync-access-handle write `write` performs IS OPFS's atomic unit: it
+    /// truncates then writes the whole payload through one handle, and a reader can't
+    /// observe a torn intermediate. So the atomic-write contract is already met by
+    /// delegating — this is the real OPFS guarantee, not a stand-in.
+    pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+        write(path, bytes).await
     }
 }

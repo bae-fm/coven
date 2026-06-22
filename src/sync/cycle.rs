@@ -454,6 +454,7 @@ pub async fn run_single_sync_cycle(
             db,
             &library_dir.db_path(),
             storage,
+            library_dir,
             blob_source,
         )
         .await

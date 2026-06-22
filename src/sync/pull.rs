@@ -139,7 +139,6 @@ pub async fn pull_changes(
     library_dir: &LibraryDir,
     blob_source: &dyn BlobSource,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
-    let _ = library_dir;
     // The receiver's current wall-clock millis, read once from the register clock
     // and passed down to bound an incoming `_updated_at`'s physical component. A
     // stamp grossly beyond this (plus a generous offline allowance) is a broken
@@ -522,9 +521,15 @@ pub async fn pull_changes(
             // can't carry the cursor past the failed seq (its blobs would then
             // never be re-fetched). The next cycle resumes at this seq. OnDemand
             // blobs are not downloaded here — they are fetched on first read.
-            let blobs_ok =
-                download_changeset_blobs(db, &changes, blob_source, storage, &in_changeset_keys)
-                    .await;
+            let blobs_ok = download_changeset_blobs(
+                db,
+                &changes,
+                blob_source,
+                storage,
+                library_dir,
+                &in_changeset_keys,
+            )
+            .await;
             if !blobs_ok {
                 warn!(
                     "Blob download failed for {}/{}, not applying; cursor not advanced",
@@ -886,9 +891,10 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
 }
 
 /// Download the `Mirrored` blobs a changeset references. Returns true if all
-/// succeeded. The host's [`BlobSource`] decides which row-changes carry blobs,
-/// their cloud namespace/scope/retention class, and the local destination path;
-/// the per-blob download runs through [`download_blobs`].
+/// succeeded. The host's [`BlobSource`] decides which row-changes carry blobs and
+/// their cloud namespace/scope/retention class; the per-blob download runs through
+/// [`download_blobs`], which writes each into `storage/pinned/<id>` under
+/// `library_dir` (the cache, not the host's `local_path`).
 ///
 /// Only [`BlobSync::Mirrored`] blobs are downloaded — those are part of having the
 /// library on every device. An [`BlobSync::OnDemand`] blob is recorded by the
@@ -902,12 +908,14 @@ async fn download_changeset_blobs(
     changes: &[RowChange],
     blob_source: &dyn BlobSource,
     storage: &dyn SyncStorage,
+    library_dir: &LibraryDir,
     in_changeset_keys: &HashMap<String, [u8; 32]>,
 ) -> bool {
     download_blobs(
         db,
         mirrored_blobs(blob_source, changes),
         storage,
+        library_dir,
         in_changeset_keys,
     )
     .await
@@ -947,9 +955,17 @@ async fn resolve_pull_scope(
     }
 }
 
-/// Download each blob in `blobs` to its `local_path`, decrypting via storage
-/// (which returns plaintext) and writing the bytes. Returns true if every blob
-/// succeeded. Skips blobs whose local file already exists.
+/// Download each blob in `blobs` into `storage/pinned/<id>` under `library_dir`,
+/// decrypting via storage (which returns plaintext) and writing the bytes
+/// atomically. Returns true if every blob succeeded. Skips blobs already present in
+/// `pinned/`.
+///
+/// Only `Mirrored` blobs reach here (callers filter), and a `Mirrored` blob is
+/// system-pinned the moment it lands — part of having the library on every device —
+/// so its bytes go to the protected `pinned/` folder, not the evictable `cache/`.
+/// The destination is coven-built from the validated blob id; the cache owns where a
+/// pulled blob lives. The host's `BlobRef::local_path` is the push's upload source,
+/// not a pull destination.
 ///
 /// Each blob's public scope is resolved to the internal key scope here — not in
 /// [`BlobSource`], which has no DB — via [`resolve_pull_scope`], which consults
@@ -966,19 +982,20 @@ pub(crate) async fn download_blobs(
     db: &Database,
     blobs: Vec<crate::blob::BlobRef>,
     storage: &dyn SyncStorage,
+    library_dir: &LibraryDir,
     in_changeset_keys: &HashMap<String, [u8; 32]>,
 ) -> bool {
     let mut all_ok = true;
     for blob in blobs {
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
-        // changeset authored by any write-capable member, and its `local_path` is
-        // built from those by the host. An id or namespace that is not a single
-        // safe path token, a cloud_path that escapes its prefix, or a local_path
-        // that climbs above its directory would write attacker-chosen bytes outside
-        // the library — refuse the blob as bad data before resolving or writing it,
-        // the same posture as any other failed blob in this loop. The token check
-        // makes traversal unrepresentable; the local_path check is the independent
-        // second line, in case the host built the path some other way.
+        // changeset authored by any write-capable member. An id or namespace that is
+        // not a single safe path token, or a cloud_path that escapes its prefix,
+        // would write attacker-chosen bytes outside the library or under a forged
+        // cloud key — refuse the blob as bad data before resolving or writing it, the
+        // same posture as any other failed blob in this loop. The id check makes
+        // local traversal unrepresentable: the destination path below is built from
+        // the validated id by coven, so there is no host-supplied local path left to
+        // independently re-check.
         if let Err(e) = crate::library_dir::validate_path_token(&blob.namespace) {
             error!(id = %blob.id, namespace = %blob.namespace, "blob namespace is not a safe path token ({e}); refusing");
             all_ok = false;
@@ -996,20 +1013,30 @@ pub(crate) async fn download_blobs(
                 continue;
             }
         }
-        if crate::library_dir::path_escapes_root(&blob.local_path) {
-            error!(id = %blob.id, path = %blob.local_path.display(), "blob local path climbs above its directory; refusing");
-            all_ok = false;
-            continue;
-        }
 
-        match crate::local_blob::exists(&blob.local_path).await {
-            // Already on disk — don't re-download.
+        // The coven-built destination: `storage/pinned/<id>`. Building it validates
+        // the id again (and that it can form the `{ab}/{cd}` shard); a failure is the
+        // same bad-data refusal as the token check above.
+        let dest = match library_dir.pinned_blob_path(&blob.id) {
+            Ok(p) => p,
+            Err(e) => {
+                error!(id = %blob.id, "cannot build pinned blob path ({e}); refusing");
+                all_ok = false;
+                continue;
+            }
+        };
+
+        match crate::local_blob::exists(&dest).await {
+            // Already system-pinned on disk — don't re-download.
             Ok(true) => continue,
             Ok(false) => {}
-            // Couldn't tell (a real storage failure): fall through and re-download,
-            // which overwrites idempotently. Logged so the failure isn't silent.
+            // A failed existence check is a local-disk fault, not a missing blob —
+            // and the download's own write would hit the same fault. Hold the cursor
+            // and retry next cycle rather than treat the error as absence.
             Err(e) => {
-                warn!(id = %blob.id, error = %e, "cannot check for local blob; attempting download");
+                error!(id = %blob.id, error = %e, "cannot check for local blob; holding");
+                all_ok = false;
+                continue;
             }
         }
 
@@ -1032,9 +1059,11 @@ pub(crate) async fn download_blobs(
             .await
         {
             Ok(bytes) => {
-                // `local_blob::write` creates the parent directories itself, so the
-                // pull path stays the same on native (filesystem) and wasm (OPFS).
-                if let Err(e) = crate::local_blob::write(&blob.local_path, &bytes).await {
+                // Atomic write so a crash can't leave a torn `pinned/<id>` a later
+                // read trusts as complete: the file appears whole or not at all,
+                // which the row-before-blob ordering and the cache's presence-is-truth
+                // model both depend on.
+                if let Err(e) = crate::local_blob::write_atomic(&dest, &bytes).await {
                     warn!(id = %blob.id, error = %e, "failed to write blob");
                     all_ok = false;
                 }

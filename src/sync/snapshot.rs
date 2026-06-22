@@ -439,8 +439,9 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 ///
 /// Reads the blobs the host's source finds in the DB at `db_path`, then downloads
 /// the `Mirrored` ones via the same [`crate::sync::pull::download_blobs`] path the
-/// incremental pull uses (skipping any whose local file already exists). A failed
-/// download is logged there and reflected in the returned flag; the bootstrap that
+/// incremental pull uses — into `storage/pinned/<id>` under `library_dir`, skipping
+/// any already present there. A failed download is logged there and reflected in
+/// the returned flag; the bootstrap that
 /// calls this records the not-yet-complete state in
 /// [`SNAPSHOT_BLOB_BACKFILL_PENDING`], and each subsequent sync cycle re-runs this
 /// until it returns true, so a blob whose object was not yet in the cloud (or whose
@@ -459,6 +460,7 @@ pub(crate) async fn reconcile_snapshot_blobs(
     db: &crate::database::Database,
     db_path: &Path,
     storage: &dyn SyncStorage,
+    library_dir: &crate::library_dir::LibraryDir,
     blob_source: &dyn crate::blob::BlobSource,
 ) -> Result<bool, crate::database::DbError> {
     let blobs: Vec<crate::blob::BlobRef> = {
@@ -479,10 +481,17 @@ pub(crate) async fn reconcile_snapshot_blobs(
     // No in-changeset key map here: a snapshot's blobs take their keys from the
     // `item_keys` rows the snapshot itself carried into this DB, so resolution
     // goes through the DB (issue #111's pull path uses the map for keys minted in
-    // the changeset being applied; the bootstrap has no such changeset).
-    let all_ok =
-        crate::sync::pull::download_blobs(db, blobs, storage, &std::collections::HashMap::new())
-            .await;
+    // the changeset being applied; the bootstrap has no such changeset). The blobs
+    // are `Mirrored`, so `download_blobs` writes each to `storage/pinned/<id>`
+    // (system pin) under `library_dir`.
+    let all_ok = crate::sync::pull::download_blobs(
+        db,
+        blobs,
+        storage,
+        library_dir,
+        &std::collections::HashMap::new(),
+    )
+    .await;
     if all_ok {
         info!(total, "snapshot blob reconciliation complete");
     } else {
