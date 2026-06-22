@@ -78,23 +78,30 @@ delete by key. The other layers call into this.
 The cache holds **only cloud-durable blobs**, so everything in it is
 re-fetchable. That makes the disk authoritative and keeps this layer simple.
 
-- **Presence = the file on disk.** `storage/<id>` exists ⇒ cached. A read opens
-  the file; absent ⇒ fetch from cloud, decrypt, write, serve. No table decides
-  presence.
+**The cache IS the folder — no table** (locked in Phase 2). Presence is the file;
+pinned-ness is which of two folders it lives in. Nothing a `readdir`+`stat` can't
+answer, so there is no metadata sidecar to keep in sync with the disk.
+
+- **Presence = the file on disk.** A blob is in **exactly one** of
+  `storage/pinned/<id>` (protected) or `storage/cache/<id>` (evictable), or in
+  neither (remote-only). A read serves the file from either folder; absent from
+  both ⇒ fetch from cloud, decrypt, write to `cache/`, serve. No table decides
+  presence or pinned-ness.
 - **Writes are atomic** — temp → fsync → rename — so a crash can't leave a
-  half-written file the read would trust.
-- **A metadata sidecar** `blob_cache(blob_id, pinned, last_accessed_at,
-  size_bytes)` holds only what the disk can't: `pinned` (policy) and
-  `last_accessed_at` (atime is unreliable). **Best-effort, not the presence
-  authority** — a row for a missing file is harmless (re-fetch); a file with no
-  row is treated as unpinned. Disk wins; no row⟺file invariant to maintain.
-- **Read / populate** — a hit serves the file and bumps `last_accessed_at`; a
-  miss fetches+decrypts, writes the file (full-length only — a ranged read serves
-  its range but never caches a truncated file), and serves.
-- **Eviction** — `max_cache_size` counts **only unpinned** bytes. Over budget →
-  drop unpinned files LRU until under it. `clear_cache()` drops all unpinned.
-  Because the cache holds only re-fetchable blobs, the only rule is **"never evict
-  pinned."**
+  half-written file the read would trust. Pin/unpin is a `rename` within
+  `storage/` (one filesystem, atomic), so a blob is never in both folders or
+  neither mid-move.
+- **Read / populate** — a hit serves the file (whole-file `read_blob`, or a ranged
+  slice via `open_blob_stream`); a miss fetches+decrypts, writes the file to
+  `cache/` (full-length only — a ranged read serves its range but never caches a
+  truncated file, since presence is the only truth), and serves.
+- **Eviction** — `max_cache_size` (a single device-local `sync_state` value)
+  counts the files under `cache/`; `pinned/` is **structurally exempt** (never
+  walked). Over budget → delete the oldest by **mtime** until under it (mtime is
+  the recency proxy — no `last_accessed` column). `clear_cache()` drops all of
+  `cache/`. Because the cache holds only re-fetchable blobs, the only rule is
+  **"never evict pinned"** — which holds because pinned blobs live in the
+  separate `pinned/` folder the eviction sweep never walks.
 
 ### Pinning — first-class, in the cache
 
@@ -190,13 +197,16 @@ no migration shims. Phases 1 and 6 span both repos (the trait change breaks bae'
 - Behavior parity: `OnDemand` reads fetch-each-time for now (no cache yet).
 - Verify: existing image-sync + audio-upload tests pass through the new path.
 
-**2. Cache layer.**
-- `blob_cache(blob_id, pinned, last_accessed_at, size_bytes)` device-local table;
-  `storage/<id>` files; disk-as-truth presence; atomic temp→fsync→rename writes.
-- `read_blob(id)`: hit (bump `last_accessed_at`) or fetch+decrypt+populate
+**2. Cache layer (folder-truth — no table).**
+- Two folders under the library dir, `storage/pinned/<id>` (protected) +
+  `storage/cache/<id>` (evictable); presence is the file, pinned-ness is which
+  folder. **No `blob_cache` table** — `readdir`+`stat` answers everything. Atomic
+  temp→fsync→rename writes; pin/unpin is a `rename` within `storage/`.
+- `read_blob(id)`: hit in either folder, or fetch+decrypt+populate `cache/`
   (full-file only).
-- `pin(ids)`/`unpin(ids)`: pin populates then flags; unpin clears (file stays).
-- `Mirrored` blobs system-pinned on pull (the lifecycle calls `pin`).
+- `pin(ids)`/`unpin(ids)`: pin populates then promotes (`cache/`→`pinned/`,
+  fetching first if absent); unpin demotes (`pinned/`→`cache/`, file stays).
+- `Mirrored` blobs system-pinned on pull (written straight to `pinned/`).
 - Verify: a second read is a local hit; a pinned `OnDemand` blob stays after a
   cache sweep stub.
 
@@ -207,12 +217,37 @@ no migration shims. Phases 1 and 6 span both repos (the trait change breaks bae'
   `open_blob_stream`. A ranged read never writes a truncated cache file.
 - Verify: seek/partial playback reads decrypt correctly; full reads populate.
 
-**4. Eviction.**
-- `max_cache_size` setting (bytes); accounting sums **unpinned** `size_bytes`.
-- LRU sweep over unpinned by `last_accessed_at` until under budget, deleting file
-  (+ sidecar row); `clear_cache()`. Trigger synchronously after each populate.
-- Verify: over-budget populate evicts the LRU unpinned entry; pinned + `Mirrored`
-  untouched; budget never drifts.
+**4. Eviction (folder-model — no table).**
+The cache is **folder-truth**: a blob is a file under `storage/pinned/`
+(protected) or `storage/cache/` (evictable), with no `blob_cache` table. So
+eviction works from the filesystem, not a table — there is no `last_accessed_at`
+or `size_bytes` column to sum, and "unpinned" is not a flag but "lives in
+`cache/`."
+- `max_cache_size` setting (bytes), device-local, stored as a single value under
+  the `max_cache_size` key in the existing `sync_state` key/value (config, not
+  per-blob accounting). Get/set via `Database::get_max_cache_size` /
+  `set_max_cache_size`. **Unset ⇒ unlimited ⇒ eviction off**; the host opts into a
+  budget.
+- Accounting sums the sizes of the files under `cache_dir()` (`storage/cache/`) by
+  `stat`ing them. `pinned/` is **structurally exempt** — the sweep never walks it,
+  so a pinned (or system-pinned `Mirrored`) blob can never be evicted, the same
+  guarantee the two-folder split gives `clear_cache`.
+- If the total exceeds the budget, delete the **oldest by mtime** first until the
+  total is back under it. mtime is the recency proxy (no `last_accessed` column —
+  the deliberate folder-truth trade-off, since pinning already retains the blobs
+  the user chose to keep). Delete the file only; there is no sidecar row. A file already gone by
+  delete time (a concurrent `clear_cache`/sweep) is the one legitimate skip,
+  logged at debug; every other stat/delete failure surfaces.
+- `evict_to_budget(db, library_dir)` runs **synchronously after each cache
+  populate** — `read_blob`'s miss-write and `write_blob`, once the file has landed
+  in `cache/`. A populate that pushes the cache over budget evicts down to it; the
+  just-written file is the newest, so a single over-budget sweep evicts older
+  files first and never reaches it. `clear_cache()` (drops all of `cache/`) is
+  kept unchanged.
+- Verify: over-budget populate evicts the oldest `cache/` file(s) until under
+  budget; pinned + `Mirrored` (in `pinned/`) untouched; unset budget evicts
+  nothing; the just-populated blob survives a single over-budget eviction; budget
+  never drifts (summed `cache/` size `<= max_cache_size` after eviction).
 
 **5. Safe delete + GC + snapshot backfill.**
 - Reference-checked delete: an orphaned blob (no live row references it) is
