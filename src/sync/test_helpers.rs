@@ -275,6 +275,12 @@ pub struct MockSyncStorage {
     /// `get_membership_entry` still serves them — models the eventual-consistency
     /// lag where a just-written entry is fetchable by key before it shows in a LIST.
     membership_list_hidden: Mutex<HashSet<(String, u64)>>,
+    /// Membership coordinates hidden from the FIRST `list_membership_entries` call
+    /// but revealed from the second onward — models the cycle-start LIST not
+    /// showing an entry that a later in-cycle reload then does.
+    membership_reveal_after_first_list: Mutex<HashSet<(String, u64)>>,
+    /// Count of `list_membership_entries` calls, driving the reveal above.
+    membership_list_calls: Mutex<u64>,
 }
 
 impl MockSyncStorage {
@@ -286,6 +292,8 @@ impl MockSyncStorage {
             snapshot_meta: Mutex::new(None),
             min_schema_version: Mutex::new(None),
             membership_list_hidden: Mutex::new(HashSet::new()),
+            membership_reveal_after_first_list: Mutex::new(HashSet::new()),
+            membership_list_calls: Mutex::new(0),
         }
     }
 
@@ -294,6 +302,16 @@ impl MockSyncStorage {
     /// just-written entry is readable by key before a LIST reflects it.
     pub fn hide_membership_from_list(&self, author_pubkey: &str, seq: u64) {
         self.membership_list_hidden
+            .lock()
+            .unwrap()
+            .insert((author_pubkey.to_string(), seq));
+    }
+
+    /// Hide a membership entry from the first `list_membership_entries` call and
+    /// reveal it from the second onward, modeling a cycle-start LIST that lags an
+    /// entry which an in-cycle reload then sees.
+    pub fn reveal_membership_after_first_list(&self, author_pubkey: &str, seq: u64) {
+        self.membership_reveal_after_first_list
             .lock()
             .unwrap()
             .insert((author_pubkey.to_string(), seq));
@@ -481,6 +499,12 @@ impl SyncStorage for MockSyncStorage {
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
         let objects = self.objects.lock().unwrap();
         let hidden = self.membership_list_hidden.lock().unwrap();
+        let reveal_after_first = self.membership_reveal_after_first_list.lock().unwrap();
+        let call_no = {
+            let mut calls = self.membership_list_calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
         let mut entries = Vec::new();
 
         for key in objects.keys() {
@@ -488,8 +512,11 @@ impl SyncStorage for MockSyncStorage {
                 if let Some(slash_pos) = rest.rfind('/') {
                     let author = &rest[..slash_pos];
                     if let Ok(seq) = rest[slash_pos + 1..].parse::<u64>() {
-                        if !hidden.contains(&(author.to_string(), seq)) {
-                            entries.push((author.to_string(), seq));
+                        let coord = (author.to_string(), seq);
+                        let suppressed = hidden.contains(&coord)
+                            || (call_no == 1 && reveal_after_first.contains(&coord));
+                        if !suppressed {
+                            entries.push(coord);
                         }
                     }
                 }

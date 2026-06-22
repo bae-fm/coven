@@ -458,11 +458,13 @@ async fn resolve_membership_authorization(
         return MembershipJudgment::Unauthorized;
     };
 
-    // Reload the chain fresh: the cycle-start LIST may have lagged the entry that
-    // authorizes this author.
-    let fresh = match reload_chain(storage).await {
-        Ok(Some(chain)) => chain,
-        Ok(None) => {
+    // Reload the entries fresh: the cycle-start LIST may have lagged the entry
+    // that authorizes this author. Only the storage *read* is a reason to retry;
+    // a validation failure of the reloaded set must NOT stall (see below).
+    let fresh = match reload_entries(storage).await {
+        // Genuine storage read failure — can't tell yet, retry next cycle.
+        Err(()) => return MembershipJudgment::Indeterminate,
+        Ok(entries) if entries.is_empty() => {
             // The chain is append-only and was non-empty at cycle start, so an
             // empty re-list mid-cycle is an anomalous transient. Keep judging
             // against the cycle-start chain we already hold — the keyed grant GET
@@ -470,7 +472,27 @@ async fn resolve_membership_authorization(
             warn!("membership re-list came back empty mid-cycle; keeping the cycle-start chain");
             current.clone()
         }
-        Err(()) => return MembershipJudgment::Indeterminate,
+        Ok(entries) => {
+            let only_entries = entries.into_iter().map(|(_, e)| e).collect();
+            match MembershipChain::from_entries(only_entries) {
+                Ok(chain) => chain,
+                // A reloaded entry fails whole-chain validation — e.g. a member
+                // planted a bogus, listable, self-signed Add. That must NOT stall
+                // and must NOT fail open: fall back to the known-good cycle-start
+                // chain (already validated when it loaded) and resolve this author
+                // via the keyed grant below. A keyed GET fetches the one specific
+                // entry, bypassing the poisoned whole-set validation — so a bogus
+                // entry can neither block a legitimate member nor stall the pull.
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "reloaded membership chain failed validation; falling back \
+                         to the cycle-start chain"
+                    );
+                    current.clone()
+                }
+            }
+        }
     };
     if fresh.can_write_now(author) {
         return MembershipJudgment::Authorized(fresh);
@@ -537,21 +559,22 @@ async fn resolve_membership_authorization(
     }
 }
 
-/// Reload the full membership chain from storage. `Ok(None)` when no chain
-/// exists; `Err(())` when it can't be listed/downloaded — the caller treats that
-/// as indeterminate (retry), never as "no chain" (which would fail open). The
-/// underlying cause is logged here rather than carried up, since the caller only
-/// needs the fact of failure to decide retry-vs-skip.
-async fn reload_chain(storage: &dyn SyncStorage) -> Result<Option<MembershipChain>, ()> {
-    let entries = storage.list_membership_entries().await.map_err(|e| {
+/// Re-list and re-download the membership entries — storage reads only, no
+/// validation. `Err(())` is a genuine storage read failure (the caller treats it
+/// as indeterminate/retry). Validation is deliberately the caller's job and kept
+/// separate: a bogus-but-listable entry fails whole-chain validation, and that is
+/// a "skip this changeset / fall back to the known-good chain" condition, never a
+/// "retry forever" one — folding it into a read error here would let one planted
+/// entry stall every device's pull. The underlying read error is logged here
+/// since the caller only needs the fact of failure.
+async fn reload_entries(
+    storage: &dyn SyncStorage,
+) -> Result<Vec<(MembershipCoord, MembershipEntry)>, ()> {
+    let keys = storage.list_membership_entries().await.map_err(|e| {
         warn!("membership re-list failed while resolving authorization: {e}");
     })?;
-    if entries.is_empty() {
-        return Ok(None);
-    }
-    super::membership_ops::download_chain(storage, &entries)
+    super::membership_ops::download_entries(storage, &keys)
         .await
-        .map(Some)
         .map_err(|e| {
             warn!("membership re-download failed while resolving authorization: {e}");
         })

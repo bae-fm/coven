@@ -825,6 +825,89 @@ async fn pull_skips_signed_changeset_whose_grant_entry_is_invalid_without_stalli
     );
 }
 
+/// The same stall, reached through the in-cycle chain RELOAD instead of the
+/// named-grant merge: a bogus entry is absent from the cycle-start LIST (so the
+/// chain loads clean and authorization stays on) but present in the reload LIST,
+/// where whole-chain validation fails. That validation failure must fall back to
+/// the cycle-start chain, NOT stall — otherwise one planted, listable entry
+/// freezes every device's pull.
+#[tokio::test]
+async fn pull_does_not_stall_when_a_bogus_entry_becomes_listable_mid_cycle() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let attacker = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let attacker_pk = hex::encode(attacker.public_key);
+
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    // Bogus self-signed Add by a non-owner: parses and verifies, but poisons
+    // whole-chain validation. Hidden from the FIRST LIST (cycle-start loads
+    // founder-only and clean) and revealed on the reload's LIST.
+    let bogus = make_entry(
+        &attacker,
+        MembershipAction::Add,
+        &attacker,
+        MemberRole::Member,
+        "0000000002000-0000-attacker",
+    );
+    storage
+        .put_membership_entry(&attacker_pk, 1, serde_json::to_vec(&bogus).unwrap())
+        .await
+        .unwrap();
+    storage.reveal_membership_after_first_list(&attacker_pk, 1);
+
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Forged', NULL, '0000000003000-0000-attacker', '2026-01-01')",
+        ],
+    )
+    .await;
+    let grant = MembershipCoord {
+        author: attacker_pk.clone(),
+        seq: 1,
+    };
+    let packed = envelope::pack_signed(
+        "devAttacker",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &attacker,
+        Some(grant),
+        &cs,
+    );
+    storage.put_changeset_packed("devAttacker", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.skipped_unauthorized, 1);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(
+        updated.get("devAttacker"),
+        Some(&1),
+        "a bogus entry appearing in the reload must not stall the pull"
+    );
+}
+
 /// The push side binds an outgoing changeset to this device's own membership
 /// grant, so a puller in the lag window can resolve it.
 #[tokio::test]
