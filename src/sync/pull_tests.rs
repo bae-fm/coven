@@ -13,7 +13,7 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
 use crate::sync::push::SCHEMA_VERSION;
-use crate::sync::service::SyncService;
+use crate::sync::service::{SyncCycleError, SyncService};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
@@ -206,6 +206,68 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     assert!(!result.asset_downloads_failed);
     let downloaded = std::fs::read(dst_photos.path().join("p1")).expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
+}
+
+/// A changeset that references a blob whose local file is missing must abort the
+/// cycle, not skip the upload and publish the row anyway. `sync` returns the
+/// outgoing changeset for the caller to push; aborting here (Err) is what keeps
+/// the caller from publishing a row whose blob was never uploaded — every puller
+/// would 404 on that blob forever (issue #83).
+#[tokio::test]
+async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
+    let storage = MockSyncStorage::new();
+
+    // A note + a photo row, but the photo file is deliberately never written, so
+    // the push loop's existence check sees the local file as absent.
+    let src_photos = tempfile::tempdir().expect("src photos");
+    let src_plan = PhotoBlobPlan {
+        dir: src_photos.path().to_path_buf(),
+    };
+
+    let db1 = open_test_db();
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db1,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('p1', 'n1', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db1
+        .take_changeset_and_suspend()
+        .await
+        .expect("capture outgoing");
+
+    let service = SyncService::new("dev1".to_string());
+    let keypair = UserKeypair::generate();
+    let (_t1, ld1) = temp_library_dir();
+    let result = service
+        .sync(
+            &db1,
+            &test_synced_tables(),
+            outgoing,
+            0,
+            &HashMap::new(),
+            &storage,
+            "2026-01-01T00:00:00Z",
+            "",
+            &keypair,
+            &ld1,
+            &src_plan,
+        )
+        .await;
+    db1.resume_session().await.expect("resume");
+
+    // `SyncResult` is not Debug; inspect only the error side for the assert message.
+    let err = result.err();
+    assert!(
+        matches!(err, Some(SyncCycleError::BlobMissing(_))),
+        "a missing local blob file must abort the cycle, got {err:?}",
+    );
 }
 
 /// A blob plan that names each `note_photos` row at a readable cloud path

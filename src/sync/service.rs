@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use tracing::{info, warn};
+use tracing::{error, info};
 
 use crate::blob::BlobPlan;
 use crate::database::Database;
@@ -103,11 +103,29 @@ impl SyncService {
             for blob in blob_plan.blobs_to_push(&changes) {
                 match crate::local_blob::exists(&blob.local_path).await {
                     Ok(true) => {}
-                    // Genuinely absent: this device doesn't hold the file, so skip
-                    // its upload (another device may push it).
+                    // The file is absent but the outgoing changeset references it.
+                    // The device that authored the row is the only one that holds
+                    // the file, so the old "another device may push it" rationale
+                    // does not apply — packing and publishing the changeset now would
+                    // make the row visible to every device while its blob is missing
+                    // from the cloud, and pullers would 404 on it permanently (the
+                    // seq advances; the row is never a fresh INSERT again). A missing
+                    // blob means the changeset is not ready to publish — it is not a
+                    // skip. Abort the cycle (the changeset is neither packed nor
+                    // pushed), exactly like the storage-error arm below; the next
+                    // cycle retries once the file is back.
                     Ok(false) => {
-                        warn!(id = %blob.id, "blob file not found locally, skipping upload");
-                        continue;
+                        error!(
+                            id = %blob.id,
+                            path = %blob.local_path.display(),
+                            "blob file missing locally; aborting push so the changeset \
+                             is not published without its blob"
+                        );
+                        return Err(SyncCycleError::BlobMissing(format!(
+                            "blob {} file not found at {}",
+                            blob.id,
+                            blob.local_path.display()
+                        )));
                     }
                     // A real storage failure checking existence is not "absent" —
                     // abort the cycle rather than silently dropping the upload.
@@ -194,6 +212,9 @@ pub enum SyncCycleError {
     Pull(pull::PullError),
     AssetScan(String),
     AssetUpload(String),
+    /// An outgoing changeset references a blob whose local file is missing, so the
+    /// changeset cannot be published without stranding pullers on a 404.
+    BlobMissing(String),
 }
 
 impl std::fmt::Display for SyncCycleError {
@@ -203,6 +224,7 @@ impl std::fmt::Display for SyncCycleError {
             SyncCycleError::Pull(e) => write!(f, "pull error: {e}"),
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
             SyncCycleError::AssetUpload(e) => write!(f, "asset upload error: {e}"),
+            SyncCycleError::BlobMissing(e) => write!(f, "blob missing: {e}"),
         }
     }
 }
