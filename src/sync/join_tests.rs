@@ -183,6 +183,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         .expect("owner empty snapshot");
     push_snapshot(
         &storage,
+        "test-lib",
         empty_snap,
         "A",
         HashMap::new(),
@@ -203,13 +204,17 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     .await;
     storage.store_changeset("A", 1, &cs1, SCHEMA_VERSION);
 
-    // The shared snapshot before B joins. B must not replace it.
-    let snapshot_before = storage.get_snapshot().await.expect("snapshot present");
+    // The shared snapshot pointer before B joins. B must not republish (which
+    // would flip the pointer to a new generation).
+    let snapshot_before = storage
+        .get_snapshot_pointer()
+        .await
+        .expect("snapshot pointer present");
 
     // Device B joins through the real path: bootstrap from the snapshot, then
     // pull the changesets published after it.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, &enc, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -242,6 +247,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let b_hlc = Hlc::new("B".to_string());
     run_single_sync_cycle(
         &storage,
+        "test-lib",
         "B",
         &b_hlc,
         &SystemClock,
@@ -257,9 +263,12 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     .expect("B sync cycle");
 
     // A just-joined device with no local changes must leave the shared snapshot
-    // untouched. Today the join path persists no `snapshot_seq`, so the cycle
-    // trips `is_initial_sync` and overwrites the owner's snapshot with B's own.
-    let snapshot_after = storage.get_snapshot().await.expect("snapshot present");
+    // untouched: the pointer still names the owner's generation, not a republished
+    // one of B's own.
+    let snapshot_after = storage
+        .get_snapshot_pointer()
+        .await
+        .expect("snapshot pointer present");
     assert_eq!(
         snapshot_after, snapshot_before,
         "a just-joined device's first cycle must not republish/clobber the shared snapshot",
@@ -306,6 +315,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("owner snapshot");
     push_snapshot(
         &storage,
+        "test-lib",
         snapshot,
         "A",
         HashMap::new(),
@@ -341,7 +351,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     };
     let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, &enc, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -417,6 +427,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         .expect("owner snapshot");
     push_snapshot(
         &storage,
+        "test-lib",
         snapshot,
         "A",
         HashMap::new(),
@@ -438,7 +449,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     // folder, not the plan's `dir`.
     let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, &enc, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -488,6 +499,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     let b_hlc = Hlc::new("B".to_string());
     run_single_sync_cycle(
         &storage,
+        "test-lib",
         "B",
         &b_hlc,
         &SystemClock,

@@ -697,7 +697,8 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip() {
         let keys = [
-            "snapshot.db.enc",
+            "snapshot/abc/0.db.enc",
+            "snapshot/current.json.enc",
             "changes/device-abc/1.enc",
             "heads/device-abc.json.enc",
             "images/cover.jpg",

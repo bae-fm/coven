@@ -143,6 +143,7 @@ async fn commit_push_success(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_single_sync_cycle(
     storage: &dyn SyncStorage,
+    library_id: &str,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
@@ -518,6 +519,7 @@ pub async fn run_single_sync_cycle(
             Ok(encrypted) => {
                 match super::snapshot::push_snapshot(
                     storage,
+                    library_id,
                     encrypted,
                     device_id,
                     sync_result.updated_cursors.clone(),
@@ -675,6 +677,7 @@ pub async fn init_sync(
     Some(SyncComponents {
         storage: std::sync::Arc::new(storage),
         hlc,
+        library_id: config.library_id.clone(),
         device_id: config.device_id.clone(),
         cipher: cipher_lock,
         user_keypair,
@@ -804,6 +807,10 @@ async fn found_and_pin(
 pub struct SyncComponents {
     pub storage: std::sync::Arc<CloudSyncStorage>,
     pub hlc: std::sync::Arc<Hlc>,
+    /// The library this sync loop is for. Binds the snapshot meta/pointer it
+    /// publishes so a member of two libraries can't replay one's catalog as the
+    /// other's.
+    pub library_id: String,
     pub device_id: String,
     pub cipher: std::sync::Arc<std::sync::RwLock<CloudCipher>>,
     pub user_keypair: UserKeypair,

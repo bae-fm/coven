@@ -739,8 +739,8 @@ mod tests {
             "/Apps/your-app/my-library/changes/dev1/42.enc"
         );
         assert_eq!(
-            home.full_path("snapshot.db.enc"),
-            "/Apps/your-app/my-library/snapshot.db.enc"
+            home.full_path("snapshot/abc/0.db.enc"),
+            "/Apps/your-app/my-library/snapshot/abc/0.db.enc"
         );
     }
 

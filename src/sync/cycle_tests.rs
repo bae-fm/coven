@@ -41,6 +41,7 @@ async fn run_cycle_m(
 ) {
     run_single_sync_cycle(
         storage,
+        "test-lib",
         "M",
         hlc,
         &SystemClock,
@@ -212,8 +213,8 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        SyncStorage::get_snapshot(&storage).await.is_ok(),
-        "the snapshot must push even while an upload is pending — the gate, not a \
+        SyncStorage::get_snapshot_pointer(&storage).await.is_ok(),
+        "the snapshot must publish even while an upload is pending — the gate, not a \
          global flag, decides what it carries",
     );
 }
@@ -244,6 +245,7 @@ async fn cycle_reports_resume_drain_promptly_when_drain_breaks_mid_batch() {
 
     let result = run_single_sync_cycle(
         &storage,
+        "test-lib",
         "M",
         &hlc,
         &SystemClock,

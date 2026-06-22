@@ -58,6 +58,7 @@ pub struct WasmSyncSchedule {
 struct CycleInputs {
     storage: CloudSyncStorage,
     hlc: Rc<Hlc>,
+    library_id: String,
     device_id: String,
     /// The at-rest cipher, shared with `storage` (the same `Arc<RwLock<CloudCipher>>`
     /// the [`CloudSyncStorage`] seals/opens with, via its
@@ -99,6 +100,7 @@ impl WasmSyncRuntime {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         storage: CloudSyncStorage,
+        library_id: String,
         device_id: String,
         hlc: Rc<Hlc>,
         cipher: Arc<RwLock<CloudCipher>>,
@@ -114,6 +116,7 @@ impl WasmSyncRuntime {
             inputs: Rc::new(CycleInputs {
                 storage,
                 hlc,
+                library_id,
                 device_id,
                 cipher,
                 db,
@@ -245,6 +248,7 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
 
     let result = super::cycle::run_single_sync_cycle(
         storage,
+        &inputs.library_id,
         &inputs.device_id,
         &inputs.hlc,
         inputs.clock.as_ref(),

@@ -146,7 +146,8 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
     version.to_be_bytes().to_vec()
 }
 
-/// Serialized form of `snapshot_meta.json{suffix}`: the per-device cursors of a
+/// Serialized form of a snapshot generation's
+/// `snapshot/{author}/{seq}_meta.json{suffix}`: the per-device cursors of a
 /// snapshot plus the hash of the snapshot DB image, under one author signature.
 ///
 /// A snapshot is a destructive primitive twice over. The DB image is the whole
@@ -160,14 +161,22 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
 /// longer matches `db_hash`; swapped cursors no longer verify.
 ///
 /// `db_hash` is the SHA-256 of the snapshot's **stored** (sealed) bytes — exactly
-/// what `put_snapshot` writes and `get_snapshot` returns — so a verifier hashes
-/// the bytes it downloaded and compares, with no decryption needed to detect a
-/// substituted image.
+/// what the generation's db object holds — so a verifier hashes the bytes it
+/// downloaded and compares, with no decryption needed to detect a substituted
+/// image.
+///
+/// `library_id` binds the meta to its library: it is part of the signed payload
+/// but not stored (the reader supplies its own library id to [`Self::verify`]),
+/// mirroring [`WrappedLibraryKey`]. A member of two libraries cannot take one
+/// library's catalog and re-sign its meta as the other's — re-verifying under the
+/// second library's id fails, because the signature was taken over the first's.
 ///
 /// Like [`HeadJson`] (and unlike [`WrappedLibraryKey`]), the `author_pubkey` is
 /// stored: a snapshot's author varies device to device, so the verifier learns
 /// who signed it and then checks that author against the membership chain (the
-/// authorization step, the caller's job).
+/// authorization step, the caller's job). It is also what lets the
+/// superseded-generation sweep recognize which generations a device published, so
+/// each device reclaims only its own (see [`crate::sync::snapshot`]).
 #[derive(Serialize, Deserialize)]
 pub struct SnapshotMetaJson {
     /// Per-device cursors at snapshot time: device_id -> head seq. A bootstrapping
@@ -182,24 +191,30 @@ pub struct SnapshotMetaJson {
 }
 
 /// The snapshot-meta fields the signature covers, in declaration order. Excludes
-/// `author_pubkey`/`signature` (the signature's own outputs). `cursors` is a
-/// `BTreeMap` so its serialization is order-deterministic — a canonical payload.
+/// `author_pubkey`/`signature` (the signature's own outputs). Includes
+/// `library_id` (so a meta can't be replayed into a different library, mirroring
+/// [`WrappedKeyFields`]). `cursors` is a `BTreeMap` so its serialization is
+/// order-deterministic — a canonical payload.
 #[derive(Serialize)]
 struct SnapshotMetaFields<'a> {
+    library_id: &'a str,
     cursors: &'a std::collections::BTreeMap<String, u64>,
     db_hash: &'a str,
 }
 
 impl SnapshotMetaJson {
-    /// Build a snapshot meta signed by `keypair`: fills `author_pubkey` with the
-    /// device's public key and `signature` with the detached signature over the
-    /// canonical payload (which binds the cursors and DB hash).
+    /// Build a snapshot meta for `library_id` signed by `keypair`: fills
+    /// `author_pubkey` with the device's public key and `signature` with the
+    /// detached signature over the canonical payload (which binds `library_id`,
+    /// the cursors, and the DB hash). `library_id` is bound but not stored — the
+    /// reader passes its own to [`Self::verify`].
     pub fn signed(
+        library_id: &str,
         cursors: std::collections::BTreeMap<String, u64>,
         db_hash: String,
         keypair: &UserKeypair,
     ) -> Self {
-        let payload = snapshot_meta_signing_payload(&cursors, &db_hash);
+        let payload = snapshot_meta_signing_payload(library_id, &cursors, &db_hash);
         let sig = keypair.sign(&payload);
         SnapshotMetaJson {
             cursors,
@@ -209,22 +224,129 @@ impl SnapshotMetaJson {
         }
     }
 
-    /// Verify the embedded signature against the embedded `author_pubkey`. A meta
-    /// that fails this is forged, corrupt, or tampered (cursors or DB hash changed
-    /// after signing), and must not be adopted. Whether the author is *authorized*
+    /// Verify the embedded signature against the embedded `author_pubkey`, bound
+    /// to `library_id`. A meta that fails this is forged, corrupt, tampered
+    /// (cursors or DB hash changed after signing), or a different library's meta
+    /// replayed here, and must not be adopted. Whether the author is *authorized*
     /// (a current member) is a separate check the caller runs.
-    pub fn verify(&self) -> bool {
-        let payload = snapshot_meta_signing_payload(&self.cursors, &self.db_hash);
+    pub fn verify(&self, library_id: &str) -> bool {
+        let payload = snapshot_meta_signing_payload(library_id, &self.cursors, &self.db_hash);
         keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
 
 fn snapshot_meta_signing_payload(
+    library_id: &str,
     cursors: &std::collections::BTreeMap<String, u64>,
     db_hash: &str,
 ) -> Vec<u8> {
-    let fields = SnapshotMetaFields { cursors, db_hash };
+    let fields = SnapshotMetaFields {
+        library_id,
+        cursors,
+        db_hash,
+    };
     serde_json::to_vec(&fields).expect("snapshot meta fields serialization cannot fail")
+}
+
+/// Serialized form of `snapshot/current.json{suffix}`: the pointer that names
+/// which snapshot generation is live.
+///
+/// A snapshot is published as a set of objects under a per-generation key in the
+/// publishing device's own keyspace (`snapshot/{author}/{seq}.db`,
+/// `snapshot/{author}/{seq}_meta.json`), all written *before* the pointer. The
+/// pointer is the commit: a reader resolves it first, then loads the db+meta pair
+/// it names from `{author_pubkey, seq}` — always a complete, self-consistent
+/// generation, never a half-written one. Writing the db+meta at fixed keys instead
+/// would let a reader observe a new db paired with a stale meta (a torn read); the
+/// pointer removes that window because nothing references a generation until it is
+/// whole.
+///
+/// The bucket is untrusted, so the pointer is signed like every other control
+/// object. It names a generation's `{author_pubkey, seq}` and repeats that
+/// generation's `db_hash`, all under one author signature, so a non-member who can
+/// write the bucket cannot repoint the live snapshot at a fabricated or stale
+/// generation: a pointer they author fails the membership check, and one they copy
+/// from an older generation no longer matches the `seq`/`db_hash` they would need
+/// to forge. `db_hash` is repeated here (not only in the meta) so the pointer
+/// commits to the *exact* generation, not merely its number — the verifier checks
+/// the pointer's `db_hash` equals the meta's before adopting the db image.
+///
+/// `library_id` binds the pointer to its library: it is part of the signed
+/// payload but not stored (the reader supplies its own library id to
+/// [`Self::verify`]), mirroring [`WrappedLibraryKey`]. A member of two libraries
+/// cannot repoint one library's snapshot under the other's — re-verifying under
+/// the second library's id fails.
+///
+/// Like [`HeadJson`] and [`SnapshotMetaJson`], `author_pubkey` is stored: the
+/// publishing device varies, so the verifier learns who signed and then checks
+/// that author against the membership chain (the authorization step, the caller's
+/// job).
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotPointerJson {
+    /// The sequence of the snapshot generation this pointer publishes. With the
+    /// pointer's `author_pubkey`, names the
+    /// `snapshot/{author_pubkey}/{seq}.db` / `snapshot/{author_pubkey}/{seq}_meta.json`
+    /// objects to load.
+    pub seq: u64,
+    /// Hex-encoded SHA-256 of the named generation's stored (sealed) snapshot DB
+    /// bytes — the same hash that generation's [`SnapshotMetaJson`] commits to.
+    pub db_hash: String,
+    /// Hex-encoded Ed25519 public key of the device that published this pointer.
+    /// Doubles as the live generation's keyspace segment: the named generation's
+    /// objects live under `snapshot/{author_pubkey}/{seq}`.
+    pub author_pubkey: String,
+    /// Hex-encoded detached signature over [`SnapshotPointerFields`].
+    pub signature: String,
+}
+
+/// The pointer fields the signature covers, in declaration order. Excludes
+/// `author_pubkey`/`signature` (the signature's own outputs). Includes
+/// `library_id` (so a pointer can't be replayed into a different library,
+/// mirroring [`WrappedKeyFields`]). Binding both `seq` and `db_hash` means a
+/// pointer cannot be re-stamped to a different generation number, nor have its
+/// number kept while pointed at a substituted image.
+#[derive(Serialize)]
+struct SnapshotPointerFields<'a> {
+    library_id: &'a str,
+    seq: u64,
+    db_hash: &'a str,
+}
+
+impl SnapshotPointerJson {
+    /// Build a pointer for `library_id` signed by `keypair`: fills `author_pubkey`
+    /// with the device's public key and `signature` with the detached signature
+    /// over the canonical payload (which binds `library_id`, the generation `seq`,
+    /// and its DB hash). `library_id` is bound but not stored — the reader passes
+    /// its own to [`Self::verify`].
+    pub fn signed(library_id: &str, seq: u64, db_hash: String, keypair: &UserKeypair) -> Self {
+        let payload = snapshot_pointer_signing_payload(library_id, seq, &db_hash);
+        let sig = keypair.sign(&payload);
+        SnapshotPointerJson {
+            seq,
+            db_hash,
+            author_pubkey: hex::encode(keypair.public_key),
+            signature: hex::encode(sig),
+        }
+    }
+
+    /// Verify the embedded signature against the embedded `author_pubkey`, bound
+    /// to `library_id`. A pointer that fails this is forged, corrupt, tampered
+    /// (`seq` or `db_hash` changed after signing), or a different library's pointer
+    /// replayed here, and must not be followed. Whether the author is *authorized*
+    /// (a current write-capable member) is a separate check the caller runs.
+    pub fn verify(&self, library_id: &str) -> bool {
+        let payload = snapshot_pointer_signing_payload(library_id, self.seq, &self.db_hash);
+        keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
+    }
+}
+
+fn snapshot_pointer_signing_payload(library_id: &str, seq: u64, db_hash: &str) -> Vec<u8> {
+    let fields = SnapshotPointerFields {
+        library_id,
+        seq,
+        db_hash,
+    };
+    serde_json::to_vec(&fields).expect("snapshot pointer fields serialization cannot fail")
 }
 
 /// Serialized form of `keys/{recipient_pubkey}{suffix}`: the library encryption
@@ -458,33 +580,48 @@ mod tests {
         use std::collections::BTreeMap;
         let kp = UserKeypair::generate();
         let cursors = BTreeMap::from([("devA".to_string(), 5u64), ("devB".to_string(), 9)]);
-        let meta = SnapshotMetaJson::signed(cursors.clone(), "abc123".to_string(), &kp);
+        let meta = SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), &kp);
 
         assert_eq!(meta.author_pubkey, hex::encode(kp.public_key));
-        assert!(meta.verify(), "a freshly signed snapshot meta verifies");
+        assert!(
+            meta.verify("lib"),
+            "a freshly signed snapshot meta verifies"
+        );
 
         // Round-trips through JSON unchanged.
         let json = serde_json::to_vec(&meta).expect("serialize meta");
         let parsed: SnapshotMetaJson = serde_json::from_slice(&json).expect("parse meta");
-        assert!(parsed.verify(), "meta verifies after a JSON round-trip");
+        assert!(
+            parsed.verify("lib"),
+            "meta verifies after a JSON round-trip"
+        );
+
+        // The signature binds the library: a meta re-verified under a different
+        // library id is refused (the cross-library replay defense).
+        assert!(
+            !meta.verify("other-lib"),
+            "a meta must not verify under a different library id"
+        );
 
         // The signature binds the DB hash: a meta swapped onto a different DB image
         // (a substituted snapshot) no longer verifies.
-        let mut tampered_db = SnapshotMetaJson::signed(cursors.clone(), "abc123".to_string(), &kp);
+        let mut tampered_db =
+            SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), &kp);
         tampered_db.db_hash = "deadbeef".to_string();
         assert!(
-            !tampered_db.verify(),
+            !tampered_db.verify("lib"),
             "a tampered db_hash fails verification"
         );
 
         // It also binds the cursors: poisoning a cursor (the bootstrap-skip attack)
         // invalidates the signature.
-        let mut tampered_cursors = SnapshotMetaJson::signed(cursors, "abc123".to_string(), &kp);
+        let mut tampered_cursors =
+            SnapshotMetaJson::signed("lib", cursors, "abc123".to_string(), &kp);
         tampered_cursors
             .cursors
             .insert("devA".to_string(), u64::MAX);
         assert!(
-            !tampered_cursors.verify(),
+            !tampered_cursors.verify("lib"),
             "tampered cursors fail verification"
         );
     }
@@ -495,6 +632,7 @@ mod tests {
         let kp = UserKeypair::generate();
         let other = UserKeypair::generate();
         let mut meta = SnapshotMetaJson::signed(
+            "lib",
             BTreeMap::from([("devA".to_string(), 1u64)]),
             "hash".to_string(),
             &kp,
@@ -502,7 +640,61 @@ mod tests {
         // Swap the claimed author: the signature no longer matches, so the meta is
         // rejected (a forger can't claim a member's pubkey).
         meta.author_pubkey = hex::encode(other.public_key);
-        assert!(!meta.verify());
+        assert!(!meta.verify("lib"));
+    }
+
+    #[test]
+    fn snapshot_pointer_round_trips_and_binds_its_fields() {
+        let kp = UserKeypair::generate();
+        let pointer = SnapshotPointerJson::signed("lib", 7, "abc123".to_string(), &kp);
+
+        assert_eq!(pointer.author_pubkey, hex::encode(kp.public_key));
+        assert!(pointer.verify("lib"), "a freshly signed pointer verifies");
+
+        // Round-trips through JSON unchanged.
+        let json = serde_json::to_vec(&pointer).expect("serialize pointer");
+        let parsed: SnapshotPointerJson = serde_json::from_slice(&json).expect("parse pointer");
+        assert!(
+            parsed.verify("lib"),
+            "pointer verifies after a JSON round-trip"
+        );
+
+        // The signature binds the library: a pointer re-verified under a different
+        // library id is refused (the cross-library replay defense).
+        assert!(
+            !pointer.verify("other-lib"),
+            "a pointer must not verify under a different library id"
+        );
+
+        // The signature binds the seq: repointing to a different generation number
+        // after signing invalidates it, so a forged pointer can't name an arbitrary
+        // generation.
+        let mut tampered_seq = SnapshotPointerJson::signed("lib", 7, "abc123".to_string(), &kp);
+        tampered_seq.seq = 99;
+        assert!(
+            !tampered_seq.verify("lib"),
+            "a tampered seq fails verification"
+        );
+
+        // It also binds the DB hash: pointing the same seq at a substituted image
+        // (a different generation's db) fails.
+        let mut tampered_hash = SnapshotPointerJson::signed("lib", 7, "abc123".to_string(), &kp);
+        tampered_hash.db_hash = "deadbeef".to_string();
+        assert!(
+            !tampered_hash.verify("lib"),
+            "a tampered db_hash fails verification"
+        );
+    }
+
+    #[test]
+    fn snapshot_pointer_signed_by_one_key_does_not_verify_under_another() {
+        let kp = UserKeypair::generate();
+        let other = UserKeypair::generate();
+        let mut pointer = SnapshotPointerJson::signed("lib", 1, "hash".to_string(), &kp);
+        // Swap the claimed author: the signature no longer matches, so the pointer
+        // is rejected (a forger can't claim a member's pubkey to repoint).
+        pointer.author_pubkey = hex::encode(other.public_key);
+        assert!(!pointer.verify("lib"));
     }
 
     #[test]

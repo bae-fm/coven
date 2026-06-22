@@ -264,10 +264,12 @@ pub struct MockSyncStorage {
     /// Published device heads, keyed by device_id -> signed `HeadJson` JSON bytes
     /// (exactly what the cloud stores, minus the at-rest cipher).
     heads: Mutex<HashMap<String, Vec<u8>>>,
-    /// The single shared snapshot blob (`snapshot.db{suffix}`).
-    snapshot: Mutex<Option<Vec<u8>>>,
-    /// The snapshot's per-device cursor metadata (`snapshot_meta.json{suffix}`).
-    snapshot_meta: Mutex<Option<Vec<u8>>>,
+    /// Snapshot generations and their pointer, keyed exactly as the cloud lays
+    /// them out (`snapshot/{author}/{seq}.db`, `snapshot/{author}/{seq}_meta.json`,
+    /// `snapshot/current.json`). Keying each device's generations under its own
+    /// `{author}` — not a flat seq — is what lets a test exercise the real
+    /// globally-unique keyspace and atomic-publish behavior.
+    snapshot_objects: Mutex<HashMap<String, Vec<u8>>>,
     /// Signed `min_schema_version.json` bytes (None = no minimum set).
     min_schema_version: Mutex<Option<Vec<u8>>>,
     /// The device identity this mock signs its head/min_schema with. Defaults to a
@@ -298,8 +300,7 @@ impl MockSyncStorage {
         MockSyncStorage {
             objects: Mutex::new(HashMap::new()),
             heads: Mutex::new(HashMap::new()),
-            snapshot: Mutex::new(None),
-            snapshot_meta: Mutex::new(None),
+            snapshot_objects: Mutex::new(HashMap::new()),
             min_schema_version: Mutex::new(None),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
@@ -338,6 +339,29 @@ impl MockSyncStorage {
             self.objects.lock().unwrap().remove(&key).is_some(),
             "delete_blob_object: no mock cloud blob at {key} to delete (test-setup bug)",
         );
+    }
+
+    /// The DB image of the live snapshot generation — the one the pointer names —
+    /// or None if no snapshot has been published. Lets a test assert what
+    /// `bootstrap_from_snapshot` would adopt without re-deriving the pointer→seq→db
+    /// resolution itself.
+    pub async fn current_snapshot_db(&self) -> Option<Vec<u8>> {
+        let pointer_bytes = self
+            .snapshot_objects
+            .lock()
+            .unwrap()
+            .get("snapshot/current.json")
+            .cloned()?;
+        let pointer: crate::sync::signed_control::SnapshotPointerJson =
+            serde_json::from_slice(&pointer_bytes).expect("parse pointer");
+        self.snapshot_objects
+            .lock()
+            .unwrap()
+            .get(&format!(
+                "snapshot/{}/{}.db",
+                pointer.author_pubkey, pointer.seq
+            ))
+            .cloned()
     }
 
     /// Store a changeset in the mock storage (simulates what push would do). The
@@ -514,17 +538,27 @@ impl SyncStorage for MockSyncStorage {
         Ok(stored[offset as usize..end as usize].to_vec())
     }
 
-    async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        *self.snapshot.lock().unwrap() = Some(data);
+    async fn put_snapshot(
+        &self,
+        author: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.snapshot_objects
+            .lock()
+            .unwrap()
+            .insert(format!("snapshot/{author}/{seq}.db"), data);
         Ok(())
     }
 
-    async fn get_snapshot(&self) -> Result<Vec<u8>, StorageError> {
-        self.snapshot
+    async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+        let key = format!("snapshot/{author}/{seq}.db");
+        self.snapshot_objects
             .lock()
             .unwrap()
-            .clone()
-            .ok_or(StorageError::NotFound("snapshot.db".into()))
+            .get(&key)
+            .cloned()
+            .ok_or(StorageError::NotFound(key))
     }
 
     async fn delete_changeset(&self, _device_id: &str, _seq: u64) -> Result<(), StorageError> {
@@ -635,17 +669,89 @@ impl SyncStorage for MockSyncStorage {
         Ok(())
     }
 
-    async fn put_snapshot_meta(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        *self.snapshot_meta.lock().unwrap() = Some(data);
+    async fn put_snapshot_meta(
+        &self,
+        author: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.snapshot_objects
+            .lock()
+            .unwrap()
+            .insert(format!("snapshot/{author}/{seq}_meta.json"), data);
         Ok(())
     }
 
-    async fn get_snapshot_meta(&self) -> Result<Vec<u8>, StorageError> {
-        self.snapshot_meta
+    async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+        let key = format!("snapshot/{author}/{seq}_meta.json");
+        self.snapshot_objects
             .lock()
             .unwrap()
-            .clone()
-            .ok_or(StorageError::NotFound("snapshot_meta.json".into()))
+            .get(&key)
+            .cloned()
+            .ok_or(StorageError::NotFound(key))
+    }
+
+    async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        self.snapshot_objects
+            .lock()
+            .unwrap()
+            .insert("snapshot/current.json".to_string(), data);
+        Ok(())
+    }
+
+    async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
+        self.snapshot_objects
+            .lock()
+            .unwrap()
+            .get("snapshot/current.json")
+            .cloned()
+            .ok_or(StorageError::NotFound("snapshot/current.json".into()))
+    }
+
+    async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
+        // List only this author's own keyspace — the meta objects under
+        // `snapshot/{author}/` — exactly as `CloudSyncStorage` does. Ownership is
+        // structural: a peer's generations live under a different prefix.
+        let prefix = format!("snapshot/{author}/");
+        let objects = self.snapshot_objects.lock().unwrap();
+        let mut seqs = Vec::new();
+        for key in objects.keys() {
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                // A different author's generation or the shared pointer — not under
+                // this author's prefix, legitimately not ours; skip silently.
+                continue;
+            };
+            // Mirror `CloudSyncStorage`: the `{seq}.db` sibling is expected and listed
+            // via its meta (skip silently); a meta with a non-numeric seq, or any other
+            // object under this author's prefix, is surfaced rather than dropped.
+            match rest.strip_suffix("_meta.json") {
+                Some(seq_str) => match seq_str.parse::<u64>() {
+                    Ok(seq) => seqs.push(seq),
+                    Err(e) => {
+                        tracing::warn!(
+                            "snapshot listing: meta key {key} has a non-numeric seq: {e}"
+                        )
+                    }
+                },
+                None if rest.ends_with(".db") => {}
+                None => tracing::warn!(
+                    "snapshot listing: unexpected object {key} under a snapshot author prefix"
+                ),
+            }
+        }
+        seqs.sort_unstable();
+        Ok(seqs)
+    }
+
+    async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError> {
+        // Remove the db first, the meta last: the meta is what `list` keys a
+        // generation by, so a crash between the two leaves it still listed (and
+        // re-deletable), never a meta-less db.
+        let mut objects = self.snapshot_objects.lock().unwrap();
+        objects.remove(&format!("snapshot/{author}/{seq}.db"));
+        objects.remove(&format!("snapshot/{author}/{seq}_meta.json"));
+        Ok(())
     }
 }
 

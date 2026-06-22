@@ -74,6 +74,7 @@ fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> Wa
 
     let runtime = WasmSyncRuntime::new(
         storage,
+        "test-lib".to_string(),
         device_id.to_string(),
         Rc::new(Hlc::new(device_id.to_string())),
         cipher,

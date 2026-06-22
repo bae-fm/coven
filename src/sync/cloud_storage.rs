@@ -514,16 +514,23 @@ impl SyncStorage for CloudSyncStorage {
         reader.read(offset, len).await
     }
 
-    async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        let key = format!("snapshot.db{}", self.suffix());
+    async fn put_snapshot(
+        &self,
+        author: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        crate::library_dir::validate_path_token(author)?;
+        let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
         self.home
             .write(&key, data, &crate::storage::cloud::no_progress())
             .await?;
         Ok(())
     }
 
-    async fn get_snapshot(&self) -> Result<Vec<u8>, StorageError> {
-        let key = format!("snapshot.db{}", self.suffix());
+    async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+        crate::library_dir::validate_path_token(author)?;
+        let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
         self.home.read(&key).await.map_err(StorageError::from)
     }
 
@@ -681,21 +688,102 @@ impl SyncStorage for CloudSyncStorage {
         Ok(())
     }
 
-    async fn put_snapshot_meta(&self, data: Vec<u8>) -> Result<(), StorageError> {
+    async fn put_snapshot_meta(
+        &self,
+        author: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        crate::library_dir::validate_path_token(author)?;
         let stored = self.cipher().seal(&data);
-        let key = format!("snapshot_meta.json{}", self.suffix());
+        let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
         self.home
             .write(&key, stored, &crate::storage::cloud::no_progress())
             .await?;
         Ok(())
     }
 
-    async fn get_snapshot_meta(&self) -> Result<Vec<u8>, StorageError> {
-        let key = format!("snapshot_meta.json{}", self.suffix());
+    async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+        crate::library_dir::validate_path_token(author)?;
+        let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
         let stored = self.home.read(&key).await?;
         self.cipher()
             .open(&stored)
-            .map_err(|e| StorageError::Decryption(format!("snapshot_meta: {e}")))
+            .map_err(|e| StorageError::Decryption(format!("snapshot_meta {author}/{seq}: {e}")))
+    }
+
+    async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        let stored = self.cipher().seal(&data);
+        let key = format!("snapshot/current.json{}", self.suffix());
+        self.home
+            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .await?;
+        Ok(())
+    }
+
+    async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
+        let key = format!("snapshot/current.json{}", self.suffix());
+        let stored = self.home.read(&key).await?;
+        self.cipher()
+            .open(&stored)
+            .map_err(|e| StorageError::Decryption(format!("snapshot_pointer: {e}")))
+    }
+
+    async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
+        crate::library_dir::validate_path_token(author)?;
+        let suffix = self.suffix();
+        let prefix = format!("snapshot/{author}/");
+        let keys = self.home.list(&prefix).await?;
+        let mut seqs = Vec::new();
+        for key in &keys {
+            // Under this device's own prefix, match only the metadata objects:
+            // `snapshot/{author}/{seq}_meta.json{suffix}`. A generation is keyed by
+            // its meta (written after the DB image), so listing it means the DB
+            // image is already whole. The `{seq}.db` sibling is skipped here. Only
+            // this `{author}`'s generations are listed — a peer's live under a
+            // different prefix — so ownership is structural, no per-object author
+            // check needed.
+            let Some(rest) = key
+                .strip_prefix(&prefix)
+                .and_then(|s| s.strip_suffix(suffix))
+            else {
+                warn!("snapshot listing: object {key} is not under the prefix with the expected suffix; skipping");
+                continue;
+            };
+            match rest.strip_suffix("_meta.json") {
+                Some(seq_str) => match seq_str.parse::<u64>() {
+                    Ok(seq) => seqs.push(seq),
+                    Err(e) => warn!("snapshot listing: meta key {key} has a non-numeric seq: {e}"),
+                },
+                // The `{seq}.db` sibling is each generation's expected complement,
+                // listed via its meta, so skip it silently; anything else under this
+                // author prefix is unexpected and surfaced rather than dropped.
+                None if rest.ends_with(".db") => {}
+                None => {
+                    warn!(
+                        "snapshot listing: unexpected object {key} under a snapshot author prefix"
+                    )
+                }
+            }
+        }
+        seqs.sort_unstable();
+        Ok(seqs)
+    }
+
+    async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError> {
+        crate::library_dir::validate_path_token(author)?;
+        let suffix = self.suffix();
+        // Delete the db first, then the meta: the meta object is what
+        // `list_own_snapshot_generations` keys a generation by, so removing it last
+        // means a crash between the two deletes leaves the generation still listed
+        // (its meta present) and re-deletable next sweep, never a meta-less db.
+        self.home
+            .delete(&format!("snapshot/{author}/{seq}.db{suffix}"))
+            .await?;
+        self.home
+            .delete(&format!("snapshot/{author}/{seq}_meta.json{suffix}"))
+            .await?;
+        Ok(())
     }
 }
 
@@ -985,38 +1073,86 @@ mod tests {
             vec![1]
         );
 
-        // Snapshot + snapshot_meta: literal at rest, bare keys.
+        // Snapshot generation + meta + pointer: literal at rest, bare generational
+        // keys under the publishing device's `{author}` prefix.
+        let author = "abc123";
         let snap = b"SQLite format 3\0 ... bytes".to_vec();
         storage
-            .put_snapshot(snap.clone())
+            .put_snapshot(author, 0, snap.clone())
             .await
             .expect("put_snapshot");
-        assert_eq!(home.get("snapshot.db").as_deref(), Some(snap.as_slice()));
+        assert_eq!(
+            home.get("snapshot/abc123/0.db").as_deref(),
+            Some(snap.as_slice())
+        );
         assert!(
-            home.get("snapshot.db.enc").is_none(),
+            home.get("snapshot/abc123/0.db.enc").is_none(),
             "no .enc snapshot key"
         );
-        assert_eq!(storage.get_snapshot().await.expect("get_snapshot"), snap);
+        assert_eq!(
+            storage.get_snapshot(author, 0).await.expect("get_snapshot"),
+            snap
+        );
 
         let meta = b"{\"cursors\":{}}".to_vec();
         storage
-            .put_snapshot_meta(meta.clone())
+            .put_snapshot_meta(author, 0, meta.clone())
             .await
             .expect("put_snapshot_meta");
         assert_eq!(
-            home.get("snapshot_meta.json").as_deref(),
+            home.get("snapshot/abc123/0_meta.json").as_deref(),
             Some(meta.as_slice())
         );
         assert!(
-            home.get("snapshot_meta.json.enc").is_none(),
+            home.get("snapshot/abc123/0_meta.json.enc").is_none(),
             "no .enc meta key"
         );
         assert_eq!(
             storage
-                .get_snapshot_meta()
+                .get_snapshot_meta(author, 0)
                 .await
                 .expect("get_snapshot_meta"),
             meta
+        );
+
+        let pointer = b"{\"seq\":0}".to_vec();
+        storage
+            .put_snapshot_pointer(pointer.clone())
+            .await
+            .expect("put_snapshot_pointer");
+        assert_eq!(
+            home.get("snapshot/current.json").as_deref(),
+            Some(pointer.as_slice())
+        );
+        assert!(
+            home.get("snapshot/current.json.enc").is_none(),
+            "no .enc pointer key"
+        );
+        assert_eq!(
+            storage
+                .get_snapshot_pointer()
+                .await
+                .expect("get_snapshot_pointer"),
+            pointer
+        );
+
+        // The generation is listable by seq under its author, and a delete removes
+        // both its objects.
+        assert_eq!(
+            storage
+                .list_own_snapshot_generations(author)
+                .await
+                .expect("list generations"),
+            vec![0],
+        );
+        storage
+            .delete_snapshot_generation(author, 0)
+            .await
+            .expect("delete generation");
+        assert!(
+            home.get("snapshot/abc123/0.db").is_none()
+                && home.get("snapshot/abc123/0_meta.json").is_none(),
+            "delete_snapshot_generation removes the generation's db and meta",
         );
 
         // A Master-scoped blob is stored verbatim too (no per-scope key).

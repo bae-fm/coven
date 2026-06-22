@@ -67,6 +67,7 @@ async fn run_cycle(
 
     run_single_sync_cycle(
         storage,
+        "test-lib",
         device_id,
         &hlc,
         &SystemClock,

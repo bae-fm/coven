@@ -40,6 +40,7 @@ async fn run_cycle(
 ) -> Result<SyncCycleResult, String> {
     run_single_sync_cycle(
         storage,
+        "test-lib",
         device_id,
         hlc,
         &SystemClock,
@@ -91,7 +92,7 @@ async fn blob_delete_fires_immediately_without_waiting_for_peers() {
 
     // Device B joins: bootstrap from A's snapshot, then pull A/1.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, &cipher, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &cipher, None, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -204,7 +205,10 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
         .expect("A initial snapshot cycle");
 
     // The snapshot is stored in the clear: a valid SQLite image, not ciphertext.
-    let at_rest = storage.get_snapshot().await.expect("snapshot pushed");
+    let at_rest = storage
+        .current_snapshot_db()
+        .await
+        .expect("snapshot pushed");
     assert!(
         at_rest.starts_with(b"SQLite format 3\0"),
         "a plaintext home stores the snapshot as a bare SQLite image, not ciphertext",
@@ -213,9 +217,15 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
     // Device B bootstraps from the plaintext snapshot — `CloudCipher::Plaintext`
     // opens it verbatim — and reads A's row.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, &CloudCipher::Plaintext, None, &lib_b.db_path())
-        .await
-        .expect("B bootstrap from plaintext snapshot");
+    let boot = bootstrap_from_snapshot(
+        &storage,
+        "test-lib",
+        &CloudCipher::Plaintext,
+        None,
+        &lib_b.db_path(),
+    )
+    .await
+    .expect("B bootstrap from plaintext snapshot");
     open_db_and_pull(
         &lib_b.db_path(),
         &tables,

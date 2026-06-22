@@ -407,6 +407,7 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
 
     push_snapshot(
         &storage,
+        "test-lib",
         encrypted,
         "dev-a",
         std::collections::HashMap::new(),
@@ -421,7 +422,7 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     // This library has no membership chain (a bare storage with no founder entry),
     // so the snapshot is authorized on its signature alone — the open-library path.
     let target = temp.path().join("device_b.db");
-    bootstrap_from_snapshot(&storage, &snapshot_enc, None, &target)
+    bootstrap_from_snapshot(&storage, "test-lib", &snapshot_enc, None, &target)
         .await
         .expect("device B bootstraps from snapshot");
 

@@ -102,6 +102,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
 
     let result = run_single_sync_cycle(
         &storage,
+        "test-lib",
         "dev-b",
         &b_hlc,
         &SystemClock,
@@ -574,6 +575,7 @@ async fn cycle_error_mid_span_still_re_attaches_capture_session() {
 
     let result = run_single_sync_cycle(
         &storage,
+        "test-lib",
         "dev-self",
         &hlc,
         &SystemClock,

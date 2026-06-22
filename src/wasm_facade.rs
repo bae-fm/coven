@@ -276,6 +276,7 @@ impl CovenLibrary {
 
         let runtime = WasmSyncRuntime::new(
             storage,
+            library_id.to_string(),
             device_id.clone(),
             Rc::new(Hlc::new(device_id)),
             cipher,

@@ -322,7 +322,8 @@ async fn bootstrap_and_save(
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
     let bootstrap_result =
-        bootstrap_from_snapshot(bucket_dyn, cipher, Some(owner_pubkey), &db_path).await?;
+        bootstrap_from_snapshot(bucket_dyn, library_id, cipher, Some(owner_pubkey), &db_path)
+            .await?;
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",

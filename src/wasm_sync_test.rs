@@ -73,6 +73,7 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
 
     run_single_sync_cycle(
         storage,
+        "test-lib",
         device_id,
         &hlc,
         &SystemClock,

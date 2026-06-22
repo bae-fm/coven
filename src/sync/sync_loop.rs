@@ -56,6 +56,7 @@ pub struct SyncLoopHandle {
 struct SyncLoopInner {
     storage: Arc<CloudSyncStorage>,
     hlc: Arc<Hlc>,
+    library_id: String,
     device_id: String,
     cipher: Arc<std::sync::RwLock<CloudCipher>>,
     db: Database,
@@ -80,6 +81,7 @@ impl SyncLoopHandle {
             inner: Arc::new(SyncLoopInner {
                 storage: components.storage,
                 hlc: components.hlc,
+                library_id: components.library_id,
                 device_id: components.device_id,
                 cipher: components.cipher,
                 db,
@@ -303,6 +305,7 @@ async fn run_single_cycle(
 
     super::cycle::run_single_sync_cycle(
         storage,
+        &inner.library_id,
         &inner.device_id,
         &inner.hlc,
         clock,
