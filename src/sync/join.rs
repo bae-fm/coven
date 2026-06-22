@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::blob::BlobPlan;
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
@@ -432,25 +432,27 @@ pub(crate) async fn open_db_and_pull(
     // the bucket's own credentials — whoever holds it already controls the bucket.
     // Join already pinned its owner from the invite, so it skips this.
     if owner_pubkey.is_none() {
-        if let Ok(entries) = storage.list_membership_entries().await {
-            if !entries.is_empty() {
-                match crate::sync::membership_ops::download_chain(storage, &entries).await {
-                    Ok(chain) => {
-                        if let Some(founder) = chain.founder_pubkey() {
-                            db.set_sync_state(
-                                crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
-                                founder,
-                            )
-                            .await
-                            .map_err(|e| {
-                                JoinError::Database(format!("Failed to pin library owner: {e}"))
-                            })?;
-                        }
-                    }
-                    // A chain that won't load is left unpinned: the first sync connect
-                    // then refuses it, which is the right outcome for a malformed chain.
-                    Err(e) => warn!("restore: could not load chain to pin owner: {e}"),
-                }
+        let entries = storage.list_membership_entries().await.map_err(|e| {
+            JoinError::Database(format!(
+                "restore: failed to list membership to pin owner: {e}"
+            ))
+        })?;
+        // An empty listing is a chain-less (plaintext/open) library — nothing to
+        // pin. A non-empty one must load and pin, or fail the restore loudly so it
+        // can be retried as a unit; leaving the owner unpinned and deferring to the
+        // first sync connect would be a silent self-heal.
+        if !entries.is_empty() {
+            let chain = crate::sync::membership_ops::download_chain(storage, &entries)
+                .await
+                .map_err(|e| {
+                    JoinError::Database(format!("restore: failed to load chain to pin owner: {e}"))
+                })?;
+            if let Some(founder) = chain.founder_pubkey() {
+                db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
+                    .await
+                    .map_err(|e| {
+                        JoinError::Database(format!("Failed to pin library owner: {e}"))
+                    })?;
             }
         }
     }
