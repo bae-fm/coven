@@ -24,6 +24,22 @@ pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
     imp::read(path).await
 }
 
+/// Read exactly `len` bytes starting at byte `offset` from the local file at
+/// `path`. The cache stores plaintext, so a ranged read of a cached blob seeks and
+/// reads the slice straight off disk — no decryption — the local analogue of
+/// [`crate::sync::cloud_storage::BlobRangeReader::read`] for a cache hit.
+///
+/// `Err` if the file is missing, unreadable, or shorter than `offset + len`: the
+/// read is exact, never a silent short read. A cached blob's file is the whole
+/// plaintext (cache writes are whole-file and atomic), so a caller that has
+/// already checked the requested range against the blob's plaintext length never
+/// trips the short-file case; if it somehow does, the file is torn and the loud
+/// error is correct. `len == 0` returns an empty vec without opening past the
+/// seek.
+pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    imp::read_range(path, offset, len).await
+}
+
 /// Write `bytes` to `path`, creating any missing parent directories. Overwrites an
 /// existing file exactly — no stale tail survives from a longer previous version.
 pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -72,6 +88,31 @@ mod imp {
         tokio::fs::read(path)
             .await
             .map_err(|e| format!("read local blob {}: {e}", path.display()))
+    }
+
+    pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| format!("open local blob {} for ranged read: {e}", path.display()))?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| format!("seek local blob {} to {offset}: {e}", path.display()))?;
+        // `read_exact` errors if fewer than `len` bytes remain rather than
+        // returning a short buffer, so a request past the file's end fails loudly
+        // instead of silently truncating the served range.
+        let mut buf = vec![0u8; len as usize];
+        file.read_exact(&mut buf).await.map_err(|e| {
+            format!(
+                "read {len} bytes at {offset} from local blob {}: {e}",
+                path.display()
+            )
+        })?;
+        Ok(buf)
     }
 
     pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -351,6 +392,49 @@ mod imp {
             .map_err(|e| format!("OPFS read {}: {}", path.display(), err_str(&e)))?
             as usize;
         buf.truncate(read);
+        Ok(buf)
+    }
+
+    pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let fh = file_handle(path, false)
+            .await
+            .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
+        let sah = sync_access(&fh).await?;
+        let out = read_range_at(&sah, offset, len, path);
+        sah.close();
+        out
+    }
+
+    /// Read exactly `len` bytes at `offset` through an open handle. Split out so
+    /// `read_range` always `close()`s the handle afterward. A sync-access read
+    /// positioned at `offset` returns however many bytes are available there; if
+    /// that is short of `len` the file doesn't cover the range, so this errors
+    /// rather than returning a truncated slice — matching the native `read_exact`.
+    fn read_range_at(
+        sah: &FileSystemSyncAccessHandle,
+        offset: u64,
+        len: u64,
+        path: &Path,
+    ) -> Result<Vec<u8>, String> {
+        let mut buf = vec![0u8; len as usize];
+        let read = sah
+            .read_with_u8_array_and_options(&mut buf, &at(offset as f64))
+            .map_err(|e| {
+                format!(
+                    "OPFS ranged read {} at {offset}: {}",
+                    path.display(),
+                    err_str(&e)
+                )
+            })? as usize;
+        if read != len as usize {
+            return Err(format!(
+                "OPFS short ranged read {}: got {read} of {len} bytes at {offset}",
+                path.display()
+            ));
+        }
         Ok(buf)
     }
 

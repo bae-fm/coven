@@ -136,7 +136,11 @@ impl CloudCipher {
 /// `SyncStorage` that delegates raw I/O to a `CloudHome` and handles the path
 /// layout and the at-rest protection (its [`CloudCipher`]).
 pub struct CloudSyncStorage {
-    home: Box<dyn CloudHome>,
+    /// The raw cloud backend. `Arc` (not `Box`) because a ranged read hands a
+    /// clone to the [`BlobRangeReader`] it builds — the reader holds the home for
+    /// the life of a stream and reads across awaits, so the home is genuinely
+    /// shared between this storage and the readers it spawns, not owned by one.
+    home: Arc<dyn CloudHome>,
     cipher: Arc<RwLock<CloudCipher>>,
     /// How blob objects are keyed. Unlike the cipher, the scheme does not rotate
     /// over a home's life, so it is a plain field with no lock.
@@ -150,7 +154,7 @@ pub struct CloudSyncStorage {
 
 impl CloudSyncStorage {
     pub fn new(
-        home: Box<dyn CloudHome>,
+        home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
         blob_paths: BlobPathScheme,
         keypair: UserKeypair,
@@ -489,6 +493,27 @@ impl SyncStorage for CloudSyncStorage {
             .map_err(|e| StorageError::Decryption(format!("blob {namespace}/{id}: {e}")))
     }
 
+    async fn read_blob_range(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        // Build the ranged reader over a clone of the shared home and the current
+        // cipher (a snapshot of the lock — a key rotation between reads builds a
+        // fresh reader next call). The reader owns the chunk math and decryption;
+        // this just resolves the key/scope/size it needs. The cipher is cloned out
+        // of the lock so the reader doesn't hold the guard across its awaits.
+        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let cipher = self.cipher().clone();
+        let reader = BlobRangeReader::new(self.home.clone(), &cipher, scope, key, source_size);
+        reader.read(offset, len).await
+    }
+
     async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError> {
         let key = format!("snapshot.db{}", self.suffix());
         self.home
@@ -717,7 +742,7 @@ mod tests {
     async fn key_scoped_blob_round_trips_and_master_cannot_read_it() {
         let master = EncryptionService::new_with_key(&[7u8; 32]);
         let storage = CloudSyncStorage::new(
-            Box::new(InMemoryCloudHome::new()),
+            Arc::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(master),
             BlobPathScheme::Hashed,
             UserKeypair::generate(),
@@ -769,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn list_heads_skips_a_head_it_cannot_decrypt() {
         let storage = CloudSyncStorage::new(
-            Box::new(InMemoryCloudHome::new()),
+            Arc::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(EncryptionService::new_with_key(&[1u8; 32])),
             BlobPathScheme::Hashed,
             UserKeypair::generate(),
@@ -812,7 +837,7 @@ mod tests {
         let keypair = UserKeypair::generate();
         let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[2u8; 32]));
         let storage = CloudSyncStorage::new(
-            Box::new(InMemoryCloudHome::new()),
+            Arc::new(InMemoryCloudHome::new()),
             cipher.clone(),
             BlobPathScheme::Hashed,
             keypair.clone(),
@@ -866,7 +891,7 @@ mod tests {
         let keypair = UserKeypair::generate();
         let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32]));
         let storage = CloudSyncStorage::new(
-            Box::new(InMemoryCloudHome::new()),
+            Arc::new(InMemoryCloudHome::new()),
             cipher.clone(),
             BlobPathScheme::Hashed,
             keypair.clone(),
@@ -915,7 +940,7 @@ mod tests {
     async fn plaintext_home_stores_control_objects_in_the_clear_without_enc_suffix() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
-            Box::new(home.clone()),
+            Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
             UserKeypair::generate(),
@@ -1031,7 +1056,7 @@ mod tests {
     async fn plain_scheme_stores_blob_at_the_readable_cloud_path() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
-            Box::new(home.clone()),
+            Arc::new(home.clone()),
             CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32])),
             BlobPathScheme::Plain,
             UserKeypair::generate(),
@@ -1088,7 +1113,7 @@ mod tests {
         );
 
         let storage = CloudSyncStorage::new(
-            Box::new(InMemoryCloudHome::new()),
+            Arc::new(InMemoryCloudHome::new()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
             UserKeypair::generate(),
@@ -1110,7 +1135,7 @@ mod tests {
         let home = InMemoryCloudHome::new();
         let master = EncryptionService::new_with_key(&[5u8; 32]);
         let storage = CloudSyncStorage::new(
-            Box::new(home.clone()),
+            Arc::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),
             BlobPathScheme::Hashed,
             UserKeypair::generate(),
@@ -1159,7 +1184,7 @@ mod tests {
     async fn blob_range_reader_reads_a_plaintext_blob_verbatim() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
-            Box::new(home.clone()),
+            Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
             UserKeypair::generate(),
@@ -1198,7 +1223,7 @@ mod tests {
         let master = EncryptionService::new_with_key(&[7u8; 32]);
         let cipher = CloudCipher::Encrypted(master);
         let storage = CloudSyncStorage::new(
-            Box::new(home.clone()),
+            Arc::new(home.clone()),
             cipher.clone(),
             BlobPathScheme::Hashed,
             UserKeypair::generate(),
@@ -1254,7 +1279,7 @@ mod tests {
         let home = InMemoryCloudHome::new();
         let master = EncryptionService::new_with_key(&[9u8; 32]);
         let storage = CloudSyncStorage::new(
-            Box::new(home.clone()),
+            Arc::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),
             BlobPathScheme::Hashed,
             UserKeypair::generate(),

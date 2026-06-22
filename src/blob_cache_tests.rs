@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::blob::{BlobRef, BlobScope, BlobSource, BlobSync, ResolvedScope};
-use crate::blob_cache::{clear_cache, pin, read_blob, unpin, write_blob};
+use crate::blob_cache::{clear_cache, open_blob_stream, pin, read_blob, unpin, write_blob};
 use crate::changeset::RowChange;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::storage::SyncStorage;
@@ -316,4 +316,189 @@ async fn write_blob_stages_to_cache_and_pin_needs_no_cloud_fetch() {
         .await
         .expect("the pinned staged blob reads back");
     assert_eq!(got, bytes, "the staged bytes survive write_blob → pin");
+}
+
+/// A multi-byte blob payload `0,1,2,…` mod 251, long enough to slice a mid-file
+/// window out of. The byte at index `i` is `(i % 251) as u8`, so a returned slice
+/// is trivially checkable against `&full[offset..offset+len]`.
+fn ramp(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// A ranged read of a CACHED blob is served from the local plaintext file: after a
+/// whole-file read populates `cache/<id>`, the cloud copy is deleted so any cloud
+/// fallback would fail, and ranged reads (a mid-file window and an `offset > 0`
+/// tail) still return the correct slices — proving they came from disk, not a
+/// re-fetch.
+#[tokio::test]
+async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("blob-aaaa", "audio", BlobSync::OnDemand);
+    let full = ramp(5000);
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &full).await;
+
+    // Populate the cache with the whole file, then remove the cloud copy so a
+    // ranged read that tried to fetch would fail.
+    read_blob(&db, &ld, &storage, &blob)
+        .await
+        .expect("whole-file read populates the cache");
+    assert!(ld.cache_blob_path(&blob.id).unwrap().exists());
+    storage.delete_blob_object("audio", &blob.id).await;
+
+    // A window from the middle of the file.
+    let (offset, len) = (1234u64, 1000u64);
+    let mid = open_blob_stream(&db, &ld, &storage, &blob, full.len() as u64, offset, len)
+        .await
+        .expect("mid-file ranged read served from the local file");
+    assert_eq!(
+        mid,
+        &full[offset as usize..(offset + len) as usize],
+        "the mid-file window matches the plaintext slice",
+    );
+
+    // A tail starting at offset > 0 running to the end of the file.
+    let tail_off = 4000u64;
+    let tail_len = full.len() as u64 - tail_off;
+    let tail = open_blob_stream(
+        &db,
+        &ld,
+        &storage,
+        &blob,
+        full.len() as u64,
+        tail_off,
+        tail_len,
+    )
+    .await
+    .expect("tail ranged read served from the local file");
+    assert_eq!(
+        tail,
+        &full[tail_off as usize..],
+        "the tail window matches the plaintext slice",
+    );
+}
+
+/// A ranged read of a NON-cached blob fetches and decrypts just the requested
+/// range from the cloud AND leaves the cache empty: neither `pinned/<id>` nor
+/// `cache/<id>` exists afterward. A ranged read must never write a truncated cache
+/// file — only the whole-file `read_blob` populates.
+#[tokio::test]
+async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("blob-bbbb", "audio", BlobSync::OnDemand);
+    let full = ramp(5000);
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &full).await;
+
+    // The blob is in neither folder before the read.
+    assert!(!ld.pinned_blob_path(&blob.id).unwrap().exists());
+    assert!(!ld.cache_blob_path(&blob.id).unwrap().exists());
+
+    let (offset, len) = (2000u64, 1500u64);
+    let got = open_blob_stream(&db, &ld, &storage, &blob, full.len() as u64, offset, len)
+        .await
+        .expect("ranged read fetches the range from the cloud");
+    assert_eq!(
+        got,
+        &full[offset as usize..(offset + len) as usize],
+        "the fetched range matches the plaintext slice",
+    );
+
+    // The defining guarantee: a ranged miss populated NOTHING. A later whole-file
+    // read would have to fetch fresh, and `read_blob`'s presence check is never
+    // fooled by a truncated file.
+    assert!(
+        !ld.pinned_blob_path(&blob.id).unwrap().exists(),
+        "a ranged miss must not write storage/pinned/<id>",
+    );
+    assert!(
+        !ld.cache_blob_path(&blob.id).unwrap().exists(),
+        "a ranged miss must not write storage/cache/<id> (no truncated cache file)",
+    );
+}
+
+/// A full `read_blob` still populates the evictable cache (Phase 2 behavior intact,
+/// unchanged by adding the ranged path): after one whole-file read, `cache/<id>`
+/// exists and a second read is served from it even with the cloud copy gone.
+#[tokio::test]
+async fn full_read_blob_still_populates_the_cache() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("blob-cccc", "audio", BlobSync::OnDemand);
+    let bytes = b"WHOLE-FILE-PAYLOAD".to_vec();
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
+
+    let first = read_blob(&db, &ld, &storage, &blob)
+        .await
+        .expect("first whole-file read fetches from the cloud");
+    assert_eq!(first, bytes);
+    assert!(
+        ld.cache_blob_path(&blob.id).unwrap().exists(),
+        "a whole-file read populates storage/cache/<id>",
+    );
+
+    // Cloud copy gone → the second whole-file read must be a local hit.
+    storage.delete_blob_object("audio", &blob.id).await;
+    let second = read_blob(&db, &ld, &storage, &blob)
+        .await
+        .expect("second whole-file read is served from the cache");
+    assert_eq!(second, bytes);
+}
+
+/// The ranged contract is pinned and identical on both serving paths: an
+/// `offset + len` past the blob's plaintext size is an error (never a short read),
+/// and a zero-length read is an empty result (never an error) — checked for a
+/// cached blob (served from disk) and a non-cached one (served from the cloud).
+#[tokio::test]
+async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    let full = ramp(1000);
+
+    // Non-cached blob: contract enforced before/within the cloud path.
+    let remote = blob_ref("blob-dddd", "audio", BlobSync::OnDemand);
+    put_cloud_blob(&storage, &remote.id, &remote.namespace, &full).await;
+    assert!(
+        open_blob_stream(&db, &ld, &storage, &remote, full.len() as u64, 900, 200)
+            .await
+            .is_err(),
+        "a range past the blob size must error on the cloud path",
+    );
+    assert!(
+        open_blob_stream(&db, &ld, &storage, &remote, full.len() as u64, 500, 0)
+            .await
+            .expect("zero-length read is not an error")
+            .is_empty(),
+        "a zero-length read is an empty result on the cloud path",
+    );
+
+    // Cached blob: same contract on the local-file path. Populate the cache, drop
+    // the cloud copy so only the local path can serve.
+    let cached = blob_ref("blob-eeee", "audio", BlobSync::OnDemand);
+    put_cloud_blob(&storage, &cached.id, &cached.namespace, &full).await;
+    read_blob(&db, &ld, &storage, &cached)
+        .await
+        .expect("populate the cache");
+    storage.delete_blob_object("audio", &cached.id).await;
+    assert!(
+        open_blob_stream(&db, &ld, &storage, &cached, full.len() as u64, 900, 200)
+            .await
+            .is_err(),
+        "a range past the blob size must error on the local-file path too",
+    );
+    assert!(
+        open_blob_stream(&db, &ld, &storage, &cached, full.len() as u64, 500, 0)
+            .await
+            .expect("zero-length read is not an error")
+            .is_empty(),
+        "a zero-length read is an empty result on the local-file path too",
+    );
 }

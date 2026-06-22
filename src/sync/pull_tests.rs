@@ -566,7 +566,7 @@ impl BlobSource for ReadablePhotoBlobSource {
 #[tokio::test]
 async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let storage = CloudSyncStorage::new(
-        Box::new(InMemoryCloudHome::new()),
+        std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&[5u8; 32])),
         BlobPathScheme::Plain,
         UserKeypair::generate(),
@@ -684,7 +684,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // One cloud and one library key, shared by both devices.
     let storage = CloudSyncStorage::new(
-        Box::new(InMemoryCloudHome::new()),
+        std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&[7u8; 32])),
         BlobPathScheme::Hashed,
         UserKeypair::generate(),

@@ -254,8 +254,12 @@ pub async fn join_library(
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
     // The device's signing identity signs the head/min_schema control objects it
     // writes; it's the same keypair the invite wrapped the library key for.
-    let storage =
-        CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, user_keypair.clone());
+    let storage = CloudSyncStorage::new(
+        std::sync::Arc::from(cloud_home),
+        cipher.clone(),
+        blob_paths,
+        user_keypair.clone(),
+    );
 
     // Create the library directory under `libraries/`, named by the invite's
     // `library_id`. The decode guaranteed the id is a safe single component, so the

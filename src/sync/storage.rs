@@ -162,6 +162,32 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError>;
 
+    /// Serve `len` plaintext bytes of a blob starting at `offset`, without
+    /// downloading the whole object — the ranged sibling of [`Self::get_blob`].
+    /// Keyed the same way `get_blob` keys it (hashed shard or `cloud_path`), and
+    /// decrypted under the key the resolved `scope` selects on an encrypted home
+    /// (read verbatim on a plaintext one).
+    ///
+    /// `source_size` is the blob's plaintext length, which the caller knows (the
+    /// host row that owns the blob carries it) and the implementation needs to
+    /// validate the range and locate the covering encrypted chunks — the object's
+    /// stored length alone doesn't give it (the nonce header and per-chunk
+    /// authentication tags pad it). An out-of-range request (`offset + len` past
+    /// `source_size`, or an overflow) errors rather than truncating; `len == 0` is
+    /// an empty result. The cache layer ([`crate::blob_cache::open_blob_stream`])
+    /// uses this only on a miss — a cache hit reads the local plaintext file
+    /// directly.
+    async fn read_blob_range(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StorageError>;
+
     /// Upload a snapshot.
     /// Writes to `snapshot.db{suffix}` (overwrites any previous snapshot).
     async fn put_snapshot(&self, data: Vec<u8>) -> Result<(), StorageError>;

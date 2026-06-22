@@ -252,7 +252,12 @@ pub async fn restore_from_cloud(
 
     let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
 
-    let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, keypair.clone());
+    let storage = CloudSyncStorage::new(
+        std::sync::Arc::from(cloud_home),
+        cipher.clone(),
+        blob_paths,
+        keypair.clone(),
+    );
 
     // Create the library directory under `libraries/`, named by the restore code's
     // `lid`. The decode guaranteed the id is a safe single component, so the

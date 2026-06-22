@@ -18,10 +18,13 @@
 //! (one filesystem, atomic) so a blob never appears in both folders or neither
 //! mid-move.
 //!
-//! Reads are whole-file: [`read_blob`] returns the entire blob. [`clear_cache`]
-//! drops all of `cache/` in one sweep — it does not evict selectively by a size
-//! budget; a pinned blob (in `pinned/`) is exempt because it lives in the other
-//! folder.
+//! [`read_blob`] returns the entire blob (a miss fetches + decrypts it and
+//! populates `cache/`); [`open_blob_stream`] serves a plaintext byte range for a
+//! host streaming or seeking (a miss range-reads + decrypts from the cloud but
+//! populates nothing — a partial file would be read as the whole blob, since
+//! presence is the only truth). [`clear_cache`] drops all of `cache/` in one
+//! sweep — it does not evict selectively by a size budget; a pinned blob (in
+//! `pinned/`) is exempt because it lives in the other folder.
 
 use crate::blob::{BlobRef, BlobSync};
 use crate::database::Database;
@@ -128,6 +131,104 @@ pub async fn read_blob(
         .await
         .map_err(BlobCacheError::Io)?;
     Ok(bytes)
+}
+
+/// Serve `len` plaintext bytes of a blob starting at `offset`, for a host
+/// streaming or seeking it (playback) without loading the whole file. The ranged
+/// sibling of [`read_blob`]: same arguments plus `(source_size, offset, len)`,
+/// returning the plaintext slice.
+///
+/// `source_size` is the blob's plaintext length — the host knows it (the row that
+/// owns the blob carries it) and both serving paths need it to bound the range
+/// (the cloud path also needs it to find the covering encrypted chunks; see
+/// [`SyncStorage::read_blob_range`]). The range is validated once here, against
+/// `source_size`, so a request behaves identically whether it is served from the
+/// local file or the cloud: `len == 0` is an empty result, and an `offset + len`
+/// past `source_size` (or an overflow) is an error, never a short read — the same
+/// contract [`crate::sync::cloud_storage::BlobRangeReader::read`] enforces.
+///
+/// **Cache hit** (`pinned/<id>` OR `cache/<id>` exists): the local file is the
+/// whole plaintext, so the slice is read straight off disk at `offset` — no
+/// decryption, no cloud. **Cache miss**: the range is fetched and decrypted from
+/// the cloud via [`SyncStorage::read_blob_range`]. A miss **never writes a cache
+/// file** — a ranged read populates nothing, because a truncated/partial file
+/// under `cache/<id>` would be read as the whole blob by [`read_blob`] (presence
+/// is the only truth). Only the whole-file [`read_blob`] populates the cache.
+///
+/// As in [`read_blob`], a failure to even check a file's existence is surfaced,
+/// never collapsed into a miss (which would re-fetch over a present file and could
+/// mask a real fault).
+pub async fn open_blob_stream(
+    db: &Database,
+    library_dir: &LibraryDir,
+    storage: &dyn SyncStorage,
+    blob: &BlobRef,
+    source_size: u64,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, BlobCacheError> {
+    // The range contract, applied once for both serving paths. A zero-length read
+    // is empty without touching disk or cloud; an out-of-range read is an error
+    // before either path runs, so the local-file path can't silently short-read.
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let end = offset.checked_add(len).ok_or_else(|| {
+        BlobCacheError::Io(format!(
+            "blob range overflow for {}: offset={offset}, len={len}",
+            blob.id
+        ))
+    })?;
+    if end > source_size {
+        return Err(BlobCacheError::Io(format!(
+            "blob range {offset}..{end} for {} exceeds blob size {source_size}",
+            blob.id
+        )));
+    }
+
+    let pinned = library_dir.pinned_blob_path(&blob.id)?;
+    let cache = library_dir.cache_blob_path(&blob.id)?;
+
+    // A hit in either folder serves the slice from the local plaintext file. The
+    // file is the whole blob (cache writes are whole-file), so the validated range
+    // is in bounds and `read_range` reads exactly `len` bytes. An existence-check
+    // failure is surfaced, not read as a miss.
+    for path in [&pinned, &cache] {
+        match crate::local_blob::exists(path).await {
+            Ok(true) => {
+                return crate::local_blob::read_range(path, offset, len)
+                    .await
+                    .map_err(BlobCacheError::Io);
+            }
+            Ok(false) => {}
+            Err(e) => return Err(BlobCacheError::Io(e)),
+        }
+    }
+
+    // Miss: serve the range from the cloud (range read + decrypt over the resolved
+    // scope) WITHOUT writing a cache file — a partial file would be mistaken for
+    // the whole blob by `read_blob`. Only `read_blob` populates the cache.
+    crate::library_dir::validate_path_token(&blob.namespace)?;
+    crate::library_dir::validate_path_token(&blob.id)?;
+    if let Some(cloud_path) = blob.cloud_path.as_deref() {
+        crate::library_dir::validate_cloud_path(cloud_path)?;
+    }
+    let resolved = db
+        .resolve_blob_scope(blob.scope.clone())
+        .await
+        .map_err(|e| BlobCacheError::Io(format!("resolve blob scope for {}: {e}", blob.id)))?;
+    storage
+        .read_blob_range(
+            &blob.namespace,
+            &blob.id,
+            resolved,
+            blob.cloud_path.as_deref(),
+            source_size,
+            offset,
+            len,
+        )
+        .await
+        .map_err(BlobCacheError::Storage)
 }
 
 /// Ensure a blob is local AND protected: present in `storage/pinned/<id>`, exempt
