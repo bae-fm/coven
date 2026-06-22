@@ -20,7 +20,8 @@ use crate::sync::membership::{
 };
 use crate::sync::pull::pull_changes;
 use crate::sync::session::SyncedTable;
-use crate::sync::storage::{DeviceHead, StorageError, SyncStorage};
+use crate::sync::signed_control::{HeadJson, MinSchemaVersionJson};
+use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
 
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a *gated root* (`notes`,
@@ -251,32 +252,51 @@ fn blob_key(namespace: &str, id: &str, cloud_path: Option<&str>) -> String {
 }
 
 /// In-memory mock of SyncStorage for tests.
-/// Stores changesets as plaintext (no encryption in tests).
+///
+/// Stores changesets as plaintext (no encryption in tests) but signs and verifies
+/// the head and min_schema control objects through the same
+/// [`crate::sync::signed_control`] helpers production uses, so tests exercise a
+/// faithful sign-on-write / verify-on-read path rather than a parallel one.
 pub struct MockSyncStorage {
     /// Changesets: key = "changes/{device_id}/{seq}" -> packed envelope bytes.
     objects: Mutex<HashMap<String, Vec<u8>>>,
-    /// Published device heads, keyed by device_id.
-    heads: Mutex<HashMap<String, DeviceHead>>,
+    /// Published device heads, keyed by device_id -> signed `HeadJson` JSON bytes
+    /// (exactly what the cloud stores, minus the at-rest cipher).
+    heads: Mutex<HashMap<String, Vec<u8>>>,
     /// The single shared snapshot blob (`snapshot.db{suffix}`).
     snapshot: Mutex<Option<Vec<u8>>>,
     /// The snapshot's per-device cursor metadata (`snapshot_meta.json{suffix}`).
     snapshot_meta: Mutex<Option<Vec<u8>>>,
-    /// Minimum schema version marker (None = no minimum set).
-    min_schema_version: Mutex<Option<u32>>,
+    /// Signed `min_schema_version.json` bytes (None = no minimum set).
+    min_schema_version: Mutex<Option<Vec<u8>>>,
+    /// The device identity this mock signs its head/min_schema with. Defaults to a
+    /// fresh keypair; a membership test that needs the head/floor attributed to a
+    /// specific member constructs the mock with [`Self::with_keypair`].
+    keypair: UserKeypair,
 }
 
 impl MockSyncStorage {
     pub fn new() -> Self {
+        Self::with_keypair(UserKeypair::generate())
+    }
+
+    /// A mock whose head and min_schema control objects are signed by `keypair`.
+    /// Lets a membership test attribute the head it publishes (and any floor it
+    /// sets) to a specific member, the way a real device signs its own.
+    pub fn with_keypair(keypair: UserKeypair) -> Self {
         MockSyncStorage {
             objects: Mutex::new(HashMap::new()),
             heads: Mutex::new(HashMap::new()),
             snapshot: Mutex::new(None),
             snapshot_meta: Mutex::new(None),
             min_schema_version: Mutex::new(None),
+            keypair,
         }
     }
 
-    /// Store a changeset in the mock storage (simulates what push would do).
+    /// Store a changeset in the mock storage (simulates what push would do). The
+    /// changeset itself is left unsigned (for tests exercising unsigned-changeset
+    /// rejection); the device head it advances is signed by the mock's keypair.
     pub fn store_changeset(
         &self,
         device_id: &str,
@@ -308,21 +328,24 @@ impl MockSyncStorage {
         self.store_packed(device_id, seq, packed);
     }
 
-    /// Insert packed envelope bytes at `changes/{device_id}/{seq}` and advance
-    /// the device head to `seq`.
+    /// Insert packed envelope bytes at `changes/{device_id}/{seq}` and advance the
+    /// device head to `seq`, signing the head with the mock's keypair.
     fn store_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
         let key = format!("changes/{device_id}/{seq}");
         self.objects.lock().unwrap().insert(key, packed);
-        let mut heads = self.heads.lock().unwrap();
-        heads
-            .entry(device_id.to_string())
-            .or_insert_with(|| DeviceHead {
-                device_id: device_id.to_string(),
-                seq,
-                snapshot_seq: None,
-                last_sync: None,
-            })
-            .seq = seq;
+        self.publish_head(device_id, seq, None);
+    }
+
+    /// Publish a signed head for `device_id` at `seq`, exactly as `put_head` does,
+    /// but reusable by the changeset-fabrication helpers. Signs with the mock's
+    /// keypair and stores the resulting `HeadJson` JSON bytes.
+    fn publish_head(&self, device_id: &str, seq: u64, snapshot_seq: Option<u64>) {
+        let head = HeadJson::signed(seq, snapshot_seq, None, &self.keypair);
+        let bytes = serde_json::to_vec(&head).expect("serialize head");
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), bytes);
     }
 }
 
@@ -330,7 +353,25 @@ impl MockSyncStorage {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for MockSyncStorage {
     async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
-        Ok(self.heads.lock().unwrap().values().cloned().collect())
+        let heads = self.heads.lock().unwrap();
+        let mut out = Vec::new();
+        for (device_id, bytes) in heads.iter() {
+            let head: HeadJson = serde_json::from_slice(bytes)
+                .map_err(|e| StorageError::S3(format!("parse head {device_id}: {e}")))?;
+            // Mirror the cloud: a head whose signature doesn't verify is skipped,
+            // not returned.
+            if !head.verify() {
+                continue;
+            }
+            out.push(DeviceHead {
+                device_id: device_id.clone(),
+                seq: head.seq,
+                snapshot_seq: head.snapshot_seq,
+                last_sync: head.last_sync,
+                author_pubkey: Some(head.author_pubkey),
+            });
+        }
+        Ok(out)
     }
 
     async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
@@ -357,18 +398,10 @@ impl SyncStorage for MockSyncStorage {
         &self,
         device_id: &str,
         seq: u64,
-        _snapshot_seq: Option<u64>,
+        snapshot_seq: Option<u64>,
         _timestamp: &str,
     ) -> Result<(), StorageError> {
-        self.heads.lock().unwrap().insert(
-            device_id.to_string(),
-            DeviceHead {
-                device_id: device_id.to_string(),
-                seq,
-                snapshot_seq: None,
-                last_sync: None,
-            },
-        );
+        self.publish_head(device_id, seq, snapshot_seq);
         Ok(())
     }
 
@@ -421,12 +454,27 @@ impl SyncStorage for MockSyncStorage {
         Ok(vec![])
     }
 
-    async fn get_min_schema_version(&self) -> Result<Option<u32>, StorageError> {
-        Ok(*self.min_schema_version.lock().unwrap())
+    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
+        let stored = self.min_schema_version.lock().unwrap();
+        let Some(bytes) = stored.as_ref() else {
+            return Ok(None);
+        };
+        let parsed: MinSchemaVersionJson = serde_json::from_slice(bytes)
+            .map_err(|e| StorageError::S3(format!("parse min_schema_version: {e}")))?;
+        // Mirror the cloud: an unverifiable floor is treated as absent.
+        if !parsed.verify() {
+            return Ok(None);
+        }
+        Ok(Some(MinSchemaVersion {
+            version: parsed.min_schema_version,
+            author_pubkey: Some(parsed.author_pubkey),
+        }))
     }
 
     async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
-        *self.min_schema_version.lock().unwrap() = Some(version);
+        let payload = MinSchemaVersionJson::signed(version, &self.keypair);
+        let bytes = serde_json::to_vec(&payload).expect("serialize min_schema_version");
+        *self.min_schema_version.lock().unwrap() = Some(bytes);
         Ok(())
     }
 

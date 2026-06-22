@@ -41,6 +41,26 @@ pub struct DeviceHead {
     /// the device last synced). None for heads written before this field
     /// was added.
     pub last_sync: Option<String>,
+    /// Hex-encoded Ed25519 public key the head's signature verified against, set
+    /// by [`SyncStorage::list_heads`] once the embedded signature is checked.
+    /// The caller uses it to decide whether the head's author is a current member
+    /// (the authorization check the chain backs). Always `Some` for a head read
+    /// from storage (every head is signed regardless of the at-rest cipher);
+    /// `Option` only because heads the status-UI tests build by hand carry none.
+    pub author_pubkey: Option<String>,
+}
+
+/// A verified `min_schema_version`: the version plus the public key its
+/// signature verified against. [`SyncStorage::get_min_schema_version`] returns
+/// this only when the embedded signature checks out, so the caller can decide
+/// whether the author is a current owner before honoring the floor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinSchemaVersion {
+    pub version: u32,
+    /// Hex-encoded Ed25519 public key the signature verified against. Always
+    /// `Some` for a floor read from storage (it is always signed); `Option` only
+    /// so a mock that stores a bare version can omit it.
+    pub author_pubkey: Option<String>,
 }
 
 /// Error type for storage operations.
@@ -151,11 +171,14 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// Returns the sequence numbers that exist in `changes/{device_id}/`.
     async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError>;
 
-    /// Get the minimum schema version required to sync with this storage.
+    /// Get the minimum schema version required to sync with this storage, with
+    /// the public key its signature verified against.
     ///
-    /// Returns `None` if no minimum has been set (backwards compat: any version
-    /// can sync). Reads from `min_schema_version.json{suffix}`.
-    async fn get_min_schema_version(&self) -> Result<Option<u32>, StorageError>;
+    /// Returns `None` if no minimum has been set, or if the stored object's
+    /// signature is invalid (a forged floor is treated as absent, not trusted).
+    /// Reads from `min_schema_version.json{suffix}`. The caller checks the
+    /// returned `author_pubkey` is a current owner before honoring the version.
+    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError>;
 
     /// Set the minimum schema version required to sync with this storage.
     ///

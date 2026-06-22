@@ -40,6 +40,7 @@ pub mod restore;
 pub mod restore_code;
 pub mod service;
 pub mod session;
+pub mod signed_control;
 pub mod snapshot;
 pub mod status;
 pub mod storage;

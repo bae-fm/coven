@@ -13,6 +13,7 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
 use crate::sync::envelope;
+use crate::sync::membership::{MemberRole, MembershipAction};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::pull::PullError;
 use crate::sync::push::SCHEMA_VERSION;
@@ -329,6 +330,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         Box::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&[5u8; 32])),
         BlobPathScheme::Plain,
+        UserKeypair::generate(),
     );
 
     // Device A: a shared note + a cover photo whose file is present locally.
@@ -444,6 +446,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         Box::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&[7u8; 32])),
         BlobPathScheme::Hashed,
+        UserKeypair::generate(),
     );
 
     // Device A: a note and its cover photo, the file present locally.
@@ -547,11 +550,14 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
 
 #[tokio::test]
 async fn pull_rejects_unsigned_changeset_when_chain_exists() {
-    let storage = MockSyncStorage::new();
-
     // A membership chain exists. Coven always signs its changesets, so an
-    // unsigned one here is forged; a chained library must reject it.
+    // unsigned one here is forged; a chained library must reject it. The mock
+    // signs the head it publishes for dev1 with the founder's keypair (a current
+    // member), so the head passes its authorization check and pull goes on to
+    // examine — and reject — the unsigned changeset behind it.
     let founder = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(founder.clone());
+
     let entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
     let entry_bytes = serde_json::to_vec(&entry).expect("serialize founder");
     storage
@@ -662,10 +668,13 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 /// changeset signed by that owner applies.
 #[tokio::test]
 async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
-    let storage = MockSyncStorage::new();
-
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key);
+    // The owner's device is the mock: it signs the head it publishes for
+    // `devOwner` with the owner keypair, so the head's author is a current member
+    // and passes the head-authorization check.
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
     storage
         .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
@@ -752,6 +761,225 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "a malformed chain on a pinned-owner library must be refused, got {:?}",
+        result.map(|_| ()),
+    );
+}
+
+/// A head whose author is not a current member is skipped by `pull_changes` when
+/// a chain exists: its changesets are never fetched and its cursor never advances,
+/// even though the changeset bytes sit in the bucket. A forged head (anyone with
+/// the bucket credential can write one) must not drive a per-seq fetch loop.
+#[tokio::test]
+async fn pull_skips_a_head_authored_by_a_non_member() {
+    // The mock signs every head it publishes with `outsider`, who is not in the
+    // chain — so the head it writes for `dev1` fails the membership check.
+    let outsider = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(outsider);
+
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    // dev1 has a changeset in the bucket (its head is published by the mock,
+    // signed by the non-member `outsider`).
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromForgedHead', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    // The head was skipped, so dev1 was never examined and its cursor is absent.
+    assert_eq!(updated.get("dev1"), None);
+    // The skipped head is also absent from the surfaced remote heads.
+    assert!(!result.remote_heads.iter().any(|h| h.device_id == "dev1"));
+}
+
+/// The honored case: a head authored by a current member (here a second device
+/// whose head and changeset the owner signs) is kept, and its changeset applies.
+#[tokio::test]
+async fn pull_honors_a_head_authored_by_a_current_member() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    // The mock is the owner's device, so the head it publishes for `devA` is
+    // owner-signed — a current member.
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromMember', NULL, '0000000001000-0000-devA', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devA",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &owner,
+        &cs,
+    );
+    storage.put_changeset_packed("devA", 1, packed);
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devA"), Some(&1));
+}
+
+/// A `min_schema_version` floor signed by a non-owner is ignored: it must NOT trip
+/// `SchemaVersionTooOld` even when its version exceeds ours. The floor is an
+/// owner-only control; a Member- or Follower-signed (or bucket-planted) one is a
+/// freeze attempt.
+#[tokio::test]
+async fn pull_ignores_min_schema_version_from_a_non_owner() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let member = UserKeypair::generate();
+
+    // The mock signs the floor with `member` (a current member, but not an owner).
+    let storage = MockSyncStorage::with_keypair(member.clone());
+
+    // Chain: owner founds, then adds `member` as a Member.
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+    let add_member = make_entry(
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    storage
+        .put_membership_entry(&owner_pk, 2, serde_json::to_vec(&add_member).unwrap())
+        .await
+        .unwrap();
+
+    // A member-signed floor above our version.
+    storage
+        .set_min_schema_version(SCHEMA_VERSION + 1)
+        .await
+        .unwrap();
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    // The pull must succeed (the non-owner floor is ignored), not error with
+    // SchemaVersionTooOld.
+    let result = pull_into_result(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "a non-owner floor must be ignored, not trip SchemaVersionTooOld; got {:?}",
+        result.map(|_| ()),
+    );
+}
+
+/// A `min_schema_version` floor signed by a current owner IS honored: a version
+/// above ours trips `SchemaVersionTooOld`, the same refuse-to-sync the owner
+/// intends after a breaking migration.
+#[tokio::test]
+async fn pull_honors_min_schema_version_from_a_current_owner() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    // The mock is the owner's device, so the floor it sets is owner-signed.
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    storage
+        .set_min_schema_version(SCHEMA_VERSION + 1)
+        .await
+        .unwrap();
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let result = pull_into_result(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(PullError::SchemaVersionTooOld {
+                min_version,
+                ..
+            }) if min_version == SCHEMA_VERSION + 1
+        ),
+        "an owner-signed floor above our version must trip SchemaVersionTooOld; got {:?}",
         result.map(|_| ()),
     );
 }

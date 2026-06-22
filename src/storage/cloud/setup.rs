@@ -451,10 +451,18 @@ pub async fn create_sync_storage(
         None => build_cloud_cipher(config, key_service)?,
     };
 
+    // The device's global signing identity, used to sign the control objects the
+    // storage writes (its head, the min_schema floor) so a reader can attribute
+    // and verify them against the membership chain.
+    let keypair = key_service
+        .get_or_create_user_keypair()
+        .map_err(|e| format!("Failed to load user keypair: {e}"))?;
+
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
         cloud_home,
         cipher,
         BlobPathScheme::for_storage(config.cloud_home.storage),
+        keypair,
     ))
 }
 

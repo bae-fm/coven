@@ -19,7 +19,7 @@ use super::apply::apply_changeset_lww_with_schema;
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
-use super::membership::MembershipChain;
+use super::membership::{MemberRole, MembershipChain};
 use super::push::SCHEMA_VERSION;
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
@@ -48,6 +48,23 @@ fn cursor_for_device(cursors: &HashMap<String, u64>, device_id: &str) -> u64 {
             INITIAL_CURSOR
         }
     }
+}
+
+/// Whether `pubkey` is a current member of `chain` in any role (Owner, Member, or
+/// the read-only Follower). The gate for honoring a device's *head*: a Follower
+/// reads, so its head is legitimate even though it may not author changesets.
+fn is_current_member(chain: &MembershipChain, pubkey: &str) -> bool {
+    chain.current_members().iter().any(|(pk, _)| pk == pubkey)
+}
+
+/// Whether `pubkey` is a current *Owner* of `chain`. The gate for honoring a
+/// `min_schema_version` floor: only an owner may raise the fleet's required
+/// schema, so a Member- or Follower-signed floor is ignored.
+fn is_current_owner(chain: &MembershipChain, pubkey: &str) -> bool {
+    chain
+        .current_members()
+        .iter()
+        .any(|(pk, role)| pk == pubkey && *role == MemberRole::Owner)
 }
 
 /// Summary of a pull operation.
@@ -105,23 +122,6 @@ pub async fn pull_changes(
     blob_plan: &dyn BlobPlan,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
     let _ = library_dir;
-    // Check min_schema_version before processing any changesets.
-    // If the storage has a minimum that's higher than ours, refuse to sync.
-    if let Some(min_version) = storage
-        .get_min_schema_version()
-        .await
-        .map_err(PullError::Storage)?
-    {
-        if SCHEMA_VERSION < min_version {
-            return Err(PullError::SchemaVersionTooOld {
-                local_version: SCHEMA_VERSION,
-                min_version,
-            });
-        }
-    }
-
-    let heads = storage.list_heads().await.map_err(PullError::Storage)?;
-
     // The library's established owner, pinned at create/join/restore (issue #102).
     // `Some` for an opaque (encrypted) library — its membership chain is anchored
     // to this pubkey; `None` for a browsable library, which has no chain and is
@@ -186,6 +186,75 @@ pub async fn pull_changes(
             None
         }
     };
+
+    // Check min_schema_version before processing any changesets. The floor is an
+    // untrusted control object, so it is honored only when its verified author is
+    // a current *owner*: a non-owner-signed (or, with a chain present, unsigned)
+    // floor is a freeze/downgrade attempt and is ignored. `get_min_schema_version`
+    // already verified the signature and surfaced the author; this is the
+    // authorization half. With no chain (a browsable library) we keep the prior
+    // behavior and honor any floor present.
+    if let Some(min) = storage
+        .get_min_schema_version()
+        .await
+        .map_err(PullError::Storage)?
+    {
+        let honor = match membership_chain.as_ref() {
+            Some(chain) => min
+                .author_pubkey
+                .as_deref()
+                .is_some_and(|pk| is_current_owner(chain, pk)),
+            None => true,
+        };
+        if honor {
+            if SCHEMA_VERSION < min.version {
+                return Err(PullError::SchemaVersionTooOld {
+                    local_version: SCHEMA_VERSION,
+                    min_version: min.version,
+                });
+            }
+        } else {
+            warn!(
+                author = ?min.author_pubkey,
+                version = min.version,
+                "ignoring min_schema_version not signed by a current owner"
+            );
+        }
+    }
+
+    // List heads, then drop any the membership chain doesn't authorize. A head is
+    // a signed control object (`list_heads` verified its signature and surfaced the
+    // author); when a chain is present, a head whose author is not a current member
+    // is a forgery that would otherwise pollute sync status and drive a per-seq
+    // fetch loop, so it is skipped here. Our own head is always kept — the pull
+    // loop skips our device_id anyway, and we trust what we wrote. With no chain
+    // (browsable) every head is kept, as before.
+    let heads = storage.list_heads().await.map_err(PullError::Storage)?;
+    let heads: Vec<DeviceHead> = heads
+        .into_iter()
+        .filter(|head| {
+            if head.device_id == our_device_id {
+                return true;
+            }
+            match membership_chain.as_ref() {
+                Some(chain) => {
+                    let authorized = head
+                        .author_pubkey
+                        .as_deref()
+                        .is_some_and(|pk| is_current_member(chain, pk));
+                    if !authorized {
+                        warn!(
+                            device_id = %head.device_id,
+                            author = ?head.author_pubkey,
+                            "skipping head not authored by a current member"
+                        );
+                    }
+                    authorized
+                }
+                None => true,
+            }
+        })
+        .collect();
 
     // Per-table `_updated_at` column index map. Built once from the live schema
     // (so column additions stay safe) and shared by both the apply — every

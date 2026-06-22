@@ -235,7 +235,10 @@ pub async fn join_library(
     let encryption = EncryptionService::new(&encryption_key_hex)?;
     let cipher = CloudCipher::Encrypted(encryption);
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
-    let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths);
+    // The device's signing identity signs the head/min_schema control objects it
+    // writes; it's the same keypair the invite wrapped the library key for.
+    let storage =
+        CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, user_keypair.clone());
 
     // Step 4: Create library directory using the invite code's library_id.
     let library_id = code.library_id;

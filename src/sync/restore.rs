@@ -13,7 +13,7 @@ use tracing::info;
 use crate::blob::BlobPlan;
 use crate::config::{Config, ConfigError, HomeStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
-use crate::keys::{KeyError, KeyService};
+use crate::keys::{KeyError, KeyService, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
@@ -192,7 +192,10 @@ async fn build_cloud_home(
 /// Restore a library from cloud storage.
 ///
 /// Validates inputs, constructs the cloud home from the source, runs the sync
-/// protocol, and sets the library as active.
+/// protocol, and sets the library as active. `keypair` is the restored device's
+/// signing identity (recovered from the restore code); the storage signs the
+/// control objects it writes with it, and it is the same key the caller imports
+/// once restore succeeds.
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     library_id: &str,
@@ -200,6 +203,7 @@ pub async fn restore_from_cloud(
     library_name: &str,
     synced_tables: &[SyncedTable],
     source: RestoreSource,
+    keypair: &UserKeypair,
     app_dir: &Path,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
@@ -241,7 +245,7 @@ pub async fn restore_from_cloud(
 
     let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
 
-    let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths);
+    let storage = CloudSyncStorage::new(cloud_home, cipher.clone(), blob_paths, keypair.clone());
 
     // Create library directory.
     let device_id = ids.new_id();
@@ -313,6 +317,17 @@ pub async fn restore_from_code(
     let signing_key_bytes = URL_SAFE_NO_PAD
         .decode(&parsed.sk)
         .map_err(|e| RestoreError::Database(format!("Invalid signing key encoding: {e}")))?;
+    // The restored device's identity. Rebuilt here (not imported yet) so the
+    // storage can sign its control objects during restore, while the keyring
+    // import still happens only after restore succeeds.
+    let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
+        signing_key_bytes.clone().try_into().map_err(|_| {
+            RestoreError::Database(format!(
+                "Signing key must be {} bytes",
+                crate::keys::SIGN_SECRETKEYBYTES
+            ))
+        })?;
+    let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(RestoreError::Key)?;
 
     let require_oauth = |provider_name: &str| -> Result<crate::oauth::OAuthTokens, RestoreError> {
         oauth_tokens.clone().ok_or_else(|| {
@@ -365,6 +380,7 @@ pub async fn restore_from_code(
         &parsed.name,
         synced_tables,
         source,
+        &keypair,
         app_dir,
         clock,
         ids,

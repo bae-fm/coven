@@ -487,7 +487,7 @@ mod tests {
     use super::*;
     use crate::encryption::EncryptionService;
     use crate::sync::apply::apply_changeset_lww;
-    use crate::sync::storage::DeviceHead;
+    use crate::sync::storage::{DeviceHead, MinSchemaVersion};
     use async_trait::async_trait;
     use rusqlite::session::Session as RqSession;
     use rusqlite::{Connection, OptionalExtension};
@@ -638,6 +638,7 @@ mod tests {
                     seq: *seq,
                     snapshot_seq: *snap,
                     last_sync: None,
+                    author_pubkey: None,
                 })
                 .collect())
         }
@@ -726,8 +727,15 @@ mod tests {
             Ok(seqs)
         }
 
-        async fn get_min_schema_version(&self) -> Result<Option<u32>, StorageError> {
-            Ok(*self.min_schema_version.lock().unwrap())
+        async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
+            Ok(self
+                .min_schema_version
+                .lock()
+                .unwrap()
+                .map(|version| MinSchemaVersion {
+                    version,
+                    author_pubkey: None,
+                }))
         }
 
         async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {

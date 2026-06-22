@@ -56,6 +56,7 @@ fn storage_for(cloud: &InMemoryCloudHome) -> CloudSyncStorage {
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        UserKeypair::generate(),
     )
 }
 

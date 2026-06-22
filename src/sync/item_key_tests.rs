@@ -16,6 +16,7 @@ use crate::blob::{BlobPlan, BlobRef, BlobScope, ResolvedScope};
 use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
+use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::push_changeset;
@@ -53,6 +54,7 @@ fn storage_over(home: InMemoryCloudHome) -> CloudSyncStorage {
         Box::new(home),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
         BlobPathScheme::Hashed,
+        UserKeypair::generate(),
     )
 }
 
@@ -250,6 +252,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         Box::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
         BlobPathScheme::Hashed,
+        UserKeypair::generate(),
     );
 
     // --- Device A: mint the item key, write a shareable note + a blob-bearing
