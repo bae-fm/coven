@@ -506,16 +506,22 @@ async fn resolve_membership_authorization(
 
 /// Reload the full membership chain from storage. `Ok(None)` when no chain
 /// exists; `Err(())` when it can't be listed/downloaded — the caller treats that
-/// as indeterminate (retry), never as "no chain" (which would fail open).
+/// as indeterminate (retry), never as "no chain" (which would fail open). The
+/// underlying cause is logged here rather than carried up, since the caller only
+/// needs the fact of failure to decide retry-vs-skip.
 async fn reload_chain(storage: &dyn SyncStorage) -> Result<Option<MembershipChain>, ()> {
-    let entries = storage.list_membership_entries().await.map_err(|_| ())?;
+    let entries = storage.list_membership_entries().await.map_err(|e| {
+        warn!("membership re-list failed while resolving authorization: {e}");
+    })?;
     if entries.is_empty() {
         return Ok(None);
     }
     super::membership_ops::download_chain(storage, &entries)
         .await
         .map(Some)
-        .map_err(|_| ())
+        .map_err(|e| {
+            warn!("membership re-download failed while resolving authorization: {e}");
+        })
 }
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
