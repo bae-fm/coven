@@ -62,6 +62,26 @@ fn ed25519_hex_to_x25519(
 /// `keys/{recipient_pubkey}`. The signature binds `(library_id,
 /// recipient_pubkey, sealed)` so the joiner can prove the key came from the
 /// owner and was meant for them, not substituted by a bucket writer.
+///
+/// `owner_keypair` is whatever Owner is performing the invite/revoke — NOT
+/// necessarily the chain founder. The two callers below pass the local device's
+/// own keypair, and the membership chain authorizes any current Owner to add or
+/// remove members, so a second Owner can reach here and sign with their own key.
+///
+/// But a joining (or rotating) device pins exactly ONE clear-text authority: the
+/// founder the invite carries (`InviteCode::owner_pubkey`, set from
+/// `chain.founder_pubkey()`), because the joiner has no membership chain yet — it
+/// is bootstrapping into the library and the chain itself is sealed under the very
+/// key it is trying to adopt. [`WrappedLibraryKey::verify_and_unwrap`] therefore
+/// checks the signature against that founder and nothing else. So a wrapped key an
+/// adopting device accepts MUST be signed by the founder; one signed by a
+/// non-founder Owner fails that check and the join/rotation fails closed (a loud
+/// [`InviteError`], never a silent adoption of the wrong key). The practical
+/// limitation: only the founder can issue or rotate library keys that a fresh
+/// device will accept. A non-founder Owner can still author membership-chain
+/// changes that existing members honor; what they cannot do is hand a brand-new
+/// device a key it will adopt. Widening that would mean giving the joiner more
+/// than one pinned authority — a multi-owner trust shape this code does not have.
 fn signed_wrapped_key(
     library_id: &str,
     recipient_ed25519_pubkey: &str,
@@ -117,7 +137,10 @@ pub async fn create_invitation(
     let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
 
     // Seal the library key to the invitee and sign the binding so the joiner can
-    // authenticate it on adoption.
+    // authenticate it on adoption. The joiner verifies this signature against the
+    // founder the invite pins, so for the invitee to actually adopt the key
+    // `owner_keypair` must be the founder's (see `signed_wrapped_key`); a
+    // non-founder Owner's invite fails closed at the joiner.
     let wrapped_key = signed_wrapped_key(
         library_id,
         invitee_ed25519_pubkey,
@@ -265,7 +288,11 @@ pub async fn revoke_member(
     let new_key = encryption::generate_random_key();
 
     // Re-wrap the new key to all remaining members, each signed so a joiner that
-    // later adopts it can authenticate it the same way an invite's key is.
+    // later adopts it can authenticate it the same way an invite's key is. As at
+    // invite time, an adopting device verifies against the founder the invite
+    // pinned, so `owner_keypair` must be the founder's for the rotated key to be
+    // adoptable on a fresh device (see `signed_wrapped_key`); a non-founder Owner's
+    // rotation re-wraps keys no joiner will accept (it fails closed, not silently).
     let remaining_members = chain.current_members();
     for (member_pubkey, _) in &remaining_members {
         let x25519_pk = ed25519_hex_to_x25519(member_pubkey)?;
@@ -484,6 +511,84 @@ mod tests {
             matches!(result, Err(InviteError::Crypto(_))),
             "a key bound to another member's slot must be refused, got {result:?}",
         );
+    }
+
+    /// A NON-founder Owner can legitimately invite (the membership chain
+    /// authorizes any current Owner), but `create_invitation` signs the wrapped
+    /// key with that inviting Owner's own key, while the invitee pins the founder.
+    /// So the invitee cannot adopt a second Owner's key: verification is against
+    /// the founder and fails closed. This is the founder-only key-issuance limit,
+    /// asserted to fail loudly (an `InviteError`) rather than silently adopt a key
+    /// signed by the wrong authority.
+    #[tokio::test]
+    async fn second_owner_invite_is_unadoptable_by_the_joiner() {
+        use crate::sync::membership::MembershipAction;
+        use crate::sync::test_helpers::make_entry;
+
+        let founder = gen_keypair();
+        let second_owner = gen_keypair();
+        let invitee = gen_keypair();
+        let encryption_key: [u8; 32] = [3u8; 32];
+
+        let storage = MockSyncStorage::new();
+
+        // Chain: founder, then the founder promotes `second_owner` to Owner.
+        let mut chain = bootstrap_chain(&founder);
+        chain
+            .add_entry(make_entry(
+                &founder,
+                MembershipAction::Add,
+                &second_owner,
+                MemberRole::Owner,
+                "0000000002000-0000-dev1",
+            ))
+            .unwrap();
+
+        // The SECOND owner invites the new member. This succeeds — the chain
+        // authorizes any Owner to add — and signs the wrapped key with the second
+        // owner's key.
+        create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            &second_owner,
+            &pubkey_hex(&invitee),
+            MemberRole::Member,
+            &encryption_key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await
+        .unwrap();
+
+        // The invitee pins the founder (what the invite carries). The wrapped key
+        // is signed by the second owner, so verification against the founder fails
+        // and the join fails CLOSED — no silent adoption of the wrong key.
+        let result = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &invitee,
+            LIB_ID,
+            &pubkey_hex(&founder),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(InviteError::Crypto(_))),
+            "a non-founder owner's wrapped key must not be adoptable by a joiner pinning the founder, got {result:?}",
+        );
+
+        // It is specifically the founder constraint, not a broken invite: had the
+        // joiner instead pinned the second owner (the actual signer), the same
+        // wrapped key would verify and adopt. (A device never does this — it only
+        // ever pins the founder — but it isolates the cause to the pinned authority.)
+        let adopted = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &invitee,
+            LIB_ID,
+            &pubkey_hex(&second_owner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(adopted, encryption_key);
     }
 
     #[tokio::test]
