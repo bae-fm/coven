@@ -165,12 +165,19 @@ impl SyncLoopHandle {
                                 drain_in_progress = result.resume_drain_promptly;
                                 // Schema-skip takes priority — newer-version changesets
                                 // are permanently inapplicable until the user updates the
-                                // app, while asset download failures retry naturally next
-                                // cycle.
+                                // app. A rejected-unauthorized changeset (forged or from a
+                                // removed member) is a genuine integrity event, surfaced
+                                // ahead of asset-download failures, which retry naturally
+                                // next cycle.
                                 let error = if result.skipped_schema > 0 {
                                     Some(format!(
                                         "{} changes from a newer app version were skipped. Update the app to apply them.",
                                         result.skipped_schema,
+                                    ))
+                                } else if result.rejected_unauthorized > 0 {
+                                    Some(format!(
+                                        "{} changes from an unauthorized device were rejected.",
+                                        result.rejected_unauthorized,
                                     ))
                                 } else if result.asset_downloads_failed {
                                     Some("Some files failed to download, will retry".to_string())

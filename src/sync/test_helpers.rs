@@ -277,6 +277,12 @@ pub struct MockSyncStorage {
     /// fail-closed path where membership can't even be listed (#88), instead of
     /// silently disabling authorization for the cycle.
     fail_membership_list: std::sync::atomic::AtomicBool,
+    /// `(author_pubkey, seq)` entries the LIST omits but a keyed GET still serves.
+    /// Simulates the eventual-consistency window where a freshly-written
+    /// membership entry isn't in the LIST yet, but a direct GET (read-after-write
+    /// consistent) resolves it — the exact lag issue #84's grant-coordinate fetch
+    /// is built for.
+    hidden_from_listing: Mutex<std::collections::HashSet<(String, u64)>>,
 }
 
 impl MockSyncStorage {
@@ -296,6 +302,7 @@ impl MockSyncStorage {
             min_schema_version: Mutex::new(None),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
+            hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -305,6 +312,19 @@ impl MockSyncStorage {
     pub fn fail_membership_listing(&self) {
         self.fail_membership_list
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Hide a stored membership entry from `list_membership_entries` while leaving
+    /// `get_membership_entry` able to serve it — the eventual-consistency window
+    /// where the LIST that rebuilds the chain lags an entry a direct (keyed,
+    /// read-after-write consistent) GET already resolves. Lets a test stage a
+    /// member's authorizing Add, hide it from the LIST, and prove issue #84's
+    /// grant-coordinate fetch recovers the changeset instead of dropping it.
+    pub fn hide_membership_from_listing(&self, author_pubkey: &str, seq: u64) {
+        self.hidden_from_listing
+            .lock()
+            .unwrap()
+            .insert((author_pubkey.to_string(), seq));
     }
 
     /// Store a changeset in the mock storage (simulates what push would do). The
@@ -325,6 +345,7 @@ impl MockSyncStorage {
             timestamp: "2026-02-10T00:00:00Z".to_string(),
             changeset_size: changeset_bytes.len(),
             author_pubkey: None,
+            membership_grant: None,
             signature: None,
         };
         let packed = envelope::pack(&env, changeset_bytes);
@@ -525,6 +546,7 @@ impl SyncStorage for MockSyncStorage {
             return Err(StorageError::S3("injected membership-list failure".into()));
         }
         let objects = self.objects.lock().unwrap();
+        let hidden = self.hidden_from_listing.lock().unwrap();
         let mut entries = Vec::new();
 
         for key in objects.keys() {
@@ -532,7 +554,12 @@ impl SyncStorage for MockSyncStorage {
                 if let Some(slash_pos) = rest.rfind('/') {
                     let author = &rest[..slash_pos];
                     if let Ok(seq) = rest[slash_pos + 1..].parse::<u64>() {
-                        entries.push((author.to_string(), seq));
+                        // Omit entries a test marked as not-yet-visible to the LIST
+                        // (issue #84's eventual-consistency lag); a keyed GET still
+                        // serves them.
+                        if !hidden.contains(&(author.to_string(), seq)) {
+                            entries.push((author.to_string(), seq));
+                        }
                     }
                 }
             }

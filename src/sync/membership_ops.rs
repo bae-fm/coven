@@ -10,7 +10,9 @@ use crate::keys::{KeyService, UserKeypair};
 
 use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
-use super::membership::{founder_entry, MemberRole, MembershipChain, MembershipEntry};
+use super::membership::{
+    founder_entry, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
+};
 use super::storage::SyncStorage;
 
 /// `sync_state` key holding the hex Ed25519 pubkey of the library's established
@@ -251,12 +253,15 @@ pub(crate) async fn write_founder_entry(
     Ok(())
 }
 
-/// Download and build a membership chain from the storage.
-pub(crate) async fn download_chain(
+/// Download each membership entry, paired with the storage coordinate it was
+/// loaded from. The pairing lets a caller name the exact entry that authorizes a
+/// given pubkey (see [`super::membership::write_grant_coord`]);
+/// [`download_chain`] drops the coordinates and builds the validated chain.
+pub(crate) async fn download_entries(
     storage: &dyn SyncStorage,
     entry_keys: &[(String, u64)],
-) -> Result<MembershipChain, MembershipOpsError> {
-    let mut raw_entries = Vec::new();
+) -> Result<Vec<(MembershipCoord, MembershipEntry)>, MembershipOpsError> {
+    let mut entries = Vec::with_capacity(entry_keys.len());
     for (author, seq) in entry_keys {
         let data = storage
             .get_membership_entry(author, *seq)
@@ -272,8 +277,27 @@ pub(crate) async fn download_chain(
                 "Failed to parse membership entry {author}/{seq}: {e}"
             ))
         })?;
-        raw_entries.push(entry);
+        entries.push((
+            MembershipCoord {
+                author_pubkey: author.clone(),
+                seq: *seq,
+            },
+            entry,
+        ));
     }
+    Ok(entries)
+}
+
+/// Download and build a membership chain from the storage.
+pub(crate) async fn download_chain(
+    storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
+) -> Result<MembershipChain, MembershipOpsError> {
+    let raw_entries = download_entries(storage, entry_keys)
+        .await?
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
 
     MembershipChain::from_entries(raw_entries)
         .map_err(|e| MembershipOpsError(format!("Invalid membership chain: {e}")))

@@ -23,6 +23,7 @@ use crate::sync::session::SyncedTable;
 
 use super::envelope;
 use super::gate;
+use super::membership::{self, MembershipCoord};
 use super::pull::{self, PullResult};
 use super::push::{OutgoingChangeset, SCHEMA_VERSION};
 use super::storage::SyncStorage;
@@ -160,6 +161,16 @@ impl SyncService {
             }
         }
 
+        // Bind the outgoing changeset to the membership entry that authorizes us
+        // to write. A puller that has not yet seen that entry (membership entries
+        // and changesets are separate, unordered object streams) fetches it by
+        // this coordinate to resolve the gap, instead of judging us non-member and
+        // skipping the changeset forever. Only needed when we actually publish.
+        let membership_grant = match &outgoing_cs {
+            Some(_) => self.resolve_write_grant(storage, keypair).await?,
+            None => None,
+        };
+
         let outgoing = outgoing_cs.map(|cs| {
             let next_seq = local_seq + 1;
             let packed = envelope::pack_signed(
@@ -169,6 +180,7 @@ impl SyncService {
                 message,
                 timestamp,
                 keypair,
+                membership_grant,
                 &cs,
             );
             OutgoingChangeset {
@@ -204,6 +216,32 @@ impl SyncService {
             updated_cursors,
         })
     }
+
+    /// The storage coordinate of the membership entry that authorizes this device
+    /// to write, or `None` for a solo library (no membership chain). Embedded in
+    /// the outgoing changeset so a puller can resolve a membership-propagation gap.
+    ///
+    /// A storage failure aborts the cycle rather than publishing a changeset with
+    /// no grant: a puller hitting the gap window would otherwise skip it as
+    /// non-member — the very loss this binding exists to prevent.
+    async fn resolve_write_grant(
+        &self,
+        storage: &dyn SyncStorage,
+        keypair: &UserKeypair,
+    ) -> Result<Option<MembershipCoord>, SyncCycleError> {
+        let entry_keys = storage
+            .list_membership_entries()
+            .await
+            .map_err(|e| SyncCycleError::Membership(format!("list membership entries: {e}")))?;
+        if entry_keys.is_empty() {
+            return Ok(None);
+        }
+        let entries = super::membership_ops::download_entries(storage, &entry_keys)
+            .await
+            .map_err(|e| SyncCycleError::Membership(e.0))?;
+        let our_pubkey = hex::encode(keypair.public_key);
+        Ok(membership::write_grant_coord(&entries, &our_pubkey))
+    }
 }
 
 #[derive(Debug)]
@@ -215,6 +253,10 @@ pub enum SyncCycleError {
     /// An outgoing changeset references a blob whose local file is missing, so the
     /// changeset cannot be published without stranding pullers on a 404.
     BlobMissing(String),
+    /// The membership chain could not be loaded to bind the outgoing changeset to
+    /// the entry that authorizes this device — publishing without it risks pullers
+    /// skipping the changeset as non-member.
+    Membership(String),
 }
 
 impl std::fmt::Display for SyncCycleError {
@@ -225,6 +267,7 @@ impl std::fmt::Display for SyncCycleError {
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
             SyncCycleError::AssetUpload(e) => write!(f, "asset upload error: {e}"),
             SyncCycleError::BlobMissing(e) => write!(f, "blob missing: {e}"),
+            SyncCycleError::Membership(e) => write!(f, "membership error: {e}"),
         }
     }
 }
