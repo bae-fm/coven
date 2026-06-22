@@ -8,6 +8,7 @@ use fallible_streaming_iterator::FallibleStreamingIterator;
 use rusqlite::hooks::Action;
 use rusqlite::session::ChangesetIter;
 use rusqlite::types::ValueRef;
+use tracing::warn;
 
 /// The operation type for a changeset entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,14 +117,41 @@ pub fn insert_text_blob_pairs(
         if op.table_name() != table || op.code() != Action::SQLITE_INSERT {
             continue;
         }
-        let Some(text) = item.new_value(text_col).ok().and_then(value_ref_to_string) else {
-            continue;
+        // A matched INSERT whose expected columns are malformed is bad data for
+        // this table — log and skip it rather than silently dropping it (a
+        // silently-dropped item_keys row would later surface only as a missing
+        // key, with no trace of why).
+        let text = match item.new_value(text_col) {
+            Ok(v) => match value_ref_to_string(v) {
+                Some(s) => s,
+                None => {
+                    warn!(
+                        table,
+                        text_col, "matched INSERT has a NULL/absent text column, skipping"
+                    );
+                    continue;
+                }
+            },
+            Err(e) => {
+                warn!(table, text_col, error = %e, "cannot read text column of matched INSERT, skipping");
+                continue;
+            }
         };
-        // The blob column must be an actual BLOB; anything else (NULL, a stray
-        // text/integer) is not key material and is skipped.
+        // The blob column must be an actual BLOB; a non-blob value (NULL, a stray
+        // text/integer) is not key material, and a read error is a malformed row.
         let bytes = match item.new_value(blob_col) {
             Ok(ValueRef::Blob(b)) => b.to_vec(),
-            _ => continue,
+            Ok(_) => {
+                warn!(
+                    table,
+                    blob_col, "matched INSERT's blob column is not a BLOB, skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                warn!(table, blob_col, error = %e, "cannot read blob column of matched INSERT, skipping");
+                continue;
+            }
         };
         out.push((text, bytes));
     }
@@ -205,6 +233,49 @@ fn real_to_sqlite_text(f: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`insert_text_blob_pairs`] must recover a blob column's EXACT bytes, where
+    /// [`walk`] would lossily stringify them. This is the linchpin of the pull's
+    /// blob-before-row ordering: an item content key (random 32 bytes, rarely
+    /// valid UTF-8) is read from the changeset that mints it so the item-scoped
+    /// blob can be downloaded before the changeset is applied.
+    #[test]
+    fn insert_text_blob_pairs_recovers_raw_blob_bytes() {
+        use rusqlite::session::Session as RqSession;
+
+        let conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE item_keys (item_id TEXT PRIMARY KEY, key BLOB, _updated_at TEXT)",
+        )
+        .expect("schema");
+
+        // High bytes set, so the key is NOT valid UTF-8: walk's lossy stringify
+        // would replace bytes with U+FFFD and destroy the key; the raw extraction
+        // must return it byte-for-byte.
+        let raw_key: Vec<u8> = (0u8..32).map(|i| 0x80 | i).collect();
+        assert!(
+            String::from_utf8(raw_key.clone()).is_err(),
+            "the key must be non-UTF-8 for this test to mean anything",
+        );
+
+        let mut session = RqSession::new(&conn).expect("session");
+        session.attach(Some("item_keys")).expect("attach");
+        conn.execute(
+            "INSERT INTO item_keys (item_id, key, _updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["item-1", raw_key.clone(), "0000000001000-0000-devX"],
+        )
+        .expect("insert");
+        let mut cs = Vec::new();
+        session.changeset_strm(&mut cs).expect("changeset");
+
+        let pairs = insert_text_blob_pairs(&cs, "item_keys", 0, 1).expect("extract");
+        assert_eq!(pairs, vec![("item-1".to_string(), raw_key)]);
+
+        // A different table name matches nothing.
+        assert!(insert_text_blob_pairs(&cs, "other", 0, 1)
+            .expect("extract")
+            .is_empty());
+    }
 
     /// The REAL arm must render a faithful float: it round-trips back to the same
     /// `f64`, always reads as a float (has a `.` or exponent), and matches SQLite's
