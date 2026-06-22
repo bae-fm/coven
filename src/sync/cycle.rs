@@ -734,9 +734,14 @@ pub(crate) async fn ensure_owner_anchored_chain(
                 "membership chain founder {founder} does not match the pinned owner \
                  {p} — refusing (owner-takeover attempt)"
             )),
-            // No pin, but the chain is founded by our own key: founding writes the
-            // founder before the pin, so a crash after the write but before the pin
-            // lands exactly here. Complete the pin — an attacker cannot forge a
+            // No pin, but the chain is founded by our own key. Founding is two
+            // non-atomic writes — the cloud founder entry, then the local pin — and
+            // `found_and_pin` already fails loud (sync does not start) if either
+            // fails; this is that same founding operation's idempotent retry, not a
+            // separate self-heal pass. Cross-store atomicity isn't available, so a
+            // crash after the founder write but before the pin lands here; the next
+            // connect completes the pin. Refusing instead would brick the library
+            // forever on a mid-founding crash. Safe: an attacker cannot forge a
             // founder signed by our key.
             None if founder == our_pk => {
                 db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &our_pk)
