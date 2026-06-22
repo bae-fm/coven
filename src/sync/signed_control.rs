@@ -146,6 +146,87 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
     version.to_be_bytes().to_vec()
 }
 
+/// Serialized form of `snapshot_meta.json{suffix}`: the per-device cursors of a
+/// snapshot plus the hash of the snapshot DB image, under one author signature.
+///
+/// A snapshot is a destructive primitive twice over. The DB image is the whole
+/// catalog a joining device adopts wholesale; the `cursors` are control input —
+/// a bootstrapping device starts pulling each peer *past* these, so a forged
+/// `cursors = {device: u64::MAX}` makes it silently skip that device's real
+/// changesets. The at-rest cipher proves only confidentiality (the library key is
+/// shared by every member), not authorship, so a bucket writer can overwrite both
+/// objects. So the author signs both halves together: `db_hash` binds the DB
+/// image and `cursors` bind the metadata, under one signature. A tampered DB no
+/// longer matches `db_hash`; swapped cursors no longer verify.
+///
+/// `db_hash` is the SHA-256 of the snapshot's **stored** (sealed) bytes — exactly
+/// what `put_snapshot` writes and `get_snapshot` returns — so a verifier hashes
+/// the bytes it downloaded and compares, with no decryption needed to detect a
+/// substituted image.
+///
+/// Like [`HeadJson`] (and unlike [`WrappedLibraryKey`]), the `author_pubkey` is
+/// stored: a snapshot's author varies device to device, so the verifier learns
+/// who signed it and then checks that author against the membership chain (the
+/// authorization step, the caller's job).
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotMetaJson {
+    /// Per-device cursors at snapshot time: device_id -> head seq. A bootstrapping
+    /// device uses these as its initial sync_cursors.
+    pub cursors: std::collections::BTreeMap<String, u64>,
+    /// Hex-encoded SHA-256 of the stored (sealed) snapshot DB bytes.
+    pub db_hash: String,
+    /// Hex-encoded Ed25519 public key of the device that wrote this snapshot.
+    pub author_pubkey: String,
+    /// Hex-encoded detached signature over [`SnapshotMetaFields`].
+    pub signature: String,
+}
+
+/// The snapshot-meta fields the signature covers, in declaration order. Excludes
+/// `author_pubkey`/`signature` (the signature's own outputs). `cursors` is a
+/// `BTreeMap` so its serialization is order-deterministic — a canonical payload.
+#[derive(Serialize)]
+struct SnapshotMetaFields<'a> {
+    cursors: &'a std::collections::BTreeMap<String, u64>,
+    db_hash: &'a str,
+}
+
+impl SnapshotMetaJson {
+    /// Build a snapshot meta signed by `keypair`: fills `author_pubkey` with the
+    /// device's public key and `signature` with the detached signature over the
+    /// canonical payload (which binds the cursors and DB hash).
+    pub fn signed(
+        cursors: std::collections::BTreeMap<String, u64>,
+        db_hash: String,
+        keypair: &UserKeypair,
+    ) -> Self {
+        let payload = snapshot_meta_signing_payload(&cursors, &db_hash);
+        let sig = keypair.sign(&payload);
+        SnapshotMetaJson {
+            cursors,
+            db_hash,
+            author_pubkey: hex::encode(keypair.public_key),
+            signature: hex::encode(sig),
+        }
+    }
+
+    /// Verify the embedded signature against the embedded `author_pubkey`. A meta
+    /// that fails this is forged, corrupt, or tampered (cursors or DB hash changed
+    /// after signing), and must not be adopted. Whether the author is *authorized*
+    /// (a current member) is a separate check the caller runs.
+    pub fn verify(&self) -> bool {
+        let payload = snapshot_meta_signing_payload(&self.cursors, &self.db_hash);
+        keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
+    }
+}
+
+fn snapshot_meta_signing_payload(
+    cursors: &std::collections::BTreeMap<String, u64>,
+    db_hash: &str,
+) -> Vec<u8> {
+    let fields = SnapshotMetaFields { cursors, db_hash };
+    serde_json::to_vec(&fields).expect("snapshot meta fields serialization cannot fail")
+}
+
 /// Serialized form of `keys/{recipient_pubkey}{suffix}`: the library encryption
 /// key sealed to one member, plus the owner signature that authenticates it.
 ///
@@ -370,6 +451,58 @@ mod tests {
         let mut bad_pk = HeadJson::signed("devA", 1, None, None, &kp);
         bad_pk.author_pubkey = hex::encode([0u8; 16]); // wrong length
         assert!(!bad_pk.verify("devA"));
+    }
+
+    #[test]
+    fn snapshot_meta_round_trips_and_binds_its_fields() {
+        use std::collections::BTreeMap;
+        let kp = UserKeypair::generate();
+        let cursors = BTreeMap::from([("devA".to_string(), 5u64), ("devB".to_string(), 9)]);
+        let meta = SnapshotMetaJson::signed(cursors.clone(), "abc123".to_string(), &kp);
+
+        assert_eq!(meta.author_pubkey, hex::encode(kp.public_key));
+        assert!(meta.verify(), "a freshly signed snapshot meta verifies");
+
+        // Round-trips through JSON unchanged.
+        let json = serde_json::to_vec(&meta).expect("serialize meta");
+        let parsed: SnapshotMetaJson = serde_json::from_slice(&json).expect("parse meta");
+        assert!(parsed.verify(), "meta verifies after a JSON round-trip");
+
+        // The signature binds the DB hash: a meta swapped onto a different DB image
+        // (a substituted snapshot) no longer verifies.
+        let mut tampered_db = SnapshotMetaJson::signed(cursors.clone(), "abc123".to_string(), &kp);
+        tampered_db.db_hash = "deadbeef".to_string();
+        assert!(
+            !tampered_db.verify(),
+            "a tampered db_hash fails verification"
+        );
+
+        // It also binds the cursors: poisoning a cursor (the bootstrap-skip attack)
+        // invalidates the signature.
+        let mut tampered_cursors = SnapshotMetaJson::signed(cursors, "abc123".to_string(), &kp);
+        tampered_cursors
+            .cursors
+            .insert("devA".to_string(), u64::MAX);
+        assert!(
+            !tampered_cursors.verify(),
+            "tampered cursors fail verification"
+        );
+    }
+
+    #[test]
+    fn snapshot_meta_signed_by_one_key_does_not_verify_under_another() {
+        use std::collections::BTreeMap;
+        let kp = UserKeypair::generate();
+        let other = UserKeypair::generate();
+        let mut meta = SnapshotMetaJson::signed(
+            BTreeMap::from([("devA".to_string(), 1u64)]),
+            "hash".to_string(),
+            &kp,
+        );
+        // Swap the claimed author: the signature no longer matches, so the meta is
+        // rejected (a forger can't claim a member's pubkey).
+        meta.author_pubkey = hex::encode(other.public_key);
+        assert!(!meta.verify());
     }
 
     #[test]

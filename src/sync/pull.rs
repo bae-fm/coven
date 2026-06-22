@@ -164,29 +164,23 @@ pub async fn pull_changes(
     let mut membership_chain: Option<MembershipChain> =
         match storage.list_membership_entries().await {
             Ok(entries) if !entries.is_empty() => {
-                match super::membership_ops::download_chain(storage, &entries).await {
-                    Ok(chain) => {
-                        if let Some(owner) = &owner_pubkey {
-                            if !chain.is_founded_by(owner) {
-                                return Err(PullError::MembershipTampered(format!(
-                                    "chain founder {:?} is not the pinned owner {owner}",
-                                    chain.founder_pubkey()
-                                )));
-                            }
-                        }
-                        Some(chain)
-                    }
+                // Load + validate the chain and anchor it to the pinned owner (the
+                // same load+anchor the snapshot authorize runs). For an owner-pinned
+                // library a chain that won't validate, or one founded by a different
+                // key, is a refound/tamper: fail closed (refuse the cycle) rather than
+                // fall open to "no chain, accept everything". Browsable (no owner) has
+                // nothing to anchor, so a load failure there just leaves it open.
+                match super::membership_ops::load_anchored_chain(
+                    storage,
+                    &entries,
+                    owner_pubkey.as_deref(),
+                )
+                .await
+                {
+                    Ok(chain) => Some(chain),
                     Err(e) => {
-                        // The listing is non-empty but the chain won't load/validate —
-                        // malformed or corrupt. For an owner-pinned library this is a
-                        // refound/tamper: fail closed (refuse the cycle) rather than fall
-                        // open to "no chain, accept everything". Browsable (no owner) has
-                        // no chain to validate, so it stays open.
-                        if let Some(owner) = &owner_pubkey {
-                            return Err(PullError::MembershipTampered(format!(
-                                "membership chain failed to load/validate for owner-pinned \
-                             library (owner {owner}): {e}"
-                            )));
+                        if owner_pubkey.is_some() {
+                            return Err(PullError::MembershipTampered(e.to_string()));
                         }
                         warn!("failed to load membership chain for validation: {e}");
                         None

@@ -522,6 +522,7 @@ pub async fn run_single_sync_cycle(
                     device_id,
                     sync_result.updated_cursors.clone(),
                     local_seq,
+                    user_keypair,
                     clock,
                 )
                 .await

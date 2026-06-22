@@ -429,11 +429,17 @@ async fn bootstrap_and_save(
     blob_source: &dyn BlobSource,
     on_status: &impl Fn(&str),
 ) -> Result<Config, RestoreError> {
-    // Step 3: Bootstrap from snapshot.
+    // Bootstrap from the snapshot. Restore pins no owner up front (it recovers a
+    // library this device may not have founded — the owner is adopted from the
+    // chain's founder after the pull, trust-on-first-use, since the restore code
+    // already carries the bucket's own credentials). So the snapshot is
+    // authenticated against the membership chain anchored to its own founder: the
+    // author must still be a current write-capable member, and an unsigned or
+    // tampered snapshot is refused.
     on_status("Downloading library snapshot...");
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
-    let bootstrap_result = bootstrap_from_snapshot(bucket_dyn, cipher, &db_path).await?;
+    let bootstrap_result = bootstrap_from_snapshot(bucket_dyn, cipher, None, &db_path).await?;
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",
