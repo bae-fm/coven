@@ -220,11 +220,18 @@ pub async fn join_library(
     on_status("Loading keypair...");
     let user_keypair = key_service.get_user_keypair()?;
 
-    // Step 2: Accept invitation to get the library encryption key.
-    // Uses CloudHome directly — wrapped keys are sealed-box encrypted,
-    // no library-key encryption needed.
+    // Step 2: Accept invitation to get the library encryption key. Uses CloudHome
+    // directly — wrapped keys are sealed-box encrypted, no library-key encryption
+    // needed. The key is authenticated against the owner the invite pins (the
+    // chain founder) before adoption, so a bucket writer can't substitute it.
     on_status("Accepting invitation...");
-    let encryption_key = unwrap_library_key(cloud_home.as_ref(), &user_keypair).await?;
+    let encryption_key = unwrap_library_key(
+        cloud_home.as_ref(),
+        &user_keypair,
+        &code.library_id,
+        &code.owner_pubkey,
+    )
+    .await?;
     let encryption_key_hex = hex::encode(encryption_key);
 
     // Step 3: Create the sync storage with the real encryption key. Joining a

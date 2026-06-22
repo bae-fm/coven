@@ -11,6 +11,7 @@ use super::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
     MembershipError,
 };
+use super::signed_control::WrappedLibraryKey;
 use super::storage::{StorageError, SyncStorage};
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +57,25 @@ fn ed25519_hex_to_x25519(
     Ok(keys::ed25519_to_x25519_public_key(&pk_bytes))
 }
 
+/// Seal the library key to one member and wrap it in an owner-signed
+/// [`WrappedLibraryKey`], serialized to the bytes stored at
+/// `keys/{recipient_pubkey}`. The signature binds `(library_id,
+/// recipient_pubkey, sealed)` so the joiner can prove the key came from the
+/// owner and was meant for them, not substituted by a bucket writer.
+fn signed_wrapped_key(
+    library_id: &str,
+    recipient_ed25519_pubkey: &str,
+    recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
+    encryption_key: &[u8; 32],
+    owner_keypair: &UserKeypair,
+) -> Result<Vec<u8>, InviteError> {
+    let sealed = keys::seal_box_encrypt(encryption_key, recipient_x25519_pk);
+    let wrapped =
+        WrappedLibraryKey::signed(library_id, recipient_ed25519_pubkey, sealed, owner_keypair);
+    serde_json::to_vec(&wrapped)
+        .map_err(|e| InviteError::Crypto(format!("serialize wrapped key: {e}")))
+}
+
 /// Upload a signed membership entry to the storage.
 async fn upload_membership_entry(
     storage: &dyn SyncStorage,
@@ -87,6 +107,7 @@ pub async fn create_invitation(
     invitee_ed25519_pubkey: &str,
     role: MemberRole,
     encryption_key: &[u8; 32],
+    library_id: &str,
     timestamp: &str,
 ) -> Result<CloudHomeJoinInfo, InviteError> {
     // Grant access on the cloud home (no-op for S3, shares folder for consumer clouds).
@@ -95,8 +116,15 @@ pub async fn create_invitation(
     // Convert Ed25519 -> X25519 for sealed box encryption.
     let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
 
-    // Wrap the library encryption key.
-    let wrapped_key = keys::seal_box_encrypt(encryption_key, &invitee_x25519_pk);
+    // Seal the library key to the invitee and sign the binding so the joiner can
+    // authenticate it on adoption.
+    let wrapped_key = signed_wrapped_key(
+        library_id,
+        invitee_ed25519_pubkey,
+        &invitee_x25519_pk,
+        encryption_key,
+        owner_keypair,
+    )?;
 
     // Create and sign a membership entry.
     let mut entry = MembershipEntry {
@@ -123,13 +151,26 @@ pub async fn create_invitation(
     Ok(join_info)
 }
 
-/// Accept an invitation by downloading and unwrapping the library encryption key.
+/// Accept an invitation by downloading, authenticating, and unwrapping the
+/// library encryption key.
 ///
 /// The invitee calls this after receiving an invitation. It downloads the
-/// wrapped key from cloud storage and decrypts it with the invitee's X25519 keys.
+/// wrapped key from cloud storage, verifies the owner signed it for this
+/// recipient in this library, and only then decrypts it with the invitee's
+/// X25519 keys.
+///
+/// `expected_owner` is the library owner the invite pins (the chain founder).
+/// The bucket is writable by every member and anyone with the bucket
+/// credential, and a sealed box authenticates only its recipient — so without
+/// this check a bucket writer could overwrite the object with a box wrapping a
+/// key of their choosing and the joiner would adopt it. Verifying the owner's
+/// signature over `(library_id, recipient_pubkey, sealed)` rejects any such
+/// substitution.
 pub async fn unwrap_library_key(
     cloud_home: &dyn CloudHome,
     keypair: &UserKeypair,
+    library_id: &str,
+    expected_owner: &str,
 ) -> Result<[u8; 32], InviteError> {
     let pubkey_hex = hex::encode(keypair.public_key);
 
@@ -139,13 +180,27 @@ pub async fn unwrap_library_key(
     // the invite wraps the library key — so `CloudSyncStorage::put_wrapped_key`
     // always wrote it under the encrypted-home key (`keys/{pubkey}.enc`).
     let key_path = format!("keys/{pubkey_hex}.enc");
-    let wrapped_key = cloud_home.read(&key_path).await?;
+    let wrapped_bytes = cloud_home.read(&key_path).await?;
+
+    let wrapped: WrappedLibraryKey = serde_json::from_slice(&wrapped_bytes)
+        .map_err(|e| InviteError::Crypto(format!("malformed wrapped key: {e}")))?;
+
+    // Authenticate the wrapped key against the owner the invite pins before
+    // adopting anything. A failure here is a substituted, forged, or relocated
+    // key — refuse it loudly rather than decrypt whatever bytes are present.
+    let sealed = wrapped
+        .verify_and_unwrap(library_id, &pubkey_hex, expected_owner)
+        .ok_or_else(|| {
+            InviteError::Crypto(
+                "wrapped library key is not authentically signed by the library owner".to_string(),
+            )
+        })?;
 
     // Decrypt with our X25519 keys.
     let x25519_pk = keypair.to_x25519_public_key();
     let x25519_sk = keypair.to_x25519_secret_key();
 
-    let plaintext = keys::seal_box_decrypt(&wrapped_key, &x25519_pk, &x25519_sk)?;
+    let plaintext = keys::seal_box_decrypt(&sealed, &x25519_pk, &x25519_sk)?;
 
     let encryption_key: [u8; 32] = plaintext
         .try_into()
@@ -169,6 +224,7 @@ pub async fn revoke_member(
     chain: &mut MembershipChain,
     owner_keypair: &UserKeypair,
     revokee_pubkey: &str,
+    library_id: &str,
     timestamp: &str,
 ) -> Result<[u8; 32], InviteError> {
     let members = chain.current_members();
@@ -211,11 +267,18 @@ pub async fn revoke_member(
     // Generate a new random encryption key.
     let new_key = encryption::generate_random_key();
 
-    // Re-wrap the new key to all remaining members.
+    // Re-wrap the new key to all remaining members, each signed so a joiner that
+    // later adopts it can authenticate it the same way an invite's key is.
     let remaining_members = chain.current_members();
     for (member_pubkey, _) in &remaining_members {
         let x25519_pk = ed25519_hex_to_x25519(member_pubkey)?;
-        let wrapped = keys::seal_box_encrypt(&new_key, &x25519_pk);
+        let wrapped = signed_wrapped_key(
+            library_id,
+            member_pubkey,
+            &x25519_pk,
+            &new_key,
+            owner_keypair,
+        )?;
         storage.put_wrapped_key(member_pubkey, wrapped).await?;
     }
 
@@ -289,6 +352,10 @@ mod tests {
         UserKeypair::generate()
     }
 
+    /// The library id every invite test wraps keys under. The wrapped-key
+    /// signature binds it, so the same id must be passed to `unwrap_library_key`.
+    const LIB_ID: &str = "lib-test";
+
     #[tokio::test]
     async fn create_and_unwrap_library_key() {
         let owner = gen_keypair();
@@ -307,6 +374,7 @@ mod tests {
             &pubkey_hex(&invitee),
             MemberRole::Member,
             &encryption_key,
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
@@ -322,11 +390,102 @@ mod tests {
             .iter()
             .any(|(pk, r)| pk == &pubkey_hex(&invitee) && *r == MemberRole::Member));
 
-        // Invitee accepts the invitation.
-        let unwrapped = unwrap_library_key(&storage as &dyn CloudHome, &invitee)
+        // Invitee accepts the invitation: the key is authenticated against the
+        // owner the invite pins, then adopted.
+        let unwrapped = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &invitee,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unwrapped, encryption_key);
+    }
+
+    /// The substitution attack from the security issue: a bucket writer who is
+    /// not the library owner seals a key of their choosing to the joiner's public
+    /// key (which is public) and signs it with their own identity, overwriting the
+    /// invite's wrapped-key object. The joiner must refuse to adopt it — a sealed
+    /// box authenticates only the recipient, so without the owner-signature check
+    /// the joiner would take the attacker's key and the attacker could read
+    /// everything it encrypts.
+    #[tokio::test]
+    async fn unwrap_refuses_key_not_signed_by_owner() {
+        let owner = gen_keypair();
+        let attacker = gen_keypair();
+        let joiner = gen_keypair();
+
+        let storage = MockSyncStorage::new();
+
+        // The attacker forges a wrapped key: a key they chose (`[0xAA; 32]`),
+        // sealed to the joiner's real public key, signed by the attacker (not the
+        // owner), written to the joiner's slot.
+        let attacker_key: [u8; 32] = [0xAAu8; 32];
+        let joiner_x25519 = joiner.to_x25519_public_key();
+        let forged = signed_wrapped_key(
+            LIB_ID,
+            &pubkey_hex(&joiner),
+            &joiner_x25519,
+            &attacker_key,
+            &attacker,
+        )
+        .unwrap();
+        storage
+            .put_wrapped_key(&pubkey_hex(&joiner), forged)
             .await
             .unwrap();
-        assert_eq!(unwrapped, encryption_key);
+
+        // The joiner adopts only keys signed by the owner the invite pins.
+        let result = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &joiner,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(InviteError::Crypto(_))),
+            "a key signed by a non-owner must be refused, got {result:?}",
+        );
+    }
+
+    /// A wrapped key the owner legitimately signed for one member must not be
+    /// adoptable from a *different* member's slot, even though both are real
+    /// members. The signature binds the recipient pubkey (the slot), so a bucket
+    /// writer can't relocate one member's wrapped key into another's slot.
+    #[tokio::test]
+    async fn unwrap_refuses_key_relocated_to_another_slot() {
+        let owner = gen_keypair();
+        let member_a = gen_keypair();
+        let member_b = gen_keypair();
+        let key: [u8; 32] = [9u8; 32];
+
+        let storage = MockSyncStorage::new();
+
+        // The owner seals the key to member A and signs it for A's slot, but the
+        // bytes are written under member B's slot (a relocation a bucket writer
+        // can perform).
+        let a_x25519 = member_a.to_x25519_public_key();
+        let for_a =
+            signed_wrapped_key(LIB_ID, &pubkey_hex(&member_a), &a_x25519, &key, &owner).unwrap();
+        storage
+            .put_wrapped_key(&pubkey_hex(&member_b), for_a)
+            .await
+            .unwrap();
+
+        // Member B reads its slot; the signature is over A's pubkey, so it fails.
+        let result = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &member_b,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(InviteError::Crypto(_))),
+            "a key bound to another member's slot must be refused, got {result:?}",
+        );
     }
 
     #[tokio::test]
@@ -347,13 +506,21 @@ mod tests {
             &pubkey_hex(&invitee),
             MemberRole::Member,
             &encryption_key,
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
         .unwrap();
 
-        // Someone else tries to accept -- should fail.
-        let result = unwrap_library_key(&storage as &dyn CloudHome, &wrong_keypair).await;
+        // Someone else tries to accept -- should fail (no wrapped key in their
+        // slot to even parse).
+        let result = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &wrong_keypair,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -372,6 +539,7 @@ mod tests {
             "not-valid-hex",
             MemberRole::Member,
             &encryption_key,
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await;
@@ -398,6 +566,7 @@ mod tests {
             &pubkey_hex(&member),
             MemberRole::Member,
             &encryption_key,
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
@@ -412,6 +581,7 @@ mod tests {
             &pubkey_hex(&invitee),
             MemberRole::Member,
             &encryption_key,
+            LIB_ID,
             "0000000003000-0000-dev1",
         )
         .await;
@@ -436,6 +606,7 @@ mod tests {
             &pubkey_hex(&invitee),
             MemberRole::Member,
             &encryption_key,
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
@@ -475,15 +646,21 @@ mod tests {
             &pubkey_hex(&member),
             MemberRole::Member,
             &old_key,
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
         .unwrap();
 
         // Member can unwrap the key.
-        let unwrapped = unwrap_library_key(&storage as &dyn CloudHome, &member)
-            .await
-            .unwrap();
+        let unwrapped = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &member,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await
+        .unwrap();
         assert_eq!(unwrapped, old_key);
 
         // Owner revokes the member.
@@ -493,6 +670,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member),
+            LIB_ID,
             "0000000003000-0000-dev1",
         )
         .await
@@ -514,9 +692,14 @@ mod tests {
         assert!(result.is_err());
 
         // Owner can still unwrap the new key.
-        let owner_unwrapped = unwrap_library_key(&storage as &dyn CloudHome, &owner)
-            .await
-            .unwrap();
+        let owner_unwrapped = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &owner,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await
+        .unwrap();
         assert_eq!(owner_unwrapped, new_key);
 
         // The Remove entry was uploaded to the storage.
@@ -548,6 +731,7 @@ mod tests {
             &pubkey_hex(&member1),
             MemberRole::Member,
             &old_key,
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
@@ -561,6 +745,7 @@ mod tests {
             &pubkey_hex(&member2),
             MemberRole::Member,
             &old_key,
+            LIB_ID,
             "0000000003000-0000-dev1",
         )
         .await
@@ -573,20 +758,31 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member1),
+            LIB_ID,
             "0000000004000-0000-dev1",
         )
         .await
         .unwrap();
 
         // Both remaining members (owner + member2) can unwrap the new key.
-        let owner_key = unwrap_library_key(&storage as &dyn CloudHome, &owner)
-            .await
-            .unwrap();
+        let owner_key = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &owner,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await
+        .unwrap();
         assert_eq!(owner_key, new_key);
 
-        let member2_key = unwrap_library_key(&storage as &dyn CloudHome, &member2)
-            .await
-            .unwrap();
+        let member2_key = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &member2,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await
+        .unwrap();
         assert_eq!(member2_key, new_key);
 
         // member1 cannot get a wrapped key.
@@ -608,6 +804,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&outsider),
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await;
@@ -632,6 +829,7 @@ mod tests {
             &pubkey_hex(&member),
             MemberRole::Member,
             &[42u8; 32],
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
@@ -644,6 +842,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&owner),
+            LIB_ID,
             "0000000003000-0000-dev1",
         )
         .await;
@@ -669,6 +868,7 @@ mod tests {
             &pubkey_hex(&member1),
             MemberRole::Member,
             &[42u8; 32],
+            LIB_ID,
             "0000000002000-0000-dev1",
         )
         .await
@@ -682,6 +882,7 @@ mod tests {
             &pubkey_hex(&member2),
             MemberRole::Member,
             &[42u8; 32],
+            LIB_ID,
             "0000000003000-0000-dev1",
         )
         .await
@@ -694,6 +895,7 @@ mod tests {
             &mut chain,
             &member1,
             &pubkey_hex(&member2),
+            LIB_ID,
             "0000000004000-0000-dev1",
         )
         .await;

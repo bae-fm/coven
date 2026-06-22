@@ -115,6 +115,7 @@ pub async fn invite_member(
         public_key_hex,
         role,
         encryption_key,
+        library_id,
         &invite_ts,
     )
     .await
@@ -160,6 +161,7 @@ pub async fn remove_member(
     user_keypair: &UserKeypair,
     hlc: &Hlc,
     public_key_hex: &str,
+    library_id: &str,
 ) -> Result<[u8; 32], MembershipOpsError> {
     // Download existing membership entries and build the chain.
     let entry_keys = storage
@@ -181,6 +183,7 @@ pub async fn remove_member(
         &mut chain,
         user_keypair,
         public_key_hex,
+        library_id,
         &revoke_ts,
     )
     .await
