@@ -115,9 +115,8 @@ pub enum BlobSync {
     /// Synced to every device: downloaded on pull and kept local. Part of "having
     /// the library" — e.g. cover art.
     Mirrored,
-    /// Uploaded but not downloaded on pull; fetched later on first read. For now,
-    /// with no local cache yet, an `OnDemand` blob is simply skipped on pull —
-    /// e.g. audio, which streams on demand.
+    /// Uploaded on push but not downloaded on pull: a pulling device skips it and
+    /// fetches it on first read — e.g. audio, which streams on demand.
     OnDemand,
 }
 
