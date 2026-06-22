@@ -342,27 +342,6 @@ pub async fn pull_changes(
             let (env, changeset_bytes) =
                 envelope::unpack(&envelope_bytes).map_err(PullError::InvalidEnvelope)?;
 
-            // The envelope's declared changeset_size must match the trailing
-            // bytes. The size is one of the fields the signature covers, so a
-            // signed changeset whose payload was altered after signing fails this
-            // (and the signature check below); an unsigned one is caught here
-            // alone. A mismatch means corrupt, truncated, or tampered bytes that
-            // failed their own integrity check, so the changeset is rejected
-            // rather than applied. The cursor is not advanced and this device's
-            // pull stops here: a transient on-download corruption then re-fetches
-            // next cycle instead of stranding the seq.
-            if env.changeset_size != changeset_bytes.len() {
-                error!(
-                    device_id = %head.device_id,
-                    seq,
-                    expected = env.changeset_size,
-                    actual = changeset_bytes.len(),
-                    "changeset_size mismatch in envelope; rejecting (corrupt or tampered)"
-                );
-                result.asset_downloads_failed = true;
-                break;
-            }
-
             // Schema version check: skip changesets from a newer schema.
             if env.schema_version > SCHEMA_VERSION {
                 warn!(
@@ -390,6 +369,28 @@ pub async fn pull_changes(
                     device_id = %head.device_id,
                     seq,
                     "changeset has invalid signature, skipping"
+                );
+                updated_cursors.insert(head.device_id.clone(), seq);
+                continue;
+            }
+
+            // The envelope's declared changeset_size must match the trailing bytes.
+            // For a signed changeset, in-transit truncation or tampering already
+            // failed the signature check above; a mismatch that survives to here is a
+            // buggy or inconsistent encoder (or corrupt bytes of an unsigned
+            // changeset) — permanent bad data, not a transient download glitch. Skip
+            // it and ADVANCE the cursor rather than hold: holding would re-fetch the
+            // same bad object every cycle and stall this device's pull on the seq
+            // forever (a single bad changeset would halt the whole fleet's sync).
+            // Real data behind the seq still reaches this device via a later snapshot
+            // from a device that produced consistent bytes.
+            if env.changeset_size != changeset_bytes.len() {
+                error!(
+                    device_id = %head.device_id,
+                    seq,
+                    expected = env.changeset_size,
+                    actual = changeset_bytes.len(),
+                    "changeset_size mismatch in envelope; skipping (corrupt encoder)"
                 );
                 updated_cursors.insert(head.device_id.clone(), seq);
                 continue;

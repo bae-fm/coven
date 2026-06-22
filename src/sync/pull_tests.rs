@@ -230,18 +230,17 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "a size-mismatched changeset must not be applied",
     );
-    // The cursor must NOT advance: the corruption may be a transient bad download,
-    // so the next cycle re-fetches this seq rather than stranding it forever.
+    // The cursor ADVANCES past the bad seq. A size mismatch that survives the
+    // signature check is a permanent buggy/inconsistent encoder, not a transient
+    // download glitch (truncation in transit fails the signature), so holding would
+    // re-fetch the same bad object every cycle and stall this device's pull forever
+    // — a single bad changeset would halt the whole fleet's sync. Skipping it
+    // (logged at error) keeps the fleet syncing; the row's data, if real, recovers
+    // via a later snapshot from a device that produced consistent bytes.
     assert_eq!(
         updated.get("dev1"),
-        None,
-        "cursor must not advance past a size-mismatched changeset",
-    );
-    // Surfaced through the same channel as the other genuinely-bad-data, hold-the-
-    // cursor cases (a walk failure), so the cycle does not report a clean idle.
-    assert!(
-        result.asset_downloads_failed,
-        "a size-mismatched changeset must be surfaced as a bad-data hold, not swallowed",
+        Some(&1),
+        "cursor advances past a permanently-bad size-mismatched changeset",
     );
 }
 
