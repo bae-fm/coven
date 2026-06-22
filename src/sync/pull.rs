@@ -675,7 +675,16 @@ async fn resolve_membership_authorization(
         // does not exist, so the changeset is forged.
         Err(super::storage::StorageError::NotFound(_)) => return MembershipJudgment::Unauthorized,
         // A transient storage error: we can't tell yet, so retry next cycle.
-        Err(_) => return MembershipJudgment::Indeterminate,
+        Err(e) => {
+            warn!(
+                grant_author = %coord.author_pubkey,
+                grant_seq = coord.seq,
+                error = %e,
+                "transient storage error fetching the named membership grant; \
+                 leaving the cursor to retry next cycle"
+            );
+            return MembershipJudgment::Indeterminate;
+        }
     };
 
     // Merge the named grant into the fresh chain and re-judge against the whole,
@@ -719,7 +728,13 @@ fn build_anchored_chain(
     entries: Vec<MembershipEntry>,
     owner_pubkey: Option<&str>,
 ) -> Option<MembershipChain> {
-    let chain = MembershipChain::from_entries(entries).ok()?;
+    let chain = match MembershipChain::from_entries(entries) {
+        Ok(chain) => chain,
+        Err(e) => {
+            warn!("membership entries did not form a valid chain: {e}");
+            return None;
+        }
+    };
     match owner_pubkey {
         Some(owner) if !chain.is_founded_by(owner) => None,
         _ => Some(chain),
