@@ -128,12 +128,21 @@ pub async fn invite_member(
         warn!("Failed to sync authorized keys: {e}");
     }
 
+    // The invite anchors the joiner to the library's OWNER — the chain founder,
+    // not whichever Owner happens to send the invite. A second Owner inviting must
+    // still hand the joiner the founder's pubkey, or the joiner would pin the wrong
+    // owner and reject the (correctly founder-anchored) chain forever (issue #102).
+    let owner_pubkey = chain
+        .founder_pubkey()
+        .ok_or_else(|| MembershipOpsError("membership chain has no founder".to_string()))?
+        .to_string();
+
     // Build the invite code
     Ok(crate::join_code::InviteCode {
         library_id: library_id.to_string(),
         library_name: library_name.to_string(),
         join_info,
-        owner_pubkey: user_pubkey_hex,
+        owner_pubkey,
     })
 }
 
@@ -326,3 +335,72 @@ pub async fn sync_authorized_keys(
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct MembershipOpsError(pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::hlc::Hlc;
+    use crate::sync::membership::MembershipAction;
+    use crate::sync::test_helpers::{founder_entry, make_entry, pubkey_hex, MockSyncStorage};
+
+    /// The invite anchors the joiner to the library FOUNDER, regardless of which
+    /// Owner sends it. A second Owner inviting must still hand over the founder's
+    /// pubkey, or the joiner pins the wrong owner and rejects the founder-anchored
+    /// chain forever (issue #102).
+    #[tokio::test]
+    async fn invite_carries_the_founder_not_the_inviting_owner() {
+        let founder = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let invitee = UserKeypair::generate();
+        let founder_pk = pubkey_hex(&founder);
+
+        // Chain: founder, then the founder adds `second_owner` as an Owner.
+        let storage = MockSyncStorage::new();
+        storage
+            .put_membership_entry(
+                &founder_pk,
+                1,
+                serde_json::to_vec(&founder_entry(&founder, "0000000001000-0000-f")).unwrap(),
+            )
+            .await
+            .unwrap();
+        let add_owner = make_entry(
+            &founder,
+            MembershipAction::Add,
+            &second_owner,
+            MemberRole::Owner,
+            "0000000002000-0000-f",
+        );
+        storage
+            .put_membership_entry(&founder_pk, 2, serde_json::to_vec(&add_owner).unwrap())
+            .await
+            .unwrap();
+
+        // The SECOND owner invites a new member. (MockSyncStorage is both the
+        // SyncStorage and the CloudHome.)
+        let hlc = Hlc::new("f".to_string());
+        let invite = invite_member(
+            &storage,
+            &storage,
+            &second_owner,
+            &hlc,
+            &pubkey_hex(&invitee),
+            MemberRole::Member,
+            &[7u8; 32],
+            "lib-1",
+            "Lib One",
+        )
+        .await
+        .expect("invite");
+
+        assert_eq!(
+            invite.owner_pubkey, founder_pk,
+            "the invite must carry the founder's pubkey",
+        );
+        assert_ne!(
+            invite.owner_pubkey,
+            pubkey_hex(&second_owner),
+            "not the inviting owner's pubkey",
+        );
+    }
+}

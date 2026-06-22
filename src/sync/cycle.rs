@@ -734,9 +734,10 @@ pub(crate) async fn ensure_owner_anchored_chain(
                 "membership chain founder {founder} does not match the pinned owner \
                  {p} — refusing (owner-takeover attempt)"
             )),
-            // No pin, but the chain is founded by our own key: the founder write
-            // landed and the pin didn't (a crash between the two writes). Complete
-            // the pin — an attacker cannot forge a founder signed by our key.
+            // No pin, but the chain is founded by our own key: founding writes the
+            // founder before the pin, so a crash after the write but before the pin
+            // lands exactly here. Complete the pin — an attacker cannot forge a
+            // founder signed by our key.
             None if founder == our_pk => {
                 db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &our_pk)
                     .await
