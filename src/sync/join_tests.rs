@@ -74,111 +74,90 @@ async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Co
     .await
 }
 
-/// A `library_id` containing `..` is refused at the decode boundary: `decode`
-/// returns the invalid-library-id error, so a decoded `InviteCode` never carries a
-/// traversal id. Driven end to end, the join fails and creates nothing outside the
-/// libraries root.
+/// Every traversal-shaped `library_id` is refused at the decode boundary: `decode`
+/// returns `JoinCodeError::InvalidLibraryId`, so a decoded `InviteCode` never
+/// carries a traversal id. Driven end to end, the decode error propagates as
+/// `JoinError::Database` and the join creates nothing outside the libraries root.
+///
+/// The cases share one mechanism and differ only in the malicious id and the
+/// directory it would escape to, so they run as a table:
+/// - `../escape`: `app_dir/libraries/../escape` resolves to `app_dir/escape`.
+/// - an absolute path: `libraries`.join("/abs") == "/abs" replaces the base.
+/// - `.`: a trailing `.` normalizes away, so `libraries/.` lands on the data dir.
 #[tokio::test]
-async fn join_rejects_parent_dir_library_id_at_decode() {
-    let encoded = encode(&invite_code_with_library_id("../escape"));
-    assert!(
-        matches!(
-            crate::join_code::decode(&encoded),
-            Err(JoinCodeError::InvalidLibraryId(_))
-        ),
-        "decode must refuse a `..` library_id with the invalid-library-id error",
-    );
-
+async fn join_rejects_traversal_library_id_at_decode() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
-    // `app_dir/libraries/../escape` resolves to `app_dir/escape` — outside the
-    // libraries root. The decode rejects the id, so it is never created.
-    let escape_target = app_dir.join("escape");
-
-    let result = join_result_for(&encoded, app_dir).await;
-    assert!(
-        result.is_err(),
-        "a traversal library_id must fail the join, got {result:?}",
-    );
-    assert!(
-        !escape_target.exists(),
-        "join must not create a directory outside the libraries root at {}",
-        escape_target.display(),
-    );
-}
-
-/// An absolute `library_id` escapes by replacing the base (`libraries`.join("/abs")
-/// == "/abs"). It is refused at the decode boundary, and the join creates nothing
-/// at the absolute target.
-#[tokio::test]
-async fn join_rejects_absolute_library_id_at_decode() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let app_dir = tmp.path();
+    // The absolute case escapes to a path *inside* the temp dir, so even a
+    // regressed guard never writes to a real shared location.
+    let parent_escape = app_dir.join("escape");
     let abs_escape = app_dir.join("abs_escape");
     let abs_id = abs_escape.to_str().expect("utf8 path").to_string();
 
-    let encoded = encode(&invite_code_with_library_id(&abs_id));
-    assert!(
-        matches!(
-            crate::join_code::decode(&encoded),
-            Err(JoinCodeError::InvalidLibraryId(_))
-        ),
-        "decode must refuse an absolute library_id with the invalid-library-id error",
-    );
+    let cases: [(&str, Option<&std::path::Path>); 3] = [
+        ("../escape", Some(parent_escape.as_path())),
+        (&abs_id, Some(abs_escape.as_path())),
+        (".", None),
+    ];
 
-    let result = join_result_for(&encoded, app_dir).await;
-    assert!(
-        result.is_err(),
-        "an absolute library_id must fail the join, got {result:?}",
-    );
-    assert!(
-        !abs_escape.exists(),
-        "join must not create a directory at an absolute library_id path {}",
-        abs_escape.display(),
-    );
+    for (library_id, escape_target) in cases {
+        let encoded = encode(&invite_code_with_library_id(library_id));
+        assert!(
+            matches!(
+                crate::join_code::decode(&encoded),
+                Err(JoinCodeError::InvalidLibraryId(_))
+            ),
+            "decode must refuse `{library_id}` with InvalidLibraryId",
+        );
+
+        let result = join_result_for(&encoded, app_dir).await;
+        assert!(
+            matches!(result, Err(JoinError::Database(_))),
+            "`{library_id}` must fail the join with the propagated decode error, got {result:?}",
+        );
+        if let Some(target) = escape_target {
+            assert!(
+                !target.exists(),
+                "join must not create an escape directory at {}",
+                target.display(),
+            );
+        }
+    }
 }
 
-/// A lone `.` library_id is refused at decode too: a trailing `.` component
-/// normalizes away, so `libraries/.` would resolve to the data dir rather than a
-/// child of `libraries/`. The decoder rejects it before it can name a directory.
+/// A normal `library_id` decodes and the join reaches the cloud step, where it
+/// fails on the unreachable endpoint (`JoinError::Invite`, from the wrapped-key
+/// download) rather than on the id — proving the decoder rejects only unsafe ids
+/// and the directory the join would create sits under `libraries/`.
+///
+/// Join reads the device's user keypair from the keyring before the cloud download,
+/// so a keypair must exist for execution to reach the cloud. The user keypair is one
+/// process-wide keyring account, so this seeds it under `SIGNING_KEY_GUARD` to keep
+/// a parallel test from deleting it mid-join; the guard is held across the join await
+/// (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so the
+/// blocking `std` lock never deadlocks against another task on this runtime).
 #[tokio::test]
-async fn join_rejects_current_dir_library_id_at_decode() {
-    let encoded = encode(&invite_code_with_library_id("."));
-    assert!(
-        matches!(
-            crate::join_code::decode(&encoded),
-            Err(JoinCodeError::InvalidLibraryId(_))
-        ),
-        "decode must refuse a `.` library_id with the invalid-library-id error",
-    );
-
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let app_dir = tmp.path();
-    let result = join_result_for(&encoded, app_dir).await;
-    assert!(
-        result.is_err(),
-        "a `.` library_id must fail the join, got {result:?}",
-    );
-}
-
-/// A normal `library_id` decodes cleanly and the join proceeds past the boundary
-/// (it later fails on the unreachable cloud, not on the id), proving the decoder
-/// rejects only unsafe ids and the directory the join would create sits under
-/// `libraries/`.
-#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn join_accepts_a_normal_library_id_past_decode() {
     let encoded = encode(&invite_code_with_library_id("abc-123"));
     let decoded = crate::join_code::decode(&encoded).expect("a normal id decodes");
     assert_eq!(decoded.library_id, "abc-123");
 
+    crate::keys::test_keyring::install();
+    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+    let ks = crate::keys::KeyService::new("join-test".to_string());
+    let _ = ks.delete_user_keypair_for_test();
+    ks.get_or_create_user_keypair()
+        .expect("seed the device user keypair");
+
     // End to end the join still fails — the S3 endpoint above is bogus — but it
-    // fails past the decode boundary, not at it: the id is accepted.
+    // fails at the cloud read past the decode boundary, not at the id.
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
     let result = join_result_for(&encoded, app_dir).await;
     assert!(
-        result.is_err(),
-        "the bogus cloud endpoint must fail the join after the id is accepted",
+        matches!(result, Err(JoinError::Invite(_))),
+        "the bogus cloud endpoint must fail the join at the cloud read, got {result:?}",
     );
 }
 

@@ -39,9 +39,10 @@ fn restore_code_with_lid(lid: &str) -> String {
             access_key: "ak".to_string(),
             secret_key: "sk".to_string(),
         },
-        // A valid 64-byte signing key so decode reaches (and rejects on) the id,
-        // not the key.
-        sk: URL_SAFE_NO_PAD.encode([0xAB_u8; 64]),
+        // A real Ed25519 keypair's 64 bytes: a malicious `lid` is rejected at decode
+        // before the key is touched, and a valid `lid` rebuilds this keypair and
+        // proceeds to the cloud step (where the loopback endpoint fails it).
+        sk: URL_SAFE_NO_PAD.encode(crate::keys::UserKeypair::generate().signing_key),
     };
     encode_restore_code(&code)
 }
@@ -68,99 +69,62 @@ async fn restore_result_for(
     .await
 }
 
-/// An `lid` containing `..` is refused at the decode boundary: `decode_restore_code`
-/// returns the invalid-library-id error, so a decoded `RestoreCode` never carries a
-/// traversal id. Driven end to end, the restore fails and creates nothing outside
+/// Every traversal-shaped `lid` is refused at the decode boundary:
+/// `decode_restore_code` returns `RestoreCodeError::InvalidLibraryId`, so a decoded
+/// `RestoreCode` never carries a traversal id. Driven end to end, the decode error
+/// propagates as `RestoreError::Database` and the restore creates nothing outside
 /// the libraries root.
+///
+/// The cases share one mechanism and differ only in the malicious id and the
+/// directory it would escape to, so they run as a table:
+/// - `../escape`: `app_dir/libraries/../escape` resolves to `app_dir/escape`.
+/// - an absolute path: `libraries`.join("/abs") == "/abs" replaces the base.
+/// - `.`: a trailing `.` normalizes away, so `libraries/.` lands on the data dir.
 #[tokio::test]
-async fn restore_rejects_parent_dir_lid_at_decode() {
-    let encoded = restore_code_with_lid("../escape");
-    assert!(
-        matches!(
-            decode_restore_code(&encoded),
-            Err(RestoreCodeError::InvalidLibraryId(_))
-        ),
-        "decode must refuse a `..` lid with the invalid-library-id error",
-    );
-
+async fn restore_rejects_traversal_lid_at_decode() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
-    // `app_dir/libraries/../escape` resolves to `app_dir/escape` — outside the
-    // libraries root. The decode rejects the id, so it is never created.
-    let escape_target = app_dir.join("escape");
-
-    let result = restore_result_for(&encoded, app_dir).await;
-    assert!(
-        result.is_err(),
-        "a traversal lid must fail the restore, got {result:?}",
-    );
-    assert!(
-        !escape_target.exists(),
-        "restore must not create a directory outside the libraries root at {}",
-        escape_target.display(),
-    );
-}
-
-/// An absolute `lid` escapes by replacing the base (`libraries`.join("/abs") ==
-/// "/abs"). It is refused at the decode boundary, and the restore creates nothing
-/// at the absolute target.
-#[tokio::test]
-async fn restore_rejects_absolute_lid_at_decode() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let app_dir = tmp.path();
-    // An absolute path *inside* the temp dir so the test never writes to a real
-    // shared location even if the guard regresses.
+    // The absolute case escapes to a path *inside* the temp dir, so even a
+    // regressed guard never writes to a real shared location.
+    let parent_escape = app_dir.join("escape");
     let abs_escape = app_dir.join("abs_escape");
     let abs_lid = abs_escape.to_str().expect("utf8 path").to_string();
 
-    let encoded = restore_code_with_lid(&abs_lid);
-    assert!(
-        matches!(
-            decode_restore_code(&encoded),
-            Err(RestoreCodeError::InvalidLibraryId(_))
-        ),
-        "decode must refuse an absolute lid with the invalid-library-id error",
-    );
+    let cases: [(&str, Option<&std::path::Path>); 3] = [
+        ("../escape", Some(parent_escape.as_path())),
+        (&abs_lid, Some(abs_escape.as_path())),
+        (".", None),
+    ];
 
-    let result = restore_result_for(&encoded, app_dir).await;
-    assert!(
-        result.is_err(),
-        "an absolute lid must fail the restore, got {result:?}",
-    );
-    assert!(
-        !abs_escape.exists(),
-        "restore must not create a directory at an absolute lid path {}",
-        abs_escape.display(),
-    );
+    for (lid, escape_target) in cases {
+        let encoded = restore_code_with_lid(lid);
+        assert!(
+            matches!(
+                decode_restore_code(&encoded),
+                Err(RestoreCodeError::InvalidLibraryId(_))
+            ),
+            "decode must refuse `{lid}` with InvalidLibraryId",
+        );
+
+        let result = restore_result_for(&encoded, app_dir).await;
+        assert!(
+            matches!(result, Err(RestoreError::Database(_))),
+            "`{lid}` must fail the restore with the propagated decode error, got {result:?}",
+        );
+        if let Some(target) = escape_target {
+            assert!(
+                !target.exists(),
+                "restore must not create an escape directory at {}",
+                target.display(),
+            );
+        }
+    }
 }
 
-/// A lone `.` lid is refused at decode too: a trailing `.` component normalizes
-/// away, so `libraries/.` would resolve to the data dir rather than a child of
-/// `libraries/`. The decoder rejects it before it can name a directory.
-#[tokio::test]
-async fn restore_rejects_current_dir_lid_at_decode() {
-    let encoded = restore_code_with_lid(".");
-    assert!(
-        matches!(
-            decode_restore_code(&encoded),
-            Err(RestoreCodeError::InvalidLibraryId(_))
-        ),
-        "decode must refuse a `.` lid with the invalid-library-id error",
-    );
-
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let app_dir = tmp.path();
-    let result = restore_result_for(&encoded, app_dir).await;
-    assert!(
-        result.is_err(),
-        "a `.` lid must fail the restore, got {result:?}",
-    );
-}
-
-/// A normal `lid` decodes cleanly and the restore proceeds past the boundary (it
-/// later fails on the unreachable cloud, not on the id), proving the decoder
-/// rejects only unsafe ids and the directory the restore would create sits under
-/// `libraries/`.
+/// A normal `lid` decodes and the restore reaches the cloud step, where it fails on
+/// the unreachable endpoint (`RestoreError::Snapshot`) rather than on the id —
+/// proving the decoder rejects only unsafe ids and the directory the restore would
+/// create sits under `libraries/`.
 #[tokio::test]
 async fn restore_accepts_a_normal_lid_past_decode() {
     let encoded = restore_code_with_lid("abc-123");
@@ -168,12 +132,12 @@ async fn restore_accepts_a_normal_lid_past_decode() {
     assert_eq!(decoded.lid, "abc-123");
 
     // End to end the restore still fails — the S3 endpoint above is unreachable —
-    // but it fails past the decode boundary, not at it: the id is accepted.
+    // but it fails at the snapshot download past the decode boundary, not at the id.
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
     let result = restore_result_for(&encoded, app_dir).await;
     assert!(
-        result.is_err(),
-        "the unreachable cloud endpoint must fail the restore after the id is accepted",
+        matches!(result, Err(RestoreError::Snapshot(_))),
+        "the unreachable cloud endpoint must fail the restore at the snapshot download, got {result:?}",
     );
 }

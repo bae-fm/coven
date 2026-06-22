@@ -353,19 +353,10 @@ mod tests {
     /// A lone `.` is rejected just as `..` is: a trailing `.` component is
     /// normalized away when the path resolves, so `libraries/.` would land on
     /// `libraries`'s parent (the data dir) rather than name a child of `libraries/`
-    /// — an escape. `Path::parent` makes this concrete: the parent of
-    /// `libraries/.` is `libraries`'s parent, not `libraries` itself.
+    /// — an escape. The unit under test is the rejection itself.
     #[test]
     fn validate_path_token_rejects_lone_current_dir() {
         assert_eq!(validate_path_token("."), Err(PathTokenError::CurDir));
-        // The escape this prevents: joined verbatim, a `.` id does not name a child.
-        let libraries_root = Path::new("/data/libraries");
-        let joined = libraries_root.join(".");
-        assert_ne!(
-            joined.parent(),
-            Some(libraries_root),
-            "`libraries/.` must not resolve to a child of the libraries root",
-        );
     }
 
     /// A `cloud_path` is a readable object key, so an interior `/` is legitimate
@@ -400,14 +391,9 @@ mod tests {
     /// so joining it onto `libraries/` yields a direct child of that root — the
     /// construction the join/restore/create paths perform once decode has validated
     /// the id. This is what makes the consumer-side join `data_dir/libraries/<id>`
-    /// contained without any further check.
+    /// contained without any further check. The unit under test is the acceptance.
     #[test]
     fn a_validated_id_joins_to_a_direct_child_of_libraries() {
-        let id = "abc-123";
-        assert_eq!(validate_path_token(id), Ok(()));
-        let libraries_root = Path::new("/data/libraries");
-        let dir = libraries_root.join(id);
-        assert_eq!(dir, Path::new("/data/libraries/abc-123"));
-        assert_eq!(dir.parent(), Some(libraries_root));
+        assert_eq!(validate_path_token("abc-123"), Ok(()));
     }
 }

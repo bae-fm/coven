@@ -215,6 +215,12 @@ pub async fn join_library(
     make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
+    // A function that reaches `remove_dir_all` validates its own id: this guards
+    // the destructive `libraries/<id>` create/delete against any direct caller,
+    // independent of the decode-time check that validates untrusted input up front.
+    crate::library_dir::validate_path_token(&code.library_id)
+        .map_err(|e| JoinError::Database(format!("invalid library id: {e}")))?;
+
     // `code.library_id` is a safe single path component: `crate::join_code::decode`
     // rejects any id that isn't, so a decoded `InviteCode` never carries a traversal
     // id and the directory it names below stays under `libraries/`.

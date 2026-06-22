@@ -210,6 +210,12 @@ pub async fn restore_from_cloud(
     make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
+    // A function that reaches `remove_dir_all` validates its own id: this guards
+    // the destructive `libraries/<id>` create/delete against any direct caller,
+    // independent of the decode-time check that validates untrusted input up front.
+    crate::library_dir::validate_path_token(library_id)
+        .map_err(|e| RestoreError::Database(format!("invalid library id: {e}")))?;
+
     // `library_id` is a safe single path component: `decode_restore_code` rejects
     // any `lid` that isn't, so the directory it names below stays under
     // `libraries/`. (A non-empty id is part of that guarantee — the decoder rejects
