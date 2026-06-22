@@ -48,7 +48,7 @@ async fn run_cycle(
         kp,
         lib,
         Some(storage as &dyn CloudHome),
-        &NoopBlobPlan,
+        &NoopBlobSource,
         None,
     )
     .await
@@ -102,7 +102,7 @@ async fn blob_delete_fires_immediately_without_waiting_for_peers() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await
     .expect("B open_db_and_pull");
@@ -224,7 +224,7 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await
     .expect("B open_db_and_pull");

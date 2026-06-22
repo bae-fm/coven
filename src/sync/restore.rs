@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::blob::BlobPlan;
+use crate::blob::BlobSource;
 use crate::config::{Config, ConfigError, HomeStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::keys::{KeyError, KeyService, UserKeypair};
@@ -207,7 +207,7 @@ pub async fn restore_from_cloud(
     app_dir: &Path,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
-    make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
+    make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
     if library_id.is_empty() {
@@ -251,8 +251,8 @@ pub async fn restore_from_cloud(
     let device_id = ids.new_id();
     let library_dir = LibraryDir::new(app_dir.join("libraries").join(library_id));
     std::fs::create_dir_all(&*library_dir)?;
-    // The host's blob plan is bound to the library dir we just created.
-    let blob_plan = make_blob_plan(&library_dir);
+    // The host's blob source is bound to the library dir we just created.
+    let blob_source = make_blob_source(&library_dir);
 
     let key_service = KeyService::new(library_id.to_string());
 
@@ -267,7 +267,7 @@ pub async fn restore_from_cloud(
         &join_info,
         library_name,
         &key_service,
-        blob_plan.as_ref(),
+        blob_source.as_ref(),
         &on_status,
     )
     .await;
@@ -302,7 +302,7 @@ pub async fn restore_from_code(
     app_dir: &Path,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
-    make_blob_plan: impl Fn(&LibraryDir) -> Box<dyn BlobPlan>,
+    make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -384,7 +384,7 @@ pub async fn restore_from_code(
         app_dir,
         clock,
         ids,
-        make_blob_plan,
+        make_blob_source,
         on_status,
     )
     .await?;
@@ -412,7 +412,7 @@ async fn bootstrap_and_save(
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
     key_service: &KeyService,
-    blob_plan: &dyn BlobPlan,
+    blob_source: &dyn BlobSource,
     on_status: &impl Fn(&str),
 ) -> Result<Config, RestoreError> {
     // Step 3: Bootstrap from snapshot.
@@ -441,7 +441,7 @@ async fn bootstrap_and_save(
         bucket_dyn,
         &cursors,
         library_dir,
-        blob_plan,
+        blob_source,
     )
     .await?;
 

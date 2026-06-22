@@ -29,7 +29,7 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::test_helpers::{create_synced_schema, test_synced_tables, NoopBlobPlan};
+use crate::sync::test_helpers::{create_synced_schema, test_synced_tables, NoopBlobSource};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -81,7 +81,7 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
         &keypair,
         &library_dir,
         None,
-        &NoopBlobPlan,
+        &NoopBlobSource,
         None,
     )
     .await

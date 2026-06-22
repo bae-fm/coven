@@ -23,7 +23,7 @@ use super::membership::{MemberRole, MembershipChain, MembershipCoord, Membership
 use super::push::SCHEMA_VERSION;
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
-use crate::blob::BlobPlan;
+use crate::blob::{BlobSource, BlobSync};
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::library_dir::LibraryDir;
@@ -137,7 +137,7 @@ pub async fn pull_changes(
     our_device_id: &str,
     cursors: &HashMap<String, u64>,
     library_dir: &LibraryDir,
-    blob_plan: &dyn BlobPlan,
+    blob_source: &dyn BlobSource,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
     let _ = library_dir;
     // The receiver's current wall-clock millis, read once from the register clock
@@ -506,13 +506,14 @@ pub async fn pull_changes(
                 }
             };
 
-            // Download + fsync every referenced blob BEFORE applying any row. If
+            // Download + fsync every Mirrored blob BEFORE applying any row. If
             // any fails, skip the whole changeset -- nothing applied, cursor not
             // advanced -- and stop this device's pull so a later seq's success
             // can't carry the cursor past the failed seq (its blobs would then
-            // never be re-fetched). The next cycle resumes at this seq.
+            // never be re-fetched). The next cycle resumes at this seq. OnDemand
+            // blobs are not downloaded here — they are fetched on first read.
             let blobs_ok =
-                download_changeset_blobs(db, &changes, blob_plan, storage, &in_changeset_keys)
+                download_changeset_blobs(db, &changes, blob_source, storage, &in_changeset_keys)
                     .await;
             if !blobs_ok {
                 warn!(
@@ -874,10 +875,14 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
     Ok(map)
 }
 
-/// Download blobs a changeset references. Returns true if all succeeded.
-/// The host's [`BlobPlan`] decides which row-changes carry blobs, their cloud
-/// namespace/scope, and the local destination path; the per-blob download runs
-/// through [`download_blobs`].
+/// Download the `Mirrored` blobs a changeset references. Returns true if all
+/// succeeded. The host's [`BlobSource`] decides which row-changes carry blobs,
+/// their cloud namespace/scope/retention class, and the local destination path;
+/// the per-blob download runs through [`download_blobs`].
+///
+/// Only [`BlobSync::Mirrored`] blobs are downloaded — those are part of having the
+/// library on every device. An [`BlobSync::OnDemand`] blob is recorded by the
+/// applied row but its bytes are fetched on first read, so it is skipped here.
 ///
 /// `in_changeset_keys` are the item keys this changeset itself mints, so an
 /// `Item(id)`-scoped blob resolves its key WITHOUT the changeset having been
@@ -885,17 +890,30 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
 async fn download_changeset_blobs(
     db: &Database,
     changes: &[RowChange],
-    blob_plan: &dyn BlobPlan,
+    blob_source: &dyn BlobSource,
     storage: &dyn SyncStorage,
     in_changeset_keys: &HashMap<String, [u8; 32]>,
 ) -> bool {
     download_blobs(
         db,
-        blob_plan.blobs_to_pull(changes),
+        mirrored_blobs(blob_source, changes),
         storage,
         in_changeset_keys,
     )
     .await
+}
+
+/// The `Mirrored` blobs the `changes` reference, mapping each change through the
+/// host's [`BlobSource`] and keeping only the class a pulling device downloads.
+fn mirrored_blobs(
+    blob_source: &dyn BlobSource,
+    changes: &[RowChange],
+) -> Vec<crate::blob::BlobRef> {
+    changes
+        .iter()
+        .flat_map(|change| blob_source.blobs_for_change(change))
+        .filter(|blob| blob.sync == BlobSync::Mirrored)
+        .collect()
 }
 
 /// Resolve a blob's public scope to its internal key scope WITHOUT requiring the
@@ -924,7 +942,7 @@ async fn resolve_pull_scope(
 /// succeeded. Skips blobs whose local file already exists.
 ///
 /// Each blob's public scope is resolved to the internal key scope here — not in
-/// [`BlobPlan`], which has no DB — via [`resolve_pull_scope`], which consults
+/// [`BlobSource`], which has no DB — via [`resolve_pull_scope`], which consults
 /// `in_changeset_keys` (item keys the current changeset mints) before the DB so
 /// resolution does not depend on the changeset being applied. A blob whose item
 /// key is missing is a failed download (logged, `all_ok = false`) so a caller

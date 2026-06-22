@@ -431,21 +431,24 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 /// INSERT changesets that carried each row's image/torrent blob (seq <= cursor)
 /// are never re-walked and the per-changeset blob download never fires for them.
 /// Without this reconciliation a bootstrapped device has the rows but none of the
-/// files they point at (a synced album shows a placeholder cover). Audio is
-/// unaffected: a host's [`crate::blob::BlobPlan`] excludes audio from the blobs
-/// it wants local (it streams on demand), so `blobs_in_db` does not list it.
+/// files they point at (a synced album shows a placeholder cover). Only the
+/// `Mirrored` blobs are reconciled: an `OnDemand` blob (e.g. audio) is fetched on
+/// first read, so a bootstrapped device need not download it up front — this scan
+/// filters [`crate::blob::blobs_in_db`](crate::blob::BlobSource::blobs_in_db) to
+/// the `Mirrored` class, the same class the incremental pull downloads.
 ///
-/// Reads the blobs the host's plan finds in the DB at `db_path`, then downloads
-/// each via the same [`crate::sync::pull::download_blobs`] path the incremental
-/// pull uses (skipping any whose local file already exists). A failed download is
-/// logged there and reflected in the returned flag; the bootstrap that calls this
-/// records the not-yet-complete state in [`SNAPSHOT_BLOB_BACKFILL_PENDING`], and
-/// each subsequent sync cycle re-runs this until it returns true, so a blob whose
-/// object was not yet in the cloud (or whose download hit a transient error) at
-/// bootstrap is fetched on a later cycle rather than lost. A clear flag means no
-/// cycle runs this, so a caught-up library pays nothing.
+/// Reads the blobs the host's source finds in the DB at `db_path`, then downloads
+/// the `Mirrored` ones via the same [`crate::sync::pull::download_blobs`] path the
+/// incremental pull uses (skipping any whose local file already exists). A failed
+/// download is logged there and reflected in the returned flag; the bootstrap that
+/// calls this records the not-yet-complete state in
+/// [`SNAPSHOT_BLOB_BACKFILL_PENDING`], and each subsequent sync cycle re-runs this
+/// until it returns true, so a blob whose object was not yet in the cloud (or whose
+/// download hit a transient error) at bootstrap is fetched on a later cycle rather
+/// than lost. A clear flag means no cycle runs this, so a caught-up library pays
+/// nothing.
 ///
-/// `blobs_in_db` is a read-only enumeration the host's plan runs against a
+/// `blobs_in_db` is a read-only enumeration the host's source runs against a
 /// short-lived connection to the same on-disk DB the `db` actor owns; `db` is
 /// still needed because `download_blobs` resolves each blob's scope through it
 /// (an `Item`-scoped blob reads its key from the `item_keys` rows). At bootstrap
@@ -456,13 +459,16 @@ pub(crate) async fn reconcile_snapshot_blobs(
     db: &crate::database::Database,
     db_path: &Path,
     storage: &dyn SyncStorage,
-    blob_plan: &dyn crate::blob::BlobPlan,
+    blob_source: &dyn crate::blob::BlobSource,
 ) -> Result<bool, crate::database::DbError> {
-    let blobs = {
+    let blobs: Vec<crate::blob::BlobRef> = {
         let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
-        blob_plan
+        blob_source
             .blobs_in_db(&conn)
             .map_err(crate::database::DbError::from)?
+            .into_iter()
+            .filter(|blob| blob.sync == crate::blob::BlobSync::Mirrored)
+            .collect()
     };
 
     if blobs.is_empty() {

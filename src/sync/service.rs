@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use tracing::{error, info};
 
-use crate::blob::BlobPlan;
+use crate::blob::BlobSource;
 use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
@@ -68,7 +68,7 @@ impl SyncService {
         message: &str,
         keypair: &UserKeypair,
         library_dir: &LibraryDir,
-        blob_plan: &dyn BlobPlan,
+        blob_source: &dyn BlobSource,
     ) -> Result<SyncResult, SyncCycleError> {
         let _ = library_dir;
 
@@ -97,11 +97,13 @@ impl SyncService {
             }
         };
 
-        // Step 3: upload blobs the outgoing changeset references, before the
-        // envelope, so pullers can fetch them as soon as they see the change.
+        // Step 3: upload the blobs the outgoing changeset references, before the
+        // envelope, so pullers can fetch them as soon as they see the change. Both
+        // retention classes upload here — OnDemand differs from Mirrored only on
+        // the pull side (it is not downloaded), not on push.
         if let Some(ref cs) = outgoing_cs {
             let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
-            for blob in blob_plan.blobs_to_push(&changes) {
+            for blob in changes.iter().flat_map(|c| blob_source.blobs_for_change(c)) {
                 match crate::local_blob::exists(&blob.local_path).await {
                     Ok(true) => {}
                     // The file is absent but the outgoing changeset references it.
@@ -197,7 +199,7 @@ impl SyncService {
             &self.device_id,
             cursors,
             library_dir,
-            blob_plan,
+            blob_source,
         )
         .await
         .map_err(SyncCycleError::Pull)?;

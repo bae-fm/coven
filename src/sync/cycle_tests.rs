@@ -49,7 +49,7 @@ async fn run_cycle_m(
         keypair,
         ld,
         None,
-        &NoopBlobPlan,
+        &NoopBlobSource,
         None,
     )
     .await
@@ -127,7 +127,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 
     // A fresh peer pulls: it gets the shareable row, never the gated-false one.
     let db_b = open_test_db();
-    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobPlan).await;
+    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobSource).await;
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'pub'").await,
         "Shareable",
@@ -163,7 +163,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
 
     let db_b = open_test_db();
-    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobPlan).await;
+    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobSource).await;
     assert!(
         !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "a gated-false row must not reach a peer",
@@ -181,7 +181,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     // n1 was gated-false in cycle 1 (cut → no changeset pushed), so the flip
     // re-emits it at seq 1. Re-pull from empty cursors to pick it up wherever it
     // landed.
-    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobPlan).await;
+    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld, &NoopBlobSource).await;
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "Album Title",
@@ -252,7 +252,7 @@ async fn cycle_reports_resume_drain_promptly_when_drain_breaks_mid_batch() {
         &keypair,
         &ld,
         Some(&cloud as &dyn CloudHome),
-        &NoopBlobPlan,
+        &NoopBlobSource,
         Some(&PublishingObserver as &dyn BlobUploadObserver),
     )
     .await

@@ -36,7 +36,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::blob::{BlobPlan, BlobRef};
+use crate::blob::{BlobRef, BlobSource};
 use crate::changeset::RowChange;
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::HomeStorage;
@@ -283,10 +283,10 @@ impl CovenLibrary {
             // `Arc` (`ClockRef`) even on the single-threaded browser runtime.
             std::sync::Arc::new(SystemClock) as ClockRef,
             library_dir,
-            // The demo schema has no blob-bearing tables, so its blob plan
-            // references nothing. A real app supplies a `BlobPlan` that maps its
-            // blob-bearing rows to cloud objects (see `BlobPlan`).
-            Rc::new(DemoBlobPlan),
+            // The demo schema has no blob-bearing tables, so its blob source
+            // references nothing. A real app supplies a `BlobSource` that maps its
+            // blob-bearing rows to cloud objects (see `BlobSource`).
+            Rc::new(DemoBlobSource),
             None,
             schedule,
         );
@@ -398,16 +398,13 @@ fn value_ref_to_json(column: &str, value: ValueRef<'_>) -> Result<serde_json::Va
     })
 }
 
-/// The demo app's blob plan: it references no blobs, because the demo `notes`
-/// schema has no blob-bearing tables. **A real app supplies its own** `BlobPlan`
+/// The demo app's blob source: it references no blobs, because the demo `notes`
+/// schema has no blob-bearing tables. **A real app supplies its own** `BlobSource`
 /// that maps its rows (e.g. a cover image) to cloud objects.
-struct DemoBlobPlan;
+struct DemoBlobSource;
 
-impl BlobPlan for DemoBlobPlan {
-    fn blobs_to_push(&self, _changes: &[RowChange]) -> Vec<BlobRef> {
-        Vec::new()
-    }
-    fn blobs_to_pull(&self, _changes: &[RowChange]) -> Vec<BlobRef> {
+impl BlobSource for DemoBlobSource {
+    fn blobs_for_change(&self, _change: &RowChange) -> Vec<BlobRef> {
         Vec::new()
     }
     fn blobs_in_db(&self, _conn: &Connection) -> rusqlite::Result<Vec<BlobRef>> {

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{BlobPlan, BlobRef, BlobScope, ResolvedScope};
+use crate::blob::{BlobRef, BlobScope, BlobSource, BlobSync, ResolvedScope};
 use crate::changeset::RowChange;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
@@ -173,15 +173,18 @@ async fn reading_a_wrong_length_item_key_errors() {
     );
 }
 
-/// A blob plan that maps each `note_photos` row to an `Item`-scoped blob keyed by
-/// the row's `note_id` — the public scope a sharing host emits, the one whose
-/// resolution `download_changeset_blobs` performs. The blob lives at `dir/{id}`,
-/// the namespace is `audio` (the bulk share payload bae moves this way).
-struct ItemPhotoBlobPlan {
+/// A blob source that maps each `note_photos` row to an `Item`-scoped,
+/// `Mirrored` blob keyed by the row's `note_id` — the public scope a sharing host
+/// emits, the one whose resolution `download_changeset_blobs` performs. The blob
+/// lives at `dir/{id}`, the namespace is `audio` (the bulk share payload bae moves
+/// this way). It is `Mirrored` here so the pull downloads it: this exercise is
+/// about resolving the item key during download-before-apply, not the on-demand
+/// skip.
+struct ItemPhotoBlobSource {
     dir: std::path::PathBuf,
 }
 
-impl ItemPhotoBlobPlan {
+impl ItemPhotoBlobSource {
     /// Every `note_photos` row maps to an `Item`-scoped blob keyed by its
     /// `note_id`, regardless of discovery path.
     fn scope_for(_kind: &str, note_id: &str) -> BlobScope {
@@ -189,16 +192,19 @@ impl ItemPhotoBlobPlan {
     }
 
     fn refs(&self, changes: &[RowChange]) -> Vec<BlobRef> {
-        crate::sync::test_helpers::note_photos_refs(changes, &self.dir, "audio", &Self::scope_for)
+        crate::sync::test_helpers::note_photos_refs(
+            changes,
+            &self.dir,
+            "audio",
+            &Self::scope_for,
+            BlobSync::Mirrored,
+        )
     }
 }
 
-impl BlobPlan for ItemPhotoBlobPlan {
-    fn blobs_to_push(&self, changes: &[RowChange]) -> Vec<BlobRef> {
-        self.refs(changes)
-    }
-    fn blobs_to_pull(&self, changes: &[RowChange]) -> Vec<BlobRef> {
-        self.refs(changes)
+impl BlobSource for ItemPhotoBlobSource {
+    fn blobs_for_change(&self, change: &RowChange) -> Vec<BlobRef> {
+        self.refs(std::slice::from_ref(change))
     }
     fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>> {
         crate::sync::test_helpers::note_photos_refs_from_db(
@@ -206,6 +212,7 @@ impl BlobPlan for ItemPhotoBlobPlan {
             &self.dir,
             "audio",
             &Self::scope_for,
+            BlobSync::Mirrored,
         )
     }
 }
@@ -300,7 +307,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     );
 
     let dst = tempfile::tempdir().expect("B blob dir");
-    let plan = ItemPhotoBlobPlan {
+    let plan = ItemPhotoBlobSource {
         dir: dst.path().to_path_buf(),
     };
     let (_tmp_lib, ld) = temp_library_dir();

@@ -110,7 +110,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         &keypair,
         &ld,
         None,
-        &NoopBlobPlan,
+        &NoopBlobSource,
         None,
     )
     .await
@@ -152,7 +152,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         "dev-a",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await
     .expect("pull into A");
@@ -261,7 +261,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await
     .expect("pull");
@@ -582,7 +582,7 @@ async fn cycle_error_mid_span_still_re_attaches_capture_session() {
         &keypair,
         &ld,
         None,
-        &NoopBlobPlan,
+        &NoopBlobSource,
         None,
     )
     .await;

@@ -78,7 +78,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await
     .expect("B open_db_and_pull");
@@ -108,7 +108,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &keypair,
         &lib_b,
         None,
-        &NoopBlobPlan,
+        &NoopBlobSource,
         None,
     )
     .await
@@ -167,7 +167,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("push snapshot");
 
     // The cover blob exists in the cloud (uploaded when A first imported the
-    // album), keyed `photos/photo1` as `PhotoBlobPlan` maps a cover row. The
+    // album), keyed `photos/photo1` as `PhotoBlobSource` maps a cover row. The
     // mock ignores the scope, so any resolved scope seeds it.
     storage
         .put_blob(
@@ -184,7 +184,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     // with a plan that maps `note_photos` rows to blobs under B's library dir.
     let (_tmp_b, lib_b) = temp_library_dir();
     let blob_dir = lib_b.join("photos");
-    let plan = PhotoBlobPlan {
+    let plan = PhotoBlobSource {
         dir: blob_dir.clone(),
     };
     let expected_blob = blob_dir.join("photo1");
@@ -272,7 +272,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     // download attempt fails.
     let (_tmp_b, lib_b) = temp_library_dir();
     let blob_dir = lib_b.join("photos");
-    let plan = PhotoBlobPlan {
+    let plan = PhotoBlobSource {
         dir: blob_dir.clone(),
     };
     let expected_blob = blob_dir.join("photo1");
