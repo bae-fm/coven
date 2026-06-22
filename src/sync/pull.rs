@@ -458,41 +458,34 @@ async fn resolve_membership_authorization(
         return MembershipJudgment::Unauthorized;
     };
 
-    // Reload the entries fresh: the cycle-start LIST may have lagged the entry
-    // that authorizes this author. Only the storage *read* is a reason to retry;
-    // a validation failure of the reloaded set must NOT stall (see below).
+    // Best-effort fresh reload to catch an authorizing entry the cycle-start LIST
+    // lagged. This is ONLY an optimization to refresh the broader chain; nothing
+    // here decides retry-vs-skip, so nothing here returns Indeterminate. On ANY
+    // reload problem — a storage read failure, an unparseable/undecryptable entry,
+    // or a whole-set validation failure (a member can plant a bogus, listable
+    // entry) — fall back to the known-good cycle-start chain. The keyed grant GET
+    // below is the sole authority: it fetches the one specific entry (bypassing a
+    // poisoned whole set) and it alone separates a real I/O error (retry) from
+    // forged content (skip). A genuine storage outage therefore still surfaces as
+    // Indeterminate via that GET, while no bogus entry can stall the pull.
     let fresh = match reload_entries(storage).await {
-        // Genuine storage read failure — can't tell yet, retry next cycle.
-        Err(()) => return MembershipJudgment::Indeterminate,
-        Ok(entries) if entries.is_empty() => {
-            // The chain is append-only and was non-empty at cycle start, so an
-            // empty re-list mid-cycle is an anomalous transient. Keep judging
-            // against the cycle-start chain we already hold — the keyed grant GET
-            // below resolves the gap regardless of what the list returns.
+        Some(entries) if entries.is_empty() => {
+            // Append-only chain came back empty mid-cycle — an anomalous transient.
             warn!("membership re-list came back empty mid-cycle; keeping the cycle-start chain");
             current.clone()
         }
-        Ok(entries) => {
+        Some(entries) => {
             let only_entries = entries.into_iter().map(|(_, e)| e).collect();
-            match MembershipChain::from_entries(only_entries) {
-                Ok(chain) => chain,
-                // A reloaded entry fails whole-chain validation — e.g. a member
-                // planted a bogus, listable, self-signed Add. That must NOT stall
-                // and must NOT fail open: fall back to the known-good cycle-start
-                // chain (already validated when it loaded) and resolve this author
-                // via the keyed grant below. A keyed GET fetches the one specific
-                // entry, bypassing the poisoned whole-set validation — so a bogus
-                // entry can neither block a legitimate member nor stall the pull.
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "reloaded membership chain failed validation; falling back \
-                         to the cycle-start chain"
-                    );
-                    current.clone()
-                }
-            }
+            MembershipChain::from_entries(only_entries).unwrap_or_else(|e| {
+                warn!(
+                    error = %e,
+                    "reloaded membership chain failed validation; falling back to \
+                     the cycle-start chain"
+                );
+                current.clone()
+            })
         }
+        None => current.clone(),
     };
     if fresh.can_write_now(author) {
         return MembershipJudgment::Authorized(fresh);
@@ -559,25 +552,31 @@ async fn resolve_membership_authorization(
     }
 }
 
-/// Re-list and re-download the membership entries — storage reads only, no
-/// validation. `Err(())` is a genuine storage read failure (the caller treats it
-/// as indeterminate/retry). Validation is deliberately the caller's job and kept
-/// separate: a bogus-but-listable entry fails whole-chain validation, and that is
-/// a "skip this changeset / fall back to the known-good chain" condition, never a
-/// "retry forever" one — folding it into a read error here would let one planted
-/// entry stall every device's pull. The underlying read error is logged here
-/// since the caller only needs the fact of failure.
+/// Re-list and re-download the membership entries for a best-effort chain refresh.
+/// Returns `None` on ANY problem — a list/get I/O error OR an unparseable /
+/// undecryptable entry — logging the cause; the caller then falls back to the
+/// known-good cycle-start chain. Deliberately never signals "retry": a planted,
+/// listable entry that can't be parsed is attacker-controllable content, and
+/// folding it into a retry would let one such object stall every device's pull
+/// forever. Whether a genuine I/O outage should retry is decided downstream by the
+/// keyed grant GET, which is per-entry and can separate I/O from content.
 async fn reload_entries(
     storage: &dyn SyncStorage,
-) -> Result<Vec<(MembershipCoord, MembershipEntry)>, ()> {
-    let keys = storage.list_membership_entries().await.map_err(|e| {
-        warn!("membership re-list failed while resolving authorization: {e}");
-    })?;
-    super::membership_ops::download_entries(storage, &keys)
-        .await
-        .map_err(|e| {
+) -> Option<Vec<(MembershipCoord, MembershipEntry)>> {
+    let keys = match storage.list_membership_entries().await {
+        Ok(keys) => keys,
+        Err(e) => {
+            warn!("membership re-list failed while resolving authorization: {e}");
+            return None;
+        }
+    };
+    match super::membership_ops::download_entries(storage, &keys).await {
+        Ok(entries) => Some(entries),
+        Err(e) => {
             warn!("membership re-download failed while resolving authorization: {e}");
-        })
+            None
+        }
+    }
 }
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each

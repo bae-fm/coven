@@ -908,6 +908,166 @@ async fn pull_does_not_stall_when_a_bogus_entry_becomes_listable_mid_cycle() {
     );
 }
 
+/// The same stall through an UNPARSEABLE reload entry: a member can plant a
+/// validly-stored object whose bytes are not a membership entry. If it appears in
+/// the reload LIST, the whole-set re-download must not choke into a "retry forever"
+/// — the reload is best-effort and falls back to the cycle-start chain, so the
+/// changeset skips and the cursor advances instead of freezing.
+#[tokio::test]
+async fn pull_does_not_stall_when_an_unparseable_entry_becomes_listable_mid_cycle() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let attacker = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let attacker_pk = hex::encode(attacker.public_key);
+
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    // A garbage object (not a parseable membership entry), hidden from the first
+    // LIST so the cycle-start chain loads clean, revealed on the reload's LIST
+    // where the whole-set download would otherwise choke on it.
+    storage
+        .put_membership_entry(&attacker_pk, 1, b"not a membership entry".to_vec())
+        .await
+        .unwrap();
+    storage.reveal_membership_after_first_list(&attacker_pk, 1);
+
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Forged', NULL, '0000000003000-0000-attacker', '2026-01-01')",
+        ],
+    )
+    .await;
+    let grant = MembershipCoord {
+        author: attacker_pk.clone(),
+        seq: 1,
+    };
+    let packed = envelope::pack_signed(
+        "devAttacker",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &attacker,
+        Some(grant),
+        &cs,
+    );
+    storage.put_changeset_packed("devAttacker", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.skipped_unauthorized, 1);
+    assert_eq!(
+        updated.get("devAttacker"),
+        Some(&1),
+        "an unparseable entry in the reload must not stall the pull"
+    );
+}
+
+/// The flip side of the no-stall guarantee: a poisoned reload set must not drop a
+/// legitimate member. The owner's Add of a member lags the cycle-start LIST, and
+/// an unrelated garbage object also surfaces only on the reload (poisoning the
+/// whole-set download). The member's changeset must still apply — resolved through
+/// the keyed grant GET, which fetches the one real Add and bypasses the poison.
+#[tokio::test]
+async fn pull_authorizes_a_lagging_member_even_when_the_reload_set_is_poisoned() {
+    let storage = MockSyncStorage::new();
+
+    let owner = UserKeypair::generate();
+    let member = UserKeypair::generate();
+    let intruder = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let intruder_pk = hex::encode(intruder.public_key);
+
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+    let add_member = make_entry(
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "0000000002000-0000-owner",
+    );
+    storage
+        .put_membership_entry(&owner_pk, 2, serde_json::to_vec(&add_member).unwrap())
+        .await
+        .unwrap();
+    // The member's authorizing entry lags the cycle-start LIST (revealed on reload).
+    storage.reveal_membership_after_first_list(&owner_pk, 2);
+    // An unrelated garbage object also appears only on the reload — it poisons the
+    // whole-set download but must not block the member.
+    storage
+        .put_membership_entry(&intruder_pk, 1, b"garbage".to_vec())
+        .await
+        .unwrap();
+    storage.reveal_membership_after_first_list(&intruder_pk, 1);
+
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromMember', NULL, '0000000003000-0000-member', '2026-01-01')",
+        ],
+    )
+    .await;
+    let grant = MembershipCoord {
+        author: owner_pk.clone(),
+        seq: 2,
+    };
+    let packed = envelope::pack_signed(
+        "devMember",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:00:00Z",
+        &member,
+        Some(grant),
+        &cs,
+    );
+    storage.put_changeset_packed("devMember", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+
+    assert_eq!(
+        result.changesets_applied, 1,
+        "the member's changeset must apply via its keyed grant despite the poisoned reload"
+    );
+    assert_eq!(result.skipped_unauthorized, 0);
+    assert_eq!(updated.get("devMember"), Some(&1));
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+}
+
 /// The push side binds an outgoing changeset to this device's own membership
 /// grant, so a puller in the lag window can resolve it.
 #[tokio::test]
