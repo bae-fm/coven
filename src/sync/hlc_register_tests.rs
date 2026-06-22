@@ -192,16 +192,21 @@ fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
     );
 }
 
-/// Revocation is enforced by current write-capable membership, not by when a
-/// changeset claims to have been authored. A removed member signs a changeset
-/// whose envelope timestamp falls between their Add and Remove entries; pull must
-/// still reject it because the author is not a *current* write-capable member.
+/// Revocation is enforced by current membership, not by when a changeset claims
+/// to have been authored. A removed member signs a changeset whose envelope
+/// timestamp falls between their Add and Remove entries; pull must still reject it
+/// because the author is not a current member. The removed member's device signs
+/// its own head, so the rejection now lands at the head check (a removed member's
+/// head is skipped before its changesets are even fetched) — strictly stronger
+/// than the changeset-level check, and still keyed on *current* membership rather
+/// than the (spoofable) envelope timestamp.
 #[tokio::test]
 async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
-    let storage = MockSyncStorage::new();
-
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
+    // The mock signs the head it publishes for `member-device` with the member's
+    // own keypair, the way a real device signs its own head.
+    let storage = MockSyncStorage::with_keypair(member.clone());
 
     let entries = vec![
         founder_entry(&owner, "0000000001000-0000-owner"),
@@ -266,7 +271,9 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         "a removed member's changeset must be rejected",
     );
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get("member-device"), Some(&1));
+    // The removed member's head is skipped, so its changeset is never fetched and
+    // its cursor is never advanced (nothing was examined to advance past).
+    assert_eq!(updated.get("member-device"), None);
 }
 
 /// `Database::open` seeds the register from the persisted high-water mark, so the

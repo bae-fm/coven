@@ -8,13 +8,14 @@
 //! choice (`.enc` for an encrypted home, no suffix for a plaintext one).
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
-use super::storage::{DeviceHead, StorageError, SyncStorage};
+use super::signed_control::{HeadJson, MinSchemaVersionJson};
+use super::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
+use crate::keys::UserKeypair;
 use crate::storage::cloud::CloudHome;
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
@@ -132,23 +133,6 @@ impl CloudCipher {
     }
 }
 
-/// Serialized form of a device head stored in `heads/{device_id}.json{suffix}`.
-#[derive(Serialize, Deserialize)]
-struct HeadJson {
-    seq: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    snapshot_seq: Option<u64>,
-    /// RFC 3339 timestamp of when this head was last written.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_sync: Option<String>,
-}
-
-/// Serialized form of `min_schema_version.json{suffix}`.
-#[derive(Serialize, Deserialize)]
-struct MinSchemaVersionJson {
-    min_schema_version: u32,
-}
-
 /// `SyncStorage` that delegates raw I/O to a `CloudHome` and handles the path
 /// layout and the at-rest protection (its [`CloudCipher`]).
 pub struct CloudSyncStorage {
@@ -157,14 +141,25 @@ pub struct CloudSyncStorage {
     /// How blob objects are keyed. Unlike the cipher, the scheme does not rotate
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
+    /// The device's signing identity. The control objects this storage writes
+    /// (its head, the min_schema floor) are signed with it so a reader can
+    /// attribute and verify them; the at-rest cipher proves confidentiality, not
+    /// authorship.
+    keypair: UserKeypair,
 }
 
 impl CloudSyncStorage {
-    pub fn new(home: Box<dyn CloudHome>, cipher: CloudCipher, blob_paths: BlobPathScheme) -> Self {
+    pub fn new(
+        home: Box<dyn CloudHome>,
+        cipher: CloudCipher,
+        blob_paths: BlobPathScheme,
+        keypair: UserKeypair,
+    ) -> Self {
         CloudSyncStorage {
             home,
             cipher: Arc::new(RwLock::new(cipher)),
             blob_paths,
+            keypair,
         }
     }
 
@@ -394,11 +389,22 @@ impl SyncStorage for CloudSyncStorage {
             let head_json: HeadJson = serde_json::from_slice(&decoded)
                 .map_err(|e| StorageError::S3(format!("parse head {device_id}: {e}")))?;
 
+            // A head whose signature doesn't verify against its embedded author
+            // is forged (the bucket is untrusted) -- skip it like one we can't
+            // decrypt, so it can't pollute sync status or drive a per-seq fetch
+            // loop. The author the signature is bound to is surfaced so the
+            // caller can run the membership (authorization) check.
+            if !head_json.verify(device_id) {
+                warn!("skipping head {device_id} with an invalid signature");
+                continue;
+            }
+
             heads.push(DeviceHead {
                 device_id: device_id.to_string(),
                 seq: head_json.seq,
                 snapshot_seq: head_json.snapshot_seq,
                 last_sync: head_json.last_sync,
+                author_pubkey: head_json.author_pubkey,
             });
         }
 
@@ -434,11 +440,13 @@ impl SyncStorage for CloudSyncStorage {
         snapshot_seq: Option<u64>,
         timestamp: &str,
     ) -> Result<(), StorageError> {
-        let head = HeadJson {
+        let head = HeadJson::signed(
+            device_id,
             seq,
             snapshot_seq,
-            last_sync: Some(timestamp.to_string()),
-        };
+            Some(timestamp.to_string()),
+            &self.keypair,
+        );
         let json = serde_json::to_vec(&head)
             .map_err(|e| StorageError::S3(format!("serialize head: {e}")))?;
         let stored = self.cipher().seal(&json);
@@ -521,7 +529,7 @@ impl SyncStorage for CloudSyncStorage {
         Ok(seqs)
     }
 
-    async fn get_min_schema_version(&self) -> Result<Option<u32>, StorageError> {
+    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
         let key = format!("min_schema_version.json{}", self.suffix());
         let stored = match self.home.read(&key).await {
             Ok(data) => data,
@@ -537,13 +545,23 @@ impl SyncStorage for CloudSyncStorage {
         let parsed: MinSchemaVersionJson = serde_json::from_slice(&decoded)
             .map_err(|e| StorageError::S3(format!("parse min_schema_version: {e}")))?;
 
-        Ok(Some(parsed.min_schema_version))
+        // The bucket is untrusted: a floor set by anyone with the credential can
+        // freeze the fleet or force a downgrade. Treat a value whose signature
+        // doesn't verify as absent (None) rather than honoring it; the caller
+        // separately checks the verified author is a current owner.
+        if !parsed.verify() {
+            warn!("ignoring min_schema_version with an invalid signature");
+            return Ok(None);
+        }
+
+        Ok(Some(MinSchemaVersion {
+            version: parsed.min_schema_version,
+            author_pubkey: parsed.author_pubkey,
+        }))
     }
 
     async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
-        let payload = MinSchemaVersionJson {
-            min_schema_version: version,
-        };
+        let payload = MinSchemaVersionJson::signed(version, &self.keypair);
         let json = serde_json::to_vec(&payload)
             .map_err(|e| StorageError::S3(format!("serialize min_schema_version: {e}")))?;
         let stored = self.cipher().seal(&json);
@@ -700,6 +718,7 @@ mod tests {
             Box::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(master),
             BlobPathScheme::Hashed,
+            UserKeypair::generate(),
         );
 
         let item_key = [9u8; 32];
@@ -751,6 +770,7 @@ mod tests {
             Box::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(EncryptionService::new_with_key(&[1u8; 32])),
             BlobPathScheme::Hashed,
+            UserKeypair::generate(),
         );
         storage
             .put_head("ours", 5, None, "2026-01-01T00:00:00Z")
@@ -780,6 +800,110 @@ mod tests {
         );
     }
 
+    /// A head with a valid signature round-trips through `put_head` / `list_heads`
+    /// and surfaces its author; a head whose signature is invalid (written by
+    /// anyone with the bucket credential) is skipped, not returned — the bucket is
+    /// untrusted, so a forged head must not pollute sync status or drive a fetch
+    /// loop.
+    #[tokio::test]
+    async fn list_heads_verifies_signatures_and_skips_a_forged_head() {
+        let keypair = UserKeypair::generate();
+        let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[2u8; 32]));
+        let storage = CloudSyncStorage::new(
+            Box::new(InMemoryCloudHome::new()),
+            cipher.clone(),
+            BlobPathScheme::Hashed,
+            keypair.clone(),
+        );
+
+        // Our own head is written signed by our keypair.
+        storage
+            .put_head("ours", 9, Some(4), "2026-01-01T00:00:00Z")
+            .await
+            .expect("put our head");
+
+        // A forged head for another device: a structurally valid `HeadJson` whose
+        // signature does not match its author. It is sealed under the same library
+        // key (so it decrypts fine), proving the rejection is the *signature*
+        // check, not the cipher.
+        let forged = HeadJson {
+            seq: 100,
+            snapshot_seq: None,
+            last_sync: None,
+            author_pubkey: hex::encode(UserKeypair::generate().public_key),
+            signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
+        };
+        let sealed = cipher.seal(&serde_json::to_vec(&forged).expect("serialize forged head"));
+        storage
+            .cloud_home()
+            .write(
+                "heads/forged-device.json.enc",
+                sealed,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("write forged head");
+
+        let heads = storage.list_heads().await.expect("list_heads");
+        assert_eq!(heads.len(), 1, "only the validly signed head is returned");
+        assert_eq!(heads[0].device_id, "ours");
+        assert_eq!(heads[0].seq, 9);
+        assert_eq!(
+            heads[0].author_pubkey,
+            hex::encode(keypair.public_key),
+            "the verified author is surfaced to the caller",
+        );
+    }
+
+    /// A validly signed `min_schema_version` round-trips and surfaces its author;
+    /// one whose signature is invalid is treated as absent (`None`), so a bucket
+    /// writer can't freeze the fleet or force a downgrade by planting a forged
+    /// floor.
+    #[tokio::test]
+    async fn get_min_schema_version_verifies_and_ignores_a_forged_floor() {
+        let keypair = UserKeypair::generate();
+        let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32]));
+        let storage = CloudSyncStorage::new(
+            Box::new(InMemoryCloudHome::new()),
+            cipher.clone(),
+            BlobPathScheme::Hashed,
+            keypair.clone(),
+        );
+
+        // A real floor we set verifies and carries our pubkey.
+        storage.set_min_schema_version(7).await.expect("set floor");
+        let got = storage.get_min_schema_version().await.expect("get floor");
+        let got = got.expect("a signed floor is present");
+        assert_eq!(got.version, 7);
+        assert_eq!(got.author_pubkey, hex::encode(keypair.public_key));
+
+        // Overwrite it with a forged floor (valid shape, bad signature): it is
+        // treated as absent.
+        let forged = MinSchemaVersionJson {
+            min_schema_version: 9999,
+            author_pubkey: hex::encode(UserKeypair::generate().public_key),
+            signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
+        };
+        let sealed = cipher.seal(&serde_json::to_vec(&forged).expect("serialize forged floor"));
+        storage
+            .cloud_home()
+            .write(
+                "min_schema_version.json.enc",
+                sealed,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("write forged floor");
+        assert!(
+            storage
+                .get_min_schema_version()
+                .await
+                .expect("get forged floor")
+                .is_none(),
+            "a floor with an invalid signature is treated as absent",
+        );
+    }
+
     /// A plaintext home stores every control object in the clear and drops the
     /// `.enc` suffix from its keys. This round-trips a head, a changeset, the
     /// snapshot, snapshot_meta, and a `Master`-scoped blob and asserts each lands
@@ -792,6 +916,7 @@ mod tests {
             Box::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
+            UserKeypair::generate(),
         );
 
         // Head: bare key present, `.enc` key absent, and it reads back.
@@ -907,6 +1032,7 @@ mod tests {
             Box::new(home.clone()),
             CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32])),
             BlobPathScheme::Plain,
+            UserKeypair::generate(),
         );
 
         let cloud_path = "Artist - Album/cover.jpg";
@@ -963,6 +1089,7 @@ mod tests {
             Box::new(InMemoryCloudHome::new()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
+            UserKeypair::generate(),
         );
         assert!(
             storage
@@ -984,6 +1111,7 @@ mod tests {
             Box::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),
             BlobPathScheme::Hashed,
+            UserKeypair::generate(),
         );
 
         // Larger than two 64 KB chunks so a window can straddle a boundary.
@@ -1032,6 +1160,7 @@ mod tests {
             Box::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
+            UserKeypair::generate(),
         );
         let plaintext: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         storage
@@ -1070,6 +1199,7 @@ mod tests {
             Box::new(home.clone()),
             cipher.clone(),
             BlobPathScheme::Hashed,
+            UserKeypair::generate(),
         );
 
         let scope_id = "release-42".to_string();
@@ -1125,6 +1255,7 @@ mod tests {
             Box::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),
             BlobPathScheme::Hashed,
+            UserKeypair::generate(),
         );
         let plaintext = b"a short blob".to_vec();
         storage

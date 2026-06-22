@@ -55,10 +55,14 @@ fn open_device(device_id: &str) -> Database {
 /// cloud. The schedule is fast (short startup grace and idle interval) so the test
 /// converges quickly; everything else mirrors a real device's wiring.
 fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> WasmSyncRuntime {
+    // One identity for both the storage (signs the head it writes) and the
+    // runtime's cycle, as a real device has a single signing keypair.
+    let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        keypair.clone(),
     );
     // The runtime shares the storage's cipher lock (the same instance the storage
     // seals/opens with), as the facade and native init do.
@@ -74,7 +78,7 @@ fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> Wa
         Rc::new(Hlc::new(device_id.to_string())),
         cipher,
         db,
-        UserKeypair::generate(),
+        keypair,
         Arc::new(SystemClock) as ClockRef,
         library_dir,
         Rc::new(NoopBlobPlan),

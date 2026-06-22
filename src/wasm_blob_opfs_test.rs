@@ -180,6 +180,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        UserKeypair::generate(),
     );
     run_cycle(&storage_a, &db_a, "device-a", dir_a).await;
 
@@ -196,6 +197,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        UserKeypair::generate(),
     );
     run_cycle(&storage_b, &db_b, "device-b", dir_b).await;
 

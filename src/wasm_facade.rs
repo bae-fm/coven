@@ -257,7 +257,7 @@ impl CovenLibrary {
         )
         .map_err(|e| format!("open database: {e}"))?;
 
-        let storage = CloudSyncStorage::new(home, cipher, blob_paths);
+        let storage = CloudSyncStorage::new(home, cipher, blob_paths, user_keypair.clone());
         // The cycle and the storage must seal/open under the *same* cipher lock so a
         // key rotation through one is seen by the other; the storage owns it, so the
         // runtime borrows that one rather than a separate copy.

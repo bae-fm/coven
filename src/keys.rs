@@ -112,6 +112,27 @@ pub fn verify_signature(
     vk.verify(message, &sig).is_ok()
 }
 
+/// Verify a hex-encoded detached Ed25519 signature (`sig_hex`) over `message`
+/// against a hex-encoded public key (`pk_hex`). Malformed hex, a wrong-length key
+/// or signature, or a non-matching signature all fail closed (false). The shared
+/// hex front-end of [`verify_signature`], used by the changeset envelope and the
+/// signed control objects so the decode-and-verify path lives in one place.
+pub fn verify_signature_hex(pk_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
+    let Ok(pk_bytes) = hex::decode(pk_hex) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(sig_hex) else {
+        return false;
+    };
+    let Ok(pk): Result<[u8; SIGN_PUBLICKEYBYTES], _> = pk_bytes.try_into() else {
+        return false;
+    };
+    let Ok(sig): Result<[u8; SIGN_BYTES], _> = sig_bytes.try_into() else {
+        return false;
+    };
+    verify_signature(&sig, message, &pk)
+}
+
 /// Encrypt a message to a recipient's X25519 public key using a sealed box.
 /// The sender is anonymous -- only the recipient can decrypt.
 ///

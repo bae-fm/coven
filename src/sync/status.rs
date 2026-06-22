@@ -74,12 +74,14 @@ mod tests {
                 seq: 5,
                 snapshot_seq: None,
                 last_sync: Some("2026-02-10T12:00:00Z".into()),
+                author_pubkey: String::new(),
             },
             DeviceHead {
                 device_id: "dev-2".into(),
                 seq: 3,
                 snapshot_seq: None,
                 last_sync: Some("2026-02-10T11:55:00Z".into()),
+                author_pubkey: String::new(),
             },
         ];
 
@@ -100,6 +102,7 @@ mod tests {
             seq: 10,
             snapshot_seq: None,
             last_sync: None,
+            author_pubkey: String::new(),
         }];
 
         let status = build_sync_status(&heads, "dev-1", None);
