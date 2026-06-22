@@ -146,9 +146,8 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
     version.to_be_bytes().to_vec()
 }
 
-/// Serialized form of `snapshot_meta.json{suffix}`: the per-device cursors and
-/// creation time of a snapshot, plus the hash of the snapshot DB image, all under
-/// one author signature.
+/// Serialized form of `snapshot_meta.json{suffix}`: the per-device cursors of a
+/// snapshot plus the hash of the snapshot DB image, under one author signature.
 ///
 /// A snapshot is a destructive primitive twice over. The DB image is the whole
 /// catalog a joining device adopts wholesale; the `cursors` are control input —
@@ -157,8 +156,8 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
 /// changesets. The at-rest cipher proves only confidentiality (the library key is
 /// shared by every member), not authorship, so a bucket writer can overwrite both
 /// objects. So the author signs both halves together: `db_hash` binds the DB
-/// image and `cursors`/`created_at` bind the metadata, under one signature. A
-/// tampered DB no longer matches `db_hash`; swapped cursors no longer verify.
+/// image and `cursors` bind the metadata, under one signature. A tampered DB no
+/// longer matches `db_hash`; swapped cursors no longer verify.
 ///
 /// `db_hash` is the SHA-256 of the snapshot's **stored** (sealed) bytes — exactly
 /// what `put_snapshot` writes and `get_snapshot` returns — so a verifier hashes
@@ -174,8 +173,6 @@ pub struct SnapshotMetaJson {
     /// Per-device cursors at snapshot time: device_id -> head seq. A bootstrapping
     /// device uses these as its initial sync_cursors.
     pub cursors: std::collections::BTreeMap<String, u64>,
-    /// RFC 3339 timestamp when the snapshot was created.
-    pub created_at: String,
     /// Hex-encoded SHA-256 of the stored (sealed) snapshot DB bytes.
     pub db_hash: String,
     /// Hex-encoded Ed25519 public key of the device that wrote this snapshot.
@@ -190,25 +187,22 @@ pub struct SnapshotMetaJson {
 #[derive(Serialize)]
 struct SnapshotMetaFields<'a> {
     cursors: &'a std::collections::BTreeMap<String, u64>,
-    created_at: &'a str,
     db_hash: &'a str,
 }
 
 impl SnapshotMetaJson {
     /// Build a snapshot meta signed by `keypair`: fills `author_pubkey` with the
     /// device's public key and `signature` with the detached signature over the
-    /// canonical payload (which binds the cursors, creation time, and DB hash).
+    /// canonical payload (which binds the cursors and DB hash).
     pub fn signed(
         cursors: std::collections::BTreeMap<String, u64>,
-        created_at: String,
         db_hash: String,
         keypair: &UserKeypair,
     ) -> Self {
-        let payload = snapshot_meta_signing_payload(&cursors, &created_at, &db_hash);
+        let payload = snapshot_meta_signing_payload(&cursors, &db_hash);
         let sig = keypair.sign(&payload);
         SnapshotMetaJson {
             cursors,
-            created_at,
             db_hash,
             author_pubkey: hex::encode(keypair.public_key),
             signature: hex::encode(sig),
@@ -216,25 +210,20 @@ impl SnapshotMetaJson {
     }
 
     /// Verify the embedded signature against the embedded `author_pubkey`. A meta
-    /// that fails this is forged, corrupt, or tampered (cursors, creation time, or
-    /// DB hash changed after signing), and must not be adopted. Whether the author
-    /// is *authorized* (a current member) is a separate check the caller runs.
+    /// that fails this is forged, corrupt, or tampered (cursors or DB hash changed
+    /// after signing), and must not be adopted. Whether the author is *authorized*
+    /// (a current member) is a separate check the caller runs.
     pub fn verify(&self) -> bool {
-        let payload = snapshot_meta_signing_payload(&self.cursors, &self.created_at, &self.db_hash);
+        let payload = snapshot_meta_signing_payload(&self.cursors, &self.db_hash);
         keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
 
 fn snapshot_meta_signing_payload(
     cursors: &std::collections::BTreeMap<String, u64>,
-    created_at: &str,
     db_hash: &str,
 ) -> Vec<u8> {
-    let fields = SnapshotMetaFields {
-        cursors,
-        created_at,
-        db_hash,
-    };
+    let fields = SnapshotMetaFields { cursors, db_hash };
     serde_json::to_vec(&fields).expect("snapshot meta fields serialization cannot fail")
 }
 
@@ -469,12 +458,7 @@ mod tests {
         use std::collections::BTreeMap;
         let kp = UserKeypair::generate();
         let cursors = BTreeMap::from([("devA".to_string(), 5u64), ("devB".to_string(), 9)]);
-        let meta = SnapshotMetaJson::signed(
-            cursors.clone(),
-            "2026-01-01T00:00:00Z".to_string(),
-            "abc123".to_string(),
-            &kp,
-        );
+        let meta = SnapshotMetaJson::signed(cursors.clone(), "abc123".to_string(), &kp);
 
         assert_eq!(meta.author_pubkey, hex::encode(kp.public_key));
         assert!(meta.verify(), "a freshly signed snapshot meta verifies");
@@ -486,12 +470,7 @@ mod tests {
 
         // The signature binds the DB hash: a meta swapped onto a different DB image
         // (a substituted snapshot) no longer verifies.
-        let mut tampered_db = SnapshotMetaJson::signed(
-            cursors.clone(),
-            "2026-01-01T00:00:00Z".to_string(),
-            "abc123".to_string(),
-            &kp,
-        );
+        let mut tampered_db = SnapshotMetaJson::signed(cursors.clone(), "abc123".to_string(), &kp);
         tampered_db.db_hash = "deadbeef".to_string();
         assert!(
             !tampered_db.verify(),
@@ -500,12 +479,7 @@ mod tests {
 
         // It also binds the cursors: poisoning a cursor (the bootstrap-skip attack)
         // invalidates the signature.
-        let mut tampered_cursors = SnapshotMetaJson::signed(
-            cursors,
-            "2026-01-01T00:00:00Z".to_string(),
-            "abc123".to_string(),
-            &kp,
-        );
+        let mut tampered_cursors = SnapshotMetaJson::signed(cursors, "abc123".to_string(), &kp);
         tampered_cursors
             .cursors
             .insert("devA".to_string(), u64::MAX);
@@ -522,7 +496,6 @@ mod tests {
         let other = UserKeypair::generate();
         let mut meta = SnapshotMetaJson::signed(
             BTreeMap::from([("devA".to_string(), 1u64)]),
-            "2026-01-01T00:00:00Z".to_string(),
             "hash".to_string(),
             &kp,
         );

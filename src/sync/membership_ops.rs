@@ -306,6 +306,56 @@ pub(crate) async fn download_chain(
         .map_err(|e| MembershipOpsError(format!("Invalid membership chain: {e}")))
 }
 
+/// Why [`load_anchored_chain`] refused a chain. Split so each caller renders the
+/// right typed error: a chain that won't load/validate is a corrupt or malformed
+/// membership set; a chain that loads but is founded by a different key is a
+/// wiped-and-refounded takeover. The pull cycle maps both to its
+/// `MembershipTampered`; the snapshot authorize maps both to `UnauthorizedAuthor`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AnchoredChainError {
+    /// The entries didn't download, parse, or validate into a well-formed chain.
+    #[error("membership chain failed to load/validate: {0}")]
+    LoadFailed(#[from] MembershipOpsError),
+    /// The chain is well-formed but its founder is not the library's pinned owner.
+    #[error("chain founder {founder:?} is not the pinned owner {owner}")]
+    FounderMismatch {
+        founder: Option<String>,
+        owner: String,
+    },
+}
+
+/// Download and validate the membership chain from `entry_keys`, then confirm it
+/// is anchored to `owner_pubkey` when one is pinned. Returns the validated,
+/// owner-anchored chain.
+///
+/// The shared load+anchor step the pull cycle and the snapshot authorization both
+/// run: validation proves the chain is well-formed (signatures, owner-only
+/// authorship), and the anchor proves it descends from the library's established
+/// owner rather than a wiped-and-refounded chain under an attacker's key. A
+/// library with no pinned owner (browsable) skips the anchor check — it is open by
+/// design and has no owner to anchor to.
+///
+/// `entry_keys` must be non-empty (an empty listing is each caller's own
+/// short-circuit: pull falls open, snapshot accepts on signature alone), so an
+/// empty set here surfaces as a `LoadFailed` (the chain won't validate) rather
+/// than a silent success.
+pub(crate) async fn load_anchored_chain(
+    storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
+    owner_pubkey: Option<&str>,
+) -> Result<MembershipChain, AnchoredChainError> {
+    let chain = download_chain(storage, entry_keys).await?;
+    if let Some(owner) = owner_pubkey {
+        if !chain.is_founded_by(owner) {
+            return Err(AnchoredChainError::FounderMismatch {
+                founder: chain.founder_pubkey().map(str::to_string),
+                owner: owner.to_string(),
+            });
+        }
+    }
+    Ok(chain)
+}
+
 /// Write individual `auth/keys/{pubkey}` files for each current member.
 ///
 /// This materializes the membership chain into per-key files that the proxy

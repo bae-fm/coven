@@ -311,7 +311,7 @@ async fn bootstrap_and_save(
     blob_source: &dyn BlobSource,
     on_status: &impl Fn(&str),
 ) -> Result<Config, JoinError> {
-    // Step 5: Bootstrap from snapshot. The snapshot is authenticated against the
+    // Bootstrap from the snapshot. The snapshot is authenticated against the
     // membership chain anchored to the founder the invite pins (`owner_pubkey`),
     // exactly as the changeset pull is: a snapshot that is unsigned, signed by a
     // non-member, or whose DB image was tampered with is refused, never adopted.

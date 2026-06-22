@@ -13,10 +13,10 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::cloud_storage::CloudCipher;
-use super::membership_ops::download_chain;
+use super::membership_ops::load_anchored_chain;
 use super::session::SyncedTable;
 use super::signed_control::SnapshotMetaJson;
 use super::storage::{StorageError, SyncStorage};
@@ -256,7 +256,7 @@ pub async fn push_snapshot(
     // Our own current_seq is included (our head hasn't been updated yet).
     cursors.insert(device_id.to_string(), current_seq);
 
-    let meta = SnapshotMetaJson::signed(cursors, timestamp.clone(), db_hash, keypair);
+    let meta = SnapshotMetaJson::signed(cursors, db_hash, keypair);
     let meta_json =
         serde_json::to_vec(&meta).map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
 
@@ -359,21 +359,25 @@ async fn authorize_snapshot_meta(
                 "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
             )));
         }
+        // Chain-less, no owner pinned: a browsable/open library has no membership
+        // to authorize against, so the snapshot is accepted on its verified
+        // signature alone (open by design, exactly as the pull keeps every head
+        // when no chain exists). Log the skip so this authorization bail-out is
+        // visible rather than a silent default.
+        debug!(
+            author = %meta.author_pubkey,
+            "snapshot author authorization skipped: library is chain-less (no membership, \
+             no pinned owner), so authorization is not applicable"
+        );
         return Ok(meta);
     }
 
-    let chain = download_chain(storage, &entries)
+    // Non-empty chain: load + validate it and anchor to the pinned owner (the same
+    // load+anchor the pull cycle runs). A chain that won't validate, or one founded
+    // by a key other than the pinned owner, refuses the snapshot.
+    let chain = load_anchored_chain(storage, &entries, owner_pubkey)
         .await
-        .map_err(|e| SnapshotError::UnauthorizedAuthor(format!("chain failed to load: {e}")))?;
-
-    if let Some(owner) = owner_pubkey {
-        if !chain.is_founded_by(owner) {
-            return Err(SnapshotError::UnauthorizedAuthor(format!(
-                "chain founder {:?} is not the pinned owner {owner}",
-                chain.founder_pubkey()
-            )));
-        }
-    }
+        .map_err(|e| SnapshotError::UnauthorizedAuthor(e.to_string()))?;
 
     if !chain.can_write_now(&meta.author_pubkey) {
         return Err(SnapshotError::UnauthorizedAuthor(format!(
@@ -977,12 +981,8 @@ mod tests {
         db_hash: &str,
         keypair: &UserKeypair,
     ) {
-        let meta = SnapshotMetaJson::signed(
-            cursors.into_iter().collect(),
-            "2026-02-10T00:00:00Z".to_string(),
-            db_hash.to_string(),
-            keypair,
-        );
+        let meta =
+            SnapshotMetaJson::signed(cursors.into_iter().collect(), db_hash.to_string(), keypair);
         storage
             .put_snapshot_meta(serde_json::to_vec(&meta).unwrap())
             .await
@@ -2381,5 +2381,129 @@ mod authorization_tests {
             matches!(err, SnapshotError::UnauthorizedAuthor(_)),
             "expected UnauthorizedAuthor, got {err:?}",
         );
+    }
+
+    /// An owner is pinned (an opaque library) but the `membership/*` listing is
+    /// empty — a wiped chain under an otherwise-intact bucket. There is no founder
+    /// to anchor to, so even a snapshot whose signature verifies cannot be
+    /// authorized: bootstrap refuses rather than adopting it. (The chain-less path
+    /// that accepts on signature alone is ONLY the no-pinned-owner browsable case;
+    /// a pinned owner with no chain is the takeover this guards.)
+    #[tokio::test]
+    async fn bootstrap_refuses_empty_membership_when_owner_pinned() {
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        // Deliberately do NOT found a chain: the listing is empty.
+
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "owner-dev",
+            HashMap::new(),
+            1,
+            &owner,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("owner pushes a signed snapshot");
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        let err = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
+            .await
+            .expect_err("an empty chain under a pinned owner must be refused");
+        assert!(
+            matches!(err, SnapshotError::UnauthorizedAuthor(_)),
+            "expected UnauthorizedAuthor, got {err:?}",
+        );
+        assert!(
+            !target.exists(),
+            "no DB is written when the chain is wiped under a pinned owner",
+        );
+    }
+
+    /// The forged-chain / takeover case on the join path: the bucket carries a
+    /// chain founded by one key, and the snapshot is signed by a current member of
+    /// THAT chain — but the joiner pins a DIFFERENT owner (the founder its invite
+    /// names). The chain is not anchored to the pinned owner, so it cannot
+    /// authorize anyone and the snapshot is refused, even though its author is a
+    /// member of the chain actually present.
+    #[tokio::test]
+    async fn bootstrap_refuses_chain_founded_by_a_different_owner() {
+        let chain_founder = UserKeypair::generate();
+        let pinned_owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        // The bucket's chain is founded by `chain_founder`, not the pinned owner.
+        found_chain(&storage, &chain_founder).await;
+
+        // The snapshot is signed by the chain's own founder — a valid member of the
+        // chain that exists, the strongest forge a takeover can mount.
+        push_snapshot(
+            &storage,
+            fake_snapshot(),
+            "founder-dev",
+            HashMap::new(),
+            1,
+            &chain_founder,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("the chain founder pushes a signed snapshot");
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        // The joiner pins the owner its invite names — a different key.
+        let err = bootstrap_from_snapshot(
+            &storage,
+            &cipher(),
+            Some(&pubkey_hex(&pinned_owner)),
+            &target,
+        )
+        .await
+        .expect_err("a chain not anchored to the pinned owner must be refused");
+        assert!(
+            matches!(err, SnapshotError::UnauthorizedAuthor(_)),
+            "expected UnauthorizedAuthor, got {err:?}",
+        );
+        assert!(
+            !target.exists(),
+            "no DB is written when the chain is founded by a different owner",
+        );
+    }
+
+    /// Old, pre-signing snapshot metadata (a bare cursor map, no `author_pubkey` /
+    /// `signature`) is the shape an older bucket holds. It must not be silently
+    /// adopted: against the signed `SnapshotMetaJson` shape the old JSON fails to
+    /// parse, so bootstrap refuses with the parse error rather than treating an
+    /// unsigned, unauthored catalog as trusted.
+    #[tokio::test]
+    async fn bootstrap_refuses_old_unsigned_meta() {
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+        storage.put_snapshot(fake_snapshot()).await.unwrap();
+
+        // The legacy meta: a bare cursor map, none of the signing fields.
+        let legacy = serde_json::json!({
+            "cursors": { "owner-dev": 1 },
+            "created_at": "2026-01-01T00:00:00Z",
+        });
+        storage
+            .put_snapshot_meta(serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("boot.db");
+        let err = bootstrap_from_snapshot(&storage, &cipher(), Some(&pubkey_hex(&owner)), &target)
+            .await
+            .expect_err("an old unsigned meta must not be adopted");
+        // The unsigned shape lacks the signed fields, so it fails to parse — refused
+        // before any signature/authorization step, never silently accepted.
+        assert!(
+            matches!(err, SnapshotError::Io(_)),
+            "expected a parse failure (Io), got {err:?}",
+        );
+        assert!(!target.exists());
     }
 }
