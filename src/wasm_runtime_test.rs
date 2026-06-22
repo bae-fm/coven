@@ -31,7 +31,7 @@ use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::hlc::Hlc;
-use crate::sync::test_helpers::{create_synced_schema, test_synced_tables, NoopBlobPlan};
+use crate::sync::test_helpers::{create_synced_schema, test_synced_tables, NoopBlobSource};
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -81,7 +81,7 @@ fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> Wa
         keypair,
         Arc::new(SystemClock) as ClockRef,
         library_dir,
-        Rc::new(NoopBlobPlan),
+        Rc::new(NoopBlobSource),
         None,
         // Short cadence: a 10 ms startup grace and a 50 ms idle interval keep the
         // test fast while still exercising the timer-driven wait between cycles.

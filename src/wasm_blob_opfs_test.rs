@@ -30,7 +30,7 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::test_helpers::{create_synced_schema, test_synced_tables, PhotoBlobPlan};
+use crate::sync::test_helpers::{create_synced_schema, test_synced_tables, PhotoBlobSource};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -48,7 +48,7 @@ fn open_device(device_id: &str) -> Database {
     db
 }
 
-/// Run one full sync cycle for `device_id` over `storage`, with a `PhotoBlobPlan`
+/// Run one full sync cycle for `device_id` over `storage`, with a `PhotoBlobSource`
 /// rooted at `blob_dir` so `note_photos` rows map to blobs there. Plaintext at
 /// rest, no live cloud home (changeset + blob I/O go through `storage`).
 async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str, blob_dir: &Path) {
@@ -56,7 +56,7 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str, b
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new(device_id.to_string());
     let library_dir = LibraryDir::new(std::path::Path::new("/coven-blob-test-libdir"));
-    let blob_plan = PhotoBlobPlan {
+    let blob_plan = PhotoBlobSource {
         dir: blob_dir.to_path_buf(),
     };
 
@@ -169,7 +169,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     .await
     .expect("device A insert");
 
-    // The photo's plaintext lives on A's OPFS at the path `PhotoBlobPlan` derives
+    // The photo's plaintext lives on A's OPFS at the path `PhotoBlobSource` derives
     // (`dir_a/photo-1`). The push reads it through `local_blob` and uploads it.
     let photo_bytes = b"\x89PNG\r\n\x1a\n fake image bytes for photo-1".to_vec();
     crate::local_blob::write(&dir_a.join("photo-1"), &photo_bytes)

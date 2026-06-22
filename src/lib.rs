@@ -37,7 +37,7 @@
 //!   [`sync::sync_manager::SyncManager`] lazily, passing it the same `Database`
 //!   handle and synced-table set. `SyncManager::new` is synchronous and
 //!   infallible — all seeding happened in `Database::open`. The host also
-//!   supplies a [`blob::BlobPlan`] and an optional [`blob::BlobUploadObserver`].
+//!   supplies a [`blob::BlobSource`] and an optional [`blob::BlobUploadObserver`].
 //!
 //!   A local-only library that never connects a provider simply stamps and
 //!   writes rows through `Database::call` without ever building a `SyncManager`,

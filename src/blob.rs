@@ -102,6 +102,24 @@ impl BlobScope {
     }
 }
 
+/// How a blob is retained across devices — the one blob knob the host turns.
+///
+/// Both classes are declared per blob and are global (every device reads the same
+/// class from the blob's [`BlobRef`]); the difference is what a device does with
+/// the blob on pull. The distinction has to be a declared property and not a
+/// per-device choice: device B, deciding during its own pull whether to fetch a
+/// blob, can only read the blob's declared class — it cannot see what device A
+/// chose locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobSync {
+    /// Synced to every device: downloaded on pull and kept local. Part of "having
+    /// the library" — e.g. cover art.
+    Mirrored,
+    /// Uploaded on push but not downloaded on pull: a pulling device skips it and
+    /// fetches it on first read — e.g. audio, which streams on demand.
+    OnDemand,
+}
+
 /// A blob referenced by a changeset: its cloud identity plus the local file.
 #[derive(Debug, Clone)]
 pub struct BlobRef {
@@ -120,22 +138,27 @@ pub struct BlobRef {
     /// ignored when `Hashed`. `None` is only valid for a `Hashed` home — a `Plain`
     /// home with no `cloud_path` is a surfaced error, never a silent fallback.
     pub cloud_path: Option<String>,
+    /// The blob's retention class. Decides whether a pulling device downloads it
+    /// ([`BlobSync::Mirrored`]) or skips it for later on-demand fetch
+    /// ([`BlobSync::OnDemand`]).
+    pub sync: BlobSync,
 }
 
-/// Maps changeset row-changes to the blobs that must move with them.
+/// Maps the host's blob-bearing rows to the blobs that must move with them.
 ///
-/// The host knows which of its tables carry blobs and how to locate the local
-/// file. coven uploads referenced blobs before pushing a changeset and
-/// downloads them after applying an incoming one.
-pub trait BlobPlan: Send + Sync {
-    /// Blobs to upload before pushing an outgoing changeset.
-    fn blobs_to_push(&self, changes: &[RowChange]) -> Vec<BlobRef>;
-
-    /// Blobs to download after applying an incoming changeset.
-    fn blobs_to_pull(&self, changes: &[RowChange]) -> Vec<BlobRef>;
+/// The host knows which of its tables carry blobs, how to locate the local file,
+/// and each blob's retention class ([`BlobSync`]). coven uploads a referenced
+/// blob before pushing the changeset that carries its row, and on pull downloads
+/// the [`BlobSync::Mirrored`] ones before applying the incoming changeset.
+pub trait BlobSource: Send + Sync {
+    /// The blobs a single row-change references. coven calls this for both
+    /// directions — over a pushed changeset's changes to find what to upload, and
+    /// over an incoming changeset's changes to find what to download — since a
+    /// row maps to the same blobs whichever way it is moving.
+    fn blobs_for_change(&self, change: &RowChange) -> Vec<BlobRef>;
 
     /// Every blob the rows currently in `conn` reference that must be present on
-    /// local disk — the snapshot-bootstrap analogue of [`Self::blobs_to_pull`].
+    /// local disk — the snapshot-bootstrap analogue of [`Self::blobs_for_change`].
     ///
     /// A device that bootstraps from a snapshot receives the catalog rows but no
     /// per-row blob files: the snapshot is a whole-DB image, and the incremental
@@ -146,7 +169,7 @@ pub trait BlobPlan: Send + Sync {
     ///
     /// No default impl: a default returning empty would silently reintroduce the
     /// blanks-after-bootstrap bug for any host that forgot to implement it. The
-    /// host enumerates the same blob-bearing tables `blobs_to_pull` recognizes,
+    /// host enumerates the same blob-bearing tables `blobs_for_change` recognizes,
     /// reading them from the DB instead of from a [`RowChange`] stream.
     fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>>;
 }

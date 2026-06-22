@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::blob::BlobPlan;
+use crate::blob::BlobSource;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -40,8 +40,15 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     // Second device pulls.
     let db2 = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &NoopBlobPlan).await;
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &ld,
+        &NoopBlobSource,
+    )
+    .await;
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get("dev1"), Some(&1));
@@ -77,7 +84,7 @@ async fn pull_skips_changeset_from_newer_schema() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -123,7 +130,7 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
     // The puller resolves note_photos to blobs, so seq 1's missing blob fails
     // while seq 2 (no blob) would succeed.
     let dst_photos = tempfile::tempdir().expect("dst photos");
-    let plan = PhotoBlobPlan {
+    let plan = PhotoBlobSource {
         dir: dst_photos.path().to_path_buf(),
     };
     let db2 = open_test_db();
@@ -177,7 +184,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     // Source: a note + a cover photo, with the photo file present locally.
     let src_photos = tempfile::tempdir().expect("src photos");
     std::fs::write(src_photos.path().join("p1"), b"PHOTOBYTES").expect("write photo");
-    let src_plan = PhotoBlobPlan {
+    let src_plan = PhotoBlobSource {
         dir: src_photos.path().to_path_buf(),
     };
 
@@ -195,9 +202,9 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     // Upload the blobs the changeset references, then publish the changeset.
     // Resolve the public scope to the internal key scope exactly as the push
-    // loop does — `PhotoBlobPlan` only emits Derived/Master, which pass through.
+    // loop does — `PhotoBlobSource` only emits Derived/Master, which pass through.
     let changes = crate::changeset::walk(&cs).expect("walk");
-    for b in src_plan.blobs_to_push(&changes) {
+    for b in changes.iter().flat_map(|c| src_plan.blobs_for_change(c)) {
         let data = std::fs::read(&b.local_path).expect("read photo");
         let resolved = db1
             .resolve_blob_scope(b.scope.clone())
@@ -212,7 +219,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     // Destination pulls; its plan points photos at its own directory.
     let dst_photos = tempfile::tempdir().expect("dst photos");
-    let dst_plan = PhotoBlobPlan {
+    let dst_plan = PhotoBlobSource {
         dir: dst_photos.path().to_path_buf(),
     };
     let db2 = open_test_db();
@@ -224,6 +231,152 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     assert!(!result.asset_downloads_failed);
     let downloaded = std::fs::read(dst_photos.path().join("p1")).expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
+}
+
+/// A blob source that maps each `note_photos` row to an `OnDemand` blob in the
+/// `audio` namespace under the master key — the audio-style class that is uploaded
+/// on push but not downloaded on pull (it streams on demand, fetched on first
+/// read). The mirror of [`PhotoBlobSource`] for the other retention class.
+struct AudioBlobSource {
+    dir: std::path::PathBuf,
+}
+
+impl AudioBlobSource {
+    fn refs(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
+        note_photos_refs(
+            changes,
+            &self.dir,
+            "audio",
+            &|_kind, _note_id| crate::blob::BlobScope::Master,
+            crate::blob::BlobSync::OnDemand,
+        )
+    }
+}
+
+impl BlobSource for AudioBlobSource {
+    fn blobs_for_change(&self, change: &crate::changeset::RowChange) -> Vec<crate::blob::BlobRef> {
+        self.refs(std::slice::from_ref(change))
+    }
+    fn blobs_in_db(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
+        note_photos_refs_from_db(
+            conn,
+            &self.dir,
+            "audio",
+            &|_kind, _note_id| crate::blob::BlobScope::Master,
+            crate::blob::BlobSync::OnDemand,
+        )
+    }
+}
+
+/// An `OnDemand` blob uploads on push but is NOT downloaded on the puller's pull:
+/// the changeset's row still applies, the blob's bytes land in the cloud, but the
+/// puller leaves them there (no local file) to fetch on first read. This is the
+/// retention-class split — the same flow as the `Mirrored` round-trip above,
+/// asserting the opposite pull outcome. The source drives the real
+/// `SyncService::sync`, so the inline push upload runs for the `OnDemand` class too.
+#[tokio::test]
+async fn on_demand_blob_uploads_on_push_but_is_not_downloaded_on_pull() {
+    let storage = MockSyncStorage::new();
+
+    // Source: a shared note + an audio row, the audio file present locally.
+    let audio_bytes = b"AUDIO-PAYLOAD";
+    let src_audio = tempfile::tempdir().expect("src audio");
+    std::fs::write(src_audio.path().join("audio1"), audio_bytes).expect("write audio");
+    let src_plan = AudioBlobSource {
+        dir: src_audio.path().to_path_buf(),
+    };
+
+    let db1 = open_test_db();
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db1,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db1
+        .take_changeset_and_suspend()
+        .await
+        .expect("capture outgoing");
+
+    // Drive the real push path: it uploads the OnDemand blob inline (same as a
+    // Mirrored one — the class only changes the pull side), then returns the
+    // changeset for the caller to publish.
+    let service = SyncService::new("dev1".to_string());
+    let keypair = UserKeypair::generate();
+    let (_t1, ld1) = temp_library_dir();
+    let result = service
+        .sync(
+            &db1,
+            &test_synced_tables(),
+            outgoing,
+            0,
+            &HashMap::new(),
+            &storage,
+            "2026-01-01T00:00:00Z",
+            "",
+            &keypair,
+            &ld1,
+            &src_plan,
+        )
+        .await
+        .expect("sync");
+    db1.resume_session().await.expect("resume");
+    let outgoing = result.outgoing.expect("outgoing changeset");
+    cycle::push_changeset(
+        &storage,
+        "dev1",
+        outgoing.seq,
+        outgoing.packed,
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .await
+    .expect("push_changeset");
+
+    // The OnDemand blob's bytes reached the cloud on push.
+    assert!(
+        storage
+            .get_blob("audio", "audio1", crate::blob::ResolvedScope::Master, None)
+            .await
+            .is_ok(),
+        "the OnDemand blob uploaded on push (present in the cloud)",
+    );
+
+    // Destination pulls; its plan points audio at its own dir.
+    let dst_audio = tempfile::tempdir().expect("dst audio");
+    let dst_plan = AudioBlobSource {
+        dir: dst_audio.path().to_path_buf(),
+    };
+    let db2 = open_test_db();
+    let (_t, ld) = temp_library_dir();
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &dst_plan).await;
+
+    // The row applied and the cursor advanced — the OnDemand blob never blocks the
+    // apply, and its absence is not a download failure.
+    assert_eq!(result.changesets_applied, 1);
+    assert!(!result.asset_downloads_failed);
+    assert_eq!(updated.get("dev1"), Some(&1));
+    assert_eq!(
+        query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "WithAudio",
+        "the row carrying the OnDemand blob still reaches the peer",
+    );
+    // ...but the blob was NOT downloaded to the puller's disk: OnDemand is fetched
+    // on first read, not mirrored on pull.
+    assert!(
+        !dst_audio.path().join("audio1").exists(),
+        "an OnDemand blob must NOT be downloaded on pull — it stays in the cloud for on-demand fetch",
+    );
 }
 
 /// A changeset that references a blob whose local file is missing must abort the
@@ -238,7 +391,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
     // A note + a photo row, but the photo file is deliberately never written, so
     // the push loop's existence check sees the local file as absent.
     let src_photos = tempfile::tempdir().expect("src photos");
-    let src_plan = PhotoBlobPlan {
+    let src_plan = PhotoBlobSource {
         dir: src_photos.path().to_path_buf(),
     };
 
@@ -288,14 +441,15 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
     );
 }
 
-/// A blob plan that names each `note_photos` row at a readable cloud path
+/// A blob source that names each `note_photos` row at a readable cloud path
 /// (`{note_id}/{kind}.jpg`) so the plain scheme stores it browsably, instead of
-/// the content-addressed shard. The local file still lives under `dir`.
-struct ReadablePhotoBlobPlan {
+/// the content-addressed shard. The local file still lives under `dir`. The blobs
+/// are `Mirrored`, so a pulling device downloads them.
+struct ReadablePhotoBlobSource {
     dir: std::path::PathBuf,
 }
 
-impl ReadablePhotoBlobPlan {
+impl ReadablePhotoBlobSource {
     fn refs(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
         use crate::changeset::ChangeOp;
         changes
@@ -311,18 +465,16 @@ impl ReadablePhotoBlobPlan {
                     local_path: self.dir.join(id),
                     scope: crate::blob::BlobScope::Master,
                     cloud_path: Some(format!("{note_id}/{kind}.jpg")),
+                    sync: crate::blob::BlobSync::Mirrored,
                 }
             })
             .collect()
     }
 }
 
-impl BlobPlan for ReadablePhotoBlobPlan {
-    fn blobs_to_push(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
-        self.refs(changes)
-    }
-    fn blobs_to_pull(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
-        self.refs(changes)
+impl BlobSource for ReadablePhotoBlobSource {
+    fn blobs_for_change(&self, change: &crate::changeset::RowChange) -> Vec<crate::blob::BlobRef> {
+        self.refs(std::slice::from_ref(change))
     }
     fn blobs_in_db(
         &self,
@@ -353,7 +505,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let plaintext = b"COVERART";
     let src_photos = tempfile::tempdir().expect("src photos");
     std::fs::write(src_photos.path().join("p1cover"), plaintext).expect("write photo");
-    let src_plan = ReadablePhotoBlobPlan {
+    let src_plan = ReadablePhotoBlobSource {
         dir: src_photos.path().to_path_buf(),
     };
 
@@ -430,7 +582,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     // Device B: a fresh DB and its own asset dir, same cloud + plain scheme,
     // pulls and downloads the cover from the readable key.
     let dst_photos = tempfile::tempdir().expect("dst photos");
-    let dst_plan = ReadablePhotoBlobPlan {
+    let dst_plan = ReadablePhotoBlobSource {
         dir: dst_photos.path().to_path_buf(),
     };
     let db2 = open_test_db();
@@ -467,7 +619,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let plaintext = b"COVER-ART-BYTES";
     let src_photos = tempfile::tempdir().expect("src photos");
     std::fs::write(src_photos.path().join("p1cover"), plaintext).expect("write photo");
-    let src_plan = PhotoBlobPlan {
+    let src_plan = PhotoBlobSource {
         dir: src_photos.path().to_path_buf(),
     };
 
@@ -539,7 +691,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
 
     // Device B: a fresh DB and its own asset directory, same cloud + key.
     let dst_photos = tempfile::tempdir().expect("dst photos");
-    let dst_plan = PhotoBlobPlan {
+    let dst_plan = PhotoBlobSource {
         dir: dst_photos.path().to_path_buf(),
     };
     let db2 = open_test_db();
@@ -597,7 +749,7 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -646,7 +798,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
     assert!(
@@ -675,7 +827,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
     assert!(
@@ -730,7 +882,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_library() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
     assert!(
@@ -798,7 +950,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -883,7 +1035,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -955,7 +1107,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -1049,7 +1201,7 @@ async fn pull_skips_a_removed_members_changeset() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -1096,7 +1248,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
     assert!(
@@ -1149,7 +1301,7 @@ async fn pull_skips_a_head_authored_by_a_non_member() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -1213,7 +1365,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
 
@@ -1272,7 +1424,7 @@ async fn pull_ignores_min_schema_version_from_a_non_owner() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
     assert!(
@@ -1314,7 +1466,7 @@ async fn pull_honors_min_schema_version_from_a_current_owner() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobPlan,
+        &NoopBlobSource,
     )
     .await;
     assert!(

@@ -25,7 +25,7 @@ use futures_util::future::{select, Either};
 use gloo_timers::future::TimeoutFuture;
 use tracing::{debug, error, info, warn};
 
-use crate::blob::{BlobPlan, BlobUploadObserver};
+use crate::blob::{BlobSource, BlobUploadObserver};
 use crate::clock::ClockRef;
 use crate::database::Database;
 use crate::keys::UserKeypair;
@@ -71,7 +71,7 @@ struct CycleInputs {
     user_keypair: UserKeypair,
     clock: ClockRef,
     library_dir: LibraryDir,
-    blob_plan: Rc<dyn BlobPlan>,
+    blob_source: Rc<dyn BlobSource>,
     observer: Option<Rc<dyn BlobUploadObserver>>,
 }
 
@@ -106,7 +106,7 @@ impl WasmSyncRuntime {
         user_keypair: UserKeypair,
         clock: ClockRef,
         library_dir: LibraryDir,
-        blob_plan: Rc<dyn BlobPlan>,
+        blob_source: Rc<dyn BlobSource>,
         observer: Option<Rc<dyn BlobUploadObserver>>,
         schedule: WasmSyncSchedule,
     ) -> Self {
@@ -120,7 +120,7 @@ impl WasmSyncRuntime {
                 user_keypair,
                 clock,
                 library_dir,
-                blob_plan,
+                blob_source,
                 observer,
             }),
             schedule,
@@ -253,7 +253,7 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
         &inputs.user_keypair,
         &inputs.library_dir,
         Some(cloud_home),
-        inputs.blob_plan.as_ref(),
+        inputs.blob_source.as_ref(),
         inputs.observer.as_deref(),
     )
     .await?;
