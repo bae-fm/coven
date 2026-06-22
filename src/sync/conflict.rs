@@ -1,9 +1,20 @@
 //! Production conflict resolution for changeset application.
 //!
-//! Row-level Last-Writer-Wins (LWW) on the `_updated_at` column, whose HLC
-//! timestamps sort lexicographically = causally. The `_updated_at` column index
-//! is looked up dynamically from the schema (via [`TableColumns`]) so adding
-//! columns to the end of a table is safe.
+//! Row-level Last-Writer-Wins (LWW) on the `_updated_at` column: each side's
+//! value is parsed as an HLC [`Timestamp`] and the greater one wins (the parsed
+//! order equals the lexicographic order of the string form, but parsing also lets
+//! the receiver reject a stamp it can't trust). The `_updated_at` column index is
+//! looked up dynamically from the schema (via [`TableColumns`]) so adding columns
+//! to the end of a table is safe.
+//!
+//! A member is trusted to author valid changesets, so this is robustness, not a
+//! security boundary: a buggy client or a device with a grossly-wrong wall clock
+//! can stamp a row far in the future. As a value that would beat every honest
+//! stamp and win every conflict forever, so the receiver bounds an incoming stamp
+//! to its own wall clock plus a generous offline allowance
+//! ([`super::hlc::MAX_FUTURE_SKEW_MS`]) and refuses to let a grossly-future one win
+//! (the matching refusal to let it ratchet the clock lives in the pull's HLC
+//! advance — a rejected stamp never becomes an applied row there either).
 //!
 //! The logic runs inside the `apply_strm` conflict closure in [`super::apply`],
 //! which is `Fn(ConflictType, ChangesetItem) -> ConflictAction + Send + 'static`.
@@ -19,6 +30,7 @@ use rusqlite::session::{ChangesetItem, ConflictAction, ConflictType};
 use rusqlite::Connection;
 use tracing::warn;
 
+use super::hlc::Timestamp;
 use crate::changeset::value_ref_to_string;
 use crate::database::DbError;
 
@@ -94,14 +106,18 @@ impl TableSchema {
 ///
 /// For DATA/CONFLICT, `item.new_value(uat)` is the incoming `_updated_at` and
 /// `item.conflict(uat)` the existing local one; either can be absent (an
-/// unchanged column in an UPDATE) → `None` → OMIT (keep local). `fk_flag` is set
-/// on a CONSTRAINT so the caller can retry the changeset once its missing
+/// unchanged column in an UPDATE) → `None` → OMIT (keep local). Both are parsed
+/// as HLC [`Timestamp`]s; an unparseable value keeps local. A grossly-future
+/// incoming stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`]
+/// — is refused (kept local) so a broken clock can't win every conflict. `fk_flag`
+/// is set on a CONSTRAINT so the caller can retry the changeset once its missing
 /// parents have landed.
 pub fn lww_conflict_handler(
     conflict_type: ConflictType,
     item: ChangesetItem,
     table: &str,
     schema: &TableSchema,
+    receiver_wall_ms: u64,
     fk_flag: &Arc<AtomicBool>,
 ) -> ConflictAction {
     match conflict_type {
@@ -118,14 +134,47 @@ pub fn lww_conflict_handler(
                 return ConflictAction::SQLITE_CHANGESET_OMIT;
             };
             let uat = cols.updated_at;
-            let incoming = item.new_value(uat).ok().and_then(value_ref_to_string);
-            let local = item.conflict(uat).ok().and_then(value_ref_to_string);
+            // Read each side's `_updated_at` and parse it to an HLC `Timestamp`. A
+            // rusqlite error reading the column (an API failure on a known column,
+            // genuinely exceptional) is logged distinctly from a value that is simply
+            // absent or doesn't parse — the latter falls through to the `_` arm below.
+            let read_stamp = |v: Result<rusqlite::types::ValueRef, rusqlite::Error>, side: &str| {
+                match v {
+                    Ok(value) => value_ref_to_string(value).and_then(|s| Timestamp::parse(&s)),
+                    Err(e) => {
+                        warn!(table, side, error = %e, "failed to read _updated_at column for conflict resolution");
+                        None
+                    }
+                }
+            };
+            let incoming = read_stamp(item.new_value(uat), "incoming");
+            let local = read_stamp(item.conflict(uat), "local");
 
-            match (incoming.as_deref(), local.as_deref()) {
-                (Some(inc), Some(loc)) if inc > loc => ConflictAction::SQLITE_CHANGESET_REPLACE,
-                (Some(_), Some(_)) => ConflictAction::SQLITE_CHANGESET_OMIT,
+            match (incoming, local) {
+                (Some(inc), Some(loc)) => {
+                    if !inc.is_within_future_bound(receiver_wall_ms) {
+                        // A grossly-future stamp (broken clock / buggy client) would
+                        // beat every honest stamp and win this conflict forever.
+                        // Refuse it: keep local.
+                        warn!(
+                            table,
+                            incoming = %inc,
+                            receiver_wall_ms,
+                            "incoming _updated_at is grossly beyond the offline-skew \
+                             allowance, refusing to let it win; keeping local"
+                        );
+                        ConflictAction::SQLITE_CHANGESET_OMIT
+                    } else if inc > loc {
+                        ConflictAction::SQLITE_CHANGESET_REPLACE
+                    } else {
+                        ConflictAction::SQLITE_CHANGESET_OMIT
+                    }
+                }
                 _ => {
-                    warn!(table, "conflict without _updated_at values, keeping local");
+                    warn!(
+                        table,
+                        "conflict without parseable _updated_at values, keeping local"
+                    );
                     ConflictAction::SQLITE_CHANGESET_OMIT
                 }
             }

@@ -31,14 +31,18 @@ pub struct ApplyResult {
 /// [`TableSchema`] from `tables` once. A convenience wrapper over
 /// [`apply_changeset_lww_with_schema`] for callers that apply a single changeset
 /// and don't already hold a schema (tests, snapshot round-trips).
+///
+/// `receiver_wall_ms` is the receiver's current wall-clock millis, against which
+/// a grossly-future incoming `_updated_at` is refused (see [`lww_conflict_handler`]).
 pub fn apply_changeset_lww(
     conn: &Connection,
     bytes: &[u8],
     tables: &[SyncedTable],
+    receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
     let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
     let schema = Arc::new(TableSchema::from_db(conn, &table_refs)?);
-    apply_changeset_lww_with_schema(conn, bytes, schema)
+    apply_changeset_lww_with_schema(conn, bytes, schema, receiver_wall_ms)
 }
 
 /// Apply `bytes` to `conn` using LWW conflict resolution against a pre-built
@@ -52,11 +56,14 @@ pub fn apply_changeset_lww(
 /// FK/constraint violations flip a shared flag for the caller to retry.
 ///
 /// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
-/// without re-deriving it per call.
+/// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
+/// wall-clock millis, read once by the caller and moved into the closure to bound
+/// a grossly-future incoming `_updated_at` (see [`lww_conflict_handler`]).
 pub fn apply_changeset_lww_with_schema(
     conn: &Connection,
     bytes: &[u8],
     schema: Arc<TableSchema>,
+    receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
     let fk_flag = Arc::new(AtomicBool::new(false));
 
@@ -80,7 +87,14 @@ pub fn apply_changeset_lww_with_schema(
                 Ok(op) => op.table_name().to_string(),
                 Err(_) => return ConflictAction::SQLITE_CHANGESET_OMIT,
             };
-            lww_conflict_handler(conflict_type, item, &table, &schema, &closure_flag)
+            lww_conflict_handler(
+                conflict_type,
+                item,
+                &table,
+                &schema,
+                receiver_wall_ms,
+                &closure_flag,
+            )
         },
     )
     .map_err(DbError::from)?;

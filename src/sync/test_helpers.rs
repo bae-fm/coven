@@ -175,7 +175,8 @@ pub async fn apply_to_db(db: &Database, bytes: &[u8], tables: &[SyncedTable]) {
         .expect("suspend before apply");
     let bytes = bytes.to_vec();
     let tables = tables.to_vec();
-    db.call(move |conn| apply_changeset_lww(conn, &bytes, &tables).map(|_| ()))
+    let receiver_wall_ms = db.receive_wall_ms();
+    db.call(move |conn| apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms).map(|_| ()))
         .await
         .expect("apply changeset");
     db.resume_session().await.expect("resume after apply");

@@ -328,6 +328,15 @@ impl Database {
         self.hlc.clone()
     }
 
+    /// The receiver's current wall-clock millis, read from this database's
+    /// register clock. The pull reads it once and passes it down to bound an
+    /// incoming `_updated_at`'s physical component (a grossly-future stamp must not
+    /// win last-writer-wins or ratchet the clock). Available on both targets — pull
+    /// runs on wasm too — unlike [`Self::hlc`], whose only caller is native.
+    pub(crate) fn receive_wall_ms(&self) -> u64 {
+        self.hlc.wall_now_ms()
+    }
+
     /// Run `f` against the connection and await the result.
     ///
     /// This is how the host runs its app SQL and how coven runs bookkeeping,

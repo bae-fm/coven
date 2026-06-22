@@ -31,6 +31,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// clock advances (host stamp flushed at cycle end, and on apply-merge).
 pub const HIGHWATER_STATE_KEY: &str = "hlc_highwater";
 
+/// How far ahead of the receiver's wall clock an incoming `_updated_at`'s
+/// physical (millis) component may sit and still be treated as honest. A device
+/// can legitimately be offline for a long stretch and cross-device wall clocks
+/// drift, so the window is generous — 30 days. A stamp beyond `receiver wall + this`
+/// has no honest explanation (a broken clock or buggy client), so the receiver
+/// refuses to let it win last-writer-wins or ratchet the local clock. The bound is
+/// one-sided: only grossly-*future* stamps are rejected; a stamp in the past is
+/// always honest (an offline device's older edits) and is never bounded.
+pub const MAX_FUTURE_SKEW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
 /// A parsed HLC timestamp.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Timestamp {
@@ -46,6 +56,16 @@ impl Timestamp {
             counter,
             device_id,
         }
+    }
+
+    /// Whether this stamp's physical (millis) component is within the honest
+    /// future bound relative to `receiver_wall_ms` (the receiver's current wall
+    /// clock when it observed the stamp). A stamp at or behind wall time is always
+    /// honest; one ahead is honest only within [`MAX_FUTURE_SKEW_MS`]. Beyond that
+    /// it is grossly-future — a broken clock or buggy client — and the receiver
+    /// must not let it win last-writer-wins or ratchet the local clock.
+    pub fn is_within_future_bound(&self, receiver_wall_ms: u64) -> bool {
+        self.millis <= receiver_wall_ms.saturating_add(MAX_FUTURE_SKEW_MS)
     }
 
     /// Parse from the string format.
@@ -127,6 +147,16 @@ impl Hlc {
     pub fn high_water(&self) -> Timestamp {
         let state = self.state.lock().unwrap();
         Timestamp::new(state.millis, state.counter, self.device_id.clone())
+    }
+
+    /// The receiver's current wall-clock millis, read from the same injected
+    /// source the clock stamps from. This is the reference the pull bounds an
+    /// incoming `_updated_at` against (see [`Timestamp::is_within_future_bound`]):
+    /// it is the receiver's view of "now", in the same millis unit as a stamp's
+    /// physical component — never an author-supplied value. Read once per pull and
+    /// passed down, not sampled in a loop.
+    pub fn wall_now_ms(&self) -> u64 {
+        (self.wall_clock)()
     }
 
     /// Generate a new timestamp. Guaranteed to be greater than any previous
@@ -236,6 +266,16 @@ impl UpdatedAtStamper {
     pub fn for_test() -> Self {
         Self::new(Arc::new(Hlc::new("test-device".to_string())))
     }
+}
+
+/// The OS wall clock in epoch milliseconds — the same physical source [`Hlc`]
+/// stamps from. Production reads "now" through an injected clock
+/// ([`Hlc::wall_now_ms`]); this is for callers that apply a *trusted*, already-
+/// captured changeset against a raw connection with no injected clock (snapshot
+/// round-trips, gate/FK mechanics tests), where the honest receiver-now is real
+/// wall time and the future-skew bound is incidental, not under test.
+pub fn now_wall_ms() -> u64 {
+    wall_clock_ms()
 }
 
 /// Epoch milliseconds for the HLC's physical component. Native reads the OS clock
@@ -439,6 +479,32 @@ mod tests {
 
         // String comparison should agree.
         assert!(ts_b.to_string() > ts_a.to_string());
+    }
+
+    #[test]
+    fn future_bound_admits_honest_and_rejects_grossly_future() {
+        let wall: u64 = 1_700_000_000_000;
+
+        // At or behind wall time: always honest, regardless of how far behind.
+        assert!(Timestamp::new(wall, 0, "d".into()).is_within_future_bound(wall));
+        assert!(Timestamp::new(0, 0, "d".into()).is_within_future_bound(wall));
+
+        // Inside the allowance (offline device, plausible drift): honest.
+        let just_inside = wall + MAX_FUTURE_SKEW_MS - 1;
+        assert!(Timestamp::new(just_inside, 0, "d".into()).is_within_future_bound(wall));
+        // Exactly at the allowance boundary: still admitted (inclusive).
+        let at_bound = wall + MAX_FUTURE_SKEW_MS;
+        assert!(Timestamp::new(at_bound, 0, "d".into()).is_within_future_bound(wall));
+
+        // One past the allowance: grossly-future, rejected.
+        let just_beyond = wall + MAX_FUTURE_SKEW_MS + 1;
+        assert!(!Timestamp::new(just_beyond, 0, "d".into()).is_within_future_bound(wall));
+        // Absurd far-future (broken clock): rejected.
+        assert!(!Timestamp::new(u64::MAX, 0, "d".into()).is_within_future_bound(wall));
+
+        // The wall + allowance sum saturates rather than overflowing, so a near-max
+        // wall clock still admits an at-or-behind stamp.
+        assert!(Timestamp::new(u64::MAX, 0, "d".into()).is_within_future_bound(u64::MAX));
     }
 
     #[test]

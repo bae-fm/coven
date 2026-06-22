@@ -567,7 +567,8 @@ mod tests {
     /// Apply a changeset's bytes with the production LWW path scoped to the test
     /// synced set.
     fn apply(c: &Connection, bytes: &[u8]) {
-        apply_changeset_lww(c, bytes, &synced_tables()).expect("apply changeset");
+        apply_changeset_lww(c, bytes, &synced_tables(), crate::sync::hlc::now_wall_ms())
+            .expect("apply changeset");
     }
 
     /// Record a changeset over the synced tables while `body` runs SQL against a

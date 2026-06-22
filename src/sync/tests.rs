@@ -155,8 +155,12 @@ async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
     db.take_changeset_and_suspend().await.expect("suspend");
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
+    let receiver_wall_ms = db.receive_wall_ms();
     let had = db
-        .call(move |conn| apply_changeset_lww(conn, &bytes, &tables).map(|r| r.had_fk_violations))
+        .call(move |conn| {
+            apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms)
+                .map(|r| r.had_fk_violations)
+        })
         .await
         .expect("apply");
     db.resume_session().await.expect("resume");

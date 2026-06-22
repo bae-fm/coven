@@ -140,6 +140,14 @@ pub async fn pull_changes(
     blob_plan: &dyn BlobPlan,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
     let _ = library_dir;
+    // The receiver's current wall-clock millis, read once from the register clock
+    // and passed down to bound an incoming `_updated_at`'s physical component. A
+    // stamp grossly beyond this (plus a generous offline allowance) is a broken
+    // clock or buggy client: it must not win last-writer-wins (the apply's conflict
+    // handler refuses it) nor ratchet the local clock (`advance_max_updated_at`
+    // skips it). Read once here, not sampled per row, so the bound is stable across
+    // the whole pull.
+    let receiver_wall_ms = db.receive_wall_ms();
     // The library's established owner, pinned at create/join/restore (issue #102).
     // `Some` for an opaque (encrypted) library — its membership chain is anchored
     // to this pubkey; `None` for a browsable library, which has no chain and is
@@ -519,9 +527,11 @@ pub async fn pull_changes(
             let apply_result = {
                 let schema = schema.clone();
                 let bytes = changeset_bytes.clone();
-                db.call(move |conn| apply_changeset_lww_with_schema(conn, &bytes, schema))
-                    .await
-                    .map_err(|e| PullError::Apply(e.0))?
+                db.call(move |conn| {
+                    apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
+                })
+                .await
+                .map_err(|e| PullError::Apply(e.0))?
             };
 
             if apply_result.had_fk_violations {
@@ -532,7 +542,12 @@ pub async fn pull_changes(
                 });
             }
 
-            advance_max_updated_at(&mut result.max_applied_updated_at, &changes, &schema);
+            advance_max_updated_at(
+                &mut result.max_applied_updated_at,
+                &changes,
+                &schema,
+                receiver_wall_ms,
+            );
 
             result.changesets_applied += 1;
             result.row_changes.extend(changes);
@@ -558,9 +573,11 @@ pub async fn pull_changes(
             let retry_result = {
                 let schema = schema.clone();
                 let bytes = d.changeset.clone();
-                db.call(move |conn| apply_changeset_lww_with_schema(conn, &bytes, schema))
-                    .await
-                    .map_err(|e| PullError::Apply(e.0))?
+                db.call(move |conn| {
+                    apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
+                })
+                .await
+                .map_err(|e| PullError::Apply(e.0))?
             };
 
             if retry_result.had_fk_violations {
@@ -771,10 +788,20 @@ async fn reload_entries(
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
 /// as an HLC [`Timestamp`]. A row whose `_updated_at` fails to parse is logged
 /// and skipped — it must not panic the pull or silently default the clock.
+///
+/// `max` becomes the value the caller advances the local HLC past, and that
+/// advance is deliberately uncapped (it trusts a value already written to disk).
+/// So the bound lives here, at the point a stamp is *collected*: a grossly-future
+/// stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`] — is
+/// logged and skipped, so it can never ratchet the clock. A conflicting row with
+/// such a stamp was already refused by the apply, but a *non-conflicting* INSERT
+/// (no local row to conflict with) reaches here as an applied row, so this is the
+/// gate that stops it from dragging the clock forward.
 fn advance_max_updated_at(
     max: &mut Option<Timestamp>,
     changes: &[RowChange],
     schema: &TableSchema,
+    receiver_wall_ms: u64,
 ) {
     for change in changes {
         let Some(cols) = schema.get(&change.table) else {
@@ -801,6 +828,13 @@ fn advance_max_updated_at(
             continue;
         };
         match Timestamp::parse(raw) {
+            Some(ts) if !ts.is_within_future_bound(receiver_wall_ms) => warn!(
+                table = %change.table,
+                value = raw,
+                receiver_wall_ms,
+                "applied row's _updated_at is grossly beyond the offline-skew \
+                 allowance, not advancing HLC past it"
+            ),
             Some(ts) => {
                 if max.as_ref().is_none_or(|cur| ts > *cur) {
                     *max = Some(ts);
