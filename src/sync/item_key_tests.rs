@@ -240,12 +240,15 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
 /// Changeset-replay multi-device join, through the REAL pull path: device A mints
 /// an item key, writes a shareable note + its blob-bearing child row, and uploads
 /// the `Item`-scoped blob; then publishes the changeset (carrying the `item_keys`
-/// row). Device B runs the production [`pull_changes`] — which applies the
-/// changeset and then calls `download_changeset_blobs`, which resolves
-/// `Item(id)` via the freshly-applied `item_keys` row — so the
-/// blob lands on B's disk already decrypted. This catches a regression where the
-/// pull-side resolution is dropped: B would fail to decrypt and the blob would
-/// not land. Members that join before any snapshot exists take this path.
+/// row). Device B runs the production [`pull_changes`] — which now resolves
+/// `Item(id)` from the `item_keys` row carried IN this changeset and downloads +
+/// fsyncs the blob BEFORE applying the changeset (issue #111: a row is never
+/// applied before its blob is durable). The key comes from the walked changeset,
+/// not a freshly-applied DB row, so the blob lands on B's disk already decrypted
+/// without the apply having to precede the download. This catches a regression
+/// where the pull-side resolution is dropped: B would fail to resolve the key and
+/// the blob would not land. Members that join before any snapshot exists take
+/// this path.
 #[tokio::test]
 async fn changeset_replay_join_resolves_item_and_decrypts() {
     let storage = CloudSyncStorage::new(

@@ -51,14 +51,48 @@ mod imp {
     }
 
     pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
         }
-        tokio::fs::write(path, bytes)
+        // Write THEN fsync the file before returning: a blob does not count as
+        // "downloaded" until its bytes are durable on disk, because the pull
+        // applies the row that references it only after this returns (the
+        // blob-before-row invariant, issue #111). A plain `fs::write` leaves the
+        // bytes in the page cache, so a crash could surface a row whose blob is
+        // empty or absent.
+        let mut file = tokio::fs::File::create(path)
             .await
-            .map_err(|e| format!("write local blob {}: {e}", path.display()))
+            .map_err(|e| format!("create local blob {}: {e}", path.display()))?;
+        file.write_all(bytes)
+            .await
+            .map_err(|e| format!("write local blob {}: {e}", path.display()))?;
+        file.sync_all()
+            .await
+            .map_err(|e| format!("fsync local blob {}: {e}", path.display()))?;
+        // Also fsync the parent directory so the new file's directory entry
+        // survives a crash, not just its data. Best-effort: directory fsync is
+        // not portable (Windows has no handle-based dir flush), so a failure here
+        // is logged rather than failing the already-durable file write.
+        if let Some(parent) = path.parent() {
+            match tokio::fs::File::open(parent).await {
+                Ok(dir) => {
+                    if let Err(e) = dir.sync_all().await {
+                        tracing::warn!("could not fsync parent dir {}: {e}", parent.display());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "could not open parent dir {} to fsync: {e}",
+                        parent.display()
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn exists(path: &Path) -> Result<bool, String> {

@@ -154,6 +154,20 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
         None,
         "cursor stays before the blob-failed seq 1",
     );
+    // The blob-bearing row must NOT have been applied: with download-before-apply
+    // (#111), seq 1's failed blob means seq 1 is skipped whole -- "row present,
+    // blob missing" never exists. (Before #111 the row was applied and only the
+    // cursor held back, so n1 was visible with no photo file on disk.)
+    assert!(
+        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "seq 1's row must not be applied when its blob download fails",
+    );
+    // seq 2 is never reached -- the pull stops this device at the failed seq 1.
+    assert!(
+        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n2'").await,
+        "seq 2 is not processed past the blob-failed seq 1",
+    );
+    assert_eq!(result.changesets_applied, 0);
 }
 
 #[tokio::test]
