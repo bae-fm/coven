@@ -713,6 +713,49 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     assert_eq!(updated.get("devOwner"), Some(&1));
 }
 
+/// The fail-open the auditor reproduced: a non-empty but MALFORMED chain (here a
+/// founder with a corrupt signature, so `download_chain` errors) on a pinned-owner
+/// library must be refused — not treated as "no chain, accept everything", which
+/// would let an attacker who wipes+refounds with junk get their changesets applied.
+#[tokio::test]
+async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
+    let storage = MockSyncStorage::new();
+
+    // A non-empty listing whose entry won't validate (broken founder signature).
+    let attacker = UserKeypair::generate();
+    let mut bad = founder_entry(&attacker, "2026-03-01T00:00:00Z");
+    bad.signature = "00".to_string();
+    storage
+        .put_membership_entry(
+            &hex::encode(attacker.public_key),
+            1,
+            serde_json::to_vec(&bad).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let owner = UserKeypair::generate();
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key))
+        .await
+        .unwrap();
+
+    let result = pull_into_result(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobPlan,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(PullError::MembershipTampered(_))),
+        "a malformed chain on a pinned-owner library must be refused, got {:?}",
+        result.map(|_| ()),
+    );
+}
+
 mod schema_version_too_old_display {
     use crate::sync::pull::PullError;
 

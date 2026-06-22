@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::blob::BlobPlan;
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
@@ -423,6 +423,37 @@ pub(crate) async fn open_db_and_pull(
     )
     .await
     .map_err(JoinError::Pull)?;
+
+    // Restore passes no owner (it recovers an existing library this device may not
+    // have founded): adopt the owner from the chain's founder now, before the first
+    // sync connect anchors the chain. Without this the connect would find a chain
+    // founded by another key with no owner pinned and refuse it as foreign. This is
+    // trust-on-first-use, acceptable for restore because the restore code carries
+    // the bucket's own credentials — whoever holds it already controls the bucket.
+    // Join already pinned its owner from the invite, so it skips this.
+    if owner_pubkey.is_none() {
+        if let Ok(entries) = storage.list_membership_entries().await {
+            if !entries.is_empty() {
+                match crate::sync::membership_ops::download_chain(storage, &entries).await {
+                    Ok(chain) => {
+                        if let Some(founder) = chain.founder_pubkey() {
+                            db.set_sync_state(
+                                crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                                founder,
+                            )
+                            .await
+                            .map_err(|e| {
+                                JoinError::Database(format!("Failed to pin library owner: {e}"))
+                            })?;
+                        }
+                    }
+                    // A chain that won't load is left unpinned: the first sync connect
+                    // then refuses it, which is the right outcome for a malformed chain.
+                    Err(e) => warn!("restore: could not load chain to pin owner: {e}"),
+                }
+            }
+        }
+    }
 
     // Persist the post-bootstrap sync bookkeeping so the first real sync cycle
     // treats this device as a joiner, not a brand-new library. `bootstrap_from_snapshot`

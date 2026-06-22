@@ -339,3 +339,50 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         "a chain refounded under a different key is a takeover attempt",
     );
 }
+
+/// Founding writes the cloud founder entry before pinning the owner, so a crash
+/// between the two leaves a chain founded by our own key with no pin. The next
+/// connect completes the pin (the founder is provably ours). A chain founded by a
+/// DIFFERENT key with no pin is a first-connect takeover seed and is refused — the
+/// branch that previously adopted any founder on trust.
+#[tokio::test]
+async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign() {
+    use crate::sync::cycle::ensure_owner_anchored_chain;
+    use crate::sync::membership_ops::{write_founder_entry, OWNER_PUBKEY_STATE_KEY};
+
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let hlc = Hlc::new("owner-dev".to_string());
+
+    // Cloud-first crash: our founder is in storage, but the pin never landed. The
+    // next connect completes it (founder == our key) and anchors.
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    write_founder_entry(&storage, &owner, "0000000001000-0000-owner")
+        .await
+        .unwrap();
+    let chain = ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+        .await
+        .expect("completes our own half-done founding");
+    assert!(chain.is_founded_by(&owner_pk));
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk),
+        "the pin is completed from our own founder",
+    );
+
+    // Foreign chain, no pin: an attacker seeded a chain under their own key before
+    // we ever connected. We neither founded it nor pinned an owner → refuse.
+    let attacker = UserKeypair::generate();
+    let fresh_db = open_test_db();
+    let seeded = MockSyncStorage::new();
+    write_founder_entry(&seeded, &attacker, "0000000001000-0000-attacker")
+        .await
+        .unwrap();
+    assert!(
+        ensure_owner_anchored_chain(&seeded, &fresh_db, &owner, &hlc)
+            .await
+            .is_err(),
+        "a foreign chain with no pinned owner must be refused, not adopted on trust",
+    );
+}

@@ -625,7 +625,7 @@ pub async fn init_sync(
 
     if cipher.is_plaintext() {
         // Browsable (plaintext) home: no membership chain — open by design. Keep
-        // only the device's own auth-key marker, as before.
+        // only the device's own auth-key marker; a plaintext home has no chain.
         if existing_keys.is_empty() {
             if let Err(e) = cloud_home
                 .write(
@@ -651,8 +651,9 @@ pub async fn init_sync(
                 return None;
             }
         };
-        // First-time auth-key bootstrap from the chain. (Refreshing the auth-key
-        // set on every cycle is #85/#87, not this change.)
+        // First-time auth-key bootstrap from the chain. Refreshing the auth-key set
+        // on every cycle (#85/#87) is the auth-key refresh path's job, separate from
+        // this one-time bootstrap.
         if existing_keys.is_empty() {
             if let Err(e) = super::membership_ops::sync_authorized_keys(cloud_home, &chain).await {
                 error!("Failed to bootstrap auth keys from membership chain: {e}");
@@ -673,16 +674,18 @@ pub async fn init_sync(
 }
 
 /// Establish or verify the owner-anchored membership chain for an opaque library
-/// (issue #102).
+/// (issue #102). Returns the validated chain for auth-key bootstrap, or an error
+/// to abort sync.
 ///
-/// - First cloud connect of a *created* library (no chain, no pinned owner): this
-///   device is the owner, so it writes the founder Owner entry and pins itself.
-/// - A library with a chain but no pinned owner yet (joined libraries pin at join;
-///   this is the observed-first transitional case): adopt the founder as owner.
-/// - Otherwise: anchor — the chain's founder must equal the pinned owner, else the
-///   chain was wiped and refounded (a takeover), and we refuse.
-///
-/// Returns the validated chain for auth-key bootstrap, or an error to abort sync.
+/// Founding is two non-atomic writes — the founder entry to cloud storage and the
+/// owner pin to the local DB — so this completes a half-done founding (in either
+/// order) idempotently when the chain is founded by *our* key, and otherwise
+/// refuses. It never adopts a chain founded by a *different* key with no owner
+/// pinned: that is the first-connect takeover window (#95). Every legitimate
+/// non-creator pins the owner before this runs — join from the invite's owner,
+/// restore from the chain founder — so an absent pin against a foreign founder is
+/// either an attacker who seeded the bucket or an unestablished library, both of
+/// which we refuse rather than trust.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
@@ -703,25 +706,16 @@ pub(crate) async fn ensure_owner_anchored_chain(
         .map_err(|e| format!("list membership entries: {e}"))?;
 
     if entries.is_empty() {
-        match pinned {
-            None => {
-                // Created library, first connect: we are the owner. Found + pin.
-                let ts = hlc.now().to_string();
-                super::membership_ops::write_founder_entry(storage, owner_keypair, &ts)
-                    .await
-                    .map_err(|e| e.0)?;
-                db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &our_pk)
-                    .await
-                    .map_err(|e| format!("pin owner: {e}"))?;
-                info!(owner = %our_pk, "Founded library: wrote owner-anchored founder entry");
-                crate::sync::membership::MembershipChain::from_entries(vec![
-                    crate::sync::membership::founder_entry(owner_keypair, &ts),
-                ])
-                .map_err(|e| format!("build founder chain: {e}"))
-            }
-            Some(owner) => Err(format!(
-                "membership chain is missing but owner {owner} is pinned for this \
-                 library — refusing to re-found (wiped or tampered membership/*)"
+        match pinned.as_deref() {
+            // Created library, first connect: we are the owner. Found + pin.
+            None => found_and_pin(storage, db, owner_keypair, &our_pk, hlc).await,
+            // An owner is pinned but the chain is gone. Founding writes the entry
+            // before pinning, so a crash never leaves this state — it means an
+            // established chain was wiped. Re-founding would silently drop every
+            // member, so refuse and surface it (#104) rather than self-heal.
+            Some(p) => Err(format!(
+                "membership chain is missing but owner {p} is pinned for this library \
+                 — refusing (wiped or tampered membership/*)"
             )),
         }
     } else {
@@ -732,26 +726,60 @@ pub(crate) async fn ensure_owner_anchored_chain(
             .founder_pubkey()
             .ok_or_else(|| "loaded membership chain has no founder".to_string())?
             .to_string();
-        match pinned {
-            None => {
-                db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder)
+        match pinned.as_deref() {
+            // Anchored: the founder is the pinned owner.
+            Some(p) if p == founder => Ok(chain),
+            // Refounded under a different key (#95) — refuse.
+            Some(p) => Err(format!(
+                "membership chain founder {founder} does not match the pinned owner \
+                 {p} — refusing (owner-takeover attempt)"
+            )),
+            // No pin, but the chain is founded by our own key: the founder write
+            // landed and the pin didn't (a crash between the two writes). Complete
+            // the pin — an attacker cannot forge a founder signed by our key.
+            None if founder == our_pk => {
+                db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &our_pk)
                     .await
                     .map_err(|e| format!("pin owner: {e}"))?;
-                warn!(
-                    owner = %founder,
-                    "Pinned library owner from the existing chain founder (no prior pin)"
-                );
+                Ok(chain)
             }
-            Some(owner) if founder != owner => {
-                return Err(format!(
-                    "membership chain founder {founder} does not match the pinned \
-                     library owner {owner} — refusing (owner-takeover attempt)"
-                ));
-            }
-            Some(_) => {}
+            // No pin and the chain is founded by someone else: we neither founded
+            // this nor pinned an owner (join/restore pin before this runs), so this
+            // is an attacker-seeded or unestablished chain. Refuse rather than adopt
+            // a foreign founder on trust (closes the first-connect takeover window).
+            None => Err(format!(
+                "membership chain is founded by {founder}, not this device, and no \
+                 owner is pinned — refusing (unestablished or foreign chain)"
+            )),
         }
-        Ok(chain)
     }
+}
+
+/// Write the founder entry to cloud storage and pin the owner in the local DB,
+/// then return the single-entry founder chain. Shared by the first-connect found
+/// and the crash-recovery completion so the two writes can't drift.
+#[cfg(not(target_arch = "wasm32"))]
+async fn found_and_pin(
+    storage: &dyn SyncStorage,
+    db: &Database,
+    owner_keypair: &UserKeypair,
+    our_pk: &str,
+    hlc: &Hlc,
+) -> Result<crate::sync::membership::MembershipChain, String> {
+    use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let ts = hlc.now().to_string();
+    super::membership_ops::write_founder_entry(storage, owner_keypair, &ts)
+        .await
+        .map_err(|e| e.0)?;
+    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, our_pk)
+        .await
+        .map_err(|e| format!("pin owner: {e}"))?;
+    info!(owner = %our_pk, "Founded library: wrote owner-anchored founder entry");
+    crate::sync::membership::MembershipChain::from_entries(vec![
+        crate::sync::membership::founder_entry(owner_keypair, &ts),
+    ])
+    .map_err(|e| format!("build founder chain: {e}"))
 }
 
 /// Components needed to run sync cycles.

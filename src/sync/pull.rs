@@ -151,6 +151,17 @@ pub async fn pull_changes(
                     Some(chain)
                 }
                 Err(e) => {
+                    // The listing is non-empty but the chain won't load/validate —
+                    // malformed or corrupt. For an owner-pinned library this is a
+                    // refound/tamper: fail closed (refuse the cycle) rather than fall
+                    // open to "no chain, accept everything". Browsable (no owner) has
+                    // no chain to validate, so it stays open.
+                    if let Some(owner) = &owner_pubkey {
+                        return Err(PullError::MembershipTampered(format!(
+                            "membership chain failed to load/validate for owner-pinned \
+                             library (owner {owner}): {e}"
+                        )));
+                    }
                     warn!("failed to load membership chain for validation: {e}");
                     None
                 }
@@ -165,6 +176,12 @@ pub async fn pull_changes(
             None
         }
         Err(e) => {
+            // Can't even list membership. For an owner-pinned library we cannot
+            // verify authorship, so fail closed (abort, retry next cycle) rather
+            // than apply changesets unvalidated. Browsable stays open.
+            if owner_pubkey.is_some() {
+                return Err(PullError::Storage(e));
+            }
             warn!("failed to list membership entries for validation: {e}");
             None
         }
