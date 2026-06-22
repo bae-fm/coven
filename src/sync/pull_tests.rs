@@ -212,7 +212,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 /// cycle, not skip the upload and publish the row anyway. `sync` returns the
 /// outgoing changeset for the caller to push; aborting here (Err) is what keeps
 /// the caller from publishing a row whose blob was never uploaded — every puller
-/// would 404 on that blob forever (issue #83).
+/// would 404 on that blob forever.
 #[tokio::test]
 async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
     let storage = MockSyncStorage::new();
