@@ -188,7 +188,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// stored length alone doesn't give it (the nonce header and per-chunk
     /// authentication tags pad it). An out-of-range request (`offset + len` past
     /// `source_size`, or an overflow) errors rather than truncating; `len == 0` is
-    /// an empty result. The cache layer ([`crate::blob_cache::open_blob_stream`])
+    /// an empty result. The cache layer ([`crate::blob::cache::open_blob_stream`])
     /// uses this only on a miss — a cache hit reads the local plaintext file
     /// directly.
     async fn read_blob_range(

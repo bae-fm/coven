@@ -1,6 +1,6 @@
-//! Shared backoff math for the sync subsystem. One formula serves both the
-//! cycle-level wait (sync_loop, when consecutive whole-cycle failures pile up)
-//! and the per-item wait (outbox, when an individual upload keeps failing).
+//! Shared backoff math. One formula serves both the cycle-level wait (sync_loop,
+//! when consecutive whole-cycle failures pile up) and the blob engine's per-upload
+//! wait ([`crate::blob::upload`], when an individual upload keeps failing).
 
 /// The natural cycle interval — both backoff users count attempts in multiples
 /// of this so a fresh failure rides the next natural sync cycle.
@@ -10,7 +10,7 @@ const BASE_SECS: u64 = 30;
 /// before the shift so a runaway counter never overflows. Callers wrap the
 /// result in whatever `Duration` type they need (`std::time::Duration`,
 /// `chrono::Duration`, …).
-pub(super) fn backoff_secs(n: u32, cap: u64) -> u64 {
+pub(crate) fn backoff_secs(n: u32, cap: u64) -> u64 {
     BASE_SECS.saturating_mul(1u64 << n.min(20)).min(cap)
 }
 

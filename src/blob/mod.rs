@@ -1,4 +1,4 @@
-//! Blob plumbing for sync.
+//! The blob engine: coven's single owner of a blob's whole durability lifecycle.
 //!
 //! coven syncs opaque encrypted blobs referenced by DB rows. By default it owns
 //! the cloud layout (the content-addressed `{namespace}/{ab}/{cd}/{id}`) and
@@ -6,6 +6,37 @@
 //! lives locally, and how each is scoped for encryption. A home configured for
 //! the unobfuscated blob-path scheme instead stores each blob at the consumer's
 //! readable [`BlobRef::cloud_path`] so the bucket is browsable.
+//!
+//! This module is the engine; its two halves move a blob through its lifecycle
+//! (stage → upload → download → pin/unpin → evict):
+//!
+//! - [`cache`] — the device-local half: bytes on disk keyed by blob id, with the
+//!   folder a file lives in as the only retention truth (`storage/pinned/`
+//!   protected, `storage/cache/` evictable). Stage, read (whole and ranged),
+//!   pin/unpin, clear, and budget eviction.
+//! - [`upload`] — the cloud half: drain the durable upload queue, sealing each
+//!   blob under its scope and writing it to the cloud with coalesced progress, so
+//!   a staged local-only blob becomes uploaded. The sync cycle calls the drain
+//!   each round before it pushes.
+//!
+//! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`BlobSync`],
+//! [`BlobSource`], [`BlobUploadObserver`]/[`DrainControl`]) are the vocabulary
+//! both halves and the host speak.
+
+pub mod cache;
+pub mod upload;
+
+// The cache's own tests: real `Database` + `MockSyncStorage` over a temp library
+// dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
+// Native-only (the cache writes through `tokio::fs`); see [`cache`].
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod cache_tests;
+// The upload drain's tests: real `Database` (the `cloud_outbox` queue) driven
+// against `InMemoryCloudHome`/`FailingCloudHome`, asserting record-and-continue,
+// per-entry backoff, scope-resolved sealing, and the observer callbacks. See
+// [`upload`].
+#[cfg(test)]
+mod upload_tests;
 
 use std::path::PathBuf;
 
@@ -134,7 +165,7 @@ pub struct BlobRef {
     /// be a copy the host staged into the cache; coven reads it, never copies or
     /// ingests it. It is NOT the pull destination: a pulled blob lands in the cache
     /// (`storage/pinned/<id>` / `storage/cache/<id>`), which coven owns and builds
-    /// from the validated blob id — see [`crate::blob_cache`].
+    /// from the validated blob id — see [`cache`].
     pub local_path: PathBuf,
     /// Encryption scope for this blob.
     pub scope: BlobScope,
@@ -222,10 +253,10 @@ pub enum DrainControl {
 /// queue drains.
 ///
 /// `should_skip_uploads` lets the host pause the upload pipeline without
-/// touching the queue contents. The sync cycle consults it before processing
-/// the outbox so a paused queue still accepts new entries but doesn't drain;
-/// in-flight uploads complete normally (process_uploads checks once at the top
-/// of each entry).
+/// touching the queue contents. The sync cycle consults it before draining the
+/// upload queue so a paused queue still accepts new entries but doesn't drain;
+/// in-flight uploads complete normally ([`upload::drain_uploads`] checks once at
+/// the top of each entry).
 /// `Send + Sync` with `Send` method futures on native; `?Send` on wasm. See
 /// [`crate::MaybeThreadSafe`] for why the bound is cfg'd — the browser drives
 /// every upload future on one thread.
@@ -252,9 +283,9 @@ pub trait BlobUploadObserver: crate::MaybeThreadSafe {
     /// An upload attempt failed; the entry remains queued for retry.
     async fn on_blob_upload_failed(&self, file_id: &str, error: &str);
 
-    /// If true, the sync cycle skips outbox upload processing this round and
-    /// `process_uploads` short-circuits before pulling the next queued entry.
-    /// The default is `false` so existing implementations don't need a stub.
+    /// If true, the sync cycle skips the upload drain this round and
+    /// [`upload::drain_uploads`] short-circuits before pulling the next queued
+    /// entry. The default is `false` so existing implementations don't need a stub.
     fn should_skip_uploads(&self) -> bool {
         false
     }

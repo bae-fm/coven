@@ -213,9 +213,9 @@ pub async fn run_single_sync_cycle(
         Err(e) => return Err(format!("Failed to read snapshot blob backfill flag: {e}")),
     };
 
-    // Process outbox uploads. Blob-before-row ordering is the host's
-    // responsibility: it keeps a blob-bearing row's gate column off until its
-    // blobs land, then flips it on in `on_blob_uploaded` (which can also return
+    // Drain the blob engine's upload queue. Blob-before-row ordering is the
+    // host's responsibility: it keeps a blob-bearing row's gate column off until
+    // its blobs land, then flips it on in `on_blob_uploaded` (which can also return
     // `DrainControl::Publish` to break this drain so a just-completed unit
     // publishes now instead of waiting for the whole batch). The changeset is
     // gated per row by the gate column, not by a global "any upload pending"
@@ -223,16 +223,23 @@ pub async fn run_single_sync_cycle(
     // loop's cadence below.
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
-        match super::outbox::process_uploads(db, ch, cipher, library_dir.as_ref(), clock, observer)
-            .await
+        match crate::blob::upload::drain_uploads(
+            db,
+            ch,
+            cipher,
+            library_dir.as_ref(),
+            clock,
+            observer,
+        )
+        .await
         {
             Ok(outcome) => {
                 resume_drain_promptly = outcome.yielded_for_publish;
                 if outcome.uploaded > 0 {
-                    info!(count = outcome.uploaded, "Processed outbox uploads");
+                    info!(count = outcome.uploaded, "Drained blob uploads");
                 }
             }
-            Err(e) => warn!("Outbox upload processing error: {e}"),
+            Err(e) => warn!("Blob upload drain error: {e}"),
         }
     }
 

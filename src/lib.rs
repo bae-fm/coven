@@ -43,16 +43,10 @@
 //!   writes rows through `Database::call` without ever building a `SyncManager`,
 //!   an `EncryptionService`, or a cloud config.
 
+// The blob engine: the vocabulary types plus the two lifecycle halves —
+// `blob::cache` (bytes on disk, folder-truth retention) and `blob::upload` (drain
+// the durable upload queue to the cloud). Documented at the module.
 pub mod blob;
-// The device-local blob cache: bytes on disk keyed by id, with the folder a file
-// lives in (`storage/pinned/` vs `storage/cache/`) as the only retention truth — no
-// cache table. Documented at the module.
-pub mod blob_cache;
-// The cache's own tests: real `Database` + `MockSyncStorage` over a temp library
-// dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
-// Native-only (the cache writes through `tokio::fs`); see the module.
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod blob_cache_tests;
 pub mod changeset;
 pub mod clock;
 pub mod config;

@@ -9,10 +9,10 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{BlobRef, BlobScope, BlobSource, BlobSync, ResolvedScope};
-use crate::blob_cache::{
+use super::cache::{
     clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
 };
+use crate::blob::{BlobRef, BlobScope, BlobSource, BlobSync, ResolvedScope};
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::sync::push::SCHEMA_VERSION;

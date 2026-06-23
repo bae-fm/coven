@@ -1,5 +1,8 @@
 pub mod apply;
-mod backoff;
+// Shared backoff math: the cycle-level wait (sync_loop/wasm_runtime) and the blob
+// engine's per-upload wait (`crate::blob::upload`) both count attempts in
+// multiples of one base interval, so the formula is `pub(crate)`.
+pub(crate) mod backoff;
 pub mod cloud_storage;
 pub mod conflict;
 pub mod cycle;
