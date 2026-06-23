@@ -153,33 +153,27 @@ pub async fn row_exists(db: &Database, sql: &str) -> bool {
 }
 
 /// Run `stmts` against the test database, then capture and return the recorded
-/// changeset bytes, re-attaching the capture session for the next capture.
+/// changeset bytes. Capture stays enabled (the batch is reset), so a later
+/// `capture_bytes` returns only the writes since this one.
 pub async fn capture_bytes(db: &Database, stmts: &[&str]) -> Vec<u8> {
     for s in stmts {
         exec(db, s).await;
     }
-    let bytes = db
-        .take_changeset_and_suspend()
-        .await
-        .expect("capture changeset");
-    db.resume_session().await.expect("resume session");
-    bytes
+    db.take_changeset().await.expect("capture changeset")
 }
 
 /// Apply a changeset to the test database with the production LWW path, scoped to
-/// `tables`. Suspends the capture session around the apply so the applied rows
-/// are not re-recorded (mirrors the cycle's lifecycle).
+/// `tables`. Goes through `apply_changeset` so capture is disabled around only the
+/// apply (the applied rows are not re-recorded), mirroring the cycle's lifecycle.
 pub async fn apply_to_db(db: &Database, bytes: &[u8], tables: &[SyncedTable]) {
-    db.take_changeset_and_suspend()
-        .await
-        .expect("suspend before apply");
     let bytes = bytes.to_vec();
     let tables = tables.to_vec();
     let receiver_wall_ms = db.receive_wall_ms();
-    db.call(move |conn| apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms).map(|_| ()))
-        .await
-        .expect("apply changeset");
-    db.resume_session().await.expect("resume after apply");
+    db.apply_changeset(move |conn| {
+        apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
+    })
+    .await
+    .expect("apply changeset");
 }
 
 /// A temp dir plus a [`LibraryDir`] rooted at it. The returned `TempDir` must be
@@ -835,9 +829,10 @@ impl crate::blob::BlobUploadObserver for PublishingObserver {
     async fn on_blob_upload_failed(&self, _file_id: &str, _error: &str) {}
 }
 
-/// Pull into `db` the way the protocol requires: suspend its capture session
-/// first (so applying remote rows isn't re-recorded as a local change), pull +
-/// apply, then resume. Returns the updated cursors and the pull result.
+/// Pull into `db` the way production does: capture stays enabled, and
+/// `pull_changes` disables it around only each apply (so applied rows aren't
+/// re-recorded as a local change) while a host write during the pull would still
+/// be captured. Returns the updated cursors and the pull result.
 pub async fn pull_into(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -846,10 +841,7 @@ pub async fn pull_into(
     library_dir: &crate::library_dir::LibraryDir,
     blob_source: &dyn crate::blob::BlobSource,
 ) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
-    db.take_changeset_and_suspend()
-        .await
-        .expect("suspend before pull");
-    let r = pull_changes(
+    pull_changes(
         db,
         &test_synced_tables(),
         storage,
@@ -859,14 +851,11 @@ pub async fn pull_into(
         blob_source,
     )
     .await
-    .expect("pull");
-    db.resume_session().await.expect("resume after pull");
-    r
+    .expect("pull")
 }
 
 /// Like [`pull_into`] but returns the `pull_changes` result without unwrapping, so
-/// a test can assert a [`crate::sync::pull::PullError`]. Suspends/resumes the
-/// capture session around it just like `pull_into`.
+/// a test can assert a [`crate::sync::pull::PullError`].
 #[allow(clippy::type_complexity)]
 pub async fn pull_into_result(
     db: &Database,
@@ -876,10 +865,7 @@ pub async fn pull_into_result(
     library_dir: &crate::library_dir::LibraryDir,
     blob_source: &dyn crate::blob::BlobSource,
 ) -> Result<(HashMap<String, u64>, crate::sync::pull::PullResult), crate::sync::pull::PullError> {
-    db.take_changeset_and_suspend()
-        .await
-        .expect("suspend before pull");
-    let r = pull_changes(
+    pull_changes(
         db,
         &test_synced_tables(),
         storage,
@@ -888,9 +874,7 @@ pub async fn pull_into_result(
         library_dir,
         blob_source,
     )
-    .await;
-    db.resume_session().await.expect("resume after pull");
-    r
+    .await
 }
 
 /// A blob source that references no blobs — for cycle/pull tests not exercising blobs.

@@ -1,15 +1,17 @@
 //! Full sync orchestrator: gate + push local changes, pull remote changes.
 //!
 //! Protocol within a cycle:
-//! 1. The caller captured the outgoing changeset and suspended the capture
-//!    session (so incoming applies are not re-recorded). The bytes are passed in.
+//! 1. The caller captured the outgoing changeset (resetting the recorded batch)
+//!    and passes the bytes in. Capture stays ENABLED throughout.
 //! 2. Gate the captured changeset (cut gated-false rows, re-emit on flip).
 //! 3. Push our changeset's blobs, then build the signed envelope to push.
-//! 4. Pull incoming changesets and apply them (session still suspended).
-//! 5. The caller resumes the capture session and runs snapshot policy.
+//! 4. Pull incoming changesets and apply them — the pull disables capture around
+//!    only each apply (so applied rows aren't echoed) and re-enables it at once,
+//!    so a host write landing during the network phases is still captured.
+//! 5. The caller runs snapshot policy.
 //!
-//! All connection access goes through the owned [`Database`]; the session
-//! lifecycle (suspend/resume) is the caller's, since it spans the network steps.
+//! All connection access goes through the owned [`Database`]; capture is never
+//! suspended across the network steps — only the apply briefly disables it.
 
 use std::collections::HashMap;
 
@@ -53,8 +55,9 @@ impl SyncService {
     /// pull remote changes.
     ///
     /// `outgoing` is the changeset the caller captured via
-    /// `Database::take_changeset_and_suspend`; the capture session is suspended
-    /// for the duration, so the apply inside `pull` is not re-recorded.
+    /// `Database::take_changeset`; capture stays enabled, and the apply inside
+    /// `pull` disables it around only the apply, so the applied rows are not
+    /// re-recorded while host writes during the network steps are.
     #[allow(clippy::too_many_arguments)]
     pub async fn sync(
         &self,

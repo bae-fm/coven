@@ -379,9 +379,9 @@ async fn bootstrap_and_save(
 ///
 /// The snapshot the bootstrap wrote already carries the full schema (the host's
 /// tables and coven's bookkeeping), so `Database::open`'s bookkeeping migration
-/// is idempotent and the host migrate is a no-op here. The fresh capture session
-/// is suspended before pulling — a just-bootstrapped library has no local
-/// changes to capture, and pull must apply with no session active.
+/// is idempotent and the host migrate is a no-op here. Capture stays enabled — a
+/// just-bootstrapped library has no local host writer, so there is no whole-cycle
+/// suspend to manage; `pull_changes` disables capture around only its apply.
 pub(crate) async fn open_db_and_pull(
     db_path: &Path,
     synced_tables: &[SyncedTable],
@@ -412,11 +412,6 @@ pub(crate) async fn open_db_and_pull(
             .await
             .map_err(|e| JoinError::Database(format!("Failed to pin library owner: {e}")))?;
     }
-
-    // Suspend the capture session so the apply during pull is not re-recorded.
-    db.take_changeset_and_suspend()
-        .await
-        .map_err(|e| JoinError::Database(format!("Failed to suspend capture session: {e}")))?;
 
     // Download the blob files the snapshot's rows reference. The snapshot carried
     // the catalog rows but no per-row image/torrent files, and the pull below

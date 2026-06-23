@@ -145,7 +145,6 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     storage.store_changeset("dev-b", 1, &cs_b, SCHEMA_VERSION);
 
     // A pulls B's edit; B wins on LWW because b_stamp > a_stamp.
-    db_a.take_changeset_and_suspend().await.expect("suspend A");
     pull_changes(
         &db_a,
         &test_synced_tables(),
@@ -157,7 +156,6 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     )
     .await
     .expect("pull into A");
-    db_a.resume_session().await.expect("resume A");
     assert_eq!(
         query_text(&db_a, "SELECT title FROM notes WHERE id = 'n1'").await,
         "B wrote this",
@@ -254,7 +252,6 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     );
 
     let db2 = open_test_db();
-    db2.take_changeset_and_suspend().await.expect("suspend");
     let (updated, result) = pull_changes(
         &db2,
         &test_synced_tables(),
@@ -266,7 +263,6 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     )
     .await
     .expect("pull");
-    db2.resume_session().await.expect("resume");
 
     assert_eq!(
         result.changesets_applied, 0,
@@ -522,23 +518,24 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     );
 }
 
-/// Regression: a sync cycle that errors mid-span — after the capture has
-/// suspended the session but before the span completes — must still re-attach the
-/// capture session. The `Database` (and its actor) outlive the cycle and are
-/// reused every cycle, so a span that exited without resuming would leave capture
-/// permanently off: every later host write would go un-recorded and never sync.
+/// Regression: a sync cycle that errors mid-cycle must still leave host-write
+/// capture working. The `Database` (and its actor) outlive the cycle and are
+/// reused every cycle, so if a failure could leave capture off, every later host
+/// write would go un-recorded and never sync. The fix makes this structural —
+/// capture is never suspended across the cycle (only an apply briefly disables it,
+/// and that closure can't be reached on this failure path) — so there is no
+/// suspended state a mid-cycle abort could strand.
 ///
 /// We force the failure by blocking every `INSERT` into `sync_state` with a
 /// trigger that `RAISE(ABORT)`s. The cycle's top-of-cycle reads (plain `SELECT`s)
-/// still succeed, but the first bookkeeping persist inside the suspended span
-/// fails, so the span returns `Err`. The unconditional resume must then re-attach
-/// the session — proven by a subsequent host write landing in the next captured
-/// changeset.
+/// still succeed, but the first bookkeeping persist fails, so the cycle returns
+/// `Err`. Capture must still record a subsequent host write into the next
+/// captured changeset.
 #[tokio::test]
-async fn cycle_error_mid_span_still_re_attaches_capture_session() {
+async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // A db whose `sync_state` rejects every INSERT, so a `set_sync_state` inside
-    // the cycle's suspended span fails. Reads (the seed scan, the cycle's
-    // top-of-cycle loads) are SELECTs and remain fine.
+    // the cycle fails. Reads (the seed scan, the cycle's top-of-cycle loads) are
+    // SELECTs and remain fine.
     let (db, _stamper) = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
@@ -555,9 +552,9 @@ async fn cycle_error_mid_span_still_re_attaches_capture_session() {
     .expect("open db with sync_state-blocking trigger");
 
     // A local insert so the cycle has an outgoing changeset to stage — the first
-    // `set_sync_state("staged_seq", ...)` inside the span is what the trigger
-    // aborts. (Even with no outgoing, the unconditional HLC high-water persist
-    // would abort; either way the span fails mid-suspend.)
+    // `set_sync_state("staged_seq", ...)` is what the trigger aborts. (Even with no
+    // outgoing, the unconditional HLC high-water persist would abort; either way the
+    // cycle fails after capture.)
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -594,9 +591,9 @@ async fn cycle_error_mid_span_still_re_attaches_capture_session() {
         "the blocked set_sync_state must make the cycle fail mid-span"
     );
 
-    // The session must be re-attached despite the mid-span failure: a fresh host
-    // write is captured into the next changeset. If resume had been skipped, the
-    // session would still be suspended and this capture would come back empty.
+    // Capture must still be live despite the mid-cycle failure: a fresh host write
+    // is recorded into the next changeset. If a failure could leave capture off,
+    // this capture would come back empty.
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -604,17 +601,16 @@ async fn cycle_error_mid_span_still_re_attaches_capture_session() {
     )
     .await;
     let next = db
-        .take_changeset_and_suspend()
+        .take_changeset()
         .await
         .expect("capture after the failed cycle");
-    db.resume_session().await.expect("resume");
 
     let changes = crate::changeset::walk(&next).expect("walk next changeset");
     assert!(
         changes
             .iter()
             .any(|c| c.table == "notes" && c.pk() == Some("n2")),
-        "the post-failure host write was not captured — the cycle left the capture \
-         session permanently suspended (the leak this test guards against)"
+        "the post-failure host write was not captured — the cycle left capture off \
+         (the leak this test guards against)"
     );
 }

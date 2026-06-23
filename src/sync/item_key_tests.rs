@@ -312,9 +312,6 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     };
     let (_tmp_lib, ld) = temp_library_dir();
 
-    db_b.take_changeset_and_suspend()
-        .await
-        .expect("suspend B before pull");
     let (cursors, result) = pull_changes(
         &db_b,
         db_b.synced_tables(),
@@ -326,7 +323,6 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     )
     .await
     .expect("device B pulls A's changeset");
-    db_b.resume_session().await.expect("resume B after pull");
 
     assert_eq!(result.changesets_applied, 1, "B applied A's changeset");
     assert!(

@@ -148,23 +148,18 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
     );
 }
 
-/// Apply a changeset and report whether it had FK violations, mirroring the
-/// suspend/apply/resume lifecycle of [`apply_to_db`].
+/// Apply a changeset and report whether it had FK violations, through the same
+/// `apply_changeset` lifecycle as [`apply_to_db`].
 async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
     use crate::sync::apply::apply_changeset_lww;
-    db.take_changeset_and_suspend().await.expect("suspend");
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
     let receiver_wall_ms = db.receive_wall_ms();
-    let had = db
-        .call(move |conn| {
-            apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms)
-                .map(|r| r.had_fk_violations)
-        })
-        .await
-        .expect("apply");
-    db.resume_session().await.expect("resume");
-    had
+    db.apply_changeset(move |conn| {
+        apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms).map(|r| r.had_fk_violations)
+    })
+    .await
+    .expect("apply")
 }
 
 #[tokio::test]

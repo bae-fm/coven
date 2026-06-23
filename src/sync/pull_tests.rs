@@ -375,10 +375,7 @@ async fn on_demand_blob_uploads_on_push_but_is_not_downloaded_on_pull() {
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
-    let outgoing = db1
-        .take_changeset_and_suspend()
-        .await
-        .expect("capture outgoing");
+    let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     // Drive the real push path: it uploads the OnDemand blob inline (same as a
     // Mirrored one — the class only changes the pull side), then returns the
@@ -402,7 +399,6 @@ async fn on_demand_blob_uploads_on_push_but_is_not_downloaded_on_pull() {
         )
         .await
         .expect("sync");
-    db1.resume_session().await.expect("resume");
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
@@ -481,10 +477,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
          VALUES ('p1', 'n1', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
-    let outgoing = db1
-        .take_changeset_and_suspend()
-        .await
-        .expect("capture outgoing");
+    let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
@@ -504,8 +497,6 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
             &src_plan,
         )
         .await;
-    db1.resume_session().await.expect("resume");
-
     // `SyncResult` is not Debug; inspect only the error side for the assert message.
     let err = result.err();
     assert!(
@@ -595,10 +586,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
          VALUES ('p1cover', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
-    let outgoing = db1
-        .take_changeset_and_suspend()
-        .await
-        .expect("capture outgoing");
+    let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
@@ -619,7 +607,6 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         )
         .await
         .expect("sync");
-    db1.resume_session().await.expect("resume");
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
@@ -714,10 +701,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
          VALUES ('p1cover', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
-    let outgoing = db1
-        .take_changeset_and_suspend()
-        .await
-        .expect("capture outgoing");
+    let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
@@ -738,7 +722,6 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         )
         .await
         .expect("sync");
-    db1.resume_session().await.expect("resume");
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,

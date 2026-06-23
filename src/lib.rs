@@ -94,7 +94,7 @@ mod wasm_facade_test;
 
 // Headless proof that the wasm `Database` persists on OPFS through coven's own
 // API. Inside the crate (not `tests/`) because it drives the crate-private
-// `take_changeset_and_suspend` capture path. Worker-only — see the module.
+// `take_changeset` capture path. Worker-only — see the module.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_opfs_test;
 

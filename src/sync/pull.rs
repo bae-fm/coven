@@ -134,9 +134,12 @@ struct DeferredChangeset {
 /// Pull and apply all new changesets from the sync storage.
 ///
 /// `db` is the owned connection handle; all apply and schema reads run through
-/// it on the connection thread. The caller MUST have suspended the capture
-/// session before calling — the protocol requires ending capture before pulling
-/// so the applied rows are not re-recorded into the next outgoing changeset.
+/// it on the connection thread. The apply of incoming rows goes through
+/// [`Database::apply_changeset`], which disables capture around just that apply so
+/// the applied rows are not re-recorded into the next outgoing changeset — the
+/// caller leaves capture ENABLED, so a host write landing during this pull's
+/// network phases is still captured. Every other `db.call` here (schema read,
+/// blob-scope resolution, cursor bookkeeping) runs on the normal enabled path.
 ///
 /// `tables` is the synced set [`Database::open`] owns — the host's declared
 /// tables plus coven's injected `item_keys` (for the `_updated_at` index map and
@@ -557,10 +560,13 @@ pub async fn pull_changes(
             }
 
             // Every referenced blob is now durable on disk: apply the changeset.
+            // Through `apply_changeset` so capture is disabled around just this
+            // apply (the applied rows must not echo as this device's own writes),
+            // while host writes outside it stay captured.
             let apply_result = {
                 let schema = schema.clone();
                 let bytes = changeset_bytes.clone();
-                db.call(move |conn| {
+                db.apply_changeset(move |conn| {
                     apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await
@@ -606,7 +612,7 @@ pub async fn pull_changes(
             let retry_result = {
                 let schema = schema.clone();
                 let bytes = d.changeset.clone();
-                db.call(move |conn| {
+                db.apply_changeset(move |conn| {
                     apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await

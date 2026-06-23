@@ -2,8 +2,11 @@
 //!
 //! Runs a single sync cycle (gate + push local changes, pull remote changes,
 //! manage snapshots) and initializes sync infrastructure. All connection access
-//! goes through the owned [`Database`]; the capture session is suspended for the
-//! gate/pull span and resumed before the snapshot.
+//! goes through the owned [`Database`]; capture stays ENABLED across the whole
+//! cycle (push, pull, snapshot), so a host write landing mid-cycle is recorded
+//! into the next outgoing changeset. Capture is disabled only around the
+//! synchronous apply of incoming rows, inside [`Database::apply_changeset`], so
+//! applied rows are not echoed.
 
 use std::path::PathBuf;
 
@@ -138,11 +141,12 @@ async fn commit_push_success(
 
 /// Run a single sync cycle: capture + gate + push, pull, bookkeeping, snapshot.
 ///
-/// All connection access goes through `db`. The capture session is suspended at
-/// the start of the cycle (so the apply during pull is not re-recorded) and
-/// resumed before the snapshot. Loads/persists all cycle state (local_seq,
-/// cursors, staging, snapshots) through `db`'s bookkeeping API rather than
-/// keeping mutable state across calls.
+/// All connection access goes through `db`. Capture stays ENABLED for the whole
+/// cycle — the pull's apply disables it around just the apply (see
+/// [`Database::apply_changeset`]), so a host write that lands during the network
+/// phases is captured into the next outgoing changeset rather than lost.
+/// Loads/persists all cycle state (local_seq, cursors, staging, snapshots) through
+/// `db`'s bookkeeping API rather than keeping mutable state across calls.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_single_sync_cycle(
     storage: &dyn SyncStorage,
@@ -320,229 +324,187 @@ pub async fn run_single_sync_cycle(
 
     let timestamp = hlc.now().to_string();
 
-    // ---- Suspended span ----
-    //
-    // From the changeset capture (which drops the session) through the last
-    // bookkeeping persist, the capture session is suspended so the apply during
-    // pull is not re-recorded as a local change. The `Database` is reused every
-    // cycle (the actor outlives the loop), so a span that exits without resuming
-    // would leave capture permanently off — silent, total sync loss.
-    //
-    // To make that impossible the entire span runs in one inner block that yields
-    // a `Result`; whatever it returns (Ok or Err, including a capture error or a
-    // mid-span bookkeeping-persist failure), `resume_session()` runs once,
-    // unconditionally, immediately after. Only then is the inner result
-    // propagated. There is exactly one suspend and exactly one matching resume,
-    // both on the same straight-line path — no early `return` can skip it.
-    let span = async {
-        // Capture the outgoing changeset and suspend the capture session. Inside
-        // the guarded span so a capture error also resumes below.
-        let outgoing = db
-            .take_changeset_and_suspend()
-            .await
-            .map_err(|e| format!("Failed to capture outgoing changeset: {e}"))?;
+    // Capture the outgoing changeset and reset the recorded batch. Capture stays
+    // ENABLED across everything below — push, pull, bookkeeping, snapshot — so a
+    // host write that lands at any `await` here (notably during the pull's network
+    // phases) is recorded into the NEXT outgoing changeset rather than lost. The
+    // pull's apply disables capture around only the apply itself (see
+    // [`Database::apply_changeset`]), so applied rows are not echoed. There is no
+    // whole-cycle suspend, hence nothing to unconditionally resume.
+    let outgoing = db
+        .take_changeset()
+        .await
+        .map_err(|e| format!("Failed to capture outgoing changeset: {e}"))?;
 
-        // Run the core gate + push-prep + pull.
-        let sync_result = sync_service
-            .sync(
-                db,
-                tables,
-                outgoing,
-                local_seq,
-                &cursors,
-                storage,
-                &timestamp,
-                "background sync",
-                user_keypair,
-                library_dir,
-                blob_source,
-            )
-            .await
-            .map_err(|e| format!("Sync cycle error: {e}"))?;
-
-        // Propagate the captured changeset. The gate already cut any row whose
-        // gate column is off (the host keeps a blob-bearing row gated until its
-        // blobs upload), so whatever the gate emitted is safe to publish now —
-        // there is no global upload deferral. Stage the bytes before pushing so a
-        // push failure doesn't lose them (the capture already consumed them from
-        // the session); the staged-retry above re-pushes on the next cycle.
-        if let Some(outgoing) = &sync_result.outgoing {
-            let seq = outgoing.seq;
-
-            stage_changeset(library_dir, &outgoing.packed);
-            db.set_sync_state("staged_seq", &seq.to_string())
-                .await
-                .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
-
-            match push_changeset(
-                storage,
-                device_id,
-                seq,
-                outgoing.packed.clone(),
-                snapshot_seq,
-                &timestamp,
-            )
-            .await
-            {
-                Ok(()) => {
-                    commit_push_success(db, library_dir, seq, &mut local_seq).await?;
-                    info!(seq, "Pushed changeset");
-                }
-                Err(e) => {
-                    warn!(seq, "Push failed, changeset staged for retry: {e}");
-                }
-            }
-        }
-
-        // Persist updated cursors. A failure here aborts the cycle like the
-        // sibling bookkeeping persists (local_seq, staged_seq, HLC high-water):
-        // leaving a cursor behind the rows already applied this cycle would
-        // silently desync this device and mask a real DB error.
-        for (cursor_device_id, cursor_seq) in &sync_result.updated_cursors {
-            db.set_sync_cursor(cursor_device_id, *cursor_seq)
-                .await
-                .map_err(|e| {
-                    format!("Failed to persist sync cursor for {cursor_device_id}: {e}")
-                })?;
-        }
-
-        // Republish our head every cycle, even when we pushed no changeset of our
-        // own. push_changeset writes the head only when this device produces a
-        // changeset — so a device that only pulls would otherwise never refresh
-        // its head. The head's last-sync time is what the sync-status view reads
-        // to show how recently each device synced; writing it here after the pull
-        // keeps that current. Best-effort: a transient failure leaves last cycle's
-        // head, and the next cycle republishes unconditionally, so we log rather
-        // than abort.
-        if let Err(e) = storage
-            .put_head(device_id, local_seq, snapshot_seq, &timestamp)
-            .await
-        {
-            warn!("Failed to republish head after pull: {e}");
-        }
-
-        // Advance the HLC past every applied row's `_updated_at`, so the next
-        // local stamp sorts causally after anything just pulled. The source is the
-        // max applied-row `_updated_at` (a real HLC stamp), not the envelope/head
-        // timestamp — only the row register drives last-writer-wins. This is an
-        // authoritative register value the LWW layer already wrote to disk, so the
-        // advance is unconditional (no skew cap): capping it could mint the next
-        // local stamp below an already-stored applied row and lose LWW to it.
-        if let Some(max_applied) = &sync_result.pull.max_applied_updated_at {
-            hlc.advance_past(max_applied);
-        }
-
-        // Flush the clock's high-water mark so a restart re-seeds past it. This
-        // captures both the merge above and any host stamps minted this cycle
-        // (e.g. the changeset envelope timestamp), since `high_water` reads the
-        // clock's current state. A persist error aborts the cycle rather than
-        // risking a backward jump after restart.
-        db.set_sync_state(
-            crate::sync::hlc::HIGHWATER_STATE_KEY,
-            &hlc.high_water().to_string(),
+    // Run the core gate + push-prep + pull.
+    let sync_result = sync_service
+        .sync(
+            db,
+            tables,
+            outgoing,
+            local_seq,
+            &cursors,
+            storage,
+            &timestamp,
+            "background sync",
+            user_keypair,
+            library_dir,
+            blob_source,
         )
         .await
-        .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
+        .map_err(|e| format!("Sync cycle error: {e}"))?;
 
-        // Turn queued blob deletes into signed cloud tombstones (the deletion's
-        // durable record), then GC tombstones whose convergence grace has passed
-        // (the actual blob deletion). Holding the blob for the grace
-        // keeps a peer that still references the row from being stranded; the
-        // signature stops a non-member forging a deletion. (The snapshot
-        // `garbage_collect` has no production caller, so the tombstone GC must run
-        // here, not there.)
-        if let Some(ch) = cloud_home {
-            match crate::blob::delete::drain_tombstones(
-                db,
-                ch,
-                cipher,
-                library_id,
-                user_keypair,
-                clock,
-            )
+    // Propagate the captured changeset. The gate already cut any row whose
+    // gate column is off (the host keeps a blob-bearing row gated until its
+    // blobs upload), so whatever the gate emitted is safe to publish now —
+    // there is no global upload deferral. Stage the bytes before pushing so a
+    // push failure doesn't lose them (the capture already consumed them from
+    // the session); the staged-retry above re-pushes on the next cycle.
+    if let Some(outgoing) = &sync_result.outgoing {
+        let seq = outgoing.seq;
+
+        stage_changeset(library_dir, &outgoing.packed);
+        db.set_sync_state("staged_seq", &seq.to_string())
             .await
-            {
-                Ok(n) if n > 0 => info!(count = n, "Wrote blob tombstones"),
-                Err(e) => warn!("Tombstone drain error: {e}"),
-                _ => {}
+            .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
+
+        match push_changeset(
+            storage,
+            device_id,
+            seq,
+            outgoing.packed.clone(),
+            snapshot_seq,
+            &timestamp,
+        )
+        .await
+        {
+            Ok(()) => {
+                commit_push_success(db, library_dir, seq, &mut local_seq).await?;
+                info!(seq, "Pushed changeset");
             }
-            // A still-pending tombstone-cancel means a blob was re-uploaded this
-            // cycle (or earlier) but its cancel couldn't reach the cloud, so the
-            // tombstone is still present though the blob is live. Reclaiming now would
-            // delete that re-upload, so skip the GC entirely while any cancel is
-            // pending — the next cycle retries the cancels (above) before reclaiming.
-            let cancels_pending = match db.get_pending_cloud_cancels().await {
-                Ok(cancels) => !cancels.is_empty(),
-                Err(e) => {
-                    // Can't confirm the cancel queue is clear — don't risk reclaiming.
-                    warn!("Tombstone GC skipped: failed to read pending cancels: {e}");
-                    true
-                }
-            };
-            if cancels_pending {
-                debug!("tombstone cancels still pending; skipping reclaim this cycle");
-            } else {
-                // Anchor the tombstone GC's authorization to the device's pinned owner
-                // (set on join/restore/found), the same pin `ensure_owner_anchored_chain`
-                // reads. A read failure aborts the GC for this cycle rather than falling
-                // back to trust-on-first-use: deleting user blobs on an unverifiable
-                // owner is the exact attack the pin closes. The next cycle retries.
-                match db
-                    .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-                    .await
-                {
-                    Ok(pinned_owner) => {
-                        match crate::blob::delete::gc_tombstones(
-                            storage,
-                            ch,
-                            cipher,
-                            library_id,
-                            pinned_owner.as_deref(),
-                            clock,
-                        )
-                        .await
-                        {
-                            Ok(n) if n > 0 => {
-                                info!(count = n, "Reclaimed blobs past the tombstone grace")
-                            }
-                            Err(e) => warn!("Tombstone GC error: {e}"),
-                            _ => {}
-                        }
-                    }
-                    Err(e) => warn!("Tombstone GC skipped: failed to read pinned owner: {e}"),
-                }
+            Err(e) => {
+                warn!(seq, "Push failed, changeset staged for retry: {e}");
             }
         }
-
-        Ok::<_, String>((sync_result, local_seq))
     }
-    .await;
 
-    // Resume the capture session now that the suspended span is done, before any
-    // further host writes (and before the snapshot, which VACUUMs the live db).
-    // UNCONDITIONAL: this runs whether the span succeeded or failed, so a failure
-    // mid-span can never leave capture suspended for the life of the reused
-    // `Database`. A resume failure is itself loud — log it at error and surface.
-    if let Err(re) = db.resume_session().await {
-        error!("Failed to resume capture session after sync span: {re}");
-        // Propagate the span error if there was one; otherwise surface the resume
-        // failure (capture is now off and must not be reported as a clean cycle).
-        return Err(match span {
-            Err(span_err) => {
-                format!("{span_err} (also failed to resume capture session: {re})")
+    // Persist updated cursors. A failure here aborts the cycle like the
+    // sibling bookkeeping persists (local_seq, staged_seq, HLC high-water):
+    // leaving a cursor behind the rows already applied this cycle would
+    // silently desync this device and mask a real DB error.
+    for (cursor_device_id, cursor_seq) in &sync_result.updated_cursors {
+        db.set_sync_cursor(cursor_device_id, *cursor_seq)
+            .await
+            .map_err(|e| format!("Failed to persist sync cursor for {cursor_device_id}: {e}"))?;
+    }
+
+    // Republish our head every cycle, even when we pushed no changeset of our
+    // own. push_changeset writes the head only when this device produces a
+    // changeset — so a device that only pulls would otherwise never refresh
+    // its head. The head's last-sync time is what the sync-status view reads
+    // to show how recently each device synced; writing it here after the pull
+    // keeps that current. Best-effort: a transient failure leaves last cycle's
+    // head, and the next cycle republishes unconditionally, so we log rather
+    // than abort.
+    if let Err(e) = storage
+        .put_head(device_id, local_seq, snapshot_seq, &timestamp)
+        .await
+    {
+        warn!("Failed to republish head after pull: {e}");
+    }
+
+    // Advance the HLC past every applied row's `_updated_at`, so the next
+    // local stamp sorts causally after anything just pulled. The source is the
+    // max applied-row `_updated_at` (a real HLC stamp), not the envelope/head
+    // timestamp — only the row register drives last-writer-wins. This is an
+    // authoritative register value the LWW layer already wrote to disk, so the
+    // advance is unconditional (no skew cap): capping it could mint the next
+    // local stamp below an already-stored applied row and lose LWW to it.
+    if let Some(max_applied) = &sync_result.pull.max_applied_updated_at {
+        hlc.advance_past(max_applied);
+    }
+
+    // Flush the clock's high-water mark so a restart re-seeds past it. This
+    // captures both the merge above and any host stamps minted this cycle
+    // (e.g. the changeset envelope timestamp), since `high_water` reads the
+    // clock's current state. A persist error aborts the cycle rather than
+    // risking a backward jump after restart.
+    db.set_sync_state(
+        crate::sync::hlc::HIGHWATER_STATE_KEY,
+        &hlc.high_water().to_string(),
+    )
+    .await
+    .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
+
+    // Turn queued blob deletes into signed cloud tombstones (the deletion's
+    // durable record), then GC tombstones whose convergence grace has passed
+    // (the actual blob deletion). Holding the blob for the grace
+    // keeps a peer that still references the row from being stranded; the
+    // signature stops a non-member forging a deletion. (The snapshot
+    // `garbage_collect` has no production caller, so the tombstone GC must run
+    // here, not there.)
+    if let Some(ch) = cloud_home {
+        match crate::blob::delete::drain_tombstones(db, ch, cipher, library_id, user_keypair, clock)
+            .await
+        {
+            Ok(n) if n > 0 => info!(count = n, "Wrote blob tombstones"),
+            Err(e) => warn!("Tombstone drain error: {e}"),
+            _ => {}
+        }
+        // A still-pending tombstone-cancel means a blob was re-uploaded this
+        // cycle (or earlier) but its cancel couldn't reach the cloud, so the
+        // tombstone is still present though the blob is live. Reclaiming now would
+        // delete that re-upload, so skip the GC entirely while any cancel is
+        // pending — the next cycle retries the cancels (above) before reclaiming.
+        let cancels_pending = match db.get_pending_cloud_cancels().await {
+            Ok(cancels) => !cancels.is_empty(),
+            Err(e) => {
+                // Can't confirm the cancel queue is clear — don't risk reclaiming.
+                warn!("Tombstone GC skipped: failed to read pending cancels: {e}");
+                true
             }
-            Ok(_) => format!("Failed to resume capture session: {re}"),
-        });
+        };
+        if cancels_pending {
+            debug!("tombstone cancels still pending; skipping reclaim this cycle");
+        } else {
+            // Anchor the tombstone GC's authorization to the device's pinned owner
+            // (set on join/restore/found), the same pin `ensure_owner_anchored_chain`
+            // reads. A read failure aborts the GC for this cycle rather than falling
+            // back to trust-on-first-use: deleting user blobs on an unverifiable
+            // owner is the exact attack the pin closes. The next cycle retries.
+            match db
+                .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+                .await
+            {
+                Ok(pinned_owner) => {
+                    match crate::blob::delete::gc_tombstones(
+                        storage,
+                        ch,
+                        cipher,
+                        library_id,
+                        pinned_owner.as_deref(),
+                        clock,
+                    )
+                    .await
+                    {
+                        Ok(n) if n > 0 => {
+                            info!(count = n, "Reclaimed blobs past the tombstone grace")
+                        }
+                        Err(e) => warn!("Tombstone GC error: {e}"),
+                        _ => {}
+                    }
+                }
+                Err(e) => warn!("Tombstone GC skipped: failed to read pinned owner: {e}"),
+            }
+        }
     }
-
-    let (sync_result, local_seq) = span?;
 
     // Reconcile the blob files a snapshot bootstrap could not land. Runs only
-    // while the pending flag is set, and after the pull's span resumed capture so
-    // any blob whose `item_keys` row arrived this cycle now resolves its key. The
-    // reconciliation is read-only (it downloads files, writes no rows), so it does
-    // not need the suspended span. On the first run that lands every referenced
-    // blob the flag clears and no later cycle scans.
+    // while the pending flag is set, and after the pull above applied this cycle's
+    // changesets so any blob whose `item_keys` row arrived now resolves its key.
+    // The reconciliation is read-only (it downloads files, writes no rows). On the
+    // first run that lands every referenced blob the flag clears and no later cycle
+    // scans.
     if snapshot_blob_backfill_pending {
         match super::snapshot::reconcile_snapshot_blobs(
             db,

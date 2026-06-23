@@ -388,3 +388,345 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
         "a foreign chain with no pinned owner must be refused, not adopted on trust",
     );
 }
+
+// ---- Issue #92: the capture window is just the apply, not the whole cycle ----
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_trait::async_trait;
+
+use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError};
+
+/// A [`SyncStorage`] that injects a host write at a cycle `await` point — the
+/// moment the cycle fetches an incoming changeset to apply — by running a host
+/// INSERT through the same `Database` the cycle holds, once, before delegating
+/// `get_changeset` to the inner mock.
+///
+/// This models the real hazard in issue #92: a host edit committed while the
+/// cycle is in its network phase. The write goes through the actor's one
+/// connection (the only door) at an `await` the cycle is parked on, while capture
+/// is live. If the cycle suspended capture for the whole span (the bug), the write
+/// would not be recorded into the next outgoing changeset and would be lost; with
+/// capture live across push/pull (the fix), it is recorded.
+struct HostWriteInjector {
+    inner: MockSyncStorage,
+    db: Database,
+    /// The INSERT to run, once, the first time the cycle fetches a changeset.
+    write_sql: String,
+    fired: AtomicBool,
+}
+
+impl HostWriteInjector {
+    fn new(inner: MockSyncStorage, db: Database, write_sql: &str) -> Self {
+        Self {
+            inner,
+            db,
+            write_sql: write_sql.to_string(),
+            fired: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl SyncStorage for HostWriteInjector {
+    async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+        // Fire the host write exactly once, at this `await` inside the pull's
+        // network phase — capture is live here, and the apply (which disables it)
+        // has not started for this changeset yet.
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            exec(&self.db, &self.write_sql).await;
+        }
+        self.inner.get_changeset(device_id, seq).await
+    }
+
+    async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
+        self.inner.list_heads().await
+    }
+    async fn put_changeset(
+        &self,
+        device_id: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_changeset(device_id, seq, data).await
+    }
+    async fn put_head(
+        &self,
+        device_id: &str,
+        seq: u64,
+        snapshot_seq: Option<u64>,
+        timestamp: &str,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .put_head(device_id, seq, snapshot_seq, timestamp)
+            .await
+    }
+    async fn put_blob(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .put_blob(namespace, id, scope, cloud_path, data)
+            .await
+    }
+    async fn get_blob(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_blob(namespace, id, scope, cloud_path).await
+    }
+    async fn read_blob_range(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.inner
+            .read_blob_range(namespace, id, scope, cloud_path, source_size, offset, len)
+            .await
+    }
+    async fn put_snapshot(
+        &self,
+        author: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_snapshot(author, seq, data).await
+    }
+    async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_snapshot(author, seq).await
+    }
+    async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
+        self.inner.delete_changeset(device_id, seq).await
+    }
+    async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
+        self.inner.list_changesets(device_id).await
+    }
+    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
+        self.inner.get_min_schema_version().await
+    }
+    async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
+        self.inner.set_min_schema_version(version).await
+    }
+    async fn put_membership_entry(
+        &self,
+        author_pubkey: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .put_membership_entry(author_pubkey, seq, data)
+            .await
+    }
+    async fn get_membership_entry(
+        &self,
+        author_pubkey: &str,
+        seq: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_membership_entry(author_pubkey, seq).await
+    }
+    async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        self.inner.list_membership_entries().await
+    }
+    async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
+        self.inner.put_wrapped_key(user_pubkey, data).await
+    }
+    async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_wrapped_key(user_pubkey).await
+    }
+    async fn delete_wrapped_key(&self, user_pubkey: &str) -> Result<(), StorageError> {
+        self.inner.delete_wrapped_key(user_pubkey).await
+    }
+    async fn put_snapshot_meta(
+        &self,
+        author: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_snapshot_meta(author, seq, data).await
+    }
+    async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_snapshot_meta(author, seq).await
+    }
+    async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        self.inner.put_snapshot_pointer(data).await
+    }
+    async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_snapshot_pointer().await
+    }
+    async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
+        self.inner.list_own_snapshot_generations(author).await
+    }
+    async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError> {
+        self.inner.delete_snapshot_generation(author, seq).await
+    }
+}
+
+/// Issue #92: a host write made WHILE a cycle is in its push/pull network phase
+/// must land in the device's NEXT outgoing changeset. It is captured because the
+/// cycle keeps the capture session enabled across push/pull — disabling it only
+/// around the apply of incoming rows.
+///
+/// Setup: a peer "A" has a changeset in shared storage. Device "M" runs a cycle
+/// that pulls it; the storage wrapper injects a host INSERT into M at the
+/// `get_changeset` await (inside the pull, capture live). We then assert the
+/// injected row is (a) present locally on M and (b) carried in M's next outgoing
+/// changeset — proven by pulling that changeset into a fresh peer.
+///
+/// Mutation proof: revert the cycle to suspending capture across the whole span
+/// (drop the per-apply disable and instead suspend at the top / resume at the
+/// bottom). The injected write then lands while capture is off, so it is absent
+/// from M's next changeset and assertion (b) fails.
+#[tokio::test]
+async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[4u8; 32],
+    )));
+
+    // A peer A has published one changeset (an insert of note 'a1') to shared
+    // storage, so M's cycle has something to fetch — the await we inject at.
+    let inner = MockSyncStorage::new();
+    let a_src = open_test_db();
+    let a_cs = capture_bytes(
+        &a_src,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+           VALUES ('a1', 'FromA', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+        ],
+    )
+    .await;
+    inner.store_changeset("A", 1, &a_cs, SCHEMA_VERSION);
+
+    // M's database. The injector runs this INSERT into M at the get_changeset
+    // await, mid-pull, while capture is live.
+    let db_m = open_test_db();
+    let storage = HostWriteInjector::new(
+        inner,
+        db_m.clone(),
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('m_mid', 'WrittenMidCycle', NULL, 1, '0000000002000-0000-M', '2026-01-01')",
+    );
+
+    // Cycle 1: M pulls A's changeset; the host write fires mid-pull.
+    run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+
+    // (a) The injected row is present locally on M.
+    assert_eq!(
+        query_text(&db_m, "SELECT title FROM notes WHERE id = 'm_mid'").await,
+        "WrittenMidCycle",
+        "the mid-cycle host write committed to M's local db",
+    );
+
+    // (b) The injected row is in M's NEXT outgoing changeset. Cycle 2 captures the
+    // batch recorded since cycle 1's capture — which includes the mid-pull write —
+    // and pushes it. A fresh peer C pulls M's output and must receive 'm_mid'.
+    run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+
+    let db_c = open_test_db();
+    pull_into(&db_c, &storage, "C", &HashMap::new(), &ld, &NoopBlobSource).await;
+    assert_eq!(
+        query_text(&db_c, "SELECT title FROM notes WHERE id = 'm_mid'").await,
+        "WrittenMidCycle",
+        "the mid-cycle host write reached a peer via M's next outgoing changeset — \
+         it was NOT lost to a capture-off window during push/pull",
+    );
+}
+
+/// Issue #92, the other half of the invariant: an APPLIED row must NOT echo. After
+/// M applies a peer's changeset, M's own next outgoing changeset must not carry the
+/// applied rows — capture is disabled around the apply, so the applied rows are not
+/// recorded as M's own writes.
+///
+/// Mutation proof: drop the capture-disable around the apply (apply on the normal
+/// enabled `db.call` path). The applied rows are then recorded into M's session and
+/// re-shipped on M's next changeset, so device C receives note 'a1' attributed to
+/// M and the assertion fails.
+#[tokio::test]
+async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[6u8; 32],
+    )));
+
+    // Peer A publishes a changeset; M pulls and applies it in cycle 1.
+    let storage = MockSyncStorage::new();
+    let a_src = open_test_db();
+    let a_cs = capture_bytes(
+        &a_src,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+           VALUES ('a1', 'FromA', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("A", 1, &a_cs, SCHEMA_VERSION);
+
+    let db_m = open_test_db();
+    run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+    assert_eq!(
+        query_text(&db_m, "SELECT title FROM notes WHERE id = 'a1'").await,
+        "FromA",
+        "M applied A's changeset",
+    );
+
+    // Cycle 2: M pushes whatever it captured since. The applied row must not be in
+    // it. A third device C pulls ONLY M's changesets (skip A's by pre-seeding C's
+    // cursor for A) and must not receive 'a1' from M.
+    run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+
+    let db_c = open_test_db();
+    let mut c_cursors = HashMap::new();
+    c_cursors.insert("A".to_string(), 1); // C already has A's seq 1; only pull M.
+    pull_into(&db_c, &storage, "C", &c_cursors, &ld, &NoopBlobSource).await;
+    assert!(
+        !row_exists(&db_c, "SELECT 1 FROM notes WHERE id = 'a1'").await,
+        "the row M applied from A must NOT echo back through M's own changeset \
+         (capture is disabled around the apply)",
+    );
+}
+
+/// Like [`run_cycle_m`] but over an arbitrary `&dyn SyncStorage` (e.g. the
+/// host-write injector), still with no cloud home (no outbox drain, no auth
+/// refresh).
+async fn run_cycle_m_storage(
+    storage: &dyn SyncStorage,
+    db: &Database,
+    cipher: &RwLock<CloudCipher>,
+    keypair: &UserKeypair,
+    hlc: &Hlc,
+    ld: &LibraryDir,
+) {
+    run_single_sync_cycle(
+        storage,
+        "test-lib",
+        "M",
+        hlc,
+        &SystemClock,
+        db,
+        cipher,
+        keypair,
+        ld,
+        None,
+        &NoopBlobSource,
+        None,
+    )
+    .await
+    .expect("cycle");
+}

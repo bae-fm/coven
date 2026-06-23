@@ -101,10 +101,7 @@ async fn opfs_database_persists_through_drop_and_reopen() {
 
         // Capture the outgoing changeset through coven's real session path. The
         // write above must show up as a recorded change.
-        let changeset = db
-            .take_changeset_and_suspend()
-            .await
-            .expect("capture changeset");
+        let changeset = db.take_changeset().await.expect("capture changeset");
         assert!(
             !changeset.is_empty(),
             "capture session recorded no changes for an INSERT into a synced table"

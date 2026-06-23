@@ -29,9 +29,9 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::oneshot;
-use tracing::warn;
 #[cfg(not(target_arch = "wasm32"))]
-use tracing::{debug, error};
+use tracing::debug;
+use tracing::error;
 
 use crate::db::{OutboxEntry, OutboxOperation, MIGRATION_SQL};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
@@ -55,12 +55,15 @@ enum Request {
     /// bookkeeping both arrive this way; writes are captured by the attached
     /// session. The closure boxes its own typed reply.
     Call(Box<dyn FnOnce(&Connection) + Send>),
-    /// Capture the outgoing changeset bytes from the live session, then drop the
-    /// session so a subsequent apply is not re-recorded as a local change.
-    TakeChangesetAndSuspend(oneshot::Sender<Result<Vec<u8>, DbError>>),
-    /// Recreate and re-attach the session after an apply/snapshot, resuming
-    /// capture of host writes.
-    ResumeSession(oneshot::Sender<Result<(), DbError>>),
+    /// Capture the outgoing changeset bytes from the session, then reset the
+    /// recorded batch so the next capture starts empty. Capture stays ENABLED —
+    /// this does NOT suspend; host writes after it are recorded normally.
+    TakeChangeset(oneshot::Sender<Result<Vec<u8>, DbError>>),
+    /// Run a changeset apply on the connection with capture disabled around just
+    /// the apply, so the applied rows are not re-recorded as this device's own
+    /// writes. The closure (which performs the apply) boxes its own typed reply;
+    /// capture is enabled again the instant it returns.
+    ApplyChangeset(Box<dyn FnOnce(&Connection) + Send>),
 }
 
 /// A handle to the owned database. Cloneable; every clone talks to the same
@@ -112,9 +115,13 @@ pub struct Database {
 /// erased to `'static` at construction ([`Owned::new`]); that erasure is sound
 /// precisely because of this co-ownership and drop order.
 ///
-/// `session` is `None` only while suspended between
-/// [`Database::take_changeset_and_suspend`] and [`Database::resume_session`] —
-/// the same window the native actor holds it `None`.
+/// `session` is `Some` for the connection's whole life, except a transient window
+/// inside [`Database::take_changeset`] where it is dropped and immediately
+/// recreated to reset the recorded batch (SQLite cannot clear a session in
+/// place). Capture is never suspended across an `await`: an apply disables
+/// recording on the live session ([`Database::apply_changeset`]) rather than
+/// detaching it. `None` otherwise means a prior attach failed and is reported
+/// loudly, not relied upon.
 #[cfg(target_arch = "wasm32")]
 struct Owned {
     session: Option<rusqlite::session::Session<'static>>,
@@ -377,50 +384,84 @@ impl Database {
         f(&owned.conn)
     }
 
-    /// Capture the outgoing changeset and suspend the session. The returned bytes
-    /// are the recorded local changes since the last capture; after this, the
-    /// session is dropped so a subsequent apply does not re-record the applied
-    /// rows. Empty bytes mean no local changes.
+    /// Capture the outgoing changeset bytes and reset the recorded batch, leaving
+    /// capture ENABLED. The returned bytes are the local changes recorded since the
+    /// last capture; empty bytes mean none. Capture is NOT suspended — a host write
+    /// after this is recorded into the next batch. (SQLite cannot clear a session
+    /// in place, so the reset drops and immediately recreates the session, all
+    /// within this one actor request, leaving a fresh enabled session attached.)
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn take_changeset_and_suspend(&self) -> Result<Vec<u8>, DbError> {
+    pub(crate) async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(Request::TakeChangesetAndSuspend(reply_tx))
+            .send(Request::TakeChangeset(reply_tx))
             .map_err(|_| DbError("db thread is gone".to_string()))?;
         reply_rx
             .await
             .map_err(|_| DbError("db thread dropped the reply".to_string()))?
     }
 
-    /// See the native `take_changeset_and_suspend`. Same logic the actor runs for
-    /// `Request::TakeChangesetAndSuspend`, inline on the borrowed session.
+    /// See the native `take_changeset`. Same logic the actor runs for
+    /// `Request::TakeChangeset`, inline on the borrowed session: capture the batch,
+    /// then reset it unconditionally so the result (Ok or Err) leaves a fresh
+    /// enabled session attached.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn take_changeset_and_suspend(&self) -> Result<Vec<u8>, DbError> {
+    pub(crate) async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
         let mut owned = self.owned.borrow_mut();
-        take_changeset(&mut owned.session)
+        let bytes = capture_changeset(owned.session.as_mut());
+        reset_session(&mut owned, &self.synced_tables);
+        bytes
     }
 
-    /// Recreate and re-attach the session, resuming capture of host writes. Call
-    /// after the apply phase of a cycle.
+    /// Apply an incoming changeset with capture disabled around just the apply, so
+    /// the applied rows are not re-recorded as this device's own writes. `f`
+    /// performs the apply on the connection and is SYNCHRONOUS (no `await`): on a
+    /// single thread nothing else runs while it executes, so no host write can
+    /// interleave inside the capture-off window. Capture is the live session's —
+    /// disabled with `set_enabled(false)` and re-enabled the instant `f` returns —
+    /// so host writes OUTSIDE this call (during push/pull) are still recorded.
+    ///
+    /// This is the ONLY thing the capture session is ever blind to: every other
+    /// `call` runs on the normal enabled path.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn resume_session(&self) -> Result<(), DbError> {
+    pub(crate) async fn apply_changeset<F, R>(&self, f: F) -> Result<R, DbError>
+    where
+        F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
+        R: Send + 'static,
+    {
         let (reply_tx, reply_rx) = oneshot::channel();
+        let boxed: Box<dyn FnOnce(&Connection) + Send> = Box::new(move |conn| {
+            let _ = reply_tx.send(f(conn));
+        });
         self.tx
-            .send(Request::ResumeSession(reply_tx))
+            .send(Request::ApplyChangeset(boxed))
             .map_err(|_| DbError("db thread is gone".to_string()))?;
         reply_rx
             .await
             .map_err(|_| DbError("db thread dropped the reply".to_string()))?
     }
 
-    /// See the native `resume_session`. Same logic the actor runs for
-    /// `Request::ResumeSession`, inline on the borrowed connection.
+    /// See the native `apply_changeset`. wasm borrows the connection, disables the
+    /// live session, runs `f`, re-enables it, and returns a ready future — the
+    /// borrow (and the capture-off window) never spans an `.await`.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn resume_session(&self) -> Result<(), DbError> {
+    pub(crate) async fn apply_changeset<F, R>(&self, f: F) -> Result<R, DbError>
+    where
+        F: FnOnce(&Connection) -> Result<R, DbError> + 'static,
+        R: 'static,
+    {
         let mut owned = self.owned.borrow_mut();
-        let session = attach_erased_session(&owned.conn, &self.synced_tables)?;
-        owned.session = Some(session);
-        Ok(())
+        let Owned { session, conn } = &mut *owned;
+        if let Some(s) = session.as_mut() {
+            s.set_enabled(false);
+        } else {
+            error!("capture session absent at apply; applying with capture off (already not recording)");
+        }
+        let result = f(conn);
+        if let Some(s) = session.as_mut() {
+            s.set_enabled(true);
+        }
+        result
     }
 
     // ---- Bookkeeping: sync_state ----
@@ -973,8 +1014,9 @@ fn run_actor(
     rx: std::sync::mpsc::Receiver<Request>,
 ) {
     // A failure here leaves capture off; the connection still serves reads/writes,
-    // so log it loudly rather than aborting the actor. A later ResumeSession
-    // re-attempts and surfaces its own error to the caller.
+    // so log it loudly rather than aborting the actor. The next `TakeChangeset`
+    // re-attempts the attach (its reset recreates the session) and surfaces its own
+    // error to the caller.
     let mut session = match attach_session(&conn, synced_tables) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -1002,24 +1044,37 @@ fn run_actor(
                     );
                 }
             }
-            Request::TakeChangesetAndSuspend(reply) => {
-                if reply.send(take_changeset(&mut session)).is_err() {
+            Request::TakeChangeset(reply) => {
+                // Capture the recorded batch, then reset it by dropping and
+                // recreating the session — synchronously, here in the one actor
+                // request — so the loop continues with a fresh ENABLED session and
+                // capture is never suspended across a caller's `await`.
+                let bytes = capture_changeset(session.as_mut());
+                reset_session(&mut session, &conn, synced_tables);
+                if reply.send(bytes).is_err() {
                     debug!("db actor: changeset-capture caller dropped its reply receiver");
                 }
             }
-            Request::ResumeSession(reply) => {
-                let result = match attach_session(&conn, synced_tables) {
-                    Ok(s) => {
-                        session = Some(s);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        session = None;
-                        Err(e)
-                    }
-                };
-                if reply.send(result).is_err() {
-                    debug!("db actor: resume-session caller dropped its reply receiver");
+            Request::ApplyChangeset(f) => {
+                // Disable recording on the live session around just the apply, so
+                // the applied rows aren't echoed, then re-enable it. The session
+                // stays attached — host writes before/after (other `Call`s) are
+                // captured. Caught like `Call`: an apply closure panic must not
+                // brick the actor, and must leave capture re-enabled.
+                if let Some(s) = session.as_mut() {
+                    s.set_enabled(false);
+                } else {
+                    error!("capture session absent at apply; applying with capture off (already not recording)");
+                }
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&conn)));
+                if let Some(s) = session.as_mut() {
+                    s.set_enabled(true);
+                }
+                if let Err(panic) = outcome {
+                    error!(
+                        panic = %panic_message(&panic),
+                        "apply closure panicked; the caller's reply was dropped, actor stays alive (capture re-enabled)"
+                    );
                 }
             }
         }
@@ -1058,34 +1113,59 @@ fn attach_session<'c>(
     Ok(session)
 }
 
-/// Drain the session's recorded changes into a changeset and suspend capture by
-/// dropping the session, so a following apply is not re-recorded as local.
-///
-/// An absent session is exceptional — it means a prior resume failed to re-attach
-/// — so it is logged loudly and reported as no local changes rather than silently
-/// masking that the device stopped capturing host writes; the cycle's
-/// unconditional resume re-attaches afterward. Shared by the native actor and the
-/// wasm inline path so both drain the session identically.
-fn take_changeset(
-    session: &mut Option<rusqlite::session::Session<'_>>,
+/// Drain the session's recorded changes into a changeset, WITHOUT touching the
+/// session afterward (the caller resets it — see [`reset_session`]). An absent
+/// session is exceptional — a prior attach failed, so host writes since then were
+/// NOT recorded — and is returned as an error so the caller surfaces the lost
+/// capture loudly rather than silently reporting "no local changes" while writes
+/// went uncaptured. Shared by the native actor and the wasm inline
+/// path so both drain identically.
+fn capture_changeset(
+    session: Option<&mut rusqlite::session::Session<'_>>,
 ) -> Result<Vec<u8>, DbError> {
-    let result = match session.as_mut() {
+    match session {
         Some(s) => {
             let mut buf = Vec::new();
             s.changeset_strm(&mut buf)
                 .map(|()| buf)
                 .map_err(DbError::from)
         }
-        None => {
-            warn!(
-                "capture session unexpectedly absent at changeset capture; \
-                 reporting no local changes (a prior resume must have failed)"
-            );
-            Ok(Vec::new())
-        }
-    };
+        None => Err(DbError(
+            "capture session absent at changeset capture; host writes since the last \
+             cycle were not recorded (a prior session attach failed)"
+                .to_string(),
+        )),
+    }
+}
+
+/// Reset the recorded batch by dropping the session and immediately recreating it,
+/// since SQLite cannot clear a session in place. Leaves a fresh ENABLED session
+/// attached so capture continues uninterrupted — this does NOT suspend. A
+/// recreate failure leaves `session = None`, logged loudly; the next capture then
+/// surfaces an error (host writes went uncaptured) and re-attempts the attach.
+#[cfg(not(target_arch = "wasm32"))]
+fn reset_session<'c>(
+    session: &mut Option<rusqlite::session::Session<'c>>,
+    conn: &'c Connection,
+    synced_tables: &[SyncedTable],
+) {
     *session = None;
-    result
+    match attach_session(conn, synced_tables) {
+        Ok(s) => *session = Some(s),
+        Err(e) => error!("failed to recreate capture session after changeset capture: {e}"),
+    }
+}
+
+/// wasm form of [`reset_session`]: recreates the session against the `Owned`
+/// connection with its lifetime erased to `'static` for storage. Same semantics —
+/// a fresh enabled session, no suspend; a failure leaves `None`, logged loudly.
+#[cfg(target_arch = "wasm32")]
+fn reset_session(owned: &mut Owned, synced_tables: &[SyncedTable]) {
+    owned.session = None;
+    match attach_erased_session(&owned.conn, synced_tables) {
+        Ok(s) => owned.session = Some(s),
+        Err(e) => error!("failed to recreate capture session after changeset capture: {e}"),
+    }
 }
 
 /// Map a library DB `path` to the flat OPFS filename the connection opens
