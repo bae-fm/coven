@@ -279,6 +279,14 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
             "Rejected changes from an unauthorized device (forged or removed member)",
         );
     }
+    // An invalid-signature changeset is forged or corrupt data in shared storage —
+    // an integrity event, surfaced at error level the same way.
+    if result.invalid_signatures > 0 {
+        error!(
+            count = result.invalid_signatures,
+            "Skipped changes with an invalid signature (forged or corrupt)",
+        );
+    }
 
     Ok(result.resume_drain_promptly)
 }

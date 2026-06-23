@@ -181,6 +181,11 @@ impl SyncLoopHandle {
                                         "{} changes from an unauthorized device were rejected.",
                                         result.rejected_unauthorized,
                                     ))
+                                } else if result.invalid_signatures > 0 {
+                                    Some(format!(
+                                        "{} changes with an invalid signature were skipped.",
+                                        result.invalid_signatures,
+                                    ))
                                 } else if result.asset_downloads_failed {
                                     Some("Some files failed to download, will retry".to_string())
                                 } else {

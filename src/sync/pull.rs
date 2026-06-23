@@ -80,6 +80,16 @@ pub struct RejectedUnauthorized {
     pub author: Option<String>,
 }
 
+/// A changeset skipped because its signature did not verify — forged or corrupt,
+/// not a propagation lag. The author claim is unverifiable (the signature is
+/// invalid), so only the object's location identifies it. Surfaced so the host can
+/// warn the user, the way `RejectedUnauthorized` does.
+#[derive(Debug, Clone)]
+pub struct InvalidSignature {
+    pub device_id: String,
+    pub seq: u64,
+}
+
 /// Summary of a pull operation.
 #[derive(Debug)]
 pub struct PullResult {
@@ -96,6 +106,11 @@ pub struct PullResult {
     /// (forged or revoked). The cursor advanced past each so the client is not
     /// stuck; surfaced so the host can warn. Per-cycle, like `skipped_schema`.
     pub rejected_unauthorized: Vec<RejectedUnauthorized>,
+    /// Changesets skipped because their signature did not verify (forged or
+    /// corrupt). The cursor advanced past each — a bad signature never becomes
+    /// valid, so holding would re-fetch the bad object and stall the device —
+    /// surfaced so the host can warn. Per-cycle, like `skipped_schema`.
+    pub invalid_signatures: Vec<InvalidSignature>,
     /// All device heads fetched during this pull (including our own).
     /// Used by the sync status UI to show other devices' activity.
     pub remote_heads: Vec<DeviceHead>,
@@ -290,6 +305,7 @@ pub async fn pull_changes(
         asset_downloads_failed: false,
         skipped_schema: 0,
         rejected_unauthorized: Vec::new(),
+        invalid_signatures: Vec::new(),
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
         max_applied_updated_at: None,
@@ -356,13 +372,20 @@ pub async fn pull_changes(
                 break;
             }
 
-            // Signature check: reject changesets with invalid signatures.
+            // Signature check: reject changesets with invalid signatures. A bad
+            // signature is forged or corrupt and never becomes valid, so advance the
+            // cursor (holding would re-fetch the bad object and stall the device) and
+            // surface it — logged at error and reported to the host so it can warn.
             if !verify_changeset_signature(&env, &changeset_bytes) {
-                warn!(
+                error!(
                     device_id = %head.device_id,
                     seq,
                     "changeset has invalid signature, skipping"
                 );
+                result.invalid_signatures.push(InvalidSignature {
+                    device_id: head.device_id.clone(),
+                    seq,
+                });
                 updated_cursors.insert(head.device_id.clone(), seq);
                 continue;
             }

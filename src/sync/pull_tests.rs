@@ -1202,6 +1202,83 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     assert_eq!(updated.get("devX"), Some(&1));
 }
 
+/// Issue #86 — a changeset whose signature does not verify (forged or corrupt in
+/// transit) is SKIPPED, logged at error, and surfaced as `invalid_signatures` so
+/// the host can warn; the cursor advances past it (a bad signature never becomes
+/// valid, so holding would stall the device). The signature check runs before the
+/// authorization judgment, so a corrupt signature is reported as an invalid
+/// signature, not as unauthorized.
+#[tokio::test]
+async fn pull_skips_and_surfaces_a_changeset_with_an_invalid_signature() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key);
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    storage
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+
+    // The owner (a current member) authors a changeset that WOULD be authorized,
+    // then its signature is corrupted. The signature check must reject it before
+    // authorization is even considered.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Tampered', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "dev1",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:02:00Z",
+        &owner,
+        Some(MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 1,
+        }),
+        &cs,
+    );
+    // Corrupt the signature: an all-zero 64-byte Ed25519 signature is well-formed
+    // but never verifies. Repack without re-signing so the envelope is otherwise
+    // intact (the changeset_size still matches, so this reaches the signature check
+    // rather than failing envelope parsing).
+    let (mut env, changeset_bytes) = envelope::unpack(&packed).unwrap();
+    env.signature = Some("0".repeat(128));
+    storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &changeset_bytes));
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+        &NoopBlobSource,
+    )
+    .await;
+
+    // Nothing applied; surfaced as an invalid signature (NOT unauthorized) and the
+    // cursor advances past it so the device doesn't stall on the bad object.
+    assert_eq!(result.changesets_applied, 0);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(result.rejected_unauthorized.is_empty());
+    assert_eq!(result.invalid_signatures.len(), 1);
+    assert_eq!(result.invalid_signatures[0].device_id, "dev1");
+    assert_eq!(result.invalid_signatures[0].seq, 1);
+    assert_eq!(updated.get("dev1"), Some(&1));
+}
+
 /// Issue #84 — a removed member's changeset is skipped, not applied. The owner
 /// added the member at (owner, 2) then removed them at (owner, 3); the member's
 /// changeset names its (still-valid-looking) Add grant (owner, 2), but the puller
