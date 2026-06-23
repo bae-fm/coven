@@ -96,6 +96,28 @@ fn signed_wrapped_key(
         .map_err(|e| InviteError::Crypto(format!("serialize wrapped key: {e}")))
 }
 
+/// Test-only constructor for the serialized `keys/{recipient}` bytes, so a refresh
+/// test can seed a member's wrapped key (signed by an owner, or by an attacker to
+/// model a substituted key) directly. Thin pass-through to the production
+/// [`signed_wrapped_key`] so tests and production wrap identically.
+#[cfg(test)]
+pub(crate) fn signed_wrapped_key_for_test(
+    library_id: &str,
+    recipient_ed25519_pubkey: &str,
+    recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
+    encryption_key: &[u8; 32],
+    owner_keypair: &UserKeypair,
+) -> Vec<u8> {
+    signed_wrapped_key(
+        library_id,
+        recipient_ed25519_pubkey,
+        recipient_x25519_pk,
+        encryption_key,
+        owner_keypair,
+    )
+    .expect("wrap key for test")
+}
+
 /// Upload a signed membership entry to the storage.
 async fn upload_membership_entry(
     storage: &dyn SyncStorage,

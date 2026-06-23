@@ -35,6 +35,11 @@ pub mod pull;
 #[cfg(test)]
 mod pull_tests;
 pub mod push;
+// The per-cycle authorization/decryption refresh (#85/#87) exercised through the
+// real key-rotation flow (`revoke_member` → `apply_key_rotation`), which persists
+// to the keyring — so it builds only on native, where the keyring backend exists.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod refresh_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod restore;
 pub mod restore_code;

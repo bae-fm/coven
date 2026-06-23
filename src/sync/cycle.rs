@@ -11,13 +11,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::blob::{BlobSource, BlobUploadObserver};
 use crate::changeset::RowChange;
-// `Config`/`ClockRef`/`KeyService` are used only by the native-only `init_sync`.
+// `Config`/`ClockRef` are used only by the native-only `init_sync`.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::clock::ClockRef;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::config::Config;
 use crate::database::Database;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::keys::KeyService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
@@ -158,6 +157,19 @@ pub async fn run_single_sync_cycle(
     // The synced-table set is owned by the Database; read it once here.
     let tables = db.synced_tables();
     let sync_service = SyncService::new(device_id.to_string());
+
+    // Refresh authorization/decryption state BEFORE anything this cycle pushes,
+    // judges, or decrypts (#85/#87). Membership, the authorized-keys set, and the
+    // rotatable library key are per-cycle preconditions, not init-time bootstraps:
+    // re-read them now so a removed member's writes are rejected and a rotated key
+    // is adopted on a running device without a restart. Runs before the blob drain
+    // so the drain (and every push/pull below) uses the current key. A failure here
+    // aborts the cycle and retries next time — a refresh that can't complete must
+    // not also corrupt state, and a chain reload that can't verify must fail closed,
+    // never fall open to "no rules apply" (#88).
+    if let Some(ch) = cloud_home {
+        refresh_authorization_state(storage, ch, db, cipher, user_keypair, library_id).await?;
+    }
 
     // Load persisted sync state — DB errors abort the cycle (a transient SQLite
     // error must not make us treat the device as brand-new at seq 0). None (key
@@ -639,6 +651,121 @@ pub async fn run_single_sync_cycle(
         row_changes: sync_result.pull.row_changes,
         resume_drain_promptly,
     })
+}
+
+/// Refresh this device's authorization/decryption state at the top of a cycle:
+/// the membership chain (re-anchored to the pinned owner), the `auth/keys/` set,
+/// and the rotatable library key. Membership and key state are per-cycle
+/// preconditions, not init-time bootstraps — without this a running device acts
+/// on a stale member set (#85) and keeps a dead library key after a rotation it
+/// did not perform (#87), recovering only on restart.
+///
+/// A plaintext (browsable) home has no membership chain, no `auth/keys/`, and no
+/// wrapped library key — it is open by design — so the whole refresh is a no-op
+/// there, mirroring how `init_sync` skips the chain for a plaintext home.
+///
+/// Fail-closed: for an owner-pinned (opaque) library a chain that can't be listed,
+/// loaded, or anchored aborts the cycle (it retries next cycle) rather than
+/// proceeding with no chain — the #88 invariant that a failed membership load must
+/// never fall open. The auth-key write and the wrapped-key read likewise surface
+/// their failures as an aborted cycle: a refresh that can't complete must not leave
+/// durable state half-updated.
+async fn refresh_authorization_state(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    db: &Database,
+    cipher: &std::sync::RwLock<CloudCipher>,
+    user_keypair: &UserKeypair,
+    library_id: &str,
+) -> Result<(), String> {
+    // A plaintext home is open by design — no chain, no auth keys, no library key
+    // to rotate. Nothing to refresh.
+    if cipher.read().unwrap().is_plaintext() {
+        debug!("refresh: plaintext home, nothing to refresh");
+        return Ok(());
+    }
+
+    // The library's owner, pinned at create/join/restore (#102). The whole refresh
+    // anchors to it: the chain reload anchors to the owner, and the wrapped key is
+    // verified against the owner's signature. Without a pinned owner there is nothing
+    // to anchor against — and a production library always has one, since founding
+    // precedes any sync cycle — so a missing pin means there is no shared state to
+    // refresh this cycle; skip it. Critically we do NOT fall back to loading the chain
+    // unanchored: that would reopen the refound-owner bypass (#95), acting on a forged
+    // member set. So no owner ⇒ skip; an owner ⇒ the chain load below is always
+    // owner-anchored.
+    let Some(owner) = db
+        .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .await
+        .map_err(|e| format!("refresh: read pinned owner: {e}"))?
+    else {
+        debug!("refresh: no owner pinned yet (library not founded); nothing to anchor against");
+        return Ok(());
+    };
+
+    // 1. Reload + anchor the membership chain, the same load+anchor the pull and
+    //    snapshot-authorize paths run. Fail closed: a chain that can't be listed, is
+    //    wiped, won't validate, or is founded by a different key is a tamper/takeover
+    //    (#95/#104), so abort rather than act on a stale or forged member set. Never
+    //    set `chain = None` and continue (#88).
+    let entries = storage
+        .list_membership_entries()
+        .await
+        .map_err(|e| format!("refresh: list membership entries: {e}"))?;
+    if entries.is_empty() {
+        // The founder write precedes the pin, so an owner-pinned library with no
+        // chain is a wiped chain, not a fresh library — refuse (#104).
+        return Err(format!(
+            "refresh: membership chain is empty but owner {owner} is pinned \
+             (wiped membership/*)"
+        ));
+    }
+    let chain = super::membership_ops::load_anchored_chain(storage, &entries, Some(owner.as_str()))
+        .await
+        .map_err(|e| format!("refresh: load/anchor membership chain: {e}"))?;
+
+    // 2. Re-materialize `auth/keys/` from the current member set so a newly-added
+    //    member's key appears and a removed member's is pruned this cycle (#85).
+    super::membership_ops::sync_authorized_keys(cloud_home, &chain)
+        .await
+        .map_err(|e| format!("refresh: sync authorized keys: {e}"))?;
+
+    // 3. Adopt a rotated library key (#87). Read this device's own re-wrapped key at
+    //    `keys/{self}` and authenticate it the way join does — the owner signature
+    //    over (library_id, recipient, sealed) verified against the pinned owner
+    //    (#99) — so a bucket writer can't substitute it. If it differs from the key
+    //    in use, swap the live cipher (and persist to the keyring) via
+    //    `apply_key_rotation`, so this same cycle's push/pull/blob ops use it.
+    match super::invite::unwrap_library_key(cloud_home, user_keypair, library_id, &owner).await {
+        Ok(new_key) => {
+            let in_use = match &*cipher.read().unwrap() {
+                CloudCipher::Encrypted(enc) => Some(enc.key_bytes()),
+                // Re-checked under the lock; an opaque library is Encrypted, but if a
+                // race left it Plaintext there is no key to compare against.
+                CloudCipher::Plaintext => None,
+            };
+            if in_use != Some(new_key) {
+                let key_service = KeyService::new(library_id.to_string());
+                let fingerprint =
+                    super::membership_ops::apply_key_rotation(new_key, &key_service, cipher)
+                        .map_err(|e| format!("refresh: adopt rotated library key: {e}"))?;
+                info!(%fingerprint, "Adopted rotated library key");
+            }
+        }
+        // No wrapped key for this device: a solo library that has never shared (its
+        // creation key is the library key), or a device removed from the library (its
+        // `keys/{self}` was deleted). Nothing to adopt; keep the live key. A
+        // *remaining* member always has its `keys/{self}` re-wrapped on rotation, so
+        // this is never a current member silently stuck on a stale key.
+        Err(super::invite::InviteError::CloudHome(
+            crate::storage::cloud::CloudHomeError::NotFound(_),
+        )) => {
+            debug!("refresh: no wrapped key for this device; keeping the live key");
+        }
+        Err(e) => return Err(format!("refresh: read this device's wrapped key: {e}")),
+    }
+
+    Ok(())
 }
 
 /// Initialize sync infrastructure from config and credentials.
