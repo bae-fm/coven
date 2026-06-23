@@ -31,9 +31,6 @@ pub mod join;
 mod join_tests;
 pub mod membership;
 pub mod membership_ops;
-pub mod outbox;
-#[cfg(test)]
-mod outbox_tests;
 pub mod pull;
 #[cfg(test)]
 mod pull_tests;

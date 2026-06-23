@@ -7,23 +7,28 @@
 //! the unobfuscated blob-path scheme instead stores each blob at the consumer's
 //! readable [`BlobRef::cloud_path`] so the bucket is browsable.
 //!
-//! This module is the engine; its two halves move a blob through its lifecycle
-//! (stage → upload → download → pin/unpin → evict):
+//! This module is the engine; its halves move a blob through its lifecycle
+//! (stage → upload → download → pin/unpin → evict → delete):
 //!
 //! - [`cache`] — the device-local half: bytes on disk keyed by blob id, with the
 //!   folder a file lives in as the only retention truth (`storage/pinned/`
 //!   protected, `storage/cache/` evictable). Stage, read (whole and ranged),
 //!   pin/unpin, clear, and budget eviction.
-//! - [`upload`] — the cloud half: drain the durable upload queue, sealing each
-//!   blob under its scope and writing it to the cloud with coalesced progress, so
-//!   a staged local-only blob becomes uploaded. The sync cycle calls the drain
+//! - [`upload`] — the cloud-write half: drain the durable upload queue, sealing
+//!   each blob under its scope and writing it to the cloud with coalesced progress,
+//!   so a staged local-only blob becomes uploaded. The sync cycle calls the drain
 //!   each round before it pushes.
+//! - [`delete`] — the cloud-delete half: turn a queued deletion into a signed
+//!   cloud tombstone, hold the blob for a convergence grace so a lagging peer
+//!   isn't stranded, then GC the blob once the grace has passed. The sync cycle
+//!   drains tombstones and runs the GC each round after it pulls.
 //!
 //! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`BlobSync`],
 //! [`BlobSource`], [`BlobUploadObserver`]/[`DrainControl`]) are the vocabulary
 //! both halves and the host speak.
 
 pub mod cache;
+pub mod delete;
 pub mod upload;
 
 // The cache's own tests: real `Database` + `MockSyncStorage` over a temp library
@@ -37,6 +42,12 @@ mod cache_tests;
 // [`upload`].
 #[cfg(test)]
 mod upload_tests;
+// The delete half's tests: tombstone signing, the drain that writes tombstones,
+// the graced GC that reclaims blobs, upload-cancels-delete at both layers, and the
+// shared `cloud_outbox` row shape. Driven against `InMemoryCloudHome` and
+// `MockSyncStorage`. See [`delete`].
+#[cfg(test)]
+mod delete_tests;
 
 use std::path::PathBuf;
 

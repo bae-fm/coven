@@ -614,7 +614,9 @@ impl Database {
     /// under (master, a derived scope, or a coven-managed item); coven persists
     /// it on the row and resolves it to a key at drain — looking up the
     /// `item_keys` row for an [`crate::blob::BlobScope::Item`] scope — long after
-    /// the enqueue site is gone. Idempotent on `(operation, cloud_key)`.
+    /// the enqueue site is gone. Idempotent on `(operation, cloud_key)`. Queuing an
+    /// upload also cancels any pending delete of the same key — latest intent wins,
+    /// so a re-upload isn't tombstoned in the same cycle.
     pub async fn enqueue_upload(
         &self,
         file_id: &str,
@@ -655,6 +657,16 @@ impl Database {
         scope: crate::blob::BlobScope,
         created_at: &str,
     ) -> Result<(), DbError> {
+        // Latest intent wins: queuing an upload for a key cancels a pending delete
+        // of the same key, so a re-upload and a stale delete can't both be live in
+        // one cycle (which the upload-then-delete phase split would otherwise
+        // resolve by deleting the freshly re-uploaded blob). Runs on the caller's
+        // connection so a transactional import stays atomic with this cancel.
+        conn.execute(
+            "DELETE FROM cloud_outbox WHERE operation = 'delete' AND cloud_key = ?1",
+            [cloud_key],
+        )
+        .map_err(DbError::from)?;
         conn.execute(
             "INSERT OR IGNORE INTO cloud_outbox \
              (operation, file_id, cloud_key, source_path, scope, created_at) \
@@ -671,13 +683,28 @@ impl Database {
         .map_err(DbError::from)
     }
 
-    /// Enqueue a blob delete. The drain removes it from the cloud on the next
-    /// sync cycle once the cloud is reachable. Idempotent on `(operation, cloud_key)`.
+    /// Enqueue a blob delete. The next sync cycle's drain turns it into a signed
+    /// cloud tombstone, and a later GC reclaims the blob once the convergence grace
+    /// has passed (see [`crate::blob::delete`]). Idempotent on `(operation,
+    /// cloud_key)`. Queuing a delete also cancels any pending upload of the same key
+    /// — latest intent wins.
     pub async fn enqueue_delete(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
         let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
         // A delete touches no key, so it carries no scope — the column is
         // nullable and a delete row leaves it NULL.
         self.call(move |conn| {
+            // Latest intent wins: queuing a delete cancels a pending upload of the
+            // same key (the mirror of `enqueue_upload_on`), so an enqueued-then-
+            // deleted blob isn't uploaded only to be tombstoned in the same cycle.
+            // It also drops a pending tombstone-cancel for the key: a fresh delete
+            // wants the blob tombstoned, so a leftover cancel (which would remove
+            // that tombstone) must not survive to undo it.
+            conn.execute(
+                "DELETE FROM cloud_outbox \
+                 WHERE operation IN ('upload', 'cancel') AND cloud_key = ?1",
+                [&cloud_key],
+            )
+            .map_err(DbError::from)?;
             conn.execute(
                 "INSERT OR IGNORE INTO cloud_outbox \
                  (operation, cloud_key, scope, created_at) \
@@ -699,6 +726,14 @@ impl Database {
     /// Pending delete entries, oldest first.
     pub async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.pending_outbox("delete").await
+    }
+
+    /// Pending tombstone-cancel entries, oldest first. Each names a `cloud_key`
+    /// whose tombstone must be removed because the blob was re-uploaded; the
+    /// tombstone-cancel drain reads these and retries the removal until it lands
+    /// (see [`crate::blob::delete::drain_tombstone_cancels`]).
+    pub async fn get_pending_cloud_cancels(&self) -> Result<Vec<OutboxEntry>, DbError> {
+        self.pending_outbox("cancel").await
     }
 
     async fn pending_outbox(&self, op_str: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
@@ -728,6 +763,43 @@ impl Database {
             conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
                 .map(|_| ())
                 .map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// Atomically complete an upload whose inline tombstone-cancel failed: remove
+    /// the upload row `id` and enqueue a `cancel` row for `cloud_key` in one
+    /// transaction. A re-uploaded blob must have its tombstone removed or a later
+    /// GC deletes the live blob; doing both writes together means the durable
+    /// cancel intent exists the instant the upload row is gone, so a crash can
+    /// never drop the upload (it is no longer queued) while leaving the tombstone
+    /// (no cancel queued). The tombstone-cancel drain retries the removal until it
+    /// lands. Used only on the inline-cancel-failed path — a successful inline
+    /// cancel needs no row and just calls [`Self::remove_cloud_outbox_entry`].
+    pub async fn complete_upload_canceling_tombstone(
+        &self,
+        id: i64,
+        cloud_key: &str,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
+        self.call(move |conn| {
+            // One transaction so the row-removal and the cancel-insert commit
+            // together: a crash mid-pair must never leave the upload row gone
+            // while no cancel is queued (the tombstone would then outlive every
+            // retry). `unchecked_transaction` takes `&Connection`, which is what
+            // `call` hands the closure.
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
+                .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO cloud_outbox \
+                 (operation, cloud_key, scope, created_at) \
+                 VALUES ('cancel', ?1, NULL, ?2)",
+                (cloud_key, created_at),
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
         })
         .await
     }
@@ -835,6 +907,7 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
             }
         }
         "delete" => OutboxOperation::Delete,
+        "cancel" => OutboxOperation::Cancel,
         other => panic!("invalid cloud_outbox.operation: {other:?}"),
     };
     Ok(OutboxEntry {

@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::blob::{BlobSource, BlobUploadObserver};
 use crate::changeset::RowChange;
@@ -241,6 +241,17 @@ pub async fn run_single_sync_cycle(
             }
             Err(e) => warn!("Blob upload drain error: {e}"),
         }
+
+        // Retry any tombstone-cancel an upload's inline cancel could not complete.
+        // Runs right after the upload drain (and before the tombstone GC below), so
+        // a blob re-uploaded this cycle has its tombstone removed before the GC
+        // could reclaim it. A cancel that still fails stays queued for the next
+        // cycle — the live re-uploaded blob must never lose its tombstone-cancel.
+        match crate::blob::delete::drain_tombstone_cancels(db, ch, cipher).await {
+            Ok(n) if n > 0 => info!(count = n, "Completed pending tombstone cancels"),
+            Err(e) => warn!("Tombstone cancel drain error: {e}"),
+            _ => {}
+        }
     }
 
     // This device's pull cursors: where the pull starts from, and what we publish
@@ -417,14 +428,73 @@ pub async fn run_single_sync_cycle(
         .await
         .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
 
-        // Process outbox deletes: remove the queued cloud blobs now, without
-        // waiting on peers. A peer still holding the referencing row pulls its
-        // removal on its own next cycle.
+        // Turn queued blob deletes into signed cloud tombstones (the deletion's
+        // durable record), then GC tombstones whose convergence grace has passed
+        // (the actual blob deletion). Holding the blob for the grace
+        // keeps a peer that still references the row from being stranded; the
+        // signature stops a non-member forging a deletion. (The snapshot
+        // `garbage_collect` has no production caller, so the tombstone GC must run
+        // here, not there.)
         if let Some(ch) = cloud_home {
-            match super::outbox::process_deletes(db, ch).await {
-                Ok(n) if n > 0 => info!(count = n, "Processed outbox deletes"),
-                Err(e) => warn!("Outbox delete processing error: {e}"),
+            match crate::blob::delete::drain_tombstones(
+                db,
+                ch,
+                cipher,
+                library_id,
+                user_keypair,
+                clock,
+            )
+            .await
+            {
+                Ok(n) if n > 0 => info!(count = n, "Wrote blob tombstones"),
+                Err(e) => warn!("Tombstone drain error: {e}"),
                 _ => {}
+            }
+            // A still-pending tombstone-cancel means a blob was re-uploaded this
+            // cycle (or earlier) but its cancel couldn't reach the cloud, so the
+            // tombstone is still present though the blob is live. Reclaiming now would
+            // delete that re-upload, so skip the GC entirely while any cancel is
+            // pending — the next cycle retries the cancels (above) before reclaiming.
+            let cancels_pending = match db.get_pending_cloud_cancels().await {
+                Ok(cancels) => !cancels.is_empty(),
+                Err(e) => {
+                    // Can't confirm the cancel queue is clear — don't risk reclaiming.
+                    warn!("Tombstone GC skipped: failed to read pending cancels: {e}");
+                    true
+                }
+            };
+            if cancels_pending {
+                debug!("tombstone cancels still pending; skipping reclaim this cycle");
+            } else {
+                // Anchor the tombstone GC's authorization to the device's pinned owner
+                // (set on join/restore/found), the same pin `ensure_owner_anchored_chain`
+                // reads. A read failure aborts the GC for this cycle rather than falling
+                // back to trust-on-first-use: deleting user blobs on an unverifiable
+                // owner is the exact attack the pin closes. The next cycle retries.
+                match db
+                    .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+                    .await
+                {
+                    Ok(pinned_owner) => {
+                        match crate::blob::delete::gc_tombstones(
+                            storage,
+                            ch,
+                            cipher,
+                            library_id,
+                            pinned_owner.as_deref(),
+                            clock,
+                        )
+                        .await
+                        {
+                            Ok(n) if n > 0 => {
+                                info!(count = n, "Reclaimed blobs past the tombstone grace")
+                            }
+                            Err(e) => warn!("Tombstone GC error: {e}"),
+                            _ => {}
+                        }
+                    }
+                    Err(e) => warn!("Tombstone GC skipped: failed to read pinned owner: {e}"),
+                }
             }
         }
 

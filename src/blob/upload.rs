@@ -289,7 +289,37 @@ pub async fn drain_uploads(
 
         match upload_with_progress(cloud_home, &entry.cloud_key, file_id, sealed, observer).await {
             Ok(()) => {
-                if let Err(e) = db.remove_cloud_outbox_entry(entry.id).await {
+                // A successful write wins over any pending deletion: remove the
+                // tombstone a prior cycle (possibly another device) wrote for this
+                // key, so the GC won't reclaim the blob we just re-uploaded. The
+                // enqueue layer already drops a same-device pending delete row; this
+                // covers a tombstone already committed to the cloud.
+                //
+                // The cancel must not be lost if it fails: a surviving tombstone
+                // past its grace deletes this live blob. So try it inline (the
+                // common case has no tombstone — one no-op delete), and on failure
+                // persist a durable `cancel` row atomically with removing the upload
+                // row. The tombstone-cancel drain then retries until the tombstone
+                // is gone, across cloud errors and restarts. Until that row is
+                // committed the upload row stays queued, so a crash re-uploads and
+                // re-attempts — the tombstone is still there to cancel.
+                let suffix = cipher.read().unwrap().suffix();
+                let cancel =
+                    crate::blob::delete::cancel_tombstone(cloud_home, suffix, &entry.cloud_key)
+                        .await;
+                let removed = match cancel {
+                    Ok(()) => db.remove_cloud_outbox_entry(entry.id).await,
+                    Err(e) => {
+                        warn!("{e}; queuing a durable tombstone cancel for retry");
+                        db.complete_upload_canceling_tombstone(
+                            entry.id,
+                            &entry.cloud_key,
+                            &now.to_rfc3339(),
+                        )
+                        .await
+                    }
+                };
+                if let Err(e) = removed {
                     warn!("Failed to remove outbox entry {}: {e}", entry.id);
                 }
                 count += 1;

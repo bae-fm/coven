@@ -247,7 +247,10 @@ impl CloudHome for SlowChunkedCloudHome {
         unimplemented!("not exercised by drain_uploads")
     }
     async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
+        // The upload drain cancels any tombstone for a key it just wrote, which
+        // deletes the (absent) tombstone object. This fake stores nothing, so the
+        // cancel is a successful no-op.
+        Ok(())
     }
     async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
