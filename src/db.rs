@@ -1,9 +1,10 @@
 //! coven's bookkeeping schema, the `item_keys` synced table, and the
 //! cloud-outbox row types.
 //!
-//! coven owns four device-local bookkeeping tables — `sync_cursors`,
-//! `sync_state`, `cloud_outbox`, `local_blob_refs` — plus the library-global
-//! synced table `item_keys`, all created by `MIGRATION_SQL`, which
+//! coven owns five device-local bookkeeping tables — `sync_cursors`,
+//! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_manage_intents` — plus
+//! the library-global synced table `item_keys`, all created by `MIGRATION_SQL`,
+//! which
 //! [`crate::database::Database::open`] runs against the connection coven owns.
 //! The host no longer implements any of this; it runs its own SQL through
 //! [`crate::database::Database::call`] and reads/writes the outbox through the
@@ -73,6 +74,22 @@ CREATE TABLE IF NOT EXISTS local_blob_refs (
     namespace TEXT NOT NULL,
     path      TEXT NOT NULL,   -- absolute external path coven reads but does NOT own
     size      INTEGER NOT NULL -- plaintext length; validate-on-read
+);
+
+-- Device-local marker for an in-flight manage (Unmanaged → Managed): coven owns
+-- the transition, so this row makes it durable. It is set in the same transaction
+-- that enqueues the root's blob uploads, and removed in the same transaction that
+-- flips the gate true once the last upload lands (the single commit point). It is a
+-- pure presence marker: its existence tells the upload drain's completion check that
+-- an uploaded blob's root is a manage to finish (vs. an orphan from a cancelled
+-- manage to tombstone), and it makes completion + cancel idempotent across a
+-- restart. The pin choice rides each upload row's `retain_pinned`, not this marker.
+-- Device-local like the other bookkeeping tables — no `_updated_at`, never synced or
+-- snapshotted.
+CREATE TABLE IF NOT EXISTS blob_manage_intents (
+    root_table TEXT NOT NULL,
+    root_id    TEXT NOT NULL,
+    PRIMARY KEY (root_table, root_id)
 );
 
 CREATE TABLE IF NOT EXISTS item_keys (

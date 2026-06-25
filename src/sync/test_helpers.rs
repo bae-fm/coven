@@ -833,23 +833,6 @@ impl CloudHome for MockSyncStorage {
     }
 }
 
-/// A [`BlobUploadObserver`](crate::blob::BlobUploadObserver) that breaks the
-/// outbox drain after every upload by returning
-/// [`DrainControl::Publish`](crate::blob::DrainControl), modeling a host that
-/// flips a gate column on the moment a unit's blobs land. The other callbacks are
-/// no-ops. Shared by the cycle and outbox drain tests.
-pub struct PublishingObserver;
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl crate::blob::BlobUploadObserver for PublishingObserver {
-    async fn on_blob_upload_started(&self, _file_id: &str) {}
-    async fn on_blob_uploaded(&self, _file_id: &str) -> crate::blob::DrainControl {
-        crate::blob::DrainControl::Publish
-    }
-    async fn on_blob_upload_failed(&self, _file_id: &str, _error: &str) {}
-}
-
 /// Pull into `db` the way production does: capture stays enabled, and
 /// `pull_changes` disables it around only each apply (so applied rows aren't
 /// re-recorded as a local change) while a host write during the pull would still

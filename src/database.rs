@@ -735,31 +735,41 @@ impl Database {
     /// — latest intent wins.
     pub async fn enqueue_delete(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
         let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
-        // A delete touches no key, so it carries no scope — the column is
-        // nullable and a delete row leaves it NULL.
-        self.call(move |conn| {
-            // Latest intent wins: queuing a delete cancels a pending upload of the
-            // same key (the mirror of `enqueue_upload_on`), so an enqueued-then-
-            // deleted blob isn't uploaded only to be tombstoned in the same cycle.
-            // It also drops a pending tombstone-cancel for the key: a fresh delete
-            // wants the blob tombstoned, so a leftover cancel (which would remove
-            // that tombstone) must not survive to undo it.
-            conn.execute(
-                "DELETE FROM cloud_outbox \
-                 WHERE operation IN ('upload', 'cancel') AND cloud_key = ?1",
-                [&cloud_key],
-            )
-            .map_err(DbError::from)?;
-            conn.execute(
-                "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, cloud_key, scope, created_at) \
-                 VALUES ('delete', ?1, NULL, ?2)",
-                (cloud_key, created_at),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
+        self.call(move |conn| Self::enqueue_delete_on(conn, &cloud_key, &created_at))
+            .await
+    }
+
+    /// Transaction-composable form of [`enqueue_delete`](Self::enqueue_delete):
+    /// runs on a connection the host already holds inside a [`call`](Self::call)
+    /// closure, so coven's `unmanage` can flip a root's gate false and enqueue its
+    /// blob deletes in one transaction — the tombstone can't be lost to a crash
+    /// between the flip and a separate enqueue. A delete touches no key, so it
+    /// carries no scope (the column is NULL for a delete row).
+    pub fn enqueue_delete_on(
+        conn: &Connection,
+        cloud_key: &str,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        // Latest intent wins: queuing a delete cancels a pending upload of the same
+        // key (the mirror of `enqueue_upload_on`), so an enqueued-then-deleted blob
+        // isn't uploaded only to be tombstoned in the same cycle. It also drops a
+        // pending tombstone-cancel for the key: a fresh delete wants the blob
+        // tombstoned, so a leftover cancel (which would remove that tombstone) must
+        // not survive to undo it.
+        conn.execute(
+            "DELETE FROM cloud_outbox \
+             WHERE operation IN ('upload', 'cancel') AND cloud_key = ?1",
+            [cloud_key],
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO cloud_outbox \
+             (operation, cloud_key, scope, created_at) \
+             VALUES ('delete', ?1, NULL, ?2)",
+            (cloud_key, created_at),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
     }
 
     /// Pending upload entries, oldest first. The host reads these to drive its
@@ -808,43 +818,6 @@ impl Database {
             conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
                 .map(|_| ())
                 .map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Atomically complete an upload whose inline tombstone-cancel failed: remove
-    /// the upload row `id` and enqueue a `cancel` row for `cloud_key` in one
-    /// transaction. A re-uploaded blob must have its tombstone removed or a later
-    /// GC deletes the live blob; doing both writes together means the durable
-    /// cancel intent exists the instant the upload row is gone, so a crash can
-    /// never drop the upload (it is no longer queued) while leaving the tombstone
-    /// (no cancel queued). The tombstone-cancel drain retries the removal until it
-    /// lands. Used only on the inline-cancel-failed path — a successful inline
-    /// cancel needs no row and just calls [`Self::remove_cloud_outbox_entry`].
-    pub async fn complete_upload_canceling_tombstone(
-        &self,
-        id: i64,
-        cloud_key: &str,
-        created_at: &str,
-    ) -> Result<(), DbError> {
-        let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
-        self.call(move |conn| {
-            // One transaction so the row-removal and the cancel-insert commit
-            // together: a crash mid-pair must never leave the upload row gone
-            // while no cancel is queued (the tombstone would then outlive every
-            // retry). `unchecked_transaction` takes `&Connection`, which is what
-            // `call` hands the closure.
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            tx.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
-                .map_err(DbError::from)?;
-            tx.execute(
-                "INSERT OR IGNORE INTO cloud_outbox \
-                 (operation, cloud_key, scope, created_at) \
-                 VALUES ('cancel', ?1, NULL, ?2)",
-                (cloud_key, created_at),
-            )
-            .map_err(DbError::from)?;
-            tx.commit().map_err(DbError::from)
         })
         .await
     }
@@ -919,39 +892,121 @@ impl Database {
         path: &Path,
         size: u64,
     ) -> Result<(), DbError> {
+        let (blob_id, namespace, path) = (
+            blob_id.to_string(),
+            namespace.to_string(),
+            path.to_path_buf(),
+        );
+        self.call(move |conn| {
+            Self::register_external_blob_on(conn, &blob_id, &namespace, &path, size)
+        })
+        .await
+    }
+
+    /// Transaction-composable form of
+    /// [`register_external_blob`](Self::register_external_blob): runs on a
+    /// connection the host already holds inside a [`call`](Self::call) closure, so
+    /// coven's `unmanage` can flip a root's gate false and register the external
+    /// refs for its now-local files in one transaction. Insert-or-replace on
+    /// `blob_id`, so a relocate overwrites the prior row.
+    pub fn register_external_blob_on(
+        conn: &Connection,
+        blob_id: &str,
+        namespace: &str,
+        path: &Path,
+        size: u64,
+    ) -> Result<(), DbError> {
         let path = path.to_str().ok_or_else(|| {
             DbError(format!(
                 "external blob path for {blob_id} is not valid UTF-8: {path:?}"
             ))
         })?;
-        let (blob_id, namespace, path) =
-            (blob_id.to_string(), namespace.to_string(), path.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT INTO local_blob_refs (blob_id, namespace, path, size) \
-                 VALUES (?1, ?2, ?3, ?4) \
-                 ON CONFLICT(blob_id) DO UPDATE SET \
-                     namespace = excluded.namespace, \
-                     path = excluded.path, \
-                     size = excluded.size",
-                (blob_id, namespace, path, size as i64),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
+        conn.execute(
+            "INSERT INTO local_blob_refs (blob_id, namespace, path, size) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(blob_id) DO UPDATE SET \
+                 namespace = excluded.namespace, \
+                 path = excluded.path, \
+                 size = excluded.size",
+            (blob_id, namespace, path, size as i64),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
     }
 
     /// Remove the external blob ref for `blob_id`, so the blob resolves through the
     /// normal cache/cloud path again. A no-op if no ref is registered.
     pub async fn clear_external_blob(&self, blob_id: &str) -> Result<(), DbError> {
         let blob_id = blob_id.to_string();
-        self.call(move |conn| {
-            conn.execute("DELETE FROM local_blob_refs WHERE blob_id = ?1", [blob_id])
-                .map(|_| ())
-                .map_err(DbError::from)
-        })
-        .await
+        self.call(move |conn| Self::clear_external_blob_on(conn, &blob_id))
+            .await
+    }
+
+    /// Transaction-composable form of
+    /// [`clear_external_blob`](Self::clear_external_blob): runs on a connection the
+    /// host already holds inside a [`call`](Self::call) closure, so coven's `manage`
+    /// completion can flip a root's gate true and drop the external refs for its
+    /// now-cloud-backed blobs in one transaction. A no-op if no ref is registered.
+    pub fn clear_external_blob_on(conn: &Connection, blob_id: &str) -> Result<(), DbError> {
+        conn.execute("DELETE FROM local_blob_refs WHERE blob_id = ?1", [blob_id])
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
+    // ---- Blob manage intents (device-local in-flight manage markers) ----
+
+    /// Record an in-flight manage of `(root_table, root_id)` as a presence marker.
+    /// Transaction-composable: coven's `manage` inserts this in the same
+    /// transaction that enqueues the root's blob uploads, so an in-flight manage is
+    /// a durable, atomic fact (the upload drain's completion check reads it to know
+    /// an uploaded blob's root is a manage to finish, and it survives a restart).
+    /// The pin choice rides each upload row's `retain_pinned`, not this marker.
+    pub fn insert_manage_intent_on(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "INSERT OR REPLACE INTO blob_manage_intents (root_table, root_id) \
+             VALUES (?1, ?2)",
+            (root_table, root_id),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    /// Remove the manage intent for `(root_table, root_id)`. Transaction-composable
+    /// so it commits with the gate flip (on completion) or with the cancel cleanup.
+    pub fn delete_manage_intent_on(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "DELETE FROM blob_manage_intents WHERE root_table = ?1 AND root_id = ?2",
+            (root_table, root_id),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    /// Whether a manage is in flight for `(root_table, root_id)`. Read inside the
+    /// upload drain's completion check to tell a manage to finish (`true`) from an
+    /// orphan upload of a cancelled manage to tombstone (`false`). Synchronous (runs
+    /// on a connection the caller already holds).
+    pub fn manage_intent_exists(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<bool, DbError> {
+        conn.query_row(
+            "SELECT 1 FROM blob_manage_intents WHERE root_table = ?1 AND root_id = ?2",
+            (root_table, root_id),
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|o| o.is_some())
+        .map_err(DbError::from)
     }
 
     /// The external user-owned file `blob_id` resolves to, or `None` when no ref is

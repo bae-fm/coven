@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use tracing::{debug, error, info, warn};
 
-use crate::blob::BlobUploadObserver;
+use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 // `Config`/`ClockRef` are used only by the native-only `init_sync`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -55,9 +55,10 @@ pub struct SyncCycleResult {
     pub asset_downloads_failed: bool,
     /// Row changes from applied changesets, for the host to map to domain events.
     pub row_changes: Vec<RowChange>,
-    /// The outbox drain broke this cycle to publish a just-completed unit
-    /// (`DrainControl::Publish`), so the loop should run the next cycle promptly
-    /// to drain + publish the rest instead of waiting the idle interval.
+    /// The outbox drain broke this cycle to publish a just-completed manage (coven
+    /// flipped a root's gate the moment its last blob landed), so the loop should run
+    /// the next cycle promptly to drain + publish the rest instead of waiting the
+    /// idle interval.
     pub resume_drain_promptly: bool,
 }
 
@@ -159,7 +160,7 @@ pub async fn run_single_sync_cycle(
     user_keypair: &UserKeypair,
     library_dir: &LibraryDir,
     cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn BlobUploadObserver>,
+    observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, String> {
     // The synced-table set is owned by the Database; read it once here.
     let tables = db.synced_tables();
@@ -232,17 +233,17 @@ pub async fn run_single_sync_cycle(
         Err(e) => return Err(format!("Failed to read snapshot blob backfill flag: {e}")),
     };
 
-    // Drain the blob engine's upload queue. Blob-before-row ordering is the
-    // host's responsibility: it keeps a blob-bearing row's gate column off until
-    // its blobs land, then flips it on in `on_blob_uploaded` (which can also return
-    // `DrainControl::Publish` to break this drain so a just-completed unit
-    // publishes now instead of waiting for the whole batch). The changeset is
-    // gated per row by the gate column, not by a global "any upload pending"
-    // flag. The drain reports whether it broke to publish, which drives the
+    // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
+    // the gate column: a managing root stays gated off until its last blob lands,
+    // and coven flips it on inside the drain (the manage completion), breaking the
+    // drain so this cycle publishes the now-shareable subtree instead of waiting for
+    // the whole batch. The changeset is gated per row, not by a global "any upload
+    // pending" flag. The drain reports whether it broke to publish, which drives the
     // loop's cadence below.
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
-        match crate::blob::upload::drain_uploads(db, ch, cipher, library_dir, clock, observer).await
+        match crate::blob::upload::drain_uploads(db, ch, cipher, library_dir, clock, hlc, observer)
+            .await
         {
             Ok(outcome) => {
                 resume_drain_promptly = outcome.yielded_for_publish;

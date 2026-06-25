@@ -12,15 +12,18 @@
 //!
 //! From that one model coven derives every blob set it needs:
 //! [`BlobDecls::ref_from_change`] over a changeset row (push upload / pull
-//! download / apply-side cache drop), and [`BlobDecls::refs_in_db`] over the whole
-//! DB (snapshot-bootstrap backfill).
+//! download / apply-side cache drop), [`BlobDecls::refs_in_db`] over the whole DB
+//! (snapshot-bootstrap backfill), [`BlobDecls::refs_for_root`] over a gated root's
+//! subtree (the manage/unmanage transitions), and [`BlobDecls::row_for_blob`] to
+//! map an uploaded blob back to its row (the manage completion check).
 
 use std::collections::HashMap;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::blob::{BlobRef, BlobScope, BlobSync};
 use crate::changeset::RowChange;
+use crate::sync::gate::Gates;
 use crate::sync::session::{quote_ident, BlobScopeSpec, SyncedTable};
 
 /// Why building the blob-declaration model failed.
@@ -30,6 +33,8 @@ pub enum BlobDeclError {
     MissingColumn { table: String, column: String },
     /// A schema read (`PRAGMA table_info`) failed.
     Sqlite(rusqlite::Error),
+    /// Walking the gate's FK graph for [`BlobDecls::refs_for_root`] failed.
+    Gate(String),
 }
 
 impl std::fmt::Display for BlobDeclError {
@@ -42,6 +47,7 @@ impl std::fmt::Display for BlobDeclError {
                 )
             }
             BlobDeclError::Sqlite(e) => write!(f, "blob declaration schema read failed: {e}"),
+            BlobDeclError::Gate(e) => write!(f, "blob declaration FK walk failed: {e}"),
         }
     }
 }
@@ -61,6 +67,10 @@ struct TableBlob {
     sync: BlobSync,
     /// Index of the blob-id column.
     id_col: usize,
+    /// Name of the blob-id column. The index reads a row top-to-bottom; the name
+    /// keys a lookup the other way ([`BlobDecls::row_for_blob`]: which row carries
+    /// a given blob id), so both directions resolve off the same declaration.
+    id_col_name: String,
     /// Index of the readable cloud-path column, if declared.
     cloud_path_col: Option<usize>,
     /// The encryption scope, with any column reference resolved to an index.
@@ -89,6 +99,30 @@ impl TableBlob {
             cloud_path,
             sync: self.sync,
         }
+    }
+
+    /// Build the [`BlobRef`] for a live `SELECT *` row of this table, or `None` when
+    /// the row's blob id (or an `ItemColumn` scope value) is NULL. The resolved
+    /// indices address a `SELECT *` row in schema order, exactly as they address a
+    /// changeset row. Shared by [`BlobDecls::refs_in_db`] (whole DB) and
+    /// [`BlobDecls::refs_for_root`] (one root's subtree).
+    fn ref_from_row(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<BlobRef>> {
+        let Some(id) = row.get::<_, Option<String>>(self.id_col)? else {
+            return Ok(None);
+        };
+        let cloud_path = match self.cloud_path_col {
+            Some(i) => row.get::<_, Option<String>>(i)?,
+            None => None,
+        };
+        let scope = match &self.scope {
+            ResolvedScopeSpec::Master => BlobScope::Master,
+            ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
+            ResolvedScopeSpec::ItemColumn(i) => match row.get::<_, Option<String>>(*i)? {
+                Some(item) => BlobScope::Item(item),
+                None => return Ok(None),
+            },
+        };
+        Ok(Some(self.blob_ref(id, scope, cloud_path)))
     }
 }
 
@@ -137,6 +171,7 @@ impl BlobDecls {
                     namespace: decl.namespace.clone(),
                     sync: decl.sync,
                     id_col,
+                    id_col_name: decl.id_column.clone(),
                     cloud_path_col,
                     scope,
                 },
@@ -177,25 +212,73 @@ impl BlobDecls {
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
-                let Some(id) = row.get::<_, Option<String>>(tb.id_col)? else {
-                    continue;
-                };
-                let cloud_path = match tb.cloud_path_col {
-                    Some(i) => row.get::<_, Option<String>>(i)?,
-                    None => None,
-                };
-                let scope = match &tb.scope {
-                    ResolvedScopeSpec::Master => BlobScope::Master,
-                    ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
-                    ResolvedScopeSpec::ItemColumn(i) => match row.get::<_, Option<String>>(*i)? {
-                        Some(item) => BlobScope::Item(item),
-                        None => continue,
-                    },
-                };
-                out.push(tb.blob_ref(id, scope, cloud_path));
+                if let Some(blob) = tb.ref_from_row(row)? {
+                    out.push(blob);
+                }
             }
         }
         Ok(out)
+    }
+
+    /// Every blob the blob-bearing rows in the gated subtree rooted at
+    /// `(root_table, root_id)` reference. The transition analogue of
+    /// [`Self::refs_in_db`], scoped to one root: it asks the gate for the subtree's
+    /// rows ([`Gates::subtree_rows`] — a pure down-walk, so a release's files but
+    /// not a sibling release's) and reads each blob-bearing row by primary key.
+    ///
+    /// `manage` enqueues an upload per `OnDemand` blob here; `unmanage` materializes
+    /// each blob here back to a user file. A row in the subtree whose table carries
+    /// no blob (a `tracks` join row) contributes nothing.
+    pub fn refs_for_root(
+        &self,
+        conn: &Connection,
+        gates: &Gates,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<BlobRef>, BlobDeclError> {
+        let rows = gates
+            .subtree_rows(conn, root_table, root_id)
+            .map_err(|e| BlobDeclError::Gate(e.to_string()))?;
+        let mut out = Vec::new();
+        for (table, pk) in rows {
+            let Some(tb) = self.tables.get(&table) else {
+                continue; // a non-blob-bearing subtree row (e.g. a join row).
+            };
+            // The subtree keys rows by primary key (`id`), the same column the gate
+            // walks; read that row's declared blob columns by `SELECT *`.
+            let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(&table));
+            let blob = conn.query_row(&sql, [&pk], |row| tb.ref_from_row(row))?;
+            if let Some(blob) = blob {
+                out.push(blob);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The `(table, primary key)` of the row carrying the blob with id `blob_id`, or
+    /// `None` if no blob-bearing row does (a plain upload with no backing row, e.g.
+    /// in a drain test). Searches each blob-bearing table for a row whose declared
+    /// blob-id column equals `blob_id`. The manage completion check uses this to map
+    /// a just-uploaded blob back to its row, then resolves that row's gated root.
+    pub fn row_for_blob(
+        &self,
+        conn: &Connection,
+        blob_id: &str,
+    ) -> Result<Option<(String, String)>, BlobDeclError> {
+        for (table, tb) in &self.tables {
+            let sql = format!(
+                "SELECT id FROM {} WHERE {} = ?1",
+                quote_ident(table),
+                quote_ident(&tb.id_col_name),
+            );
+            let pk: Option<String> = conn
+                .query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
+                .optional()?;
+            if let Some(pk) = pk {
+                return Ok(Some((table.clone(), pk)));
+            }
+        }
+        Ok(None)
     }
 }
 

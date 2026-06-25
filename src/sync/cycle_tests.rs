@@ -1,27 +1,24 @@
-//! Blob-before-row ordering is the host's job, enforced per row by the gate
-//! column: the host keeps a blob-bearing row's gate column off until that row's
-//! blobs upload, then flips it on (in `on_blob_uploaded`), so the changeset gate
-//! — and the snapshot, which runs the same gate — only ever carry rows whose
-//! blobs are in the cloud. The sync cycle does not hold the whole changeset back
-//! on a global "any upload pending" flag.
+//! Blob-before-row ordering is enforced per row by the gate column: a blob-bearing
+//! row's gate column stays off until its blobs upload, then coven flips it on (the
+//! manage completion in the upload drain), so the changeset gate — and the snapshot,
+//! which runs the same gate — only ever carry rows whose blobs are in the cloud. The
+//! sync cycle does not hold the whole changeset back on a global "any upload
+//! pending" flag.
 //!
 //! These tests pin that contract: a pending upload does not hold back an
-//! already-shareable (gated-true) changeset or snapshot, a gated-false row is
-//! withheld until its gate flips, and a `DrainControl::Publish` from the observer
-//! lets the cycle publish a just-completed unit mid-batch (surfaced as
-//! `resume_drain_promptly` so the loop runs the next cycle promptly).
+//! already-shareable (gated-true) changeset or snapshot, and a gated-false row is
+//! withheld until its gate flips. The completion flip + its mid-batch publish
+//! (`resume_drain_promptly`) are covered in `blob::transition_tests`.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use crate::blob::{BlobScope, BlobUploadObserver};
+use crate::blob::BlobScope;
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
-use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
@@ -70,21 +67,6 @@ async fn seed_pending_upload(db: &Database) {
     )
     .await
     .expect("seed pending upload");
-}
-
-/// Queue a pending upload whose source file exists, so the cycle's drain uploads
-/// it for real.
-async fn seed_real_upload(db: &Database, file_id: &str, source: &str) {
-    db.enqueue_upload(
-        file_id,
-        &format!("storage/{file_id}"),
-        Some(source),
-        BlobScope::Master,
-        false,
-        T0,
-    )
-    .await
-    .expect("seed real upload");
 }
 
 /// A pending cloud upload does not hold back a gated-true changeset: the gate
@@ -142,8 +124,8 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 }
 
 /// A gated-false row is withheld until its gate flips on, then it propagates: the
-/// per-row gate, not a global flag, is what holds a not-yet-uploaded unit. (A
-/// host flips the gate in `on_blob_uploaded` once the row's blobs land.)
+/// per-row gate, not a global flag, is what holds a not-yet-uploaded unit. (coven
+/// flips the gate when a manage's blobs land; here the flip is written directly.)
 #[tokio::test]
 async fn gated_false_row_propagates_once_its_gate_flips() {
     let storage = MockSyncStorage::new();
@@ -220,60 +202,10 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
     );
 }
 
-/// When the observer breaks the drain mid-batch (Publish), the cycle reports
-/// `resume_drain_promptly`: it uploaded one blob and left the rest queued, so the
-/// loop runs the next cycle promptly to keep draining + publishing per unit.
-#[tokio::test]
-async fn cycle_reports_resume_drain_promptly_when_drain_breaks_mid_batch() {
-    let storage = MockSyncStorage::new();
-    let db = open_test_db();
-    let (tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[3u8; 32],
-    )));
-    let keypair = UserKeypair::generate();
-    let hlc = Hlc::new("M".to_string());
-    let cloud = InMemoryCloudHome::new();
-
-    // Two real uploads queued; the shared observer publishes after each upload,
-    // so the drain breaks after the first.
-    let a = tmp.path().join("a.bin");
-    let b = tmp.path().join("b.bin");
-    std::fs::write(&a, b"aaaa").unwrap();
-    std::fs::write(&b, b"bbbb").unwrap();
-    seed_real_upload(&db, "fa", a.to_str().unwrap()).await;
-    seed_real_upload(&db, "fb", b.to_str().unwrap()).await;
-
-    let result = run_single_sync_cycle(
-        &storage,
-        "test-lib",
-        "M",
-        &hlc,
-        &SystemClock,
-        &db,
-        &enc,
-        &keypair,
-        &ld,
-        Some(&cloud as &dyn CloudHome),
-        Some(&PublishingObserver as &dyn BlobUploadObserver),
-    )
-    .await
-    .expect("cycle");
-
-    assert!(
-        result.resume_drain_promptly,
-        "after the drain breaks mid-batch with entries still queued, the cycle \
-         signals the loop to run again promptly",
-    );
-    assert!(
-        cloud.get("storage/fa").is_some(),
-        "the first blob uploaded this cycle",
-    );
-    assert!(
-        cloud.get("storage/fb").is_none(),
-        "the second blob is left for the next cycle",
-    );
-}
+// The drain's break-to-publish is now driven by a manage *completion* (coven flips
+// the gate the moment the last blob lands), not by an observer signal. It is covered
+// end-to-end in `blob::transition_tests` — `resume_drain_promptly` after a manage
+// completes, with another root's blob left queued.
 
 /// Founder-at-creation + owner anchoring (issue #102): the first cloud connect of
 /// a created library writes the founder Owner entry and pins the owner; later

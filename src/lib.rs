@@ -38,7 +38,7 @@
 //!   handle and synced-table set. `SyncManager::new` is synchronous and
 //!   infallible — all seeding happened in `Database::open`. Which rows carry blobs
 //!   is declared per table via [`sync::session::SyncedTable::carries_blob`]; the
-//!   host also supplies an optional [`blob::BlobUploadObserver`].
+//!   host also supplies an optional [`blob::BlobTransitionObserver`].
 //!
 //!   A local-only library that never connects a provider simply stamps and
 //!   writes rows through `Database::call` without ever building a `SyncManager`,
@@ -139,7 +139,7 @@ pub use sync::hlc::UpdatedAtStamper;
 pub use rusqlite;
 
 /// Thread-safety floor for coven's async storage traits ([`storage::cloud::CloudHome`],
-/// [`sync::storage::SyncStorage`], [`blob::BlobUploadObserver`]).
+/// [`sync::storage::SyncStorage`], [`blob::BlobTransitionObserver`]).
 ///
 /// Native sync runs the connection on a thread actor and awaits multi-threaded
 /// cloud SDKs, so those traits must be `Send + Sync` and their method futures

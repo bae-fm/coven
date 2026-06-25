@@ -11,8 +11,8 @@ use std::sync::{Mutex, RwLock};
 
 use chrono::Duration;
 
-use super::upload::{backoff_window, drain_uploads};
-use crate::blob::{BlobUploadObserver, DrainControl};
+use super::upload::{backoff_window, drain_uploads, DrainOutcome};
+use crate::blob::BlobTransitionObserver;
 use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
@@ -21,10 +21,27 @@ use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::hlc::Hlc;
 use crate::sync::invite::{create_invitation, unwrap_library_key};
 use crate::sync::membership::MemberRole;
-use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage, PublishingObserver};
+use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
 use rusqlite::OptionalExtension;
+
+/// Run the real [`drain_uploads`] with a throwaway HLC, the register coven stamps a
+/// manage flip from. These drain tests carry no synced/gated tables (an `open_outbox_
+/// db` has only the bookkeeping schema), so no upload resolves to a gated root — the
+/// completion flip never fires and the HLC only ever mints the stamps that go unused.
+async fn run_drain(
+    db: &Database,
+    cloud: &dyn CloudHome,
+    cipher: &std::sync::RwLock<CloudCipher>,
+    library_dir: &LibraryDir,
+    clock: &dyn Clock,
+    observer: Option<&dyn BlobTransitionObserver>,
+) -> Result<DrainOutcome, String> {
+    let hlc = Hlc::new("test-device".to_string());
+    drain_uploads(db, cloud, cipher, library_dir, clock, &hlc, observer).await
+}
 
 // --- Database under test ----------------------------------------------------
 
@@ -122,7 +139,7 @@ impl RecordingObserver {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl BlobUploadObserver for RecordingObserver {
+impl BlobTransitionObserver for RecordingObserver {
     async fn on_blob_upload_started(&self, file_id: &str) {
         self.events
             .lock()
@@ -136,12 +153,11 @@ impl BlobUploadObserver for RecordingObserver {
             bytes_total,
         ));
     }
-    async fn on_blob_uploaded(&self, file_id: &str) -> DrainControl {
+    async fn on_blob_uploaded(&self, file_id: &str) {
         self.events
             .lock()
             .unwrap()
             .push(ObsEvent::Uploaded(file_id.to_string()));
-        DrainControl::Continue
     }
     async fn on_blob_upload_failed(&self, file_id: &str, error: &str) {
         self.events
@@ -303,7 +319,7 @@ async fn bad_item_does_not_block_good_later_item() {
     let observer = RecordingObserver::new();
     let clock = fixed_clock(T0);
 
-    let n = drain_uploads(
+    let n = run_drain(
         &db,
         &cloud,
         &enc(),
@@ -328,53 +344,6 @@ async fn bad_item_does_not_block_good_later_item() {
     assert!(get_upload(&db, 2).await.is_none(), "uploaded entry removed");
 }
 
-/// `DrainControl::Publish` breaks the drain after that upload: the first blob
-/// uploads and its entry is removed, but the rest of the queue is left for the
-/// next cycle so the host can publish the just-completed unit now.
-#[tokio::test]
-async fn publish_signal_breaks_the_drain_leaving_the_rest_queued() {
-    let tmp = tempfile::tempdir().unwrap();
-    let p1 = write_temp_file(tmp.path(), "a.bin", b"aaaa");
-    let p2 = write_temp_file(tmp.path(), "b.bin", b"bbbb");
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "fa", "key-a", Some(p1), 0, None).await;
-    insert_upload(&db, 2, "fb", "key-b", Some(p2), 0, None).await;
-    let cloud = InMemoryCloudHome::new();
-
-    let outcome = drain_uploads(
-        &db,
-        &cloud,
-        &enc(),
-        &LibraryDir::new(tmp.path()),
-        &fixed_clock(T0),
-        Some(&PublishingObserver),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        outcome.uploaded, 1,
-        "the drain stops after the first upload on Publish"
-    );
-    assert!(
-        outcome.yielded_for_publish,
-        "the drain reports it broke to let the cycle publish"
-    );
-    assert!(cloud.get("key-a").is_some(), "first blob uploaded");
-    assert!(
-        cloud.get("key-b").is_none(),
-        "second blob is not uploaded this pass"
-    );
-    assert!(
-        get_upload(&db, 1).await.is_none(),
-        "the uploaded entry was removed"
-    );
-    assert!(
-        get_upload(&db, 2).await.is_some(),
-        "the rest of the queue stays for the next cycle",
-    );
-}
-
 /// A failed attempt persists attempt_count + last_error, and a later cycle past
 /// the backoff window retries and bumps the count again.
 #[tokio::test]
@@ -385,7 +354,7 @@ async fn failure_persists_attempt_count_and_last_error() {
     insert_upload(&db, 1, "f1", "k1", Some(path), 0, None).await;
     let cloud = FailingCloudHome::new();
 
-    drain_uploads(
+    run_drain(
         &db,
         &cloud,
         &enc(),
@@ -400,7 +369,7 @@ async fn failure_persists_attempt_count_and_last_error() {
     assert!(err.as_deref().unwrap().contains("cloud write failed"));
 
     // 31s later — past the 30s window for attempt_count==1 → retried.
-    drain_uploads(
+    run_drain(
         &db,
         &cloud,
         &enc(),
@@ -427,7 +396,7 @@ async fn backoff_skips_item_inside_window() {
     let observer = RecordingObserver::new();
 
     // 10s after last attempt: inside the 30s window for attempt_count==1.
-    let n = drain_uploads(
+    let n = run_drain(
         &db,
         &cloud,
         &enc(),
@@ -455,7 +424,7 @@ async fn backoff_skips_item_inside_window() {
     );
 
     // 31s after last attempt: window elapsed → attempted (and fails again).
-    drain_uploads(
+    run_drain(
         &db,
         &cloud,
         &enc(),
@@ -482,7 +451,7 @@ async fn observer_fires_started_then_uploaded_on_success() {
     let cloud = InMemoryCloudHome::new();
     let observer = RecordingObserver::new();
 
-    drain_uploads(
+    run_drain(
         &db,
         &cloud,
         &enc(),
@@ -519,7 +488,7 @@ async fn observer_fires_started_then_failed_on_failure() {
     let cloud = FailingCloudHome::new();
     let observer = RecordingObserver::new();
 
-    drain_uploads(
+    run_drain(
         &db,
         &cloud,
         &enc(),
@@ -558,7 +527,7 @@ async fn observer_receives_advancing_midfile_progress() {
     };
     let observer = RecordingObserver::new();
 
-    drain_uploads(
+    run_drain(
         &db,
         &cloud,
         &enc(),
@@ -681,7 +650,7 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         master_key,
     )));
 
-    let n = drain_uploads(
+    let n = run_drain(
         &db,
         &cloud,
         &master_enc,
@@ -820,7 +789,7 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
     .expect("enqueue a pinned upload");
 
     let cloud = InMemoryCloudHome::new();
-    let n = drain_uploads(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
+    let n = run_drain(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
         .await
         .expect("drain")
         .uploaded;
@@ -875,7 +844,7 @@ async fn unpinned_upload_populates_nothing_on_write() {
     .expect("enqueue an unpinned upload");
 
     let cloud = InMemoryCloudHome::new();
-    let n = drain_uploads(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
+    let n = run_drain(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
         .await
         .expect("drain")
         .uploaded;
@@ -930,7 +899,7 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     .expect("enqueue a pinned upload whose populate will fail");
 
     let cloud = InMemoryCloudHome::new();
-    let n = drain_uploads(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
+    let n = run_drain(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
         .await
         .expect("the drain succeeds despite the populate failure")
         .uploaded;

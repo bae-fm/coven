@@ -24,14 +24,22 @@
 //!   drains tombstones and runs the GC each round after it pulls.
 //!
 //! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`BlobSync`],
-//! [`BlobUploadObserver`]/[`DrainControl`]) are the vocabulary both halves and the
-//! host speak. Which rows carry blobs is not a runtime callback but a per-table
-//! declaration ([`crate::sync::session::BlobDecl`]) coven resolves into a
-//! [`decl::BlobDecls`] each cycle to derive the blob set itself.
+//! [`BlobTransitionObserver`]) are the vocabulary both halves and the host speak.
+//! Which rows carry blobs is not a runtime callback but a per-table declaration
+//! ([`crate::sync::session::BlobDecl`]) coven resolves into a [`decl::BlobDecls`]
+//! each cycle to derive the blob set itself.
+//!
+//! coven also owns the two locality transitions ([`transition`]): `manage`
+//! (Unmanaged → Managed: upload the user's files, then flip the gate) and
+//! `unmanage` (Managed → Unmanaged: materialize the files back, then retract). The
+//! manage *completion* — flipping the gate the instant the last upload lands —
+//! lives in the [`upload`] drain, the one place that knows an upload just
+//! succeeded.
 
 pub mod cache;
 pub mod decl;
 pub mod delete;
+pub mod transition;
 pub mod upload;
 
 // The cache's own tests: real `Database` + `MockSyncStorage` over a temp library
@@ -46,6 +54,13 @@ mod cache_tests;
 // [`upload`].
 #[cfg(test)]
 mod upload_tests;
+// The coven-owned manage/unmanage transition tests: multi-device manage + unmanage
+// through the real cycle, cancel both directions, the drain's completion flip +
+// cancel-in-gap, crash-idempotency at each commit boundary, and a round-trip. Uses
+// a `watch` cancel signal + `run_single_sync_cycle`, both native-only. See
+// [`transition`].
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod transition_tests;
 // The delete half's tests: tombstone signing, the drain that writes tombstones,
 // the graced GC that reclaims blobs, upload-cancels-delete at both layers, and the
 // shared `cloud_outbox` row shape. Driven against `InMemoryCloudHome` and
@@ -188,82 +203,88 @@ pub struct BlobRef {
     pub sync: BlobSync,
 }
 
-/// What the outbox drain should do after a successful upload, returned by
-/// [`BlobUploadObserver::on_blob_uploaded`].
+/// Notified about coven's blob transitions, for host-specific bookkeeping and UI:
+/// per-blob upload progress while a manage uploads, per-blob materialize progress
+/// while an unmanage copies files back, and a completion hook per direction the
+/// host turns into its own UI event.
 ///
-/// coven drains the outbox in one pass per cycle, then the cycle captures and
-/// pushes the changeset. For a host that gates rows on blob upload (keeping a
-/// row's gate column off until its blobs land, then flipping it in
-/// `on_blob_uploaded`), draining the whole queue before publishing means every
-/// row waits on the slowest upload in the batch. Returning [`Self::Publish`]
-/// lets the host break the drain the moment an upload makes new rows shareable,
-/// so the cycle publishes them and the loop resumes draining the rest next
-/// cycle — turning all-or-nothing propagation into per-unit propagation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DrainControl {
-    /// Keep draining the next queued upload before publishing.
-    Continue,
-    /// Stop draining now so this sync cycle publishes before continuing. The
-    /// host returns this when the upload just made new rows shareable (e.g. it
-    /// flipped a gate column on). Entries still queued drain on the next cycle,
-    /// which the loop runs promptly rather than after the idle interval.
-    Publish,
-}
-
-/// Notified about the lifecycle of a blob upload, for host-specific
-/// bookkeeping and UI (e.g. transitioning a record from "uploading" to
-/// "cloud-only", or surfacing a failure). `on_blob_upload_started` fires before
-/// each attempt — the host tracks the transient in-flight set in memory;
-/// `on_blob_uploaded` on success; `on_blob_upload_failed` when an attempt fails
-/// and the entry is left queued for retry.
+/// The host no longer drives the transition — coven owns flipping the gate and
+/// deciding when a cycle publishes — so this observer only *reports*. The upload
+/// callbacks fire as the drain works: `on_blob_upload_started` before each
+/// attempt, `on_blob_upload_progress` zero or more times as encrypted bytes reach
+/// the cloud (backends that can't report sub-file progress call it once at the end
+/// with `bytes_done == bytes_total`), `on_blob_uploaded` on success (notification
+/// only — coven, not the host, flips the gate and breaks the drain to publish),
+/// and `on_blob_upload_failed` when an attempt fails and its entry stays queued.
 ///
-/// `on_blob_upload_progress` reports how many bytes of the blob have reached
-/// the cloud so far, between start and the terminal callback, so the host can
-/// move a per-file progress bar mid-upload instead of jumping from 0 to 100% at
-/// completion. The byte counts are of the encrypted payload (what the cloud
-/// backend actually transfers), which is marginally larger than the plaintext
-/// file. It fires zero or more times per upload; backends that can't report
-/// sub-file progress call it once at the end with `bytes_done == bytes_total`.
+/// `on_root_managed` / `on_root_unmanaged` fire whenever coven *completes* a
+/// transition — including one resumed after a restart — so the host's own
+/// row-updated event survives a restart rather than being lost with an in-memory
+/// flag. `on_blob_materialize_progress` moves an unmanage's per-file progress bar.
 ///
-/// `on_blob_uploaded` returns a [`DrainControl`] so a host that gates rows on
-/// upload can publish each unit as its blobs land instead of after the whole
-/// queue drains.
+/// `should_skip_uploads` lets the host pause the upload pipeline without touching
+/// the queue: the sync cycle consults it before draining so a paused queue still
+/// accepts new entries but doesn't drain ([`upload::drain_uploads`] checks once at
+/// the top of each entry; in-flight uploads complete normally).
 ///
-/// `should_skip_uploads` lets the host pause the upload pipeline without
-/// touching the queue contents. The sync cycle consults it before draining the
-/// upload queue so a paused queue still accepts new entries but doesn't drain;
-/// in-flight uploads complete normally ([`upload::drain_uploads`] checks once at
-/// the top of each entry).
 /// `Send + Sync` with `Send` method futures on native; `?Send` on wasm. See
-/// [`crate::MaybeThreadSafe`] for why the bound is cfg'd — the browser drives
-/// every upload future on one thread.
+/// [`crate::MaybeThreadSafe`] for why the bound is cfg'd — the browser drives every
+/// future on one thread.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait BlobUploadObserver: crate::MaybeThreadSafe {
+pub trait BlobTransitionObserver: crate::MaybeThreadSafe {
     /// An upload attempt for this blob is starting now.
-    async fn on_blob_upload_started(&self, file_id: &str);
+    async fn on_blob_upload_started(&self, blob_id: &str);
 
     /// `bytes_done` of `bytes_total` encrypted bytes have reached the cloud for
     /// this in-flight blob. `bytes_done` is cumulative and monotonic within one
     /// upload attempt. The default is a no-op so observers that don't surface
     /// sub-file progress don't need a stub.
-    async fn on_blob_upload_progress(&self, file_id: &str, bytes_done: u64, bytes_total: u64) {
-        let _ = (file_id, bytes_done, bytes_total);
+    async fn on_blob_upload_progress(&self, blob_id: &str, bytes_done: u64, bytes_total: u64) {
+        let _ = (blob_id, bytes_done, bytes_total);
     }
 
-    /// The blob was uploaded to the cloud successfully. Returns whether the
-    /// drain should keep going or stop so the cycle can publish now (see
-    /// [`DrainControl`]). A host that doesn't gate rows on upload returns
-    /// [`DrainControl::Continue`].
-    async fn on_blob_uploaded(&self, file_id: &str) -> DrainControl;
+    /// The blob was uploaded to the cloud successfully — notification only. coven
+    /// owns flipping the gate and breaking the drain to publish a completed manage.
+    async fn on_blob_uploaded(&self, blob_id: &str);
 
     /// An upload attempt failed; the entry remains queued for retry.
-    async fn on_blob_upload_failed(&self, file_id: &str, error: &str);
+    async fn on_blob_upload_failed(&self, blob_id: &str, error: &str);
 
     /// If true, the sync cycle skips the upload drain this round and
     /// [`upload::drain_uploads`] short-circuits before pulling the next queued
     /// entry. The default is `false` so existing implementations don't need a stub.
     fn should_skip_uploads(&self) -> bool {
         false
+    }
+
+    /// coven completed a manage of `(root_table, root_id)`: every blob is uploaded
+    /// and the gate is flipped true (the subtree publishes this cycle). Fires for a
+    /// restart-resumed completion too, so the host's row-updated event is not lost
+    /// to a crash. The default is a no-op.
+    async fn on_root_managed(&self, root_table: &str, root_id: &str) {
+        let _ = (root_table, root_id);
+    }
+
+    /// coven completed an unmanage of `(root_table, root_id)`: every blob is
+    /// materialized back to a user file, the gate is flipped false (the subtree
+    /// retracts from peers), and the cloud blobs are queued for tombstoning. The
+    /// default is a no-op.
+    async fn on_root_unmanaged(&self, root_table: &str, root_id: &str) {
+        let _ = (root_table, root_id);
+    }
+
+    /// `done` of `total` of an unmanage's blobs have been materialized back to a
+    /// user file, so the host can move a per-file progress bar. The default is a
+    /// no-op.
+    async fn on_blob_materialize_progress(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        blob_id: &str,
+        done: u64,
+        total: u64,
+    ) {
+        let _ = (root_table, root_id, blob_id, done, total);
     }
 }

@@ -5,18 +5,22 @@
 //! supplies the config snapshot, keys, encryption, database, clock, and blob
 //! handling; coven drives the rest.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use tokio::sync::watch;
 use tracing::info;
 
-use crate::blob::BlobUploadObserver;
+use crate::blob::transition::{self, ManageError, UnmanageError};
+use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
 use crate::storage::cloud::CloudHome;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
@@ -49,7 +53,7 @@ pub struct SyncManager {
     encryption_service: Option<EncryptionService>,
     db: Database,
     clock: ClockRef,
-    observer: Option<Arc<dyn BlobUploadObserver>>,
+    observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// coven's `_updated_at` register, the same `Arc<Hlc>` the owned [`Database`]
     /// holds. The sync loop advances it past pulled rows and stamps envelopes off
@@ -94,7 +98,7 @@ impl SyncManager {
         encryption_service: Option<EncryptionService>,
         db: Database,
         clock: ClockRef,
-        observer: Option<Arc<dyn BlobUploadObserver>>,
+        observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
         let hlc = db.hlc();
         Self {
@@ -225,6 +229,98 @@ impl SyncManager {
         if let Some(ref sync_loop) = *self.sync_loop_handle.read().unwrap() {
             sync_loop.trigger();
         }
+    }
+
+    // =========================================================================
+    // Blob locality transitions (manage / unmanage / cancel)
+    // =========================================================================
+
+    /// The blob-path scheme the configured home keys objects under (`Hashed` for an
+    /// opaque home, `Plain` for a browsable one) — how coven derives each blob's
+    /// cloud object key at transition time.
+    fn blob_path_scheme(&self) -> BlobPathScheme {
+        BlobPathScheme::for_storage((self.config_provider)().cloud_home.storage)
+    }
+
+    /// Start managing `(root_table, root_id)` (Unmanaged → Managed): enqueue an
+    /// upload per OnDemand blob from its external file and record the manage intent,
+    /// then return. The drain uploads each and flips the gate true on the last (see
+    /// [`crate::blob::transition::manage_blobs`]); `on_root_managed` fires then.
+    /// `pin` keeps the managed blobs in coven's protected cache.
+    pub async fn manage(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        pin: bool,
+    ) -> Result<(), ManageError> {
+        if !self.is_sync_ready() {
+            return Err(ManageError::SyncNotReady);
+        }
+        transition::manage_blobs(
+            &self.db,
+            self.blob_path_scheme(),
+            &self.hlc,
+            root_table,
+            root_id,
+            pin,
+        )
+        .await?;
+        self.trigger_sync();
+        Ok(())
+    }
+
+    /// Cancel an in-flight manage of `(root_table, root_id)`: clear its intent and
+    /// pending uploads and tombstone any blob that already landed. The gate never
+    /// flips, so the root stays Unmanaged.
+    pub async fn cancel_manage(&self, root_table: &str, root_id: &str) -> Result<(), ManageError> {
+        if !self.is_sync_ready() {
+            return Err(ManageError::SyncNotReady);
+        }
+        let library_dir = (self.config_provider)().library_dir;
+        transition::cancel_manage_blobs(
+            &self.db,
+            &library_dir,
+            self.blob_path_scheme(),
+            &self.hlc,
+            root_table,
+            root_id,
+        )
+        .await?;
+        self.trigger_sync();
+        Ok(())
+    }
+
+    /// Unmanage `(root_table, root_id)` (Managed → Unmanaged): materialize each blob
+    /// back to the file named in `dest` (blob id → destination path) durability-first,
+    /// then flip the gate false, register the external refs, and enqueue the cloud
+    /// deletes in one atomic commit. Awaitable; `cancel` aborts before the commit
+    /// (the root stays Managed). Per-blob materialize progress and the completion
+    /// event reach the observer this manager was built with.
+    pub async fn unmanage(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        dest: &HashMap<String, PathBuf>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<(), UnmanageError> {
+        let sync_loop = self.sync_loop_handle().ok_or(UnmanageError::SyncNotReady)?;
+        let library_dir = (self.config_provider)().library_dir;
+        let storage: &dyn SyncStorage = &**sync_loop.storage();
+        transition::unmanage_blobs(
+            &self.db,
+            storage,
+            &library_dir,
+            self.blob_path_scheme(),
+            &self.hlc,
+            self.observer.as_deref(),
+            root_table,
+            root_id,
+            dest,
+            cancel,
+        )
+        .await?;
+        self.trigger_sync();
+        Ok(())
     }
 
     // =========================================================================

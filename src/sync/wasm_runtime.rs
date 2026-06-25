@@ -25,7 +25,7 @@ use futures_util::future::{select, Either};
 use gloo_timers::future::TimeoutFuture;
 use tracing::{debug, error, info, warn};
 
-use crate::blob::BlobUploadObserver;
+use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::database::Database;
 use crate::keys::UserKeypair;
@@ -72,7 +72,7 @@ struct CycleInputs {
     user_keypair: UserKeypair,
     clock: ClockRef,
     library_dir: LibraryDir,
-    observer: Option<Rc<dyn BlobUploadObserver>>,
+    observer: Option<Rc<dyn BlobTransitionObserver>>,
 }
 
 /// Drives [`super::cycle::run_single_sync_cycle`] repeatedly on the browser event
@@ -107,7 +107,7 @@ impl WasmSyncRuntime {
         user_keypair: UserKeypair,
         clock: ClockRef,
         library_dir: LibraryDir,
-        observer: Option<Rc<dyn BlobUploadObserver>>,
+        observer: Option<Rc<dyn BlobTransitionObserver>>,
         schedule: WasmSyncSchedule,
     ) -> Self {
         Self {

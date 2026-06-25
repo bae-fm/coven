@@ -557,6 +557,99 @@ impl Gates {
         ffi::sqlite3_finalize(stmt);
         Ok(present)
     }
+
+    /// The gate terminus the live row `(table, id)` resolves to by walking up its
+    /// declared-FK chain — the gated root (or inheriting ancestor) at the top — as
+    /// `(terminus_table, terminus_id)`, regardless of whether the gate currently
+    /// keeps it. `None` if the row is ungated/unrooted, or a row along the chain is
+    /// absent from the live db.
+    ///
+    /// The blob-transition drain uses this to map a just-uploaded blob's row to the
+    /// gated root a manage tracks: a `release_files` row resolves up to its
+    /// `releases` root, whose `blob_manage_intents` row the completion check reads.
+    pub(crate) fn resolve_root_of(
+        &self,
+        conn: &Connection,
+        table: &str,
+        id: &str,
+    ) -> Result<Option<(String, String)>, GateError> {
+        unsafe {
+            Ok(resolve_root(conn.handle(), self, table, id)?
+                .map(|r| (r.terminus_table, r.terminus_id)))
+        }
+    }
+
+    /// Every row in the gated subtree rooted at `(root_table, root_id)`: the root
+    /// itself plus the transitive closure of its gated FK-*descendants*, as
+    /// `(table, primary key)` pairs. A pure down-walk over the gated FK edges — it
+    /// does NOT climb to ancestors or cross to sibling roots, so a release's subtree
+    /// is exactly that release and its own files, never another release sharing an
+    /// album. Structural (no kept-filter): a managed or managing root's whole
+    /// subtree is returned whatever its gate currently reads.
+    ///
+    /// [`crate::blob::decl::BlobDecls::refs_for_root`] maps these rows to the blobs
+    /// a transition uploads (manage) or materializes (unmanage).
+    pub(crate) fn subtree_rows(
+        &self,
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<HashSet<(String, String)>, GateError> {
+        unsafe { self.subtree_rows_raw(conn.handle(), root_table, root_id) }
+    }
+
+    /// # Safety
+    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
+    unsafe fn subtree_rows_raw(
+        &self,
+        db: *mut ffi::sqlite3,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<HashSet<(String, String)>, GateError> {
+        // The down-edges (parent table -> its gated children + FK column), the same
+        // map the re-emit/retract closure walks; here we follow only this map (down,
+        // never up) from the single root so the result is one subtree.
+        let down_edges = gated_fk_child_edges(db, &self.tables)?;
+        let mut out: HashSet<(String, String)> = HashSet::new();
+        let mut work = vec![(root_table.to_string(), root_id.to_string())];
+        while let Some((table, id)) = work.pop() {
+            if !out.insert((table.clone(), id.clone())) {
+                continue; // already visited: cycle-guard and dedup.
+            }
+            if let Some(children) = down_edges.get(table.as_str()) {
+                for (child_table, fk) in children {
+                    for child_id in rows_referencing(db, child_table, fk, &id)? {
+                        work.push((child_table.clone(), child_id));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Write a gated root's gate column on (`true`) or off (`false`), stamping
+/// `_updated_at` so the flip sorts causally and is captured into this cycle's
+/// changeset. The single place the transition commits flip a gate — manage
+/// completion (on) and unmanage (off) — so the write shape lives here once. Runs on
+/// the caller's connection/transaction.
+pub(crate) fn write_gate(
+    conn: &Connection,
+    root_table: &str,
+    gate_col: &str,
+    on: bool,
+    stamp: &str,
+    root_id: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        &format!(
+            "UPDATE {} SET {} = ?1, _updated_at = ?2 WHERE id = ?3",
+            quote_ident(root_table),
+            quote_ident(gate_col),
+        ),
+        (on as i64, stamp, root_id),
+    )?;
+    Ok(())
 }
 
 /// The SQL form of [`truthy`]: a predicate that is true for `expr` exactly when

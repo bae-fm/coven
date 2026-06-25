@@ -24,19 +24,24 @@
 //! because it has the `BlobRef` and resolves coordinates to a key per call; the
 //! upload path replays a key already committed to the durable queue.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use tracing::warn;
 
-use crate::blob::{BlobScope, BlobUploadObserver, DrainControl};
-use crate::database::Database;
+use crate::blob::decl::BlobDecls;
+use crate::blob::{BlobScope, BlobSync, BlobTransitionObserver};
+use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::{CloudHome, CloudHomeError};
 use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::gate::Gates;
+use crate::sync::hlc::Hlc;
 
 /// How often the upload pipeline forwards a mid-file byte count to the observer.
 /// coven's `write` reports per chunk (every few MiB), which on a fast link can be
@@ -59,7 +64,7 @@ async fn upload_with_progress(
     cloud_key: &str,
     file_id: &str,
     data: Vec<u8>,
-    observer: Option<&dyn BlobUploadObserver>,
+    observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<(), CloudHomeError> {
     let total = data.len() as u64;
     let sent = Arc::new(AtomicU64::new(0));
@@ -127,7 +132,7 @@ async fn record_failure(
     file_id: &str,
     error: &str,
     now: chrono::DateTime<chrono::Utc>,
-    observer: Option<&dyn BlobUploadObserver>,
+    observer: Option<&dyn BlobTransitionObserver>,
 ) {
     if let Err(e) = db
         .record_cloud_upload_failure(entry.id, error, &now.to_rfc3339())
@@ -175,12 +180,12 @@ async fn resolve_and_seal(
 pub struct DrainOutcome {
     /// Number of successful uploads this pass.
     pub uploaded: usize,
-    /// The drain stopped early because [`BlobUploadObserver::on_blob_uploaded`]
-    /// returned [`DrainControl::Publish`] — the host made new rows shareable, so
-    /// the cycle should publish them and the loop should run the next cycle
-    /// promptly to drain the rest. `false` when the queue drained in one pass
-    /// (or stopped on a pause / left only backed-off entries), so the loop waits
-    /// its normal interval.
+    /// The drain stopped early because an upload just *completed a manage*: the
+    /// last of a gated root's blobs landed, so coven flipped the root's gate true
+    /// and broke the drain so this cycle publishes the now-shareable subtree (and
+    /// the loop runs the next cycle promptly to drain any other root's blobs).
+    /// `false` when the queue drained in one pass (or stopped on a pause / left
+    /// only backed-off entries), so the loop waits its normal interval.
     pub yielded_for_publish: bool,
 }
 
@@ -194,19 +199,26 @@ pub struct DrainOutcome {
 /// the queue or get re-attempted every cycle. The `observer` (if any) is notified
 /// as each attempt starts, succeeds, or fails.
 ///
-/// The drain stops early when [`BlobUploadObserver::on_blob_uploaded`] returns
-/// [`DrainControl::Publish`] — the host signals it just made new rows shareable,
-/// so the cycle should publish them before draining the rest (the remaining
-/// entries stay queued). The returned [`DrainOutcome`] carries that signal.
-/// Without an observer, or while it returns [`DrainControl::Continue`], the queue
-/// drains in one pass.
+/// coven owns the manage *completion*: after a successful upload it walks the
+/// blob's row up to its gated root, and if that root has a `blob_manage_intents`
+/// row with no other pending upload, takes the single atomic commit
+/// `{remove the final outbox row + flip the gate true + drop the root's external
+/// refs + delete the intent}` and breaks the drain so this cycle publishes the
+/// re-emitted subtree (the returned [`DrainOutcome::yielded_for_publish`]).
+/// Removing the final outbox row *inside* that commit is the crash-safety
+/// invariant: until it commits the row is present, so a crash re-runs the
+/// (idempotent overwrite) upload and retries the flip — there is no window where
+/// the blobs are up but the gate isn't, with nothing queued to drive it. An upload
+/// whose root has NO intent is an orphan from a cancelled manage: it is tombstoned
+/// (and its cache dropped) rather than flipped.
 pub async fn drain_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
     library_dir: &LibraryDir,
     clock: &dyn crate::clock::Clock,
-    observer: Option<&dyn BlobUploadObserver>,
+    hlc: &Hlc,
+    observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, String> {
     let uploads = db
         .get_pending_cloud_uploads()
@@ -214,8 +226,24 @@ pub async fn drain_uploads(
         .map_err(|e| format!("Failed to get pending uploads: {e}"))?;
 
     let now = clock.now();
+    let now_rfc = now.to_rfc3339();
     let mut count = 0;
     let mut yielded_for_publish = false;
+
+    // The blob/gate model the manage completion check reads, resolved once from the
+    // declared set + live schema (the schema can't change mid-drain). An upload's
+    // row → gated root → its `blob_manage_intents` lookup all run off these. The
+    // gate-column map lets the flip name the root's gate column. Built only when
+    // there is something to drain; a build failure aborts the drain (nothing was
+    // uploaded, the rows stay queued, the next cycle retries).
+    let (gates, blob_decls, gate_columns) = if uploads.is_empty() {
+        return Ok(DrainOutcome {
+            uploaded: 0,
+            yielded_for_publish: false,
+        });
+    } else {
+        build_transition_models(db).await?
+    };
     for entry in uploads {
         // Host-driven pause: short-circuit before pulling the next entry so a
         // freshly paused queue stops draining without aborting an in-flight
@@ -302,39 +330,6 @@ pub async fn drain_uploads(
 
         match upload_with_progress(cloud_home, &entry.cloud_key, file_id, sealed, observer).await {
             Ok(()) => {
-                // A successful write wins over any pending deletion: remove the
-                // tombstone a prior cycle (possibly another device) wrote for this
-                // key, so the GC won't reclaim the blob we just re-uploaded. The
-                // enqueue layer already drops a same-device pending delete row; this
-                // covers a tombstone already committed to the cloud.
-                //
-                // The cancel must not be lost if it fails: a surviving tombstone
-                // past its grace deletes this live blob. So try it inline (the
-                // common case has no tombstone — one no-op delete), and on failure
-                // persist a durable `cancel` row atomically with removing the upload
-                // row. The tombstone-cancel drain then retries until the tombstone
-                // is gone, across cloud errors and restarts. Until that row is
-                // committed the upload row stays queued, so a crash re-uploads and
-                // re-attempts — the tombstone is still there to cancel.
-                let suffix = cipher.read().unwrap().suffix();
-                let cancel =
-                    crate::blob::delete::cancel_tombstone(cloud_home, suffix, &entry.cloud_key)
-                        .await;
-                let removed = match cancel {
-                    Ok(()) => db.remove_cloud_outbox_entry(entry.id).await,
-                    Err(e) => {
-                        warn!("{e}; queuing a durable tombstone cancel for retry");
-                        db.complete_upload_canceling_tombstone(
-                            entry.id,
-                            &entry.cloud_key,
-                            &now.to_rfc3339(),
-                        )
-                        .await
-                    }
-                };
-                if let Err(e) = removed {
-                    warn!("Failed to remove outbox entry {}: {e}", entry.id);
-                }
                 count += 1;
 
                 // A pinned upload keeps its blob local: write the plaintext we
@@ -357,13 +352,99 @@ pub async fn drain_uploads(
                 }
 
                 if let Some(obs) = observer {
-                    if obs.on_blob_uploaded(file_id).await == DrainControl::Publish {
-                        // The host just made new rows shareable (e.g. flipped a
-                        // gate column on). Stop draining so this cycle publishes
-                        // them now; the entries still queued drain on the next
-                        // cycle, which the loop runs promptly.
+                    obs.on_blob_uploaded(file_id).await;
+                }
+
+                // A successful write wins over any pending deletion: remove the
+                // tombstone a prior cycle (possibly another device) wrote for this
+                // key, so the GC won't reclaim the blob we just re-uploaded — the
+                // round-trip re-manage case (a prior unmanage tombstoned this key).
+                // The enqueue layer already drops a same-device pending delete row;
+                // this covers a tombstone already committed to the cloud. The cancel
+                // must not be lost if it fails (a surviving tombstone past its grace
+                // deletes this live blob), so on failure the post-upload commit below
+                // persists a durable `cancel` row atomically with removing the upload
+                // row; the tombstone-cancel drain retries until the tombstone is gone.
+                let suffix = cipher.read().unwrap().suffix();
+                let cancel_failed = if let Err(e) =
+                    crate::blob::delete::cancel_tombstone(cloud_home, suffix, &entry.cloud_key)
+                        .await
+                {
+                    warn!(
+                        "tombstone cancel for {} failed ({e}); queuing a durable cancel for retry",
+                        entry.cloud_key
+                    );
+                    true
+                } else {
+                    false
+                };
+
+                // The post-upload commit: mint the gate-flip stamp off coven's HLC
+                // (the same register the host stamps rows from, so the flip sorts
+                // causally and is captured into this cycle's changeset), then in one
+                // DB call complete a manage (flip), continue, or tombstone an orphan.
+                let stamp = hlc.now().to_string();
+                let outcome = commit_after_upload(
+                    db,
+                    gates.clone(),
+                    blob_decls.clone(),
+                    gate_columns.clone(),
+                    file_id.to_string(),
+                    entry.cloud_key.clone(),
+                    entry.id,
+                    cancel_failed,
+                    stamp,
+                    now_rfc.clone(),
+                )
+                .await;
+
+                match outcome {
+                    Ok(PostUpload::Continued) => {}
+                    Ok(PostUpload::Orphan) => {
+                        // A cancelled manage left this blob uploaded with no intent;
+                        // it is tombstoned in the commit above. Drop its local cache
+                        // copy too (a `retain_pinned` upload populated `pinned/`,
+                        // which is budget-exempt and would otherwise leak).
+                        if let Err(e) =
+                            crate::blob::cache::drop_cached_blob(library_dir, file_id).await
+                        {
+                            warn!("failed to drop the cache copy of orphaned blob {file_id}: {e}");
+                        }
+                    }
+                    Ok(PostUpload::ManageCompleted {
+                        root_table,
+                        root_id,
+                        external_paths,
+                    }) => {
+                        // Post-commit, best-effort: the bytes are in the cloud (and
+                        // pinned cache) and the gate is flipped, so the user's
+                        // original files are now redundant — delete them. A failure
+                        // leaves a harmless stray file, never wrong durable state.
+                        for path in external_paths {
+                            if let Err(e) = crate::local_blob::remove_file(&path).await {
+                                warn!(
+                                    "manage of {root_table}/{root_id} completed but deleting the external source {}: {e}",
+                                    path.display()
+                                );
+                            }
+                        }
+                        if let Some(obs) = observer {
+                            obs.on_root_managed(&root_table, &root_id).await;
+                        }
+                        // Break so this cycle publishes the now-shareable subtree;
+                        // any other root's blobs drain on the promptly-run next cycle.
                         yielded_for_publish = true;
                         break;
+                    }
+                    Err(e) => {
+                        // The upload landed but the bookkeeping commit failed. The
+                        // outbox row is still present (the commit is all-or-nothing),
+                        // so the next cycle re-runs the idempotent upload and retries
+                        // the commit — no half-state. Log and keep draining.
+                        warn!(
+                            "post-upload commit for {} failed; will retry next cycle: {e}",
+                            entry.cloud_key
+                        );
                     }
                 }
             }
@@ -380,4 +461,230 @@ pub async fn drain_uploads(
         uploaded: count,
         yielded_for_publish,
     })
+}
+
+/// What the post-upload commit did, so the drain can run the cloud-/filesystem-side
+/// effects (which can't run inside the DB transaction) and decide whether to break.
+enum PostUpload {
+    /// A plain upload (no gated root) or a non-final manage upload: the outbox row
+    /// was removed. Nothing more for the drain to do.
+    Continued,
+    /// The blob was uploaded but its gated root has no manage intent — an orphan
+    /// from a cancelled manage. Its cloud delete was enqueued (tombstone) and its
+    /// outbox row removed in the commit; the drain drops its local cache copy.
+    Orphan,
+    /// This upload completed a manage: the single atomic commit flipped the gate
+    /// true, dropped the root's external refs, removed the final outbox row, and
+    /// deleted the intent. The drain deletes the now-redundant external source files
+    /// and notifies `on_root_managed`, then breaks to publish the subtree.
+    ManageCompleted {
+        root_table: String,
+        root_id: String,
+        external_paths: Vec<PathBuf>,
+    },
+}
+
+/// Build the gate model, blob declarations, and the root→gate-column map the manage
+/// completion check reads, once per drain pass. All three resolve off the declared
+/// synced-table set + the live schema, so they're built together in one DB call.
+async fn build_transition_models(
+    db: &Database,
+) -> Result<(Arc<Gates>, Arc<BlobDecls>, Arc<HashMap<String, String>>), String> {
+    let tables = db.synced_tables().to_vec();
+    let gate_columns: HashMap<String, String> = tables
+        .iter()
+        .filter_map(|t| {
+            t.gate_column()
+                .map(|c| (t.name().to_string(), c.to_string()))
+        })
+        .collect();
+    db.call(move |conn| {
+        let gates = Gates::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
+        let decls = BlobDecls::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
+        Ok((Arc::new(gates), Arc::new(decls), Arc::new(gate_columns)))
+    })
+    .await
+    .map_err(|e| format!("build blob-transition models: {e}"))
+}
+
+/// The post-upload bookkeeping for one successful upload, as one DB call so the
+/// completion check and the flip it gates are atomic: map the blob to its row and
+/// gated root, then either complete a manage (the single atomic flip commit),
+/// continue (remove the row), or tombstone an orphan.
+#[allow(clippy::too_many_arguments)]
+async fn commit_after_upload(
+    db: &Database,
+    gates: Arc<Gates>,
+    decls: Arc<BlobDecls>,
+    gate_columns: Arc<HashMap<String, String>>,
+    blob_id: String,
+    cloud_key: String,
+    final_outbox_id: i64,
+    cancel_failed: bool,
+    stamp: String,
+    now_rfc: String,
+) -> Result<PostUpload, DbError> {
+    db.call(move |conn| {
+        // Map the uploaded blob to its row, then up to its gated root. A blob with
+        // no backing row, or whose row resolves to no gated root, is a plain upload
+        // (e.g. a drain test): just remove the row.
+        let root = match decls
+            .row_for_blob(conn, &blob_id)
+            .map_err(|e| DbError(e.to_string()))?
+        {
+            Some((table, pk)) => gates
+                .resolve_root_of(conn, &table, &pk)
+                .map_err(|e| DbError(e.to_string()))?,
+            None => None,
+        };
+        let Some((root_table, root_id)) = root else {
+            commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+            return Ok(PostUpload::Continued);
+        };
+
+        // No intent ⇒ a cancelled manage left this blob orphaned in the cloud.
+        // Tombstone it (enqueue_delete drops the upload row and adds the delete), in
+        // one commit so a crash can't drop the row while leaving no tombstone.
+        if !Database::manage_intent_exists(conn, &root_table, &root_id)? {
+            let tx = conn.unchecked_transaction()?;
+            Database::enqueue_delete_on(&tx, &cloud_key, &now_rfc)?;
+            tx.commit().map_err(DbError::from)?;
+            return Ok(PostUpload::Orphan);
+        }
+
+        // A manage is in flight for this root. It completes iff no OTHER OnDemand blob
+        // of its subtree still has a pending upload (this entry's row is still present
+        // — it's removed inside the flip commit below). Scoped to OnDemand: those are
+        // the blobs a manage enqueues, so a Mirrored blob's unrelated upload neither
+        // blocks completion nor gets its external ref cleared here.
+        let refs = decls
+            .refs_for_root(conn, &gates, &root_table, &root_id)
+            .map_err(|e| DbError(e.to_string()))?;
+        let blob_ids: Vec<String> = refs
+            .iter()
+            .filter(|b| b.sync == BlobSync::OnDemand)
+            .map(|b| b.id.clone())
+            .collect();
+        if count_other_pending_uploads(conn, &blob_ids, final_outbox_id)? > 0 {
+            // Not the last blob: remove this row, leave the gate off until the rest land.
+            commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+            return Ok(PostUpload::Continued);
+        }
+
+        // The last blob: the SINGLE atomic commit. Removing the final outbox row
+        // here (not before) is the crash-safety invariant — until commit the row is
+        // present, so a crash re-runs the idempotent upload and retries this flip.
+        let gate_col = gate_columns.get(&root_table).ok_or_else(|| {
+            DbError(format!(
+                "manage completion: gated root {root_table} has no gate column"
+            ))
+        })?;
+        let external_paths = external_source_paths(conn, &blob_ids)?;
+        let tx = conn.unchecked_transaction()?;
+        finish_outbox_row(&tx, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+        crate::sync::gate::write_gate(&tx, &root_table, gate_col, true, &stamp, &root_id)
+            .map_err(DbError::from)?;
+        for id in &blob_ids {
+            Database::clear_external_blob_on(&tx, id)?;
+        }
+        Database::delete_manage_intent_on(&tx, &root_table, &root_id)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(PostUpload::ManageCompleted {
+            root_table,
+            root_id,
+            external_paths,
+        })
+    })
+    .await
+}
+
+/// The non-completing post-upload outcome: remove the upload's outbox row (and, on a
+/// failed tombstone-cancel, its durable `cancel` row) in one transaction, so the two
+/// statements commit together. The `Continued` branches — a plain upload with no
+/// gated root, and a non-final manage upload — share this single commit shape.
+fn commit_finish(
+    conn: &Connection,
+    id: i64,
+    cloud_key: &str,
+    cancel_failed: bool,
+    now_rfc: &str,
+) -> Result<(), DbError> {
+    let tx = conn.unchecked_transaction()?;
+    finish_outbox_row(&tx, id, cloud_key, cancel_failed, now_rfc)?;
+    tx.commit().map_err(DbError::from)
+}
+
+/// Remove a completed upload's outbox row. If the inline tombstone-cancel failed,
+/// also enqueue a durable `cancel` row so the tombstone-cancel drain retries. Every
+/// caller runs this inside its own transaction, so the row removal and the cancel
+/// row commit together — a crash can't drop the upload while leaving the tombstone.
+fn finish_outbox_row(
+    conn: &Connection,
+    id: i64,
+    cloud_key: &str,
+    cancel_failed: bool,
+    now_rfc: &str,
+) -> Result<(), DbError> {
+    conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
+        .map_err(DbError::from)?;
+    if cancel_failed {
+        conn.execute(
+            "INSERT OR IGNORE INTO cloud_outbox (operation, cloud_key, scope, created_at) \
+             VALUES ('cancel', ?1, NULL, ?2)",
+            (cloud_key, now_rfc),
+        )
+        .map_err(DbError::from)?;
+    }
+    Ok(())
+}
+
+/// How many pending uploads remain for the given blob ids, excluding the row
+/// `exclude_id` (the just-uploaded entry, whose row is removed inside the flip
+/// commit). Zero means this upload was the last of the manage's subtree.
+fn count_other_pending_uploads(
+    conn: &Connection,
+    blob_ids: &[String],
+    exclude_id: i64,
+) -> Result<i64, DbError> {
+    if blob_ids.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; blob_ids.len()].join(", ");
+    let sql = format!(
+        "SELECT COUNT(*) FROM cloud_outbox \
+         WHERE operation = 'upload' AND id != ?1 AND file_id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
+    let params = std::iter::once(exclude_id.to_string())
+        .chain(blob_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    stmt.query_row(params_from_iter(params.iter()), |r| r.get::<_, i64>(0))
+        .map_err(DbError::from)
+}
+
+/// The external source-file paths registered for the given blob ids (an Unmanaged
+/// release's user files). Read before the flip commit clears the refs, so the drain
+/// can delete the now-redundant originals post-commit. These are the manage's
+/// OnDemand blobs, each registered external at manage time, so a missing ref is
+/// unexpected — logged (not silently skipped) so the absence is visible; the only
+/// consequence is a source file left undeleted.
+fn external_source_paths(conn: &Connection, blob_ids: &[String]) -> Result<Vec<PathBuf>, DbError> {
+    let mut out = Vec::new();
+    for id in blob_ids {
+        let path: Option<String> = conn
+            .query_row(
+                "SELECT path FROM local_blob_refs WHERE blob_id = ?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        match path {
+            Some(path) => out.push(PathBuf::from(path)),
+            None => warn!(
+                "manage completion: blob {id} has no external ref to delete (already cleared?)"
+            ),
+        }
+    }
+    Ok(out)
 }
