@@ -80,6 +80,59 @@ pub async fn exists(path: &Path) -> Result<bool, String> {
     imp::exists(path).await
 }
 
+/// Move the file at `from` to `to` within coven's storage. The cache's pin/unpin
+/// promote a blob between `storage/cache/<id>` and `storage/pinned/<id>`; the
+/// destination's parent directories must already exist (the cache creates them via
+/// [`create_dir_all`] first).
+///
+/// Native: a `tokio::fs::rename`, atomic within one filesystem — a reader never
+/// sees the blob in both folders or neither. wasm/OPFS has no cross-directory
+/// rename, so this is copy-then-delete and is NOT atomic; see the wasm `imp` for
+/// why a transient duplicate is benign for a re-fetchable cache.
+pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
+    imp::rename(from, to).await
+}
+
+/// Remove the file at `path`. `Ok(true)` if it was there and is now gone,
+/// `Ok(false)` if it was already absent — the expected case when a blob lives in
+/// only one cache folder, or a sweep races a concurrent delete. `Err` is a real
+/// backend failure, never collapsed into "absent", so a caller can tell "nothing
+/// to remove" apart from "couldn't remove it".
+pub async fn remove_file(path: &Path) -> Result<bool, String> {
+    imp::remove_file(path).await
+}
+
+/// Remove the directory tree at `path` and everything under it. `Ok(true)` if it
+/// was there and is now gone, `Ok(false)` if it was already absent (an empty cache
+/// `clear_cache` is asked to drop). `Err` is a real backend failure — a tree the
+/// caller asked to clear must actually be gone, never reported clear over a failed
+/// delete.
+pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
+    imp::remove_dir_all(path).await
+}
+
+/// Create the directory at `path` and any missing parents. Used before a [`rename`]
+/// into a cache folder a blob has never lived in yet (its `{ab}/{cd}` shard).
+pub async fn create_dir_all(path: &Path) -> Result<(), String> {
+    imp::create_dir_all(path).await
+}
+
+/// Enumerate every file in the tree rooted at `dir`, returning `(path, recency,
+/// size)` per file — the input to a budget eviction sweep over `storage/cache/`.
+/// `recency` is milliseconds since the Unix epoch (native: the file's modification
+/// time; wasm: `File.lastModified`), larger meaning more recently written, so the
+/// caller evicts the smallest `recency` first. `size` is the file's byte length.
+///
+/// An absent `dir` is an empty result, not an error: nothing has been cached yet,
+/// so there is nothing to measure. A directory or file that vanishes mid-walk (a
+/// concurrent `clear_cache`/sweep) is dropped from the result, logged at debug —
+/// the one legitimate skip. Every other failure to read a directory or stat a file
+/// is surfaced: a cache that cannot be fully measured fails loudly rather than
+/// under-counting and silently drifting over budget.
+pub async fn walk_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)>, String> {
+    imp::walk_files(dir).await
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::path::Path;
@@ -232,18 +285,119 @@ mod imp {
         // is thus no durability sub-step that could fail after this point.
         Ok(())
     }
+
+    pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
+        tokio::fs::rename(from, to)
+            .await
+            .map_err(|e| format!("rename {} -> {}: {e}", from.display(), to.display()))
+    }
+
+    pub async fn remove_file(path: &Path) -> Result<bool, String> {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("remove file {}: {e}", path.display())),
+        }
+    }
+
+    pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("remove dir tree {}: {e}", path.display())),
+        }
+    }
+
+    pub async fn create_dir_all(path: &Path) -> Result<(), String> {
+        tokio::fs::create_dir_all(path)
+            .await
+            .map_err(|e| format!("create dir tree {}: {e}", path.display()))
+    }
+
+    pub async fn walk_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)>, String> {
+        // Descend the tree with an explicit stack and collect only leaf files. The
+        // cache stores blobs under a two-level shard (`{ab}/{cd}/<id>`), so the walk
+        // is shallow but recursive.
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let mut read_dir = match tokio::fs::read_dir(&d).await {
+                Ok(rd) => rd,
+                // No dir (the whole tree, or a shard removed mid-walk) — nothing more
+                // to measure down this branch. A legitimate skip, logged so it is not
+                // silent.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!(
+                        "walk_files: {} absent, skipping (empty tree or concurrently-removed dir)",
+                        d.display()
+                    );
+                    continue;
+                }
+                Err(e) => return Err(format!("read dir {}: {e}", d.display())),
+            };
+
+            loop {
+                let entry = match read_dir.next_entry().await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(e) => return Err(format!("read dir entry under {}: {e}", d.display())),
+                };
+                let path = entry.path();
+                let metadata = match entry.metadata().await {
+                    Ok(metadata) => metadata,
+                    // Vanished between listing and stat (a concurrent clear/sweep) —
+                    // it no longer occupies the tree, so it drops out of the measure.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        tracing::debug!(
+                            "walk_files: {} vanished between listing and stat, skipping",
+                            path.display()
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(format!("stat entry {}: {e}", path.display())),
+                };
+                if metadata.is_dir() {
+                    stack.push(path);
+                } else {
+                    let recency = mtime_millis(&metadata, &path)?;
+                    files.push((path, recency, metadata.len()));
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    /// Milliseconds since the Unix epoch from a file's modification time — the
+    /// recency key eviction sorts on. A pre-epoch mtime (impossible for a file the
+    /// cache wrote, but bad data if it occurs) fails loudly rather than wrapping to
+    /// a bogus key.
+    fn mtime_millis(metadata: &std::fs::Metadata, path: &Path) -> Result<u64, String> {
+        let mtime = metadata
+            .modified()
+            .map_err(|e| format!("modified time of {}: {e}", path.display()))?;
+        let millis = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| {
+                format!(
+                    "modified time of {} predates the Unix epoch: {e}",
+                    path.display()
+                )
+            })?
+            .as_millis();
+        Ok(millis as u64)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
-    use std::path::{Component, Path};
+    use std::path::{Component, Path, PathBuf};
 
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
-        FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
-        FileSystemGetFileOptions, FileSystemReadWriteOptions, FileSystemSyncAccessHandle,
-        WorkerGlobalScope,
+        File, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
+        FileSystemGetFileOptions, FileSystemReadWriteOptions, FileSystemRemoveOptions,
+        FileSystemSyncAccessHandle, WorkerGlobalScope,
     };
 
     /// Stringify a rejected JS value (a `DOMException` from OPFS, usually) without
@@ -318,6 +472,31 @@ mod imp {
             .map_err(|_| "OPFS root is not a directory handle".to_string())
     }
 
+    /// Walk a chain of directory `segs` from the OPFS root to the innermost
+    /// directory handle. With `create`, missing directories are made along the way;
+    /// without it, a missing directory yields [`HandleError::NotFound`] (a real
+    /// backend failure yields [`HandleError::Other`]). `path` is carried only for
+    /// error messages. The shared directory descent behind [`file_handle`],
+    /// [`dir_handle`], and the remove operations — none re-derive it.
+    async fn walk_dirs(
+        segs: &[String],
+        path: &Path,
+        create: bool,
+    ) -> Result<FileSystemDirectoryHandle, HandleError> {
+        let mut dir = root().await.map_err(HandleError::Other)?;
+        let dir_opts = FileSystemGetDirectoryOptions::new();
+        dir_opts.set_create(create);
+        for d in segs {
+            let next = JsFuture::from(dir.get_directory_handle_with_options(d, &dir_opts))
+                .await
+                .map_err(|e| classify(e, format!("OPFS directory {d:?} in {}", path.display())))?;
+            dir = next.dyn_into::<FileSystemDirectoryHandle>().map_err(|_| {
+                HandleError::Other("OPFS directory handle has the wrong type".into())
+            })?;
+        }
+        Ok(dir)
+    }
+
     /// Walk `path` to its file handle. With `create`, missing directories and the
     /// file are made along the way; without it, a missing directory or file yields
     /// [`HandleError::NotFound`] (a real backend failure yields
@@ -328,17 +507,7 @@ mod imp {
             .split_last()
             .ok_or_else(|| HandleError::Other(format!("empty OPFS path: {}", path.display())))?;
 
-        let mut dir = root().await.map_err(HandleError::Other)?;
-        let dir_opts = FileSystemGetDirectoryOptions::new();
-        dir_opts.set_create(create);
-        for d in dirs {
-            let next = JsFuture::from(dir.get_directory_handle_with_options(d, &dir_opts))
-                .await
-                .map_err(|e| classify(e, format!("OPFS directory {d:?} in {}", path.display())))?;
-            dir = next.dyn_into::<FileSystemDirectoryHandle>().map_err(|_| {
-                HandleError::Other("OPFS directory handle has the wrong type".into())
-            })?;
-        }
+        let dir = walk_dirs(dirs, path, create).await?;
 
         let file_opts = FileSystemGetFileOptions::new();
         file_opts.set_create(create);
@@ -347,6 +516,16 @@ mod imp {
             .map_err(|e| classify(e, format!("OPFS file {name:?} in {}", path.display())))?;
         fh.dyn_into::<FileSystemFileHandle>()
             .map_err(|_| HandleError::Other("OPFS file handle has the wrong type".into()))
+    }
+
+    /// Walk `path` as a chain of directories to its directory handle — the sibling
+    /// of [`file_handle`] for a directory target. Used by the tree walk and the
+    /// remove operations, which act on a directory rather than a file.
+    async fn dir_handle(
+        path: &Path,
+        create: bool,
+    ) -> Result<FileSystemDirectoryHandle, HandleError> {
+        walk_dirs(&segments(path), path, create).await
     }
 
     /// A synchronous access handle for `fh`. Holding one locks the file, so every
@@ -490,5 +669,157 @@ mod imp {
     /// delegating — this is the real OPFS guarantee, not a stand-in.
     pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         write(path, bytes).await
+    }
+
+    /// OPFS has no cross-directory rename, so a move is copy-then-delete: read the
+    /// source's whole contents, write them to the destination (creating its parent
+    /// directories), then remove the source. Unlike the native `rename` this is NOT
+    /// atomic — a crash between the write and the delete leaves the blob in both
+    /// places — but every blob the cache moves is re-fetchable from the cloud and a
+    /// read checks both folders, so a transient duplicate is benign (it serves the
+    /// same bytes from either folder), the same best-effort posture every other OPFS
+    /// write here takes.
+    pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
+        let from_fh = file_handle(from, false)
+            .await
+            .map_err(|e| e.into_message(&format!("rename source {}", from.display())))?;
+        let sah = sync_access(&from_fh).await?;
+        let bytes = read_all(&sah, from);
+        sah.close();
+        let bytes = bytes?;
+
+        // `write` creates the destination's parent directories and the file, then
+        // truncate-writes the whole payload through one sync-access handle.
+        write(to, &bytes).await?;
+
+        // The destination now holds the bytes; drop the original. (`remove_file`
+        // reports an already-absent source as `Ok(false)`, which the `?` discards —
+        // the move still succeeded because the destination has the bytes.)
+        remove_file(from).await?;
+        Ok(())
+    }
+
+    pub async fn remove_file(path: &Path) -> Result<bool, String> {
+        remove_entry(path, false).await
+    }
+
+    pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
+        remove_entry(path, true).await
+    }
+
+    /// Remove the entry `path` names from its parent directory, returning whether it
+    /// was there (`Ok(true)` removed, `Ok(false)` already absent). `recursive`
+    /// removes a non-empty directory tree (OPFS `removeEntry({recursive: true})`).
+    /// A missing parent directory means the entry is already gone, so it folds into
+    /// `Ok(false)` alongside a `NotFoundError` on the entry itself; every other OPFS
+    /// failure is surfaced.
+    async fn remove_entry(path: &Path, recursive: bool) -> Result<bool, String> {
+        let segs = segments(path);
+        let (name, dirs) = match segs.split_last() {
+            Some(split) => split,
+            None => return Err(format!("empty OPFS path: {}", path.display())),
+        };
+
+        // An absent parent directory means the entry can't be there either.
+        let dir = match walk_dirs(dirs, path, false).await {
+            Ok(dir) => dir,
+            Err(HandleError::NotFound) => return Ok(false),
+            Err(HandleError::Other(m)) => return Err(m),
+        };
+
+        let promise = if recursive {
+            let opts = FileSystemRemoveOptions::new();
+            opts.set_recursive(true);
+            dir.remove_entry_with_options(name, &opts)
+        } else {
+            dir.remove_entry(name)
+        };
+        match JsFuture::from(promise).await {
+            Ok(_) => Ok(true),
+            Err(e) => match classify(e, format!("OPFS remove {}", path.display())) {
+                HandleError::NotFound => Ok(false),
+                HandleError::Other(m) => Err(m),
+            },
+        }
+    }
+
+    pub async fn create_dir_all(path: &Path) -> Result<(), String> {
+        // `create = true`, so every component is made rather than reported missing —
+        // not-found can't arise, but fold it into a message for completeness.
+        dir_handle(path, true)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.into_message(&format!("OPFS create dir tree {}", path.display())))
+    }
+
+    pub async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
+        // An absent root directory means nothing has been cached yet — an empty
+        // result, the same posture the native walk takes on a missing dir.
+        let start = match dir_handle(dir, false).await {
+            Ok(start) => start,
+            Err(HandleError::NotFound) => return Ok(Vec::new()),
+            Err(HandleError::Other(m)) => return Err(m),
+        };
+
+        let mut files = Vec::new();
+        // Each stack item carries the directory's reconstructed path (so leaf paths
+        // match what the cache's path-builders produce) alongside its handle.
+        let mut stack = vec![(dir.to_path_buf(), start)];
+        while let Some((dir_path, handle)) = stack.pop() {
+            // `entries()` yields `[name, handle]` pairs, async — drive the iterator
+            // by awaiting each `next()` until it reports done.
+            let iter = handle.entries();
+            loop {
+                let next = iter
+                    .next()
+                    .map_err(|e| format!("OPFS iterate {}: {}", dir_path.display(), err_str(&e)))?;
+                let next = JsFuture::from(next)
+                    .await
+                    .map_err(|e| format!("OPFS iterate {}: {}", dir_path.display(), err_str(&e)))?;
+                let next: js_sys::IteratorNext = next.unchecked_into();
+                if next.done() {
+                    break;
+                }
+
+                let pair = next.value().dyn_into::<js_sys::Array>().map_err(|_| {
+                    format!(
+                        "OPFS directory entry of {} is not a [name, handle] pair",
+                        dir_path.display()
+                    )
+                })?;
+                let name = pair.get(0).as_string().ok_or_else(|| {
+                    format!(
+                        "OPFS directory entry name in {} is not a string",
+                        dir_path.display()
+                    )
+                })?;
+                let child = dir_path.join(&name);
+                let entry = pair.get(1);
+
+                if let Some(subdir) = entry.dyn_ref::<FileSystemDirectoryHandle>() {
+                    stack.push((child, subdir.clone()));
+                } else if let Ok(fh) = entry.dyn_into::<FileSystemFileHandle>() {
+                    // `File.size` and `File.lastModified` give eviction the bytes and
+                    // the recency key without opening (and locking) a sync-access
+                    // handle. lastModified is milliseconds since the Unix epoch — the
+                    // same unit the native mtime path yields.
+                    let file = JsFuture::from(fh.get_file()).await.map_err(|e| {
+                        format!("OPFS getFile {}: {}", child.display(), err_str(&e))
+                    })?;
+                    let file = file.dyn_into::<File>().map_err(|_| {
+                        format!("OPFS getFile of {} did not return a File", child.display())
+                    })?;
+                    let size = file.size() as u64;
+                    let recency = file.last_modified() as u64;
+                    files.push((child, recency, size));
+                } else {
+                    return Err(format!(
+                        "OPFS entry {} is neither a file nor a directory handle",
+                        child.display()
+                    ));
+                }
+            }
+        }
+        Ok(files)
     }
 }

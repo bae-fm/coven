@@ -36,7 +36,8 @@ pub mod upload;
 
 // The cache's own tests: real `Database` + `MockSyncStorage` over a temp library
 // dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
-// Native-only (the cache writes through `tokio::fs`); see [`cache`].
+// Native-only because they drive a real temp directory on the filesystem; the
+// cache's wasm/OPFS path is exercised by `wasm_blob_opfs_test`. See [`cache`].
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod cache_tests;
 // The upload drain's tests: real `Database` (the `cloud_outbox` queue) driven

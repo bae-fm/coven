@@ -143,6 +143,13 @@ web-sys = { version = "0.3", features = [
     "FileSystemGetDirectoryOptions",
     "FileSystemGetFileOptions",
     "FileSystemReadWriteOptions",
+    # The cache's directory/file ops over OPFS: `removeEntry({recursive})` for
+    # dropping a file or a whole tree, and `getFile()` → `File` for a tree walk's
+    # per-file size (`Blob::size`) and recency key (`File::lastModified`), the
+    # eviction inputs the native path reads off `std::fs::Metadata`.
+    "FileSystemRemoveOptions",
+    "Blob",
+    "File",
     # Lets `exists` tell a genuine "not found" (a `NotFoundError` DOMException) apart
     # from a real OPFS failure, so it returns `Ok(false)` for the former and `Err`
     # for the latter instead of masking both as "absent".

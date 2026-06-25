@@ -223,16 +223,11 @@ pub async fn drop_cached_blob(library_dir: &LibraryDir, id: &str) -> Result<(), 
         library_dir.pinned_blob_path(id)?,
         library_dir.cache_blob_path(id)?,
     ] {
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(BlobCacheError::Io(format!(
-                    "drop cached blob {}: {e}",
-                    path.display()
-                )));
-            }
-        }
+        // An absent file in either folder is the expected case (`remove_file`
+        // reports it as `Ok(false)`, not an error); every real I/O failure surfaces.
+        crate::local_blob::remove_file(&path)
+            .await
+            .map_err(BlobCacheError::Io)?;
     }
     Ok(())
 }
@@ -491,20 +486,17 @@ pub async fn unpin(library_dir: &LibraryDir, blobs: &[BlobRef]) -> Result<(), Bl
 /// failed delete.
 pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError> {
     let cache_dir = library_dir.cache_dir();
-    match tokio::fs::remove_dir_all(&cache_dir).await {
-        Ok(()) => Ok(()),
+    match crate::local_blob::remove_dir_all(&cache_dir).await {
+        Ok(true) => Ok(()),
         // No cache dir yet — nothing has been cached, so it is already clear.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Ok(false) => {
             tracing::debug!(
                 "clear_cache: no cache dir at {}, nothing to clear",
                 cache_dir.display()
             );
             Ok(())
         }
-        Err(e) => Err(BlobCacheError::Io(format!(
-            "clear cache dir {}: {e}",
-            cache_dir.display()
-        ))),
+        Err(e) => Err(BlobCacheError::Io(e)),
     }
 }
 
@@ -557,7 +549,9 @@ pub async fn evict_to_budget(
         None => return Ok(()),
     };
 
-    let mut entries = collect_cache_files(&library_dir.cache_dir()).await?;
+    let mut entries = crate::local_blob::walk_files(&library_dir.cache_dir())
+        .await
+        .map_err(BlobCacheError::Io)?;
     // The protected file's bytes count toward the total it must fit under, but it is
     // never a deletion candidate — drop it from the list, not the sum.
     let mut total: u64 = entries.iter().map(|(_, _, size)| size).sum();
@@ -568,17 +562,19 @@ pub async fn evict_to_budget(
         return Ok(());
     }
 
-    // Oldest modification time first: that file is evicted first. A stable sort is
-    // fine — files with the same mtime are interchangeable for the budget, and the
-    // just-written file (the one survival depends on) is already excluded above.
-    entries.sort_by_key(|(_, mtime, _)| *mtime);
+    // Oldest modification time first: that file is evicted first. The recency key is
+    // milliseconds since the Unix epoch (file mtime), so the smallest sorts first. A
+    // stable sort is fine — files with the same recency are interchangeable for the
+    // budget, and the just-written file (the one survival depends on) is already
+    // excluded above.
+    entries.sort_by_key(|(_, recency, _)| *recency);
 
     // Each `size` here was part of the `total` sum above, so subtracting it as its
     // file is evicted can't underflow as long as that invariant holds. `checked_sub`
     // rather than `saturating_sub`: flooring at 0 would mask a genuine accounting
     // miscount (a `size` not actually in the sum), so a violation panics loudly
     // instead of silently mis-measuring the cache.
-    for (path, _mtime, size) in entries {
+    for (path, _recency, size) in entries {
         if total <= budget {
             break;
         }
@@ -591,21 +587,16 @@ pub async fn evict_to_budget(
                 )
             })
         };
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => total = subtract(total),
+        match crate::local_blob::remove_file(&path).await {
+            Ok(true) => total = subtract(total),
             // The file is already gone (a concurrent sweep/clear). Its bytes are no
             // longer on disk, so drop them from the total and move on — the one
             // legitimate skip, not a masked failure.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(false) => {
                 tracing::debug!("evict: {} already gone, skipping", path.display());
                 total = subtract(total);
             }
-            Err(e) => {
-                return Err(BlobCacheError::Io(format!(
-                    "evict cache file {}: {e}",
-                    path.display()
-                )));
-            }
+            Err(e) => return Err(BlobCacheError::Io(e)),
         }
     }
 
@@ -658,105 +649,22 @@ async fn fetch_from_cloud(
 }
 
 /// Move a blob file from one cache folder to the other (`cache/`↔`pinned/`). Both
-/// roots are under `storage/`, so the `rename` is within one filesystem and atomic —
-/// the blob is never visible in both folders or neither. Creates the destination's
+/// roots are under `storage/`, so on native the `rename` is within one filesystem
+/// and atomic — the blob is never visible in both folders or neither. (wasm/OPFS
+/// has no cross-directory rename, so [`crate::local_blob::rename`] there is
+/// copy-then-delete, best-effort; a transient duplicate serves the same bytes from
+/// either folder and is re-fetchable, see that fn.) Creates the destination's
 /// `{ab}/{cd}` shard directory first (a folder a blob has never lived in yet).
 async fn rename_within_storage(
     from: &std::path::Path,
     to: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
     if let Some(parent) = to.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            BlobCacheError::Io(format!("create dir {} for move: {e}", parent.display()))
-        })?;
+        crate::local_blob::create_dir_all(parent)
+            .await
+            .map_err(BlobCacheError::Io)?;
     }
-    tokio::fs::rename(from, to).await.map_err(|e| {
-        BlobCacheError::Io(format!(
-            "move blob {} -> {}: {e}",
-            from.display(),
-            to.display()
-        ))
-    })
-}
-
-/// Walk `cache/` and return every file as `(path, mtime, size)` — the input to a
-/// budget eviction. The cache stores files under a two-level shard tree
-/// (`cache/{ab}/{cd}/<id>`), so this descends directories with an explicit stack
-/// and collects only the leaf files; `pinned/` is a sibling root and is never
-/// reached.
-///
-/// An absent `cache/` means nothing has been cached yet — an empty result, not an
-/// error (the same posture `clear_cache` takes on a missing dir). Every other
-/// failure to read a directory or stat a file is surfaced: the budget cannot be
-/// enforced over a cache it cannot fully measure, so a measurement failure fails
-/// loudly rather than under-counting and leaving the cache silently over budget.
-async fn collect_cache_files(
-    cache_dir: &std::path::Path,
-) -> Result<Vec<(std::path::PathBuf, std::time::SystemTime, u64)>, BlobCacheError> {
-    let mut files = Vec::new();
-    let mut dirs = vec![cache_dir.to_path_buf()];
-
-    while let Some(dir) = dirs.pop() {
-        let mut read_dir = match tokio::fs::read_dir(&dir).await {
-            Ok(rd) => rd,
-            // No cache dir (or a shard dir removed mid-walk) — nothing more to
-            // measure down this branch. A legitimate skip, but logged so it is not
-            // silent.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!(
-                    "collect_cache_files: {} absent, skipping (empty cache or concurrently-removed shard)",
-                    dir.display()
-                );
-                continue;
-            }
-            Err(e) => {
-                return Err(BlobCacheError::Io(format!(
-                    "read cache dir {}: {e}",
-                    dir.display()
-                )));
-            }
-        };
-
-        loop {
-            let entry = match read_dir.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(e) => {
-                    return Err(BlobCacheError::Io(format!(
-                        "read cache dir entry under {}: {e}",
-                        dir.display()
-                    )));
-                }
-            };
-            let path = entry.path();
-            let metadata = match entry.metadata().await {
-                Ok(metadata) => metadata,
-                // The entry vanished between listing and stat (a concurrent
-                // clear/sweep) — it no longer occupies the cache, so it drops out of
-                // the measurement. A legitimate skip, but logged so it is not silent.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::debug!(
-                        "collect_cache_files: {} vanished between listing and stat, skipping",
-                        path.display()
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    return Err(BlobCacheError::Io(format!(
-                        "stat cache entry {}: {e}",
-                        path.display()
-                    )));
-                }
-            };
-            if metadata.is_dir() {
-                dirs.push(path);
-            } else {
-                let mtime = metadata.modified().map_err(|e| {
-                    BlobCacheError::Io(format!("modified time of {}: {e}", path.display()))
-                })?;
-                files.push((path, mtime, metadata.len()));
-            }
-        }
-    }
-    Ok(files)
+    crate::local_blob::rename(from, to)
+        .await
+        .map_err(BlobCacheError::Io)
 }

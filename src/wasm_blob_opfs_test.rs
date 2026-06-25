@@ -237,3 +237,98 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         "the photo blob reached B's pinned cache with its original bytes",
     );
 }
+
+/// The directory primitives the blob cache's eviction / pin / clear paths drive on
+/// OPFS: `walk_files` enumerates a sharded tree yielding each leaf file's size,
+/// `rename` moves a file across directories (copy-then-delete, since OPFS has no
+/// native rename), `remove_file` drops one file, and `remove_dir_all` drops a whole
+/// subtree. Absence is reported as `Ok(false)` / an empty list, never an error —
+/// the contract `evict_to_budget` and `clear_cache` rely on. Disjoint path prefix
+/// from the other tests so a shared OPFS within one run doesn't collide.
+#[wasm_bindgen_test]
+async fn local_blob_dir_ops_round_trip_through_opfs() {
+    console_error_panic_hook::set_once();
+
+    let root = Path::new("/coven-blob-dirops");
+    // Two files under a two-level shard, mirroring the cache's `{ab}/{cd}/<id>`.
+    let a = root.join("ab/cd/blob-a");
+    let b = root.join("ef/01/blob-b");
+    crate::local_blob::write(&a, b"aaaa")
+        .await
+        .expect("write blob-a");
+    crate::local_blob::write(&b, b"bbbbbb")
+        .await
+        .expect("write blob-b");
+
+    // walk_files descends both shards and returns every leaf file with its size.
+    let listed = crate::local_blob::walk_files(root).await.expect("walk");
+    assert_eq!(listed.len(), 2, "walk_files found both leaf files");
+    assert!(
+        listed.iter().any(|(p, _, size)| p == &a && *size == 4),
+        "blob-a enumerated with its 4-byte size",
+    );
+    assert!(
+        listed.iter().any(|(p, _, size)| p == &b && *size == 6),
+        "blob-b enumerated with its 6-byte size",
+    );
+
+    // rename moves blob-a into a fresh shard: the destination has the bytes (its
+    // parent dirs created along the way), the source is gone.
+    let a_moved = root.join("99/88/blob-a");
+    crate::local_blob::rename(&a, &a_moved)
+        .await
+        .expect("rename blob-a");
+    assert_eq!(
+        crate::local_blob::exists(&a).await,
+        Ok(false),
+        "the rename source is gone (copy-then-delete completed)",
+    );
+    assert_eq!(
+        crate::local_blob::read(&a_moved)
+            .await
+            .expect("read the moved blob"),
+        b"aaaa",
+        "the moved file holds the original bytes",
+    );
+
+    // remove_file drops a present file (Ok(true)); a second remove is Ok(false), not
+    // an error — the already-gone case eviction tolerates.
+    assert_eq!(
+        crate::local_blob::remove_file(&a_moved).await,
+        Ok(true),
+        "removing a present file reports it was there",
+    );
+    assert_eq!(
+        crate::local_blob::remove_file(&a_moved).await,
+        Ok(false),
+        "removing an already-absent file is Ok(false), not an error",
+    );
+
+    // remove_dir_all drops the whole subtree (blob-b and its shards with it); a
+    // second sweep over the now-absent root is Ok(false), the empty-cache case.
+    assert_eq!(
+        crate::local_blob::remove_dir_all(root).await,
+        Ok(true),
+        "removing a present tree reports it was there",
+    );
+    assert_eq!(
+        crate::local_blob::exists(&b).await,
+        Ok(false),
+        "a file under the removed subtree is gone",
+    );
+    assert_eq!(
+        crate::local_blob::remove_dir_all(root).await,
+        Ok(false),
+        "removing an already-absent tree is Ok(false), not an error",
+    );
+
+    // walk_files over an absent tree is an empty list, not an error — the
+    // nothing-cached-yet case `evict_to_budget` returns early on.
+    assert!(
+        crate::local_blob::walk_files(root)
+            .await
+            .expect("walk an absent tree")
+            .is_empty(),
+        "an absent tree enumerates to nothing",
+    );
+}
