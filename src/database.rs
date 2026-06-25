@@ -664,6 +664,7 @@ impl Database {
         cloud_key: &str,
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
+        retain_pinned: bool,
         created_at: &str,
     ) -> Result<(), DbError> {
         let (file_id, cloud_key, source_path, created_at) = (
@@ -679,6 +680,7 @@ impl Database {
                 &cloud_key,
                 source_path.as_deref(),
                 scope,
+                retain_pinned,
                 &created_at,
             )
         })
@@ -696,6 +698,7 @@ impl Database {
         cloud_key: &str,
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
+        retain_pinned: bool,
         created_at: &str,
     ) -> Result<(), DbError> {
         // Latest intent wins: queuing an upload for a key cancels a pending delete
@@ -710,13 +713,14 @@ impl Database {
         .map_err(DbError::from)?;
         conn.execute(
             "INSERT OR IGNORE INTO cloud_outbox \
-             (operation, file_id, cloud_key, source_path, scope, created_at) \
-             VALUES ('upload', ?1, ?2, ?3, ?4, ?5)",
+             (operation, file_id, cloud_key, source_path, scope, retain_pinned, created_at) \
+             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6)",
             (
                 file_id,
                 cloud_key,
                 source_path,
                 scope.to_outbox_str(),
+                retain_pinned,
                 created_at,
             ),
         )
@@ -782,7 +786,7 @@ impl Database {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, operation, file_id, cloud_key, source_path, scope, \
-                            created_at, attempt_count, last_error, last_attempt_at \
+                            retain_pinned, created_at, attempt_count, last_error, last_attempt_at \
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
                 .map_err(DbError::from)?;
@@ -945,6 +949,7 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
                 file_id: r.get(2)?,
                 source_path: r.get(4)?,
                 scope,
+                retain_pinned: r.get(6)?,
             }
         }
         "delete" => OutboxOperation::Delete,
@@ -954,10 +959,10 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
     Ok(OutboxEntry {
         id: r.get(0)?,
         cloud_key: r.get(3)?,
-        created_at: r.get(6)?,
-        attempt_count: r.get(7)?,
-        last_error: r.get(8)?,
-        last_attempt_at: r.get(9)?,
+        created_at: r.get(7)?,
+        attempt_count: r.get(8)?,
+        last_error: r.get(9)?,
+        last_attempt_at: r.get(10)?,
         operation,
     })
 }

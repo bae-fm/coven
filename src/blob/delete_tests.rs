@@ -19,6 +19,7 @@ use crate::blob::BlobScope;
 use crate::clock::FixedClock;
 use crate::database::Database;
 use crate::keys::UserKeypair;
+use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
     no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo, UploadProgress,
@@ -294,7 +295,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
     use crate::db::OutboxOperation;
 
     let db = open_outbox_db();
-    db.enqueue_upload("f1", "k-up", None, BlobScope::Master, T0)
+    db.enqueue_upload("f1", "k-up", None, BlobScope::Master, false, T0)
         .await
         .expect("enqueue upload");
     db.enqueue_delete("k-del", T0)
@@ -309,6 +310,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
             file_id: "f1".to_string(),
             source_path: None,
             scope: BlobScope::Master,
+            retain_pinned: false,
         },
         "an upload entry carries its scope in the variant"
     );
@@ -710,7 +712,7 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
     // delete then upload → no delete row remains, the upload stands.
     let db = open_outbox_db();
     db.enqueue_delete("k", T0).await.expect("enqueue delete");
-    db.enqueue_upload("f", "k", None, BlobScope::Master, T0)
+    db.enqueue_upload("f", "k", None, BlobScope::Master, false, T0)
         .await
         .expect("enqueue upload");
     assert!(
@@ -725,7 +727,7 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
 
     // upload then delete → no upload row remains, the delete stands.
     let db = open_outbox_db();
-    db.enqueue_upload("f", "k", None, BlobScope::Master, T0)
+    db.enqueue_upload("f", "k", None, BlobScope::Master, false, T0)
         .await
         .expect("enqueue upload");
     db.enqueue_delete("k", T0).await.expect("enqueue delete");
@@ -742,7 +744,7 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
     // The cancel is key-scoped: a delete for one key doesn't touch an upload for
     // another.
     let db = open_outbox_db();
-    db.enqueue_upload("f", "keep", None, BlobScope::Master, T0)
+    db.enqueue_upload("f", "keep", None, BlobScope::Master, false, T0)
         .await
         .expect("enqueue upload");
     db.enqueue_delete("other", T0)
@@ -790,16 +792,24 @@ async fn reupload_through_the_drain_cancels_a_prior_cycle_tombstone() {
         "blob-key",
         Some(&src.to_string_lossy()),
         BlobScope::Master,
+        false,
         T0,
     )
     .await
     .expect("enqueue upload");
 
     let clock = FixedClock(at("2024-06-01T01:00:00Z"));
-    let n = drain_uploads(&db, &storage, &cipher, tmp.path(), &clock, None)
-        .await
-        .expect("drain")
-        .uploaded;
+    let n = drain_uploads(
+        &db,
+        &storage,
+        &cipher,
+        &LibraryDir::new(tmp.path()),
+        &clock,
+        None,
+    )
+    .await
+    .expect("drain")
+    .uploaded;
     assert_eq!(n, 1, "the blob is re-uploaded");
     assert!(
         storage.read("blob-key").await.is_ok(),
@@ -922,6 +932,7 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
         "blob-key",
         Some(&src.to_string_lossy()),
         BlobScope::Master,
+        false,
         T0,
     )
     .await
@@ -932,10 +943,17 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
     // is queued in its place.
     let failing = FailDeleteOnKey::new(&storage, "blob_tombstones/blob-key", 1);
     let clock = FixedClock(at("2024-06-01T01:00:00Z"));
-    let n = drain_uploads(&db, &failing, &cipher, tmp.path(), &clock, None)
-        .await
-        .expect("drain")
-        .uploaded;
+    let n = drain_uploads(
+        &db,
+        &failing,
+        &cipher,
+        &LibraryDir::new(tmp.path()),
+        &clock,
+        None,
+    )
+    .await
+    .expect("drain")
+    .uploaded;
     assert_eq!(n, 1, "the blob is re-uploaded despite the cancel failing");
     assert!(
         storage.read("blob-key").await.is_ok(),
@@ -1055,14 +1073,22 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         "blob-key",
         Some(&src.to_string_lossy()),
         BlobScope::Master,
+        false,
         T0,
     )
     .await
     .expect("enqueue upload");
     let clock = FixedClock(at("2024-06-01T01:00:00Z"));
-    crate::blob::upload::drain_uploads(&db, &storage, &cipher, tmp.path(), &clock, None)
-        .await
-        .expect("re-upload drain");
+    crate::blob::upload::drain_uploads(
+        &db,
+        &storage,
+        &cipher,
+        &LibraryDir::new(tmp.path()),
+        &clock,
+        None,
+    )
+    .await
+    .expect("re-upload drain");
     assert!(
         storage.read("blob_tombstones/blob-key").await.is_err(),
         "the re-upload's cancel removed the leftover tombstone",

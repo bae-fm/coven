@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     -- NULL for a delete or cancel entry, which touch no key. Local bookkeeping;
     -- this table does not sync.
     scope TEXT,
+    -- Whether a successful upload should also populate coven's protected cache
+    -- folder (storage/pinned/<id>) from the plaintext, so the blob is kept local
+    -- and budget-exempt with no later cloud round-trip. Upload-only and honestly
+    -- 0 for a delete or cancel (they retain nothing), so unlike scope/source_path
+    -- it has a meaningful default rather than NULL.
+    retain_pinned INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
@@ -93,8 +99,8 @@ pub enum OutboxOperation {
     /// Upload a local blob. Carries the local source, the host-named encryption
     /// scope (resolved to a key at drain — looking up `item_keys` for a
     /// [`crate::blob::BlobScope::Item`] scope, since the upload runs long after
-    /// the enqueue site is gone), and the `file_id` the upload reports progress
-    /// under.
+    /// the enqueue site is gone), the `file_id` the upload reports progress
+    /// under, and whether to keep the uploaded blob pinned in the local cache.
     Upload {
         file_id: String,
         /// Local plaintext source. `None` means the blob lives at coven's
@@ -103,6 +109,12 @@ pub enum OutboxOperation {
         /// The blob's encryption scope, named by the host at enqueue. An upload
         /// always has one — a delete, which touches no key, has none.
         scope: crate::blob::BlobScope,
+        /// Whether the drain populates the protected cache folder
+        /// (`storage/pinned/<id>`) from the plaintext on a successful upload, so a
+        /// pinned managed blob is kept local and budget-exempt with no later cloud
+        /// round-trip. `false` populates nothing on write — the evictable
+        /// `storage/cache/<id>` fills on a later read-miss instead.
+        retain_pinned: bool,
     },
     /// Delete a cloud blob. The drain turns it into a signed cloud tombstone (the
     /// deletion's durable record); a later GC reclaims the blob once a convergence

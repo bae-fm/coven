@@ -66,6 +66,7 @@ async fn seed_pending_upload(db: &Database) {
         "storage/aa/bb/f1",
         Some("/nonexistent/f1"),
         BlobScope::Master,
+        false,
         T0,
     )
     .await
@@ -80,6 +81,7 @@ async fn seed_real_upload(db: &Database, file_id: &str, source: &str) {
         &format!("storage/{file_id}"),
         Some(source),
         BlobScope::Master,
+        false,
         T0,
     )
     .await

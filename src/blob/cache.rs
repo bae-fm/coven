@@ -132,6 +132,33 @@ pub async fn write_blob(
     Ok(())
 }
 
+/// Write a blob's plaintext straight into the PROTECTED cache folder
+/// (`storage/pinned/<id>`), so a just-uploaded pinned managed blob is kept local
+/// and budget-exempt with no later cloud round-trip. The pinned sibling of
+/// [`write_blob`] (which stages into the evictable `storage/cache/<id>`).
+///
+/// Called by the upload drain after a successful upload whose entry is
+/// `retain_pinned`: the same plaintext the drain already read to seal is written
+/// here, so the pin is populate-on-write rather than fetch-on-read. The bytes are
+/// the plaintext (what the cache stores and serves), not the sealed ciphertext in
+/// the cloud.
+///
+/// Unlike [`write_blob`] there is NO post-write eviction: `pinned/` is structurally
+/// exempt from the size budget (the sweep never walks it), so a pinned populate can
+/// neither push the evictable cache over budget nor be trimmed. The write is atomic
+/// ([`crate::local_blob::write_atomic`]), the same torn-file guard every cache write
+/// relies on.
+pub(crate) async fn populate_pinned(
+    library_dir: &LibraryDir,
+    id: &str,
+    plaintext: &[u8],
+) -> Result<(), BlobCacheError> {
+    let dest = library_dir.pinned_blob_path(id)?;
+    crate::local_blob::write_atomic(&dest, plaintext)
+        .await
+        .map_err(BlobCacheError::Io)
+}
+
 /// Read a blob's whole contents, serving the local file on a hit and fetching from
 /// the cloud (into `cache/`) on a miss.
 ///

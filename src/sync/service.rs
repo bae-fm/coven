@@ -105,6 +105,15 @@ impl SyncService {
         // envelope, so pullers can fetch them as soon as they see the change. Both
         // retention classes upload here — OnDemand differs from Mirrored only on
         // the pull side (it is not downloaded), not on push.
+        //
+        // This inline path carries NO pin intent and so populates nothing into the
+        // local cache on write: a `BlobRef` has no retain-pinned flag to act on. A
+        // `Mirrored` blob (e.g. cover art) is system-pinned into `storage/pinned/`
+        // on every device at pull regardless, and the managed-audio case that does
+        // carry a transient pin choice goes through the durable upload outbox
+        // (`enqueue_upload` → `drain_uploads`), which is where populate-pinned-on-
+        // upload lives. So a pinned populate belongs to the outbox drain, not to
+        // this changeset-blob upload.
         if let Some(ref cs) = outgoing_cs {
             let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
             for blob in changes.iter().flat_map(|c| blob_source.blobs_for_change(c)) {

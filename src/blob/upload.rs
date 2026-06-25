@@ -34,6 +34,7 @@ use tracing::warn;
 use crate::blob::{BlobScope, BlobUploadObserver, DrainControl};
 use crate::database::Database;
 use crate::db::{OutboxEntry, OutboxOperation};
+use crate::library_dir::LibraryDir;
 use crate::storage::cloud::{CloudHome, CloudHomeError};
 use crate::sync::cloud_storage::CloudCipher;
 
@@ -144,7 +145,10 @@ async fn record_failure(
 
 /// Read an upload's local plaintext, resolve its scope to a key, and seal it for
 /// storage (encrypting under the scope's key for an encrypted home, or storing
-/// it verbatim for a plaintext one).
+/// it verbatim for a plaintext one). Returns `(plaintext, sealed)`: the cloud
+/// write consumes `sealed`, and a `retain_pinned` upload populates the protected
+/// cache folder from `plaintext` — the bytes the cache stores and serves — so it
+/// pins from the read we already did instead of re-reading the file.
 ///
 /// The two failure modes — the local file can't be read, the scope can't be
 /// resolved to a key (a missing `item_keys` row) — both surface as an `Err`
@@ -157,13 +161,14 @@ async fn resolve_and_seal(
     cipher: &std::sync::RwLock<CloudCipher>,
     file_path: &Path,
     scope: BlobScope,
-) -> Result<Vec<u8>, String> {
-    let data = crate::local_blob::read(file_path).await?;
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let plaintext = crate::local_blob::read(file_path).await?;
     let resolved = db
         .resolve_blob_scope(scope)
         .await
         .map_err(|e| format!("cannot resolve blob scope: {e}"))?;
-    Ok(cipher.read().unwrap().seal_scoped(resolved, &data))
+    let sealed = cipher.read().unwrap().seal_scoped(resolved, &plaintext);
+    Ok((plaintext, sealed))
 }
 
 /// The result of one upload-queue drain pass.
@@ -180,7 +185,9 @@ pub struct DrainOutcome {
 }
 
 /// Drain pending blob uploads: read each local file, seal it under its scope,
-/// write it to the cloud.
+/// write it to the cloud — and, for an entry marked `retain_pinned`, keep the
+/// plaintext in the protected local cache (`storage/pinned/<id>`) so the blob
+/// stays local without a later fetch.
 ///
 /// A failing entry is recorded and skipped rather than stopping the drain, with a
 /// per-entry backoff so a persistently-failing entry doesn't block the rest of
@@ -197,7 +204,7 @@ pub async fn drain_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
-    library_dir: &Path,
+    library_dir: &LibraryDir,
     clock: &dyn crate::clock::Clock,
     observer: Option<&dyn BlobUploadObserver>,
 ) -> Result<DrainOutcome, String> {
@@ -245,6 +252,7 @@ pub async fn drain_uploads(
             file_id,
             source_path,
             scope,
+            retain_pinned,
         } = &entry.operation
         else {
             unreachable!("get_pending_cloud_uploads returns only Upload rows");
@@ -278,14 +286,19 @@ pub async fn drain_uploads(
         // one step with a single failure path. A missing key is a host bug;
         // record it as a failure rather than silently sealing under the master
         // key (which no share recipient could read).
-        let sealed = match resolve_and_seal(db, cipher, &file_path, scope.clone()).await {
-            Ok(bytes) => bytes,
-            Err(msg) => {
-                warn!("Upload failed for {}: {msg}", entry.cloud_key);
-                record_failure(db, &entry, file_id, &msg, now, observer).await;
-                continue;
-            }
-        };
+        let (plaintext, sealed) =
+            match resolve_and_seal(db, cipher, &file_path, scope.clone()).await {
+                Ok(bytes) => bytes,
+                Err(msg) => {
+                    warn!("Upload failed for {}: {msg}", entry.cloud_key);
+                    record_failure(db, &entry, file_id, &msg, now, observer).await;
+                    continue;
+                }
+            };
+        // Keep the plaintext alive across the upload only if this entry pins;
+        // otherwise drop it now so a large blob isn't held in memory during the
+        // cloud write. `then_some` moves it in eagerly, freeing it when unpinned.
+        let plaintext_for_pin = (*retain_pinned).then_some(plaintext);
 
         match upload_with_progress(cloud_home, &entry.cloud_key, file_id, sealed, observer).await {
             Ok(()) => {
@@ -323,6 +336,25 @@ pub async fn drain_uploads(
                     warn!("Failed to remove outbox entry {}: {e}", entry.id);
                 }
                 count += 1;
+
+                // A pinned upload keeps its blob local: write the plaintext we
+                // already read to seal into the protected cache folder
+                // (`storage/pinned/<id>`), so the blob is budget-exempt and serves
+                // from disk with no later cloud round-trip. Best-effort, like the
+                // cache's own post-populate eviction: the upload has already
+                // succeeded and the bytes are in the cloud, so a populate failure is
+                // logged and swallowed (a later read re-fetches into the cache)
+                // rather than failing a completed upload.
+                if let Some(plaintext) = plaintext_for_pin {
+                    if let Err(e) =
+                        crate::blob::cache::populate_pinned(library_dir, file_id, &plaintext).await
+                    {
+                        warn!(
+                            "Upload of {} succeeded but pinning it into the local cache failed (a later read will re-fetch): {e}",
+                            entry.cloud_key
+                        );
+                    }
+                }
 
                 if let Some(obs) = observer {
                     if obs.on_blob_uploaded(file_id).await == DrainControl::Publish {

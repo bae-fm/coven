@@ -17,6 +17,7 @@ use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
+use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::CloudCipher;
@@ -302,10 +303,17 @@ async fn bad_item_does_not_block_good_later_item() {
     let observer = RecordingObserver::new();
     let clock = fixed_clock(T0);
 
-    let n = drain_uploads(&db, &cloud, &enc(), tmp.path(), &clock, Some(&observer))
-        .await
-        .unwrap()
-        .uploaded;
+    let n = drain_uploads(
+        &db,
+        &cloud,
+        &enc(),
+        &LibraryDir::new(tmp.path()),
+        &clock,
+        Some(&observer),
+    )
+    .await
+    .unwrap()
+    .uploaded;
 
     assert_eq!(n, 1, "the good entry uploads despite the earlier failure");
     assert!(cloud.get("key-b").is_some(), "good blob landed in cloud");
@@ -337,7 +345,7 @@ async fn publish_signal_breaks_the_drain_leaving_the_rest_queued() {
         &db,
         &cloud,
         &enc(),
-        tmp.path(),
+        &LibraryDir::new(tmp.path()),
         &fixed_clock(T0),
         Some(&PublishingObserver),
     )
@@ -377,9 +385,16 @@ async fn failure_persists_attempt_count_and_last_error() {
     insert_upload(&db, 1, "f1", "k1", Some(path), 0, None).await;
     let cloud = FailingCloudHome::new();
 
-    drain_uploads(&db, &cloud, &enc(), tmp.path(), &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    drain_uploads(
+        &db,
+        &cloud,
+        &enc(),
+        &LibraryDir::new(tmp.path()),
+        &fixed_clock(T0),
+        None,
+    )
+    .await
+    .unwrap();
     let (attempt, err, _) = get_upload(&db, 1).await.unwrap();
     assert_eq!(attempt, 1);
     assert!(err.as_deref().unwrap().contains("cloud write failed"));
@@ -389,7 +404,7 @@ async fn failure_persists_attempt_count_and_last_error() {
         &db,
         &cloud,
         &enc(),
-        tmp.path(),
+        &LibraryDir::new(tmp.path()),
         &fixed_clock("2024-06-01T00:00:31Z"),
         None,
     )
@@ -416,7 +431,7 @@ async fn backoff_skips_item_inside_window() {
         &db,
         &cloud,
         &enc(),
-        tmp.path(),
+        &LibraryDir::new(tmp.path()),
         &fixed_clock("2024-06-01T00:00:10Z"),
         Some(&observer),
     )
@@ -444,7 +459,7 @@ async fn backoff_skips_item_inside_window() {
         &db,
         &cloud,
         &enc(),
-        tmp.path(),
+        &LibraryDir::new(tmp.path()),
         &fixed_clock("2024-06-01T00:00:31Z"),
         Some(&observer),
     )
@@ -471,7 +486,7 @@ async fn observer_fires_started_then_uploaded_on_success() {
         &db,
         &cloud,
         &enc(),
-        tmp.path(),
+        &LibraryDir::new(tmp.path()),
         &fixed_clock(T0),
         Some(&observer),
     )
@@ -508,7 +523,7 @@ async fn observer_fires_started_then_failed_on_failure() {
         &db,
         &cloud,
         &enc(),
-        tmp.path(),
+        &LibraryDir::new(tmp.path()),
         &fixed_clock(T0),
         Some(&observer),
     )
@@ -547,7 +562,7 @@ async fn observer_receives_advancing_midfile_progress() {
         &db,
         &cloud,
         &enc(),
-        tmp.path(),
+        &LibraryDir::new(tmp.path()),
         &fixed_clock(T0),
         Some(&observer),
     )
@@ -657,6 +672,7 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         cloud_key,
         Some(source.as_str()),
         crate::blob::BlobScope::Item("release-1".to_string()),
+        false,
         T0,
     )
     .await
@@ -665,10 +681,17 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         master_key,
     )));
 
-    let n = drain_uploads(&db, &cloud, &master_enc, tmp.path(), &fixed_clock(T0), None)
-        .await
-        .expect("upload")
-        .uploaded;
+    let n = drain_uploads(
+        &db,
+        &cloud,
+        &master_enc,
+        &LibraryDir::new(tmp.path()),
+        &fixed_clock(T0),
+        None,
+    )
+    .await
+    .expect("upload")
+    .uploaded;
     assert_eq!(n, 1, "the release blob uploads");
 
     // At rest the blob is per-release ciphertext: not plaintext, and NOT
@@ -736,6 +759,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             "k-rollback",
             None,
             crate::blob::BlobScope::Master,
+            false,
             T0,
         )?;
         tx.rollback().map_err(DbError::from)
@@ -752,6 +776,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             "k-commit",
             Some("/tmp/source.flac"),
             crate::blob::BlobScope::Item("rel-1".to_string()),
+            false,
             T0,
         )?;
         tx.commit().map_err(DbError::from)
@@ -765,5 +790,162 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         keys,
         vec!["k-commit"],
         "only the committed enqueue persists"
+    );
+}
+
+/// A `retain_pinned` upload populates the PROTECTED cache folder from the
+/// plaintext: after the drain, `storage/pinned/<id>` holds the plaintext bytes
+/// (not the sealed ciphertext the cloud holds), and the evictable
+/// `storage/cache/<id>` is untouched — the blob is kept local and budget-exempt
+/// with no later cloud round-trip.
+#[tokio::test]
+async fn pinned_upload_populates_the_protected_cache_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plaintext = b"PINNED-AUDIO-BYTES";
+    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
+    let ld = LibraryDir::new(tmp.path());
+
+    let db = open_outbox_db();
+    let file_id = "pinaaaa1";
+    let cloud_key = "storage/pi/na/pinaaaa1";
+    db.enqueue_upload(
+        file_id,
+        cloud_key,
+        Some(source.as_str()),
+        crate::blob::BlobScope::Master,
+        true, // retain_pinned
+        T0,
+    )
+    .await
+    .expect("enqueue a pinned upload");
+
+    let cloud = InMemoryCloudHome::new();
+    let n = drain_uploads(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
+        .await
+        .expect("drain")
+        .uploaded;
+    assert_eq!(n, 1, "the pinned blob uploads");
+
+    // The cloud holds the sealed (encrypted) bytes, not the plaintext.
+    let at_rest = cloud.get(cloud_key).expect("blob present in cloud");
+    assert_ne!(at_rest, plaintext, "the cloud copy is sealed ciphertext");
+
+    // The protected folder holds the PLAINTEXT (what the cache serves), written
+    // straight from the drain's read — no cloud round-trip.
+    let pinned_path = ld.pinned_blob_path(file_id).unwrap();
+    assert!(
+        pinned_path.exists(),
+        "a pinned upload writes storage/pinned/<id>",
+    );
+    assert_eq!(
+        std::fs::read(&pinned_path).unwrap(),
+        plaintext,
+        "the pinned file is the plaintext, not the sealed cloud bytes",
+    );
+
+    // The evictable cache is untouched: a pin populates pinned/, never cache/.
+    assert!(
+        !ld.cache_blob_path(file_id).unwrap().exists(),
+        "a pinned upload does not populate the evictable storage/cache/<id>",
+    );
+}
+
+/// An unpinned upload populates NOTHING on write: after the drain the blob is in
+/// the cloud but neither cache folder holds it — the evictable `storage/cache/<id>`
+/// fills only on a later read-miss, never on the upload itself.
+#[tokio::test]
+async fn unpinned_upload_populates_nothing_on_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plaintext = b"UNPINNED-AUDIO-BYTES";
+    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
+    let ld = LibraryDir::new(tmp.path());
+
+    let db = open_outbox_db();
+    let file_id = "unpaaaa1";
+    let cloud_key = "storage/un/pa/unpaaaa1";
+    db.enqueue_upload(
+        file_id,
+        cloud_key,
+        Some(source.as_str()),
+        crate::blob::BlobScope::Master,
+        false, // retain_pinned
+        T0,
+    )
+    .await
+    .expect("enqueue an unpinned upload");
+
+    let cloud = InMemoryCloudHome::new();
+    let n = drain_uploads(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
+        .await
+        .expect("drain")
+        .uploaded;
+    assert_eq!(n, 1, "the unpinned blob uploads");
+    assert!(cloud.get(cloud_key).is_some(), "the blob is in the cloud");
+
+    // Neither folder holds it: an unpinned upload writes no local cache copy.
+    assert!(
+        !ld.pinned_blob_path(file_id).unwrap().exists(),
+        "an unpinned upload does not populate storage/pinned/<id>",
+    );
+    assert!(
+        !ld.cache_blob_path(file_id).unwrap().exists(),
+        "an unpinned upload does not populate storage/cache/<id>",
+    );
+}
+
+/// A pin populate that fails does NOT fail the upload: the upload already
+/// succeeded and the bytes are in the cloud, so a populate failure is logged and
+/// swallowed (a later read re-fetches into the cache). Here the protected folder is
+/// blocked by planting a FILE where the blob's shard directory must go, so the
+/// atomic write into `storage/pinned/<id>` can't create its parent — yet the drain
+/// still reports the upload done and clears the queue entry.
+#[tokio::test]
+async fn a_failed_pin_populate_does_not_fail_the_upload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plaintext = b"PIN-FAILS-BUT-UPLOAD-OK";
+    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
+    let ld = LibraryDir::new(tmp.path());
+
+    let db = open_outbox_db();
+    let file_id = "pinfail1";
+    let cloud_key = "storage/pi/nf/pinfail1";
+
+    // Block the populate: the pinned blob path is storage/pinned/{ab}/{cd}/<id>;
+    // plant a regular FILE at the {ab} level so creating the {ab}/{cd} shard
+    // directory fails, and with it the atomic write into pinned/.
+    let pinned_path = ld.pinned_blob_path(file_id).unwrap();
+    let ab_dir = pinned_path.parent().unwrap().parent().unwrap(); // .../pinned/{ab}
+    std::fs::create_dir_all(ab_dir.parent().unwrap()).unwrap(); // .../pinned
+    std::fs::write(ab_dir, b"blocker").unwrap(); // {ab} is now a file, not a dir
+
+    db.enqueue_upload(
+        file_id,
+        cloud_key,
+        Some(source.as_str()),
+        crate::blob::BlobScope::Master,
+        true, // retain_pinned — but the populate will fail
+        T0,
+    )
+    .await
+    .expect("enqueue a pinned upload whose populate will fail");
+
+    let cloud = InMemoryCloudHome::new();
+    let n = drain_uploads(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
+        .await
+        .expect("the drain succeeds despite the populate failure")
+        .uploaded;
+
+    // The upload counted, the blob reached the cloud, and the queue entry was
+    // cleared — the failed populate rolled none of that back.
+    assert_eq!(n, 1, "the upload succeeds even though pinning failed");
+    assert!(cloud.get(cloud_key).is_some(), "the blob reached the cloud");
+    assert!(
+        get_upload(&db, 1).await.is_none(),
+        "the completed upload's queue entry was removed",
+    );
+    // The pin did not land (its parent couldn't be created).
+    assert!(
+        !pinned_path.exists(),
+        "the blocked populate left no storage/pinned/<id> file",
     );
 }

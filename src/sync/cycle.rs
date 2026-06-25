@@ -243,15 +243,7 @@ pub async fn run_single_sync_cycle(
     // loop's cadence below.
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
-        match crate::blob::upload::drain_uploads(
-            db,
-            ch,
-            cipher,
-            library_dir.as_ref(),
-            clock,
-            observer,
-        )
-        .await
+        match crate::blob::upload::drain_uploads(db, ch, cipher, library_dir, clock, observer).await
         {
             Ok(outcome) => {
                 resume_drain_promptly = outcome.yielded_for_publish;
