@@ -599,7 +599,15 @@ pub async fn pull_changes(
             // Drop both folders for it — the `pinned/` copy is budget-exempt and
             // would otherwise leak forever once the row is gone. A peer NEVER writes
             // a cloud tombstone here; that belongs to the deleting/unmanaging owner.
-            drop_deleted_blob_caches(&changes, &blob_decls, library_dir).await;
+            if let Err(e) = drop_deleted_blob_caches(&changes, &blob_decls, library_dir).await {
+                warn!(
+                    "Dropping caches for deleted blob rows failed for {}/{}: {e}; \
+                     cursor not advanced, will retry next cycle",
+                    head.device_id, seq
+                );
+                result.asset_downloads_failed = true;
+                break;
+            }
 
             advance_max_updated_at(
                 &mut result.max_applied_updated_at,
@@ -965,8 +973,12 @@ async fn download_changeset_blobs(
 }
 
 /// The `Mirrored` blobs the `changes` reference, derived per row from the
-/// declarations and keeping only the class a pulling device downloads.
-fn mirrored_blobs(blob_decls: &BlobDecls, changes: &[RowChange]) -> Vec<crate::blob::BlobRef> {
+/// declarations. The class a pulling device downloads before applying, and the
+/// one the inline push uploads before publishing — so both call this.
+pub(crate) fn mirrored_blobs(
+    blob_decls: &BlobDecls,
+    changes: &[RowChange],
+) -> Vec<crate::blob::BlobRef> {
     changes
         .iter()
         .filter_map(|change| blob_decls.ref_from_change(change))
@@ -977,14 +989,16 @@ fn mirrored_blobs(blob_decls: &BlobDecls, changes: &[RowChange]) -> Vec<crate::b
 /// Drop the local cache copy of every blob a deleted row in `changes` references.
 /// Runs after a changeset applies: a DELETE of a blob-bearing row (a gate retract
 /// or a genuine delete) must not leave this peer's budget-exempt `pinned/` copy
-/// behind. Best-effort — a failed drop is logged, not fatal — because the row is
-/// already deleted and the bytes are at worst a leaked cache file, never wrong
-/// state; both retention classes are dropped (a deleted row needs neither).
+/// behind. A failed drop is propagated, not swallowed: the caller leaves the cursor
+/// unadvanced and retries the whole changeset next cycle, so the cleanup is never
+/// silently lost. Retry is safe — re-applying the changeset is idempotent and
+/// `drop_cached_blob` ignores an already-absent file. Both retention folders are
+/// dropped; a deleted row needs neither.
 async fn drop_deleted_blob_caches(
     changes: &[RowChange],
     blob_decls: &BlobDecls,
     library_dir: &LibraryDir,
-) {
+) -> Result<(), crate::blob::cache::BlobCacheError> {
     for change in changes {
         if change.op != crate::changeset::ChangeOp::Delete {
             continue;
@@ -992,10 +1006,9 @@ async fn drop_deleted_blob_caches(
         let Some(blob) = blob_decls.ref_from_change(change) else {
             continue;
         };
-        if let Err(e) = crate::blob::cache::drop_cached_blob(library_dir, &blob.id).await {
-            warn!(id = %blob.id, error = %e, "failed to drop cache for a deleted blob-bearing row");
-        }
+        crate::blob::cache::drop_cached_blob(library_dir, &blob.id).await?;
     }
+    Ok(())
 }
 
 /// Resolve a blob's public scope to its internal key scope WITHOUT requiring the

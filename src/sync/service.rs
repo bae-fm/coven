@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use tracing::{error, info};
 
 use crate::blob::decl::BlobDecls;
-use crate::blob::BlobSync;
 use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
@@ -124,11 +123,7 @@ impl SyncService {
                 })
                 .await
                 .map_err(|e| SyncCycleError::AssetScan(e.0))?;
-            let mirrored = changes
-                .iter()
-                .filter_map(|c| blob_decls.ref_from_change(c))
-                .filter(|blob| blob.sync == BlobSync::Mirrored);
-            for blob in mirrored {
+            for blob in crate::sync::pull::mirrored_blobs(&blob_decls, &changes) {
                 let bytes = match crate::blob::cache::read_staged(library_dir, &blob.id).await {
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => {

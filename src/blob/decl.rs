@@ -75,6 +75,23 @@ enum ResolvedScopeSpec {
     ItemColumn(usize),
 }
 
+impl TableBlob {
+    /// Build the [`BlobRef`] for one of this table's rows from the per-row `id`,
+    /// `scope`, and `cloud_path` plus this table's fixed namespace and sync class.
+    /// Shared by [`BlobDecls::ref_from_change`] (changeset row) and
+    /// [`BlobDecls::refs_in_db`] (live row), which differ only in how they read
+    /// those per-row values.
+    fn blob_ref(&self, id: String, scope: BlobScope, cloud_path: Option<String>) -> BlobRef {
+        BlobRef {
+            namespace: self.namespace.clone(),
+            id,
+            scope,
+            cloud_path,
+            sync: self.sync,
+        }
+    }
+}
+
 /// The blob declarations for a sync cycle, resolved once from the declared set +
 /// the live schema. A synced table absent from this map carries no blob.
 pub struct BlobDecls {
@@ -144,13 +161,7 @@ impl BlobDecls {
             ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
             ResolvedScopeSpec::ItemColumn(i) => BlobScope::Item(change.col(*i)?.to_string()),
         };
-        Some(BlobRef {
-            namespace: tb.namespace.clone(),
-            id,
-            scope,
-            cloud_path,
-            sync: tb.sync,
-        })
+        Some(tb.blob_ref(id, scope, cloud_path))
     }
 
     /// Every blob the rows currently in `conn` reference — the snapshot-bootstrap
@@ -181,13 +192,7 @@ impl BlobDecls {
                         None => continue,
                     },
                 };
-                out.push(BlobRef {
-                    namespace: tb.namespace.clone(),
-                    id,
-                    scope,
-                    cloud_path,
-                    sync: tb.sync,
-                });
+                out.push(tb.blob_ref(id, scope, cloud_path));
             }
         }
         Ok(out)
