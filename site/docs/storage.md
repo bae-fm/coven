@@ -5,7 +5,7 @@ a small trait that moves opaque encrypted bytes between a device and storage the
 user already controls. coven owns encryption, the key layout, and retry; the
 trait is the raw byte boundary below all of that. A `CloudHome` never sees
 plaintext, never assigns sequence numbers, and never coordinates concurrent
-writers. It reads, writes, lists, and deletes blobs addressed by a flat string
+writers. It reads, writes, lists, and deletes objects addressed by a flat string
 key.
 
 The examples use a todos app. Its synced tables are `workspaces`, `lists`,
@@ -18,10 +18,8 @@ one cloud home under keys like `changes/dev1/42.enc`.
 The host selects one provider at a time and fills its settings in
 [`CloudHomeConfig`](rustdoc:struct:coven::config::CloudHomeConfig), held on
 [`Config`](rustdoc:struct:coven::config::Config). coven reads the current config
-through a [`ConfigProvider`](rustdoc:type:coven::sync::sync_manager::ConfigProvider)
-(a closure called fresh on each operation) rather than caching its own copy, so a
-provider swap or disconnect takes effect on the next sync cycle without
-rebuilding the sync layer.
+fresh on each operation rather than caching its own copy, so a provider swap or
+disconnect takes effect on the next sync cycle without rebuilding the sync layer.
 
 [`Config::sync_enabled`](rustdoc:method:coven::config::Config::sync_enabled)
 returns true only when a provider is selected and both its config fields and its
@@ -31,7 +29,6 @@ plus a stored OAuth token, and so on).
 ## The trait
 
 ```rust
-#[async_trait]
 pub trait CloudHome: Send + Sync {
     async fn probe(&self) -> Result<(), CloudHomeError> { /* default: no-op list */ }
     async fn write(&self, key: &str, data: Vec<u8>, progress: &UploadProgress<'_>)
@@ -68,6 +65,10 @@ The `progress` argument to `write` is a
 small control files (auth keys, head pointers, the snapshot) it passes
 [`no_progress`](rustdoc:fn:coven::storage::cloud::no_progress), which discards
 the reports.
+
+(The trait carries `Send + Sync` and `Send` method futures natively, where the
+sync loop awaits multi-threaded SDKs, and drops them on wasm, where the browser
+runs everything on one thread. See [Web](/docs/web).)
 
 ## Granting and revoking access
 
@@ -121,9 +122,9 @@ in logs.
 
 ## Providers
 
-Six backends ship, plus an in-memory home for tests. Each maps the same flat
-keys onto its own naming and upload protocol; the differences below are the only
-places a provider deviates from "write opaque bytes by key".
+Five cloud backends ship, plus an in-memory home for tests. Each maps the same
+flat keys onto its own naming and upload protocol; the differences below are the
+only places a provider deviates from "write opaque bytes by key".
 
 - **S3** ([`S3CloudHome`](rustdoc:struct:coven::storage::cloud::s3::S3CloudHome))
   works against any S3-compatible endpoint (AWS, Backblaze B2, Wasabi, MinIO).
@@ -131,7 +132,9 @@ places a provider deviates from "write opaque bytes by key".
   multipart upload with 8 MiB parts, reporting progress per completed part and
   aborting the in-progress upload on failure so the bucket holds no orphaned
   parts. An optional key prefix is prepended to every key (trailing slashes
-  normalized), so `changes/dev1/42.enc` can become `libs/abc/changes/dev1/42.enc`.
+  normalized), so `changes/dev1/42.enc` can become
+  `libs/abc/changes/dev1/42.enc`. (The browser uses a separate
+  [`fetch`-based S3 home](/docs/web#cloud-storage-in-the-browser) with the same key layout.)
 
 - **Google Drive**
   ([`GoogleDriveCloudHome`](rustdoc:struct:coven::storage::cloud::google_drive::GoogleDriveCloudHome))
@@ -156,8 +159,8 @@ places a provider deviates from "write opaque bytes by key".
   so a file larger than 10 MiB is split into 10 MiB records named `key.part0`,
   `key.part1`, and so on, and read back by reassembling those parts. The raw
   record operations are defined by the
-  [`CloudKitOps`](rustdoc:trait:coven::storage::cloud::cloudkit::CloudKitOps) trait and
-  implemented in Swift through a UniFFI callback interface;
+  [`CloudKitOps`](rustdoc:trait:coven::storage::cloud::cloudkit::CloudKitOps)
+  trait and implemented in Swift through a UniFFI callback interface;
   [`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
   cannot build this one from Rust alone and returns a `Storage` error directing
   you to construct it through your Swift layer.
@@ -179,12 +182,11 @@ OAuth token not in keyring").
 
 ## OAuth token refresh
 
-Drive, Dropbox, and OneDrive share their token lifecycle through
-[`OAuthSession`](rustdoc:struct:coven::storage::cloud::oauth_session::OAuthSession).
-Each backend owns one session and routes its requests through it. Before a
-request, the session checks the access token's expiry: if it expires within 60
-seconds it refreshes first, persisting the new tokens to the keyring. After a
-request, a `401` triggers one refresh and one retry.
+Drive, Dropbox, and OneDrive share their token lifecycle through an OAuth session.
+Each backend owns one and routes its requests through it. Before a request, the
+session checks the access token's expiry: if it expires within 60 seconds it
+refreshes first, persisting the new tokens to the keyring. After a request, a
+`401` triggers one refresh and one retry.
 
 When the refresh itself fails because the grant is gone (refresh token revoked,
 expired, or the account password changed), the underlying
@@ -198,25 +200,49 @@ reconnect message.
 ## Where encryption sits
 
 `CloudHome` deals only in raw bytes. The at-rest protection and the key layout
-live one level up, in `CloudSyncStorage`, which wraps any `dyn CloudHome`: it
-seals on the way down, opens on the way up, and owns the mapping from sync
-concepts (a device's changeset seq, a blob id, a member's wrapped key) to the
-flat keys the trait stores. Both how it seals (the `CloudCipher`) and how it keys
-blobs (the `BlobPathScheme`) come from the home's
-[storage mode](encryption.md#opaque-and-browsable-homes) — one choice, set when
-the home is created:
+live one level up, in
+[`CloudSyncStorage`](rustdoc:struct:coven::sync::cloud_storage::CloudSyncStorage),
+which wraps any `dyn CloudHome`: it seals on the way down, opens on the way up,
+and owns the mapping from sync concepts (a device's changeset seq, a blob id, a
+member's wrapped key) to the flat keys the trait stores. Both how it seals (the
+[`CloudCipher`](rustdoc:enum:coven::sync::cloud_storage::CloudCipher)) and how it
+keys blobs (the
+[`BlobPathScheme`](rustdoc:enum:coven::sync::cloud_storage::BlobPathScheme)) come
+from the home's [storage mode](/docs/encryption#opaque-and-browsable-homes), one
+choice set when the home is created:
 
 - An **opaque** home (the default) encrypts every object under the library key
-  and stores it with the `.enc` suffix (`snapshot.db.enc`,
-  `heads/{device}.json.enc`, `changes/{device}/{seq}.enc`, …), and keys each blob
-  by its content-addressed shard `{namespace}/{ab}/{cd}/{id}`. A provider sees
-  `changes/dev1/42.enc` and a blob of ciphertext under an opaque key; it never
-  sees a todo title or an attachment's bytes.
+  and stores it with the `.enc` suffix (`changes/{device}/{seq}.enc`,
+  `heads/{device}.json.enc`, `snapshot/{author}/{seq}.db.enc`,
+  `snapshot/current.json.enc`, ...), and keys each blob by its content-addressed
+  shard `{namespace}/{ab}/{cd}/{id}`. A provider sees `changes/dev1/42.enc` and a
+  blob of ciphertext under an opaque key; it never sees a todo title or an
+  attachment's bytes.
 - A **browsable** home stores every object verbatim and drops the suffix, so the
-  same objects are at bare names (`snapshot.db`, `heads/{device}.json`,
-  `changes/{device}/{seq}`, …), and stores each blob at the consumer's readable
-  [`{namespace}/{cloud_path}`](blobs.md#browsable-home-blob-paths). Anyone with
-  bucket access reads the actual bytes by name.
+  same objects are at bare names (`changes/{device}/{seq}`,
+  `snapshot/{author}/{seq}.db`, ...), and stores each blob at the consumer's
+  readable [`{namespace}/{cloud_path}`](/docs/blobs#browsable-home-blob-paths).
+  Anyone with bucket access reads the actual bytes by name.
+
+## Ranged reads
+
+A host that streams a large blob (audio playback, scrubbing) wants a plaintext
+byte window without downloading and decrypting the whole object. The cache's
+[`open_blob_stream`](/docs/cache#reading-a-blob) serves a window from the local
+file on a hit, and on a miss reads it from the cloud through
+[`SyncStorage::read_blob_range`](rustdoc:trait:coven::sync::storage::SyncStorage),
+which is backed by a
+[`BlobRangeReader`](rustdoc:struct:coven::sync::cloud_storage::BlobRangeReader).
+
+On an opaque home a blob is stored as `[nonce: 24 bytes][encrypted chunks...]`.
+The reader fetches the 24-byte base nonce once on the first read and reuses it,
+then for each window range-reads only the encrypted chunks covering it and
+decrypts them (see [chunked encryption](/docs/encryption#chunked-encryption)). So
+streaming a blob in N windows issues one nonce read, not N, and never pulls the
+whole object. On a browsable home the blob is stored verbatim, so a window is
+read straight through with no nonce or decryption. The blob's
+[scope](/docs/blobs#encryption-scope) is resolved to its key once when the reader
+is built, so master-, derived-, and item-key blobs all stream the same way.
 
 ## Lifecycle
 
@@ -224,6 +250,6 @@ the home is created:
 builds the cloud home from the current config and spawns the sync loop when sync
 is enabled.
 [`SyncManager::stop_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::stop_sync)
-drops the loop and the cloud home. Because the config is read through the
-provider closure, swapping providers is a config change followed by a
-stop/start, with no app restart.
+drops the loop and the cloud home. Because the config is read fresh each
+operation, swapping providers is a config change followed by a stop/start, with
+no app restart.

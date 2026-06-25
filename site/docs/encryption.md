@@ -74,14 +74,16 @@ opaque byte store. It sees:
   changes/{device_id}/{seq}.enc          encrypted changeset envelopes
   heads/{device_id}.json.enc             encrypted head pointers
   images/{ab}/{cd}/{id}                  encrypted blobs
-  snapshot.db.enc                        full encrypted database image
+  snapshot/{author}/{seq}.db.enc         a generation's encrypted database image
+  snapshot/{author}/{seq}_meta.json.enc  that generation's signed per-device cursors
+  snapshot/current.json.enc              signed pointer to the live generation
   membership/{author_pubkey}/{seq}.enc   encrypted membership entries
   keys/{member_pubkey}.enc               library key wrapped to each member
   ```
 
-  (These are the paths of an opaque home. A browsable home — see below — drops
+  (These are the paths of an opaque home. A browsable home, see below, drops
   the `.enc` suffix, so the same objects are at `changes/{device_id}/{seq}`,
-  `snapshot.db`, and so on.)
+  `snapshot/{author}/{seq}.db`, and so on.)
 
 - The existence and count of per-member key files under `keys/`, and the hex
   Ed25519 public keys in those paths. A pubkey is a random-looking 32-byte value,
@@ -114,7 +116,7 @@ rather than fall back to a shared name.
 
 ## Opaque and browsable homes
 
-Everything above describes an **opaque home** — the default. A library can
+Everything above describes an **opaque home**, the default. A library can
 instead be created as a **browsable home**, which stores every object in the
 clear. This is one per-library choice, `cloud_home.storage`, set when the home is
 created and fixed thereafter (it determines how every object is written).
@@ -122,7 +124,7 @@ created and fixed thereafter (it determines how every object is written).
 This choice is about whether what's stored is *legible*, not about who can reach
 it. It is **not** access control: the storage provider's own access control (the
 bucket's credentials, the account's sign-in) applies either way. "Browsable" does
-not mean open to the world — it means that anyone who already has access to the
+not mean open to the world, it means that anyone who already has access to the
 bucket sees the actual files instead of ciphertext.
 
 - An **opaque home** (`storage: opaque`, the default) seals every object under
@@ -130,14 +132,14 @@ bucket sees the actual files instead of ciphertext.
   content-addressed shard `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access
   sees only ciphertext under opaque keys.
 - A **browsable home** (`storage: browsable`) stores every object verbatim with
-  no `.enc` suffix (bare names like `snapshot.db`, `heads/{device}.json`,
-  `changes/{device}/{seq}`) and stores each blob at the consumer's own readable
-  path `{namespace}/{cloud_path}`. Anyone with bucket access can open
-  `snapshot.db` or a blob directly without any key — which is the point: it is for
-  a library whose contents are not secret and whose owner wants to read the bucket
-  by name (e.g. inspect it in the storage console).
+  no `.enc` suffix (bare names like `snapshot/{author}/{seq}.db`,
+  `heads/{device}.json`, `changes/{device}/{seq}`) and stores each blob at the
+  consumer's own readable path `{namespace}/{cloud_path}`. Anyone with bucket
+  access can open the snapshot or a blob directly without any key, which is the
+  point: it is for a library whose contents are not secret and whose owner wants
+  to read the bucket by name (e.g. inspect it in the storage console).
 
-The one choice drives two mechanisms together — the at-rest cipher and the
+The one choice drives two mechanisms together, the at-rest cipher and the
 blob-path scheme, both held by a `CloudSyncStorage`:
 
 - `CloudCipher::Encrypted(key)` (opaque) seals every object under the library key
@@ -149,8 +151,8 @@ blob-path scheme, both held by a `CloudSyncStorage`:
 
 The storage mode changes only what happens at rest. Changesets, snapshots, the
 snapshot metadata, the min-schema marker, membership entries, and blobs are
-stored sealed (opaque) or verbatim (browsable); everything else — the sync
-protocol, the HLC register, the row-level gate — is unchanged.
+stored sealed (opaque) or verbatim (browsable); everything else, the sync
+protocol, the HLC register, the row-level gate, is unchanged.
 
 Two capabilities exist only on an opaque home:
 

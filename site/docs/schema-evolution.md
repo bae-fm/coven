@@ -13,7 +13,7 @@ Three things are in play, and they are independent:
 
 - **Local migrations** move *one device's own* database from the old shape to the
   new one when its app updates.
-- A per-changeset **`schema_version`** lets a reader recognize — and skip — a
+- A per-changeset **`schema_version`** lets a reader recognize, and skip, a
   change written by a newer schema than its own.
 - A **`min_schema_version`** floor in storage hard-stops a client that is too old
   to safely participate at all.
@@ -47,15 +47,15 @@ let (db, stamper) = Database::open(
 Each device runs this on the version of the binary it happens to be on, so a
 device updates *its own* schema when *its* app updates. That is exactly what a
 migration is for, including non-additive transforms (renaming a column, splitting
-a table, backfilling) — a migration can do anything to the local file.
+a table, backfilling), a migration can do anything to the local file.
 
-coven keeps **no migration ledger** — no version table, no `user_version` pragma.
+coven keeps **no migration ledger**, no version table, no `user_version` pragma.
 The SQLite file's own schema is the truth, and migrations are written
 `IF NOT EXISTS` / idempotent so re-running them over an already-migrated database
 (for example one [bootstrapped from a snapshot](/docs/bootstrap)) is a no-op.
 coven's own notion of "what version produced this data" is a single compile-time
 constant, [`SCHEMA_VERSION`](rustdoc:const:coven::sync::push::SCHEMA_VERSION),
-baked into the binary — never read back from the database.
+baked into the binary, never read back from the database.
 
 ## Additive vs. structural changes
 
@@ -64,12 +64,12 @@ The kind of change decides what it costs to sync across versions.
 Conflict resolution reads each column's index from `PRAGMA table_info` at apply
 time, and changesets address columns positionally. So **appending** a column or
 adding a table is *wire-compatible*: an older reader sees a prefix of the columns
-it knows and ignores the rest. A **structural** change — reordering, removing, or
-renaming a column, splitting a table — breaks that positional alignment: an older
+it knows and ignores the rest. A **structural** change (reordering, removing, or
+renaming a column, splitting a table) breaks that positional alignment: an older
 reader would map a changeset's values onto the wrong columns.
 
 Both are valid *local* migrations. The difference is only whether a device on the
-other version can still read the changesets — which is what the two version
+other version can still read the changesets, which is what the two version
 numbers below gate.
 
 ## `SCHEMA_VERSION`: skip changes from a newer schema
@@ -79,12 +79,12 @@ pull, a reader applies a changeset only when its `schema_version` is **at or bel
 the reader's own. When it sees a higher one
 ([`pull.rs`](rustdoc:fn:coven::sync::pull::pull_changes)), it skips that
 changeset, **leaves its cursor where it is**, and stops pulling that device for
-this cycle — every later sequence from that device is at least as new, so nothing
+this cycle, every later sequence from that device is at least as new, so nothing
 past it could apply either. Counted in `PullResult::skipped_schema`.
 
 Leaving the cursor put is the point: the changeset is genuine and becomes
 applicable the moment the app updates. The device does **not** advance past it
-(that would strand those rows — a running device does not re-bootstrap from a
+(that would strand those rows, a running device does not re-bootstrap from a
 snapshot mid-life) and does **not** reconcile them from a snapshot. It re-fetches
 from the parked sequence on the next cycle after it upgrades.
 
@@ -95,7 +95,7 @@ Worked example. bae ships v5, which adds a `due_date` column to `todos`
   sees `5 > 4`, skips them, parks her cursor for Bob, and keeps working on her v4
   schema. She does not see Bob's new-schema rows yet.
 - **Alice (v4) → Bob (v5):** Alice's changesets carry `schema_version = 4`. Bob
-  applies them — a newer reader understands an older changeset (v4's columns are a
+  applies them, a newer reader understands an older changeset (v4's columns are a
   prefix of v5's).
 - **Alice updates to v5:** her next cycle re-pulls Bob's changesets from the
   parked cursor and applies them. She converges fully.
@@ -114,12 +114,12 @@ bootstrapping, and (b) the v4 changesets it keeps *writing* would now misalign
 against the v5 shape when a v5 device applies them. The skip only protects reads
 in one direction; it does nothing about the old client's writes.
 
-For that case, the release also raises the floor — the `min_schema_version` value
+For that case, the release also raises the floor, the `min_schema_version` value
 in storage, written through `SyncStorage::set_min_schema_version`. Pull checks it
 before anything else: a client whose `SCHEMA_VERSION` is below the
 stored `min_schema_version` gets
 [`PullError::SchemaVersionTooOld`](rustdoc:enum:coven::sync::pull::PullError) and
-syncs nothing — no reads, no writes — until the user updates the app. Its
+syncs nothing, no reads, no writes, until the user updates the app. Its
 `Display` is the message shown to the user. This is a permanent stop, not a
 transient skip.
 
@@ -138,10 +138,10 @@ no longer acceptable.
 
 A [snapshot](/docs/bootstrap) is a physical `VACUUM INTO` image of the
 snapshotting device's database, so its bytes already hold that device's full
-schema. [`SnapshotMeta`](rustdoc:struct:coven::sync::snapshot::SnapshotMeta)
-records per-device cursors and a timestamp — **no schema version**. A snapshot
-therefore sidesteps the positional-changeset problem entirely: it can faithfully
-represent any schema, because it is a SQLite file, not a positional row encoding.
+schema. A snapshot generation's signed metadata records per-device cursors and a
+database hash, **no schema version**. A snapshot therefore sidesteps the
+positional-changeset problem entirely: it can faithfully represent any schema,
+because it is a SQLite file, not a positional row encoding.
 
 When a device bootstraps, it adopts that file and then runs **its own** `migrate`
 closure over it. So:
@@ -153,14 +153,14 @@ closure over it. So:
 - **Joiner below the snapshot's version (reverse):** has no per-snapshot guard.
   [`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot)
   writes the file unconditionally, and `Database::open` has no "this database is
-  from the future" detector. The only protection is the floor — checked on the
+  from the future" detector. The only protection is the floor, checked on the
   pull that immediately follows bootstrap, so a too-old joiner that should be
-  fenced fails the join with `SchemaVersionTooOld` — plus additive-tolerance for
+  fenced fails the join with `SchemaVersionTooOld`, plus additive-tolerance for
   changes that never raised the floor.
 
 This is the same contract as changesets, with one difference in shape: a changeset
 degrades *per message* (skip the newer ones, park, catch up later), while a
-snapshot is *all-or-nothing* against the floor — it is adopted whole or the join
+snapshot is *all-or-nothing* against the floor, it is adopted whole or the join
 is refused. The takeaway is the same either way: raise `min_schema_version` on any
 change an older binary cannot safely operate against, and the rest takes care of
 itself.

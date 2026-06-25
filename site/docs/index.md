@@ -95,7 +95,7 @@ db.call(move |conn| {
 **Start the manager** once a cloud provider is connected.
 
 ```rust
-let manager = SyncManager::new(/* config, keys, encryption, db, clock, blob_plan */);
+let manager = SyncManager::new(/* config, keys, encryption, db, clock, blob_source */);
 manager.start_sync().await;
 manager.trigger_sync();
 ```
@@ -148,9 +148,11 @@ You own the app:
 - [Sharing](/docs/sharing): the membership chain, roles, invite, join, revoke.
 - [Encryption](/docs/encryption): the keys, what is encrypted, what the provider
   sees.
-- [Storage](/docs/storage): the `CloudHome` trait and providers.
-- [Blobs](/docs/blobs): large files, the plan, outbox, retry.
-- [Web](/docs/web): running coven in a browser over wasm — OPFS, the keystore,
+- [Storage](/docs/storage): the `CloudHome` trait, providers, ranged reads.
+- [Blobs](/docs/blobs): large files, the blob source, upload outbox, tombstone
+  deletes.
+- [Cache](/docs/cache): the device-local blob store, pinning, eviction.
+- [Web](/docs/web): running coven in a browser over wasm, OPFS, the keystore,
   S3 over `fetch`.
 
 ## Status

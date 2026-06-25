@@ -1,14 +1,14 @@
 # Sharing
 
-A library can have more than one writer. Coven decides who may write by an
+A library can have more than one writer. coven decides who may write by an
 append-only, Ed25519-signed log of membership changes, the membership chain.
 Pull verifies both each changeset's own signature and the chain itself, so the
 cloud provider never has to be trusted with who is allowed to write.
 
-Coven shares a library by **membership** — most of this page: it grants the
+coven shares a library by **membership** (most of this page): it grants the
 *whole library* to another *writer*, a peer with their own identity in the chain,
 by sealing the library key to that member's keypair (asymmetric `seal_box`).
-[Item keys](#item-keys) are a separate, finer scope — a per-item key, independent
+[Item keys](#item-keys) are a separate, finer scope: a per-item key, independent
 of the library master, that gives one item its own encryption key.
 
 The examples use a todos app: `workspaces` hold `lists`, a `list` holds
@@ -235,7 +235,7 @@ library.
 
 ## Item keys
 
-An **item key** is a random 32-byte key for one *item* — a logical unit the host
+An **item key** is a random 32-byte key for one *item*, a logical unit the host
 names (a todo with its attachments, a music release with its files), identified by
 an opaque `item_id`. It is the second key tier, below the library master key.
 
@@ -243,7 +243,7 @@ Coven owns its lifecycle. The host calls
 [`mint_item_key(item_id)`](rustdoc:method:coven::database::Database::mint_item_key) when it
 creates the item; coven generates the key and stores it in the synced `item_keys`
 table. Because that table is synced like any other, the key rides the
-master-encrypted changeset to every member and is preserved in snapshots — a
+master-encrypted changeset to every member and is preserved in snapshots, a
 member who joins by changeset replay *or* by snapshot bootstrap gets it. The host
 never sees raw key bytes: it tags a blob with
 [`BlobScope::Item(item_id)`](rustdoc:enum:coven::blob::BlobScope) (see
@@ -251,12 +251,12 @@ never sees raw key bytes: it tags a blob with
 encrypts on push and decrypts on pull.
 
 **Why an item key and not `Master` or `Derived`?** Because it is **independent of
-the master** — a random key coven mints, stores, and syncs, not one derived from
+the master**, a random key coven mints, stores, and syncs, not one derived from
 the master. It gives one item its own key without reusing the library master or a
 master-derived key.
 
 A *member* can read every item key (each rides the master-encrypted changeset, and
-a member holds the master), so an item key does not hide an item *from members* —
+a member holds the master), so an item key does not hide an item *from members*, 
 it scopes one item to a key of its own.
 
 Item keys are opt-in. An app that needs no per-item key never emits
@@ -269,7 +269,7 @@ and the `item_keys` table stays empty.
 > the `share` module and the types below do not exist.
 
 A share hands one item to someone outside the library through a URL. The recipient
-has no coven identity and no library key — only a secret in the URL fragment. It
+has no coven identity and no library key, only a secret in the URL fragment. It
 builds on the [item key](#item-keys) above: because that key is independent of the
 master, coven can wrap it for an outsider without exposing the library.
 
@@ -279,18 +279,18 @@ Sharing is its own capability, not a storage backend.
 construct it with the owned database and that `CloudHome`, then
 [`ShareProxy::create(item_id, blobs)`](rustdoc:method:coven::share::ShareProxy::create):
 
-1. Reads the item's key (errors if it was never minted — the host must mint it and
+1. Reads the item's key (errors if it was never minted, the host must mint it and
    let it sync first, since the recipient holds the exact key the blobs are
    encrypted under).
 2. Generates a random per-share `secret` and a high-entropy `share_id`.
-3. Wraps the item key under the secret with the symmetric AEAD —
+3. Wraps the item key under the secret with the symmetric AEAD, 
    `key.enc = EncryptionService::from_key(secret).encrypt(item_key)`, the same
    cipher that encrypts blobs. Symmetric, not the asymmetric `seal_box` membership
    uses, because the recipient has only the secret, no keypair.
 4. Writes two objects under `shares/{share_id}/`: `key.enc` (the wrapped key) and
    `manifest.json`, a [`ShareManifest`](rustdoc:struct:coven::share::ShareManifest)
    listing the authorized blobs as `(namespace, id)` logical refs.
-5. Returns a [`ShareToken`](rustdoc:struct:coven::share::ShareToken) — the
+5. Returns a [`ShareToken`](rustdoc:struct:coven::share::ShareToken), the
    `share_id` and the raw `secret`. The host builds the URL
    `{base}/share/{share_id}#{base64url(secret)}`.
 
@@ -298,8 +298,8 @@ The recipient's browser reads the secret from the URL fragment (never sent to th
 server), fetches `key.enc`, and calls
 [`open_share(secret, key_enc)`](rustdoc:fn:coven::share::open_share) to recover the
 item key, then fetches and decrypts the item's blobs with it. `open_share` is a
-free function — pure in the encryption primitive alone, taking no database or
-`CloudHome` — because the recipient has neither, so a browser client that can't
+free function, pure in the encryption primitive alone, taking no database or
+`CloudHome`, because the recipient has neither, so a browser client that can't
 link coven opens a share by reproducing the documented wire format.
 
 ### Serving a share
@@ -309,7 +309,7 @@ each blob request with
 [`ShareManifest::allows(cloud_key)`](rustdoc:method:coven::share::ShareManifest::allows):
 coven hashes each authorized `(namespace, id)` to its cloud key internally and
 compares, so the server never learns coven's path layout. The manifest authorizes
-*fetch*; the wrapped item key authorizes *decrypt* — independently, so a stray
+*fetch*; the wrapped item key authorizes *decrypt*, independently, so a stray
 blob ref in a manifest only ever leaks undecryptable ciphertext.
 
 A share's security rests on two things: the `secret` stays in the URL fragment (so
@@ -321,6 +321,6 @@ the server never sees it), and `share_id` is unguessable (so the unauthenticated
 [`ShareProxy::revoke(share_id)`](rustdoc:method:coven::share::ShareProxy::revoke)
 deletes the `shares/{share_id}/` objects. Whatever serves the share can no longer
 read the manifest, so it stops serving the share and the URL goes dead. Bytes the
-recipient already downloaded are not clawed back — the same envelope model coven
+recipient already downloaded are not clawed back, the same envelope model coven
 uses for membership revocation.
 

@@ -147,17 +147,15 @@ let encryption_service = coven::encryption::EncryptionService::new(&encryption_k
 
 Once a provider is connected, build the
 [`SyncManager`](rustdoc:struct:coven::sync::sync_manager::SyncManager). It takes
-the same `db` handle (and shares its clock), a
-[`ConfigProvider`](rustdoc:type:coven::sync::sync_manager::ConfigProvider) that
-returns the host's current config on each call, a wall-clock source, and a
-[`BlobPlan`](rustdoc:trait:coven::blob::BlobPlan) (below). Construction is
+the same `db` handle (and shares its clock), a config provider that returns the
+host's current config on each call, a wall-clock source, and a
+[`BlobSource`](rustdoc:trait:coven::blob::BlobSource) (below). Construction is
 synchronous and never fails, the seeding already happened in `open`.
 
 ```rust
 use std::sync::Arc;
 
-let config_provider: coven::sync::sync_manager::ConfigProvider =
-    Arc::new(move || app_state.current_config());
+let config_provider = Arc::new(move || app_state.current_config());
 
 let manager = coven::sync::sync_manager::SyncManager::new(
     config_provider,
@@ -165,7 +163,7 @@ let manager = coven::sync::sync_manager::SyncManager::new(
     encryption_service,
     db.clone(),
     Arc::new(coven::clock::SystemClock),
-    Arc::new(TodoBlobPlan),
+    Arc::new(TodoBlobSource),
     None, // optional BlobUploadObserver
 );
 
@@ -221,51 +219,71 @@ version, a file that failed to download); show it as is.
 
 If a todo carries a file, that file is a blob. coven moves blobs with the rows
 that reference them: the host implements
-[`BlobPlan`](rustdoc:trait:coven::blob::BlobPlan) to map the rows in a changeset
-to the files to push out and pull in. Each
+[`BlobSource`](rustdoc:trait:coven::blob::BlobSource) to map a row change to the
+blobs it references. coven calls it in both directions, over outgoing changes to
+find what to upload and over incoming ones to find what to download. Each
 [`BlobRef`](rustdoc:struct:coven::blob::BlobRef) names a cloud namespace, the blob
-id, its local plaintext path, and a
-[`BlobScope`](rustdoc:enum:coven::blob::BlobScope) (`Master` for a key every
-member holds, or `Derived` for a per-scope key).
+id, the local plaintext path coven reads it from on push, a
+[`BlobScope`](rustdoc:enum:coven::blob::BlobScope) (`Master` for a key every member
+holds, or `Derived` for a per-scope key), and a
+[`BlobSync`](rustdoc:enum:coven::blob::BlobSync) retention class (`Mirrored` to keep
+it on every device, `OnDemand` to fetch it on first read).
 
 ```rust
-struct TodoBlobPlan;
+struct TodoBlobSource;
 
-impl coven::blob::BlobPlan for TodoBlobPlan {
-    fn blobs_to_push(
+impl coven::blob::BlobSource for TodoBlobSource {
+    fn blobs_for_change(
         &self,
-        changes: &[coven::changeset::RowChange],
+        change: &coven::changeset::RowChange,
     ) -> Vec<coven::blob::BlobRef> {
-        changes
-            .iter()
-            .filter(|c| c.table == "todos")
-            .filter_map(|c| {
-                let id = c.pk()?.to_string();
-                Some(coven::blob::BlobRef {
-                    namespace: "todo-files".to_string(),
-                    local_path: file_path(&id),
-                    scope: coven::blob::BlobScope::Master,
-                    id,
-                })
-            })
-            .collect()
+        if change.table != "todos" {
+            return Vec::new();
+        }
+        let Some(id) = change.pk().map(str::to_string) else {
+            return Vec::new();
+        };
+        vec![coven::blob::BlobRef {
+            namespace: "todo-files".to_string(),
+            local_path: file_path(&id),
+            scope: coven::blob::BlobScope::Master,
+            cloud_path: None, // opaque home: keyed by id
+            sync: coven::blob::BlobSync::Mirrored,
+            id,
+        }]
     }
 
-    fn blobs_to_pull(
+    // The whole-database analogue, used to fetch blobs after a snapshot bootstrap.
+    fn blobs_in_db(
         &self,
-        changes: &[coven::changeset::RowChange],
-    ) -> Vec<coven::blob::BlobRef> {
-        self.blobs_to_push(changes)
+        conn: &coven::rusqlite::Connection,
+    ) -> coven::rusqlite::Result<Vec<coven::blob::BlobRef>> {
+        let mut stmt = conn.prepare("SELECT id FROM todos")?;
+        let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        ids.map(|id| {
+            let id = id?;
+            Ok(coven::blob::BlobRef {
+                namespace: "todo-files".to_string(),
+                local_path: file_path(&id),
+                scope: coven::blob::BlobScope::Master,
+                cloud_path: None,
+                sync: coven::blob::BlobSync::Mirrored,
+                id,
+            })
+        })
+        .collect()
     }
 }
 ```
 
-coven encrypts the file on upload and writes the decrypted bytes back to
-`local_path` on pull; the on-disk copy is always plaintext. The host can also
-enqueue work directly with
+coven encrypts the file on upload; on pull it downloads, decrypts, and writes the
+plaintext into its own [cache](/docs/cache), which the host reads back through
+`read_blob`. `local_path` is only the upload source, never the pull destination.
+The host can also enqueue work directly with
 [`enqueue_upload`](rustdoc:method:coven::database::Database::enqueue_upload) and
 [`enqueue_delete`](rustdoc:method:coven::database::Database::enqueue_delete). The
-[Blobs](/docs/blobs) page covers the outbox and the cloud layout.
+[Blobs](/docs/blobs) page covers the outbox and the cloud layout, and the
+[Cache](/docs/cache) page covers the device-local read side.
 
 ## Share with a teammate
 

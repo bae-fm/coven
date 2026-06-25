@@ -27,11 +27,12 @@ never leaves the device. From then on the host runs all its SQL through
 re-exports rusqlite, so the closure works against `&coven::rusqlite::Connection`
 and the host never depends on rusqlite directly.
 
-The connection lives on one dedicated thread (an actor). Capture is the SQLite
-session extension, attached over `rusqlite::session` to every declared table on
-that owned connection. Each insert, update, and delete to a synced table is
-recorded into an in-memory changeset. The host writes as usual; capture is
-passive, and there is no host-lent pointer to a connection coven does not own.
+The connection lives on one dedicated thread (an actor) natively, or on the one
+Worker in the browser. Capture is the SQLite session extension, attached over
+`rusqlite::session` to every declared table on that owned connection. Each
+insert, update, and delete to a synced table is recorded into an in-memory
+changeset. The host writes as usual; capture is passive, and there is no
+host-lent pointer to a connection coven does not own.
 
 The set is not a tuning knob. With no tables declared the session attaches
 nothing and produces empty changesets forever, so
@@ -45,10 +46,10 @@ A background loop runs one cycle at a time.
 loads the persisted sync state each cycle (rather than holding it across calls)
 and drives these steps:
 
-1. Capture the outgoing changeset and suspend the capture session
-   (`take_changeset_and_suspend`). Suspending is what makes the rest of the cycle
-   safe: while the session is off, the rows an incoming changeset applies are not
-   recorded, so they are not re-emitted as spurious local changes next cycle.
+1. Capture the outgoing changeset and reset the recorded batch
+   ([`take_changeset`](rustdoc:method:coven::database::Database::take_changeset)).
+   Capture stays enabled: a host write that lands later in this cycle is recorded
+   into the next batch, not lost.
 2. Apply row-level gating to the captured changeset, cutting rows that should
    stay local (see [Local data](/docs/local-data)).
 3. Upload any blobs the outgoing changeset references, so a puller can fetch them
@@ -59,27 +60,28 @@ and drives these steps:
    it with last-writer-wins.
 6. Advance the clock past every applied row's `_updated_at`.
 7. Persist the updated cursors and flush the clock's high-water mark.
-8. Resume the capture session, then check snapshot policy.
+8. Check snapshot policy.
 
-The suspend in step 1 and the resume in step 8 are one matched pair. Because the
-[`Database`](rustdoc:struct:coven::database::Database) actor outlives the loop, a
-span that exited without resuming would leave capture off permanently, which is
-silent total sync loss. So gating, push, pull, and bookkeeping all run inside one
-guarded block, and the resume runs once afterward whether that block succeeded or
-failed. Every gate, apply, and bookkeeping read in between goes through
-`Database::call` against the owned connection.
+Capture is never suspended across the cycle. The only window it is off is around
+each individual apply in step 5: the pull disables the session, applies one
+incoming changeset synchronously, and re-enables it at once, so the applied rows
+are not re-recorded as this device's own writes while a host write landing
+anywhere else in the cycle still is. This is the one thing the session is ever
+blind to; every other read and write goes through `Database::call` on the normal
+enabled path. (An earlier design suspended capture across the whole network span;
+that left a window in which a host write could be dropped, so it was removed.)
 
 When Alice edits a todo title, her next cycle captures the update to `todos`,
-signs and encrypts it, and writes it to storage at `changes/<alice-device>/<seq>`.
-Bob's device, on its own cycle, lists the device heads, sees Alice's sequence
-number is past his cursor for her device, fetches the changeset, and applies it.
+signs and encrypts it, and writes it to storage at
+`changes/<alice-device>/<seq>`. Bob's device, on its own cycle, lists the device
+heads, sees Alice's sequence number is past his cursor for her device, fetches
+the changeset, and applies it.
 
-[`SyncService::sync`](rustdoc:method:coven::sync::service::SyncService::sync)
-takes the captured changeset, gates it, uploads blobs, signs the envelope, and
-pulls (steps 2 through 5, minus the staging and push). The surrounding cycle
-function captures and suspends before it, then stages and pushes the returned
-envelope, advances `local_seq`, persists cursors, advances the clock, resumes the
-session, and checks snapshot policy.
+[`SyncService`](rustdoc:struct:coven::sync::service::SyncService) runs steps 2
+through 5 (gate, upload blobs, sign the envelope, pull) over the changeset the
+caller already captured. The surrounding cycle function captures the changeset
+before it, then stages and pushes the returned envelope, advances `local_seq`,
+persists cursors, advances the clock, and checks snapshot policy.
 
 ### Push
 
@@ -91,15 +93,15 @@ numbers start at 1; the first changeset is `local_seq + 1` over an initial
 `local_seq` of 0.
 
 Blob-before-row ordering is the host's responsibility, not a global push gate.
-The cycle publishes whatever the gate emits — it does not hold the whole
-changeset back while the outbox drains. A host with rows that reference
-async-outbox blobs keeps each such row's gate column off until its blobs upload,
-then flips it on (typically in `on_blob_uploaded`). While the gate column is off
-the gate cuts the row; when it flips on the gate re-emits the row's full subtree,
-so a peer never learns of a row whose blob is not yet in the cloud. The observer
-can return `DrainControl::Publish` to break the drain the moment a unit's blobs
-land, so the cycle publishes that unit instead of waiting for the rest of the
-batch — the loop then runs the next cycle promptly to keep draining.
+The cycle publishes whatever the gate emits; it does not hold the whole changeset
+back while the outbox drains. A host with rows that reference async-outbox blobs
+keeps each such row's gate column off until its blobs upload, then flips it on
+(typically in `on_blob_uploaded`). While the gate column is off the gate cuts the
+row; when it flips on the gate re-emits the row's full subtree, so a peer never
+learns of a row whose blob is not yet in the cloud. The observer can return
+`DrainControl::Publish` to break the drain the moment a unit's blobs land, so the
+cycle publishes that unit instead of waiting for the rest of the batch, and the
+loop then runs the next cycle promptly to keep draining.
 
 ### Pull
 
@@ -111,18 +113,18 @@ order. For each one it:
   [`SCHEMA_VERSION`](rustdoc:const:coven::sync::push::SCHEMA_VERSION);
 - verifies the Ed25519 signature
   ([`verify_changeset_signature`](rustdoc:fn:coven::sync::envelope::verify_changeset_signature));
-- if the library has a membership chain, checks the author can write *now*
-  (a removed member or a read-only Follower is rejected);
-- applies the changeset with last-writer-wins (`apply_strm` on the owned
-  connection, the session still suspended);
-- downloads any blobs it references.
+- if the library has a membership chain, checks the author can write *now* (a
+  removed member or a read-only Follower is rejected);
+- applies the changeset with last-writer-wins (capture disabled only around this
+  one apply, then re-enabled);
+- downloads any `Mirrored` blobs it references into the [cache](/docs/cache).
 
-The cursor for that device advances to a sequence number only after the
-changeset is accepted (or deliberately skipped) and its blobs downloaded. A
-failed blob download leaves the cursor where it is, so the changeset re-pulls
-next cycle; the pull reports this through `PullResult::asset_downloads_failed`. A
-cursor is the highest sequence applied from a device, and pull only fetches
-beyond it, so applies are not repeated.
+The cursor for that device advances to a sequence number only after the changeset
+is accepted (or deliberately skipped) and its blobs downloaded. A failed blob
+download leaves the cursor where it is, so the changeset re-pulls next cycle; the
+pull reports this through `PullResult::asset_downloads_failed`. A cursor is the
+highest sequence applied from a device, and pull only fetches beyond it, so
+applies are not repeated.
 
 ## Hybrid logical clocks
 
@@ -228,17 +230,18 @@ ways:
   re-fetches from that sequence and applies it.
 
 How migrations, this version number, the `min_schema_version` floor, and
-snapshots fit together — with worked examples for additive vs. structural
-changes — is its own page: [Schema evolution](/docs/schema-evolution).
+snapshots fit together, with worked examples for additive vs. structural changes,
+is its own page: [Schema evolution](/docs/schema-evolution).
 
 ## Lifecycle
 
 [`SyncManager`](rustdoc:struct:coven::sync::sync_manager::SyncManager) owns the
-sync lifecycle. The host builds it once with
+sync lifecycle natively. The host builds it once with
 [`new`](rustdoc:method:coven::sync::sync_manager::SyncManager::new), passing the
 owned `Database`; the manager reads the shared `Arc<Hlc>` from it, so it advances
 the same clock the host stamps rows from. Construction is synchronous and
-infallible, because the clock was already seeded in `Database::open`.
+infallible, because the clock was already seeded in `Database::open`. (In the
+browser the equivalent is [`WasmSyncRuntime`](/docs/web).)
 
 [`start_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::start_sync)
 builds the cloud home from the current config and, if sync is enabled, spawns the
