@@ -77,9 +77,10 @@ impl SyncService {
 
         // Step 2: apply row-level sync gating. Cut gated-false rows (and their
         // FK-descendants) so they stay local; re-emit a root's full subtree when
-        // its gate flips false→true. Runs on the owned connection with the capture
-        // session already suspended. Done before the blob scan so blob upload sees
-        // the gated set, not the cut rows.
+        // its gate flips false→true. Runs on the owned connection; capture stays
+        // enabled (gating reads current row state from the live tables, and the
+        // pull disables capture only around its apply). Done before the blob scan
+        // so blob upload sees the gated set, not the cut rows.
         let outgoing_cs: Option<Vec<u8>> = if outgoing.is_empty() {
             None
         } else {
@@ -194,7 +195,8 @@ impl SyncService {
             }
         });
 
-        // Step 4 + 5: pull incoming changesets and apply them (session suspended).
+        // Step 4 + 5: pull incoming changesets and apply them (the pull disables
+        // capture around only each apply, so applied rows are not echoed).
         let (updated_cursors, pull_result) = pull::pull_changes(
             db,
             tables,

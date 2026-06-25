@@ -702,9 +702,10 @@ unsafe fn fk_topological_order(
 /// descendants), and re-emit the full subtree of any root that flipped
 /// false→true this cycle.
 ///
-/// Runs on the connection coven owns, with the capture session already suspended
-/// (gating reads current row state from the live tables). The changegroup and
-/// changeset-iteration FFI need the raw handle, borrowed once here.
+/// Runs on the connection coven owns; gating reads current row state from the
+/// live tables (capture stays enabled here, disabled only around the pull's
+/// apply). The changegroup and changeset-iteration FFI need the raw handle,
+/// borrowed once here.
 pub fn gate_outbound(
     conn: &Connection,
     changeset: &[u8],

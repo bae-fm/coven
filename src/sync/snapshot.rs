@@ -862,9 +862,9 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 /// short-lived connection to the same on-disk DB the `db` actor owns; `db` is
 /// still needed because `download_blobs` resolves each blob's scope through it
 /// (an `Item`-scoped blob reads its key from the `item_keys` rows). At bootstrap
-/// capture is suspended and the pull has not started; in a cycle this runs after
-/// the pull's span has resumed capture, and is read-only either way, so it does
-/// not re-record rows or race the actor.
+/// the pull has not started; in a cycle this runs after the pull. It is read-only
+/// either way (a SELECT the capture session records nothing from), so it does not
+/// re-record rows or race the actor.
 pub(crate) async fn reconcile_snapshot_blobs(
     db: &crate::database::Database,
     db_path: &Path,
