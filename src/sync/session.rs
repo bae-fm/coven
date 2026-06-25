@@ -29,6 +29,8 @@
 ///
 /// A table is *either* a gated root *or* a gated-by-descendants ancestor *or*
 /// plain — never two of these. See [`super::gate`] for the gating mechanics.
+/// Orthogonally, any table may *carry a blob* ([`SyncedTable::carries_blob`]):
+/// blob-bearing-ness is a property of the row's columns, not of its gate role.
 ///
 /// Each table must have an `id` text primary key at column 0 and an
 /// `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). Tables not in the
@@ -37,65 +39,154 @@
 /// pin/cache columns, local paths) out of sync: put it in a table you don't
 /// declare. An empty set is rejected by [`super::cycle::init_sync`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyncedTable {
+pub struct SyncedTable {
+    name: String,
+    role: GateRole,
+    blob: Option<BlobDecl>,
+}
+
+/// How a synced table relates to the gate. Orthogonal to whether it carries a
+/// blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GateRole {
     /// Every row syncs unconditionally.
-    Plain { name: String },
+    Plain,
     /// A gated root: a row syncs iff its boolean `gate_column` is true, and the
     /// gate flows down declared foreign keys to descendant rows.
-    GatedRoot { name: String, gate_column: String },
+    GatedRoot { gate_column: String },
     /// An always-shared ancestor kept alive by its gated subtree: a row syncs
     /// iff at least one foreign-key descendant table holds a surviving (kept)
-    /// row referencing it. This variant is a *marker* only; the keep-children
-    /// are inferred from the live foreign-key graph at gate-build time, never
-    /// listed here.
-    GatedByDescendants { name: String },
+    /// row referencing it. A *marker* only; the keep-children are inferred from
+    /// the live foreign-key graph at gate-build time, never listed here.
+    GatedByDescendants,
 }
 
 impl SyncedTable {
     /// An ungated synced table: every row syncs.
     pub fn new(name: impl Into<String>) -> Self {
-        SyncedTable::Plain { name: name.into() }
+        SyncedTable {
+            name: name.into(),
+            role: GateRole::Plain,
+            blob: None,
+        }
     }
 
     /// Make this a gated root: rows sync iff the boolean `column` is true.
-    pub fn gated_by(self, column: impl Into<String>) -> Self {
-        SyncedTable::GatedRoot {
-            name: self.name().to_string(),
+    pub fn gated_by(mut self, column: impl Into<String>) -> Self {
+        self.role = GateRole::GatedRoot {
             gate_column: column.into(),
-        }
+        };
+        self
     }
 
     /// Make this an always-shared ancestor kept alive by its gated subtree: a
     /// row syncs iff a surviving (kept) descendant row references it. The
     /// keep-children are inferred from the foreign-key graph at gate-build time,
     /// so there is nothing to pass here.
-    pub fn gated_by_descendants(self) -> Self {
-        SyncedTable::GatedByDescendants {
-            name: self.name().to_string(),
-        }
+    pub fn gated_by_descendants(mut self) -> Self {
+        self.role = GateRole::GatedByDescendants;
+        self
+    }
+
+    /// Declare that rows of this table carry a blob, located by the columns in
+    /// `decl`. coven derives the blob set itself from these columns + the live
+    /// schema (see [`crate::blob::decl::BlobDecls`]); it never calls back to the
+    /// host to discover blobs. Independent of the gate role.
+    pub fn carries_blob(mut self, decl: BlobDecl) -> Self {
+        self.blob = Some(decl);
+        self
     }
 
     /// The table name.
     pub fn name(&self) -> &str {
-        match self {
-            SyncedTable::Plain { name }
-            | SyncedTable::GatedRoot { name, .. }
-            | SyncedTable::GatedByDescendants { name } => name,
-        }
+        &self.name
     }
 
     /// The gate column name, if this table is a gated root.
     pub fn gate_column(&self) -> Option<&str> {
-        match self {
-            SyncedTable::Plain { .. } | SyncedTable::GatedByDescendants { .. } => None,
-            SyncedTable::GatedRoot { gate_column, .. } => Some(gate_column),
+        match &self.role {
+            GateRole::GatedRoot { gate_column } => Some(gate_column),
+            GateRole::Plain | GateRole::GatedByDescendants => None,
         }
     }
 
     /// Whether this is a gated-by-descendants ancestor (kept alive by its gated
     /// subtree rather than by a column of its own).
     pub fn is_gated_by_descendants(&self) -> bool {
-        matches!(self, SyncedTable::GatedByDescendants { .. })
+        matches!(self.role, GateRole::GatedByDescendants)
+    }
+
+    /// This table's blob declaration, if it carries one.
+    pub fn blob(&self) -> Option<&BlobDecl> {
+        self.blob.as_ref()
+    }
+}
+
+/// Where a blob-bearing table's blob columns live, declared by the host so coven
+/// can derive every blob a row references without a runtime callback. Resolved
+/// against the live schema into a [`crate::blob::decl::BlobDecls`] each cycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobDecl {
+    /// The column holding the blob id. Defaults to the primary key (`id`, column
+    /// 0), which is the blob id for most tables.
+    pub id_column: String,
+    /// Cloud namespace for the blob, e.g. `"images"` or `"audio"`.
+    pub namespace: String,
+    /// The column holding the consumer's readable cloud-relative path, used as the
+    /// object key under the plain (browsable) blob-path scheme. `None` means the
+    /// blob is keyed only by its hashed id (the default obfuscated scheme).
+    pub cloud_path_column: Option<String>,
+    /// How the blob is scoped for encryption (see [`BlobScopeSpec`]).
+    pub scope: BlobScopeSpec,
+    /// The blob's retention class: [`crate::blob::BlobSync::Mirrored`] (downloaded
+    /// on every device) or [`crate::blob::BlobSync::OnDemand`] (fetched on read).
+    pub sync: crate::blob::BlobSync,
+}
+
+/// How a blob's encryption scope is declared on a blob-bearing table. coven
+/// resolves it to a [`crate::blob::BlobScope`] per row when it builds the blob's
+/// reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobScopeSpec {
+    /// The library master key — every member reads it.
+    Master,
+    /// A per-scope key derived from the master key, named by this fixed string.
+    Derived(String),
+    /// A coven-managed item key, named by the value of this column in the blob's
+    /// row (resolves to [`crate::blob::BlobScope::Item`]).
+    ItemColumn(String),
+}
+
+impl BlobDecl {
+    /// A blob declaration in `namespace` with retention class `sync`, the blob id
+    /// taken from the primary key (`id`), no readable cloud path, master-scoped.
+    /// Refine with the `with_*` builders.
+    pub fn new(namespace: impl Into<String>, sync: crate::blob::BlobSync) -> Self {
+        BlobDecl {
+            id_column: "id".to_string(),
+            namespace: namespace.into(),
+            cloud_path_column: None,
+            scope: BlobScopeSpec::Master,
+            sync,
+        }
+    }
+
+    /// Take the blob id from `column` instead of the primary key.
+    pub fn with_id_column(mut self, column: impl Into<String>) -> Self {
+        self.id_column = column.into();
+        self
+    }
+
+    /// Key the blob at the readable cloud path in `column` (the plain scheme).
+    pub fn with_cloud_path_column(mut self, column: impl Into<String>) -> Self {
+        self.cloud_path_column = Some(column.into());
+        self
+    }
+
+    /// Scope the blob's encryption (defaults to [`BlobScopeSpec::Master`]).
+    pub fn with_scope(mut self, scope: BlobScopeSpec) -> Self {
+        self.scope = scope;
+        self
     }
 }
 

@@ -12,29 +12,33 @@ use std::collections::HashMap;
 use super::cache::{
     clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
 };
-use crate::blob::{BlobRef, BlobScope, BlobSource, BlobSync, ResolvedScope};
-use crate::changeset::RowChange;
+use crate::blob::{BlobRef, BlobScope, BlobSync, ResolvedScope};
 use crate::database::Database;
 use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    capture_bytes, note_photos_refs, note_photos_refs_from_db, open_test_db, pull_into,
-    temp_library_dir, MockSyncStorage, PhotoBlobSource,
+    capture_bytes, open_test_db, open_test_db_with_blob, pull_into, temp_library_dir,
+    MockSyncStorage,
 };
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
-/// retention class `sync`. `local_path` is set to a throwaway path the cache never
-/// reads (the cache owns the on-disk destination); it is here only to fill the
-/// field. Blob ids are ≥4 chars so they form the `{ab}/{cd}` partition shard.
+/// retention class `sync`. Blob ids are ≥4 chars so they form the `{ab}/{cd}`
+/// partition shard.
 fn blob_ref(id: &str, namespace: &str, sync: BlobSync) -> BlobRef {
     BlobRef {
         namespace: namespace.to_string(),
         id: id.to_string(),
-        local_path: std::path::PathBuf::from("/unused/upload/source"),
         scope: BlobScope::Master,
         cloud_path: None,
         sync,
     }
+}
+
+/// The `note_photos` declaration for the cache tests: namespace `"photos"`, master
+/// scope, `Mirrored` (downloaded + system-pinned on pull).
+fn photo_decl() -> BlobDecl {
+    BlobDecl::new("photos", BlobSync::Mirrored)
 }
 
 /// Put `bytes` into the mock cloud under the flat `{namespace}/{id}` key the mock's
@@ -44,35 +48,6 @@ async fn put_cloud_blob(storage: &MockSyncStorage, id: &str, namespace: &str, by
         .put_blob(namespace, id, ResolvedScope::Master, None, bytes.to_vec())
         .await
         .expect("put blob in mock cloud");
-}
-
-/// A blob source mapping each `note_photos` row to an `OnDemand` blob (master
-/// scope) under `dir` in the `audio` namespace — the class that is uploaded on push
-/// but NOT downloaded on pull (fetched on first read instead). The OnDemand mirror
-/// of [`PhotoBlobSource`], for driving the real pull with an OnDemand blob.
-struct OnDemandSource {
-    dir: std::path::PathBuf,
-}
-
-impl BlobSource for OnDemandSource {
-    fn blobs_for_change(&self, change: &RowChange) -> Vec<BlobRef> {
-        note_photos_refs(
-            std::slice::from_ref(change),
-            &self.dir,
-            "audio",
-            &|_kind, _note_id| BlobScope::Master,
-            BlobSync::OnDemand,
-        )
-    }
-    fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>> {
-        note_photos_refs_from_db(
-            conn,
-            &self.dir,
-            "audio",
-            &|_kind, _note_id| BlobScope::Master,
-            BlobSync::OnDemand,
-        )
-    }
 }
 
 /// A second read is a local hit: the first read populates `cache/<id>` from the
@@ -132,15 +107,11 @@ async fn mirrored_lands_in_pinned_on_pull() {
     put_cloud_blob(&storage, "ph01abcd", "photos", b"COVERBYTES").await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    // The puller's blob source maps the photo to a Mirrored blob; the pull writes
-    // it under the library dir's pinned tree.
-    let dst_photos = tempfile::tempdir().expect("dst photos");
-    let plan = PhotoBlobSource {
-        dir: dst_photos.path().to_path_buf(),
-    };
-    let db2 = open_test_db();
+    // The puller declares the photo a Mirrored blob; the pull writes it under the
+    // library dir's pinned tree.
+    let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_library_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &plan).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -245,13 +216,9 @@ async fn on_demand_fetches_on_first_read() {
     .await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    let dst = tempfile::tempdir().expect("dst");
-    let plan = OnDemandSource {
-        dir: dst.path().to_path_buf(),
-    };
-    let db2 = open_test_db();
+    let db2 = open_test_db_with_blob(BlobDecl::new("audio", BlobSync::OnDemand));
     let (_tmp, ld) = temp_library_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &plan).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
     // The row applied, but the OnDemand blob is in neither folder — pull skipped it.
     assert_eq!(result.changesets_applied, 1);
@@ -638,13 +605,9 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     put_cloud_blob(&storage, "mir0aaaa", "photos", &[9u8; 500]).await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    let dst_photos = tempfile::tempdir().expect("dst photos");
-    let plan = PhotoBlobSource {
-        dir: dst_photos.path().to_path_buf(),
-    };
-    let db2 = open_test_db();
+    let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_library_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld, &plan).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
         ld.pinned_blob_path("mir0aaaa").unwrap().exists(),

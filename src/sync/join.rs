@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::blob::BlobSource;
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
 use crate::encryption::{EncryptionError, EncryptionService};
@@ -169,7 +168,6 @@ pub async fn join_from_invite_code(
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
-    make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
     let code = crate::join_code::decode(invite_code_str)
@@ -189,7 +187,6 @@ pub async fn join_from_invite_code(
         &global_ks,
         cloud_home,
         ids.as_ref(),
-        make_blob_source,
         &on_status,
     )
     .await?;
@@ -212,7 +209,6 @@ pub async fn join_library(
     key_service: &KeyService,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
-    make_blob_source: impl Fn(&LibraryDir) -> Box<dyn BlobSource>,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
     // A function that reaches `remove_dir_all` validates its own id: this guards
@@ -268,8 +264,6 @@ pub async fn join_library(
     let device_id = ids.new_id();
     let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
     std::fs::create_dir_all(&*library_dir)?;
-    // The host's blob source is bound to the library dir we just created.
-    let blob_source = make_blob_source(&library_dir);
 
     // All steps after directory creation are wrapped so we can clean up on failure.
     let new_key_service = KeyService::new(library_id.clone());
@@ -286,7 +280,6 @@ pub async fn join_library(
         &code.join_info,
         &code.library_name,
         &new_key_service,
-        blob_source.as_ref(),
         &on_status,
     )
     .await;
@@ -312,7 +305,6 @@ async fn bootstrap_and_save(
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
     key_service: &KeyService,
-    blob_source: &dyn BlobSource,
     on_status: &impl Fn(&str),
 ) -> Result<Config, JoinError> {
     // Bootstrap from the snapshot. The snapshot is authenticated against the
@@ -342,7 +334,6 @@ async fn bootstrap_and_save(
         bucket_dyn,
         &cursors,
         library_dir,
-        blob_source,
     )
     .await?;
 
@@ -390,7 +381,6 @@ pub(crate) async fn open_db_and_pull(
     storage: &dyn SyncStorage,
     cursors: &HashMap<String, u64>,
     library_dir: &LibraryDir,
-    blob_source: &dyn BlobSource,
 ) -> Result<u64, JoinError> {
     let (db, _stamper) = Database::open(
         db_path,
@@ -426,7 +416,7 @@ pub(crate) async fn open_db_and_pull(
         db_path,
         storage,
         library_dir,
-        blob_source,
+        db.synced_tables(),
     )
     .await
     .map_err(|e| JoinError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?;
@@ -450,7 +440,6 @@ pub(crate) async fn open_db_and_pull(
         device_id,
         cursors,
         library_dir,
-        blob_source,
     )
     .await
     .map_err(JoinError::Pull)?;

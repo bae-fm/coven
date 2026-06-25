@@ -17,7 +17,8 @@ use std::collections::HashMap;
 
 use tracing::{error, info};
 
-use crate::blob::BlobSource;
+use crate::blob::decl::BlobDecls;
+use crate::blob::BlobSync;
 use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
@@ -71,10 +72,7 @@ impl SyncService {
         message: &str,
         keypair: &UserKeypair,
         library_dir: &LibraryDir,
-        blob_source: &dyn BlobSource,
     ) -> Result<SyncResult, SyncCycleError> {
-        let _ = library_dir;
-
         // Step 2: apply row-level sync gating. Cut gated-false rows (and their
         // FK-descendants) so they stay local; re-emit a root's full subtree when
         // its gate flips false→true. Runs on the owned connection; capture stays
@@ -101,57 +99,58 @@ impl SyncService {
             }
         };
 
-        // Step 3: upload the blobs the outgoing changeset references, before the
-        // envelope, so pullers can fetch them as soon as they see the change. Both
-        // retention classes upload here — OnDemand differs from Mirrored only on
-        // the pull side (it is not downloaded), not on push.
+        // Step 3: upload the Mirrored blobs the outgoing changeset references,
+        // before the envelope, so pullers can fetch them as soon as they see the
+        // change. Only Mirrored blobs (e.g. cover art) ride this inline path: their
+        // rows are ungated, so a cover row pushes the cycle it is written and the
+        // pull's blob-before-row invariant needs the cover in the cloud first — and
+        // this path uploads in the same cycle. An OnDemand blob (audio) is gated, so
+        // its row never reaches a changeset until its blob is already uploaded via
+        // the durable outbox; it is intentionally NOT uploaded here.
         //
-        // This inline path carries NO pin intent and so populates nothing into the
-        // local cache on write: a `BlobRef` has no retain-pinned flag to act on. A
-        // `Mirrored` blob (e.g. cover art) is system-pinned into `storage/pinned/`
-        // on every device at pull regardless, and the managed-audio case that does
-        // carry a transient pin choice goes through the durable upload outbox
-        // (`enqueue_upload` → `drain_uploads`), which is where populate-pinned-on-
-        // upload lives. So a pinned populate belongs to the outbox drain, not to
-        // this changeset-blob upload.
+        // The plaintext is read from coven's own cache, where a Mirrored blob is
+        // staged (system-pinned) when the host writes its row (see
+        // [`crate::blob::cache::stage_blob`]). A blob absent from the cache means
+        // the row is not ready to publish — a missing blob would make pullers 404 on
+        // it permanently (the seq advances; the row is never a fresh INSERT again) —
+        // so the cycle aborts rather than skipping the upload.
         if let Some(ref cs) = outgoing_cs {
             let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
-            for blob in changes.iter().flat_map(|c| blob_source.blobs_for_change(c)) {
-                match crate::local_blob::exists(&blob.local_path).await {
-                    Ok(true) => {}
-                    // The file is absent but the outgoing changeset references it.
-                    // The device that authored the row is the only one that holds
-                    // the file, so the old "another device may push it" rationale
-                    // does not apply — packing and publishing the changeset now would
-                    // make the row visible to every device while its blob is missing
-                    // from the cloud, and pullers would 404 on it permanently (the
-                    // seq advances; the row is never a fresh INSERT again). A missing
-                    // blob means the changeset is not ready to publish — it is not a
-                    // skip. Abort the cycle (the changeset is neither packed nor
-                    // pushed), exactly like the storage-error arm below; the next
-                    // cycle retries once the file is back.
-                    Ok(false) => {
+            let tables = tables.to_vec();
+            let blob_decls = db
+                .call(move |conn| {
+                    BlobDecls::from_tables(conn, &tables)
+                        .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))
+                })
+                .await
+                .map_err(|e| SyncCycleError::AssetScan(e.0))?;
+            let mirrored = changes
+                .iter()
+                .filter_map(|c| blob_decls.ref_from_change(c))
+                .filter(|blob| blob.sync == BlobSync::Mirrored);
+            for blob in mirrored {
+                let bytes = match crate::blob::cache::read_staged(library_dir, &blob.id).await {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => {
                         error!(
                             id = %blob.id,
-                            path = %blob.local_path.display(),
-                            "blob file missing locally; aborting push so the changeset \
+                            "blob not staged in the cache; aborting push so the changeset \
                              is not published without its blob"
                         );
                         return Err(SyncCycleError::BlobMissing(format!(
-                            "blob {} file not found at {}",
-                            blob.id,
-                            blob.local_path.display()
-                        )));
-                    }
-                    // A real storage failure checking existence is not "absent" —
-                    // abort the cycle rather than silently dropping the upload.
-                    Err(e) => {
-                        return Err(SyncCycleError::AssetUpload(format!(
-                            "checking local blob for {}: {e}",
+                            "blob {} not staged in the local cache",
                             blob.id
                         )));
                     }
-                }
+                    // A real cache-read failure is not "absent" — abort the cycle
+                    // rather than silently dropping the upload.
+                    Err(e) => {
+                        return Err(SyncCycleError::AssetUpload(format!(
+                            "reading staged blob for {}: {e}",
+                            blob.id
+                        )));
+                    }
+                };
                 // Resolve the host's public scope to the internal key scope before
                 // storage encrypts. An `Item(id)` scope reads the key from
                 // `item_keys`; a missing row is a host bug and aborts the cycle.
@@ -159,9 +158,6 @@ impl SyncService {
                     .resolve_blob_scope(blob.scope.clone())
                     .await
                     .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
-                let bytes = crate::local_blob::read(&blob.local_path)
-                    .await
-                    .map_err(SyncCycleError::AssetUpload)?;
                 storage
                     .put_blob(
                         &blob.namespace,
@@ -206,17 +202,10 @@ impl SyncService {
 
         // Step 4 + 5: pull incoming changesets and apply them (the pull disables
         // capture around only each apply, so applied rows are not echoed).
-        let (updated_cursors, pull_result) = pull::pull_changes(
-            db,
-            tables,
-            storage,
-            &self.device_id,
-            cursors,
-            library_dir,
-            blob_source,
-        )
-        .await
-        .map_err(SyncCycleError::Pull)?;
+        let (updated_cursors, pull_result) =
+            pull::pull_changes(db, tables, storage, &self.device_id, cursors, library_dir)
+                .await
+                .map_err(SyncCycleError::Pull)?;
 
         if pull_result.changesets_applied > 0 {
             info!(

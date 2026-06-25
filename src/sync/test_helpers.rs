@@ -19,21 +19,41 @@ use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
 };
 use crate::sync::pull::pull_changes;
-use crate::sync::session::SyncedTable;
+use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::signed_control::{HeadJson, MinSchemaVersionJson};
 use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
 
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a *gated root* (`notes`,
 /// gated by its `shared` boolean), a child with a foreign key (`note_tags`,
-/// which inherits the gate and exercises FK-violation retry), and a blob-bearing
-/// child (`note_photos`, also FK-to-`notes`, so it inherits the gate too).
+/// which inherits the gate and exercises FK-violation retry), and a child that
+/// CAN carry a blob (`note_photos`, also FK-to-`notes`, so it inherits the gate).
+/// `note_photos` carries no blob here; blob tests declare one with
+/// [`test_synced_tables_with_blob`].
 pub fn test_synced_tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes").gated_by("shared"),
         SyncedTable::new("note_tags"),
         SyncedTable::new("note_photos"),
     ]
+}
+
+/// [`test_synced_tables`] with `note_photos` declared blob-bearing per `decl`, for
+/// tests exercising the blob push/pull/backfill paths. The blob id is the
+/// `note_photos` primary key; `note_photos.cloud_path` holds a readable key for
+/// plain-scheme tests.
+pub fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("notes").gated_by("shared"),
+        SyncedTable::new("note_tags"),
+        SyncedTable::new("note_photos").carries_blob(decl),
+    ]
+}
+
+/// Open a test [`Database`] over the synthetic schema with `note_photos` declared
+/// blob-bearing per `decl`.
+pub fn open_test_db_with_blob(decl: BlobDecl) -> Database {
+    open_test_db_schema(test_synced_tables_with_blob(decl), create_synced_schema)
 }
 
 /// Create the synthetic test schema on a connection. Used as the host `migrate`
@@ -62,6 +82,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             kind TEXT NOT NULL,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            cloud_path TEXT,
             FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
         );",
     )
@@ -839,16 +860,14 @@ pub async fn pull_into(
     device_id: &str,
     cursors: &HashMap<String, u64>,
     library_dir: &crate::library_dir::LibraryDir,
-    blob_source: &dyn crate::blob::BlobSource,
 ) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
     pull_changes(
         db,
-        &test_synced_tables(),
+        db.synced_tables(),
         storage,
         device_id,
         cursors,
         library_dir,
-        blob_source,
     )
     .await
     .expect("pull")
@@ -863,158 +882,14 @@ pub async fn pull_into_result(
     device_id: &str,
     cursors: &HashMap<String, u64>,
     library_dir: &crate::library_dir::LibraryDir,
-    blob_source: &dyn crate::blob::BlobSource,
 ) -> Result<(HashMap<String, u64>, crate::sync::pull::PullResult), crate::sync::pull::PullError> {
     pull_changes(
         db,
-        &test_synced_tables(),
+        db.synced_tables(),
         storage,
         device_id,
         cursors,
         library_dir,
-        blob_source,
     )
     .await
-}
-
-/// A blob source that references no blobs — for cycle/pull tests not exercising blobs.
-pub struct NoopBlobSource;
-
-impl crate::blob::BlobSource for NoopBlobSource {
-    fn blobs_for_change(&self, _change: &crate::changeset::RowChange) -> Vec<crate::blob::BlobRef> {
-        Vec::new()
-    }
-    fn blobs_in_db(&self, _conn: &Connection) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
-        Ok(Vec::new())
-    }
-}
-
-/// Build one [`crate::blob::BlobRef`] for a `note_photos` row from its
-/// `(id, note_id, kind)`, under `dir` in `namespace`, scoping via
-/// `scope_for(kind, note_id)` and tagging the retention class `sync`. The single
-/// per-row builder both the changeset and the DB enumeration paths call, so a
-/// photo blob's path, scope, and class are derived one way regardless of whether
-/// the row came from a [`crate::changeset::RowChange`] or a `SELECT`.
-pub fn note_photo_ref(
-    id: &str,
-    note_id: &str,
-    kind: &str,
-    dir: &std::path::Path,
-    namespace: &str,
-    scope_for: &dyn Fn(&str, &str) -> crate::blob::BlobScope,
-    sync: crate::blob::BlobSync,
-) -> crate::blob::BlobRef {
-    crate::blob::BlobRef {
-        namespace: namespace.to_string(),
-        local_path: dir.join(id),
-        id: id.to_string(),
-        scope: scope_for(kind, note_id),
-        // These helpers exercise the hashed (default) scheme; a plain-scheme test
-        // constructs its own ref with a `cloud_path`.
-        cloud_path: None,
-        sync,
-    }
-}
-
-/// Map every `note_photos` INSERT row-change to a [`crate::blob::BlobRef`] under
-/// `dir` in `namespace`, scoping each via `scope_for(kind, note_id)` and tagging
-/// them all with the retention class `sync`. The changeset-driven analogue of
-/// [`note_photos_refs_from_db`]; both build each ref through [`note_photo_ref`].
-/// Filtered to INSERTs (matching bae's real `BlobSource`): a blob's bytes never
-/// change on update, so only an INSERT carries one, and an INSERT records every
-/// column — so `id`/`note_id`/`kind` are always present, where a partial UPDATE
-/// could leave `kind` absent. Their absence on an INSERT is a malformed test
-/// fixture, surfaced loudly rather than silently skipped.
-pub fn note_photos_refs(
-    changes: &[crate::changeset::RowChange],
-    dir: &std::path::Path,
-    namespace: &str,
-    scope_for: &dyn Fn(&str, &str) -> crate::blob::BlobScope,
-    sync: crate::blob::BlobSync,
-) -> Vec<crate::blob::BlobRef> {
-    use crate::changeset::ChangeOp;
-    changes
-        .iter()
-        .filter(|c| c.table == "note_photos" && c.op == ChangeOp::Insert)
-        .map(|c| {
-            let id = c.pk().expect("note_photos row has a primary key");
-            let note_id = c.col(1).expect("note_photos row has a note_id at column 1");
-            let kind = c.col(2).expect("note_photos row has a kind at column 2");
-            note_photo_ref(id, note_id, kind, dir, namespace, scope_for, sync)
-        })
-        .collect()
-}
-
-/// Map every `note_photos` row currently in `conn` to a [`crate::blob::BlobRef`]
-/// of class `sync`, the snapshot-bootstrap analogue of [`note_photos_refs`]: the
-/// rows the bootstrapped DB already holds, rather than an incoming changeset's.
-/// Both build each ref through [`note_photo_ref`], so a photo blob lands at the
-/// same path, scope, and class however it was discovered.
-pub fn note_photos_refs_from_db(
-    conn: &Connection,
-    dir: &std::path::Path,
-    namespace: &str,
-    scope_for: &dyn Fn(&str, &str) -> crate::blob::BlobScope,
-    sync: crate::blob::BlobSync,
-) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
-    let mut stmt = conn.prepare("SELECT id, note_id, kind FROM note_photos")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    let mut refs = Vec::new();
-    for row in rows {
-        let (id, note_id, kind) = row?;
-        refs.push(note_photo_ref(
-            &id, &note_id, &kind, dir, namespace, scope_for, sync,
-        ));
-    }
-    Ok(refs)
-}
-
-/// A blob source that maps `note_photos` rows to `Mirrored` blobs under `dir`
-/// (photos are part of having the library, downloaded on pull). `kind = "cover"`
-/// uses a per-note derived key; everything else uses the master key.
-pub struct PhotoBlobSource {
-    pub dir: std::path::PathBuf,
-}
-
-impl PhotoBlobSource {
-    /// The scope every `note_photos` row maps to, regardless of discovery path:
-    /// a cover photo uses a per-note derived key, everything else the master key.
-    fn scope_for(kind: &str, note_id: &str) -> crate::blob::BlobScope {
-        if kind == "cover" {
-            crate::blob::BlobScope::Derived(note_id.to_string())
-        } else {
-            crate::blob::BlobScope::Master
-        }
-    }
-
-    fn refs(&self, changes: &[crate::changeset::RowChange]) -> Vec<crate::blob::BlobRef> {
-        note_photos_refs(
-            changes,
-            &self.dir,
-            "photos",
-            &Self::scope_for,
-            crate::blob::BlobSync::Mirrored,
-        )
-    }
-}
-
-impl crate::blob::BlobSource for PhotoBlobSource {
-    fn blobs_for_change(&self, change: &crate::changeset::RowChange) -> Vec<crate::blob::BlobRef> {
-        self.refs(std::slice::from_ref(change))
-    }
-    fn blobs_in_db(&self, conn: &Connection) -> rusqlite::Result<Vec<crate::blob::BlobRef>> {
-        note_photos_refs_from_db(
-            conn,
-            &self.dir,
-            "photos",
-            &Self::scope_for,
-            crate::blob::BlobSync::Mirrored,
-        )
-    }
 }

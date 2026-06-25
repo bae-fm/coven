@@ -36,8 +36,6 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::blob::{BlobRef, BlobSource};
-use crate::changeset::RowChange;
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::HomeStorage;
 use crate::database::{Database, DbError};
@@ -289,10 +287,9 @@ impl CovenLibrary {
             // `Arc` (`ClockRef`) even on the single-threaded browser runtime.
             std::sync::Arc::new(SystemClock) as ClockRef,
             library_dir,
-            // The demo schema has no blob-bearing tables, so its blob source
-            // references nothing. A real app supplies a `BlobSource` that maps its
-            // blob-bearing rows to cloud objects (see `BlobSource`).
-            Rc::new(DemoBlobSource),
+            // The demo schema declares no blob-bearing tables, so coven derives an
+            // empty blob set. A real app declares its blob columns via
+            // `SyncedTable::carries_blob` (see `crate::blob::decl::BlobDecls`).
             None,
             schedule,
         );
@@ -402,18 +399,4 @@ fn value_ref_to_json(column: &str, value: ValueRef<'_>) -> Result<serde_json::Va
             )))
         }
     })
-}
-
-/// The demo app's blob source: it references no blobs, because the demo `notes`
-/// schema has no blob-bearing tables. **A real app supplies its own** `BlobSource`
-/// that maps its rows (e.g. a cover image) to cloud objects.
-struct DemoBlobSource;
-
-impl BlobSource for DemoBlobSource {
-    fn blobs_for_change(&self, _change: &RowChange) -> Vec<BlobRef> {
-        Vec::new()
-    }
-    fn blobs_in_db(&self, _conn: &Connection) -> rusqlite::Result<Vec<BlobRef>> {
-        Ok(Vec::new())
-    }
 }

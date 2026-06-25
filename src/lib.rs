@@ -36,8 +36,9 @@
 //! - When (and only when) a cloud provider is connected, the host builds the
 //!   [`sync::sync_manager::SyncManager`] lazily, passing it the same `Database`
 //!   handle and synced-table set. `SyncManager::new` is synchronous and
-//!   infallible — all seeding happened in `Database::open`. The host also
-//!   supplies a [`blob::BlobSource`] and an optional [`blob::BlobUploadObserver`].
+//!   infallible — all seeding happened in `Database::open`. Which rows carry blobs
+//!   is declared per table via [`sync::session::SyncedTable::carries_blob`]; the
+//!   host also supplies an optional [`blob::BlobUploadObserver`].
 //!
 //!   A local-only library that never connects a provider simply stamps and
 //!   writes rows through `Database::call` without ever building a `SyncManager`,

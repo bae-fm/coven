@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use tracing::{debug, error, info, warn};
 
-use crate::blob::{BlobSource, BlobUploadObserver};
+use crate::blob::BlobUploadObserver;
 use crate::changeset::RowChange;
 // `Config`/`ClockRef` are used only by the native-only `init_sync`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -159,7 +159,6 @@ pub async fn run_single_sync_cycle(
     user_keypair: &UserKeypair,
     library_dir: &LibraryDir,
     cloud_home: Option<&dyn CloudHome>,
-    blob_source: &dyn BlobSource,
     observer: Option<&dyn BlobUploadObserver>,
 ) -> Result<SyncCycleResult, String> {
     // The synced-table set is owned by the Database; read it once here.
@@ -341,7 +340,6 @@ pub async fn run_single_sync_cycle(
             "background sync",
             user_keypair,
             library_dir,
-            blob_source,
         )
         .await
         .map_err(|e| format!("Sync cycle error: {e}"))?;
@@ -503,7 +501,7 @@ pub async fn run_single_sync_cycle(
             &library_dir.db_path(),
             storage,
             library_dir,
-            blob_source,
+            tables,
         )
         .await
         {

@@ -12,8 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{BlobRef, BlobScope, BlobSource, BlobSync, ResolvedScope};
-use crate::changeset::RowChange;
+use crate::blob::{BlobScope, BlobSync, ResolvedScope};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -23,10 +22,12 @@ use crate::sync::cycle::push_changeset;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::pull::pull_changes;
 use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::session::{BlobDecl, BlobScopeSpec};
 use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot, push_snapshot};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     capture_bytes, create_synced_schema, exec, temp_library_dir, test_synced_tables,
+    test_synced_tables_with_blob,
 };
 
 /// A fixed master key, distinct from any minted item key, so "the master cannot
@@ -173,48 +174,15 @@ async fn reading_a_wrong_length_item_key_errors() {
     );
 }
 
-/// A blob source that maps each `note_photos` row to an `Item`-scoped,
+/// A `note_photos` blob declaration mapping each row to an `Item`-scoped,
 /// `Mirrored` blob keyed by the row's `note_id` — the public scope a sharing host
-/// emits, the one whose resolution `download_changeset_blobs` performs. The blob
-/// lives at `dir/{id}`, the namespace is `audio` (the bulk share payload bae moves
-/// this way). It is `Mirrored` here so the pull downloads it: this exercise is
-/// about resolving the item key during download-before-apply, not the on-demand
-/// skip.
-struct ItemPhotoBlobSource {
-    dir: std::path::PathBuf,
-}
-
-impl ItemPhotoBlobSource {
-    /// Every `note_photos` row maps to an `Item`-scoped blob keyed by its
-    /// `note_id`, regardless of discovery path.
-    fn scope_for(_kind: &str, note_id: &str) -> BlobScope {
-        BlobScope::Item(note_id.to_string())
-    }
-
-    fn refs(&self, changes: &[RowChange]) -> Vec<BlobRef> {
-        crate::sync::test_helpers::note_photos_refs(
-            changes,
-            &self.dir,
-            "audio",
-            &Self::scope_for,
-            BlobSync::Mirrored,
-        )
-    }
-}
-
-impl BlobSource for ItemPhotoBlobSource {
-    fn blobs_for_change(&self, change: &RowChange) -> Vec<BlobRef> {
-        self.refs(std::slice::from_ref(change))
-    }
-    fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>> {
-        crate::sync::test_helpers::note_photos_refs_from_db(
-            conn,
-            &self.dir,
-            "audio",
-            &Self::scope_for,
-            BlobSync::Mirrored,
-        )
-    }
+/// emits, the one whose resolution `download_changeset_blobs` performs. The
+/// namespace is `audio` (the bulk share payload bae moves this way). `Mirrored` so
+/// the pull downloads it: this exercise is about resolving the item key during
+/// download-before-apply, not the on-demand skip.
+fn item_photo_decl() -> BlobDecl {
+    BlobDecl::new("audio", BlobSync::Mirrored)
+        .with_scope(BlobScopeSpec::ItemColumn("note_id".to_string()))
 }
 
 /// Capture `db_a`'s pending writes and publish them to `storage` as device A's
@@ -299,17 +267,19 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     // --- Device B: a brand-new device that has NOT bootstrapped a snapshot. It
     // pulls A's changeset through the real pull path; resolution + download run
     // inside `pull_changes`. ---
-    let db_b = open_db("dev-b");
+    let (db_b, _stamper) = Database::open(
+        std::path::Path::new(":memory:"),
+        test_synced_tables_with_blob(item_photo_decl()),
+        "dev-b".to_string(),
+        create_synced_schema,
+    )
+    .expect("open device B with the item-scoped blob declaration");
     assert_eq!(
         db_b.item_key("note-1").await.expect("B pre-pull read"),
         None,
         "device B has no item key before pulling A's changeset"
     );
 
-    let dst = tempfile::tempdir().expect("B blob dir");
-    let plan = ItemPhotoBlobSource {
-        dir: dst.path().to_path_buf(),
-    };
     let (_tmp_lib, ld) = temp_library_dir();
 
     let (cursors, result) = pull_changes(
@@ -319,7 +289,6 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         "dev-b",
         &HashMap::new(),
         &ld,
-        &plan,
     )
     .await
     .expect("device B pulls A's changeset");

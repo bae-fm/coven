@@ -1,10 +1,10 @@
-//! The device-local plaintext file behind each [`crate::blob::BlobRef`].
+//! The device-local plaintext-file primitives behind coven's blob cache.
 //!
-//! coven reads this file on push (then encrypts and uploads it) and writes it on
-//! pull (after downloading and decrypting). The host chooses where it lives via
-//! [`BlobRef::local_path`](crate::blob::BlobRef::local_path); this module is just
-//! the read / write / exists primitives over whatever storage the target platform
-//! has.
+//! coven reads a blob file on push (then encrypts and uploads it) and writes it on
+//! pull (after downloading and decrypting); the cache ([`crate::blob::cache`])
+//! decides where each file lives (`storage/pinned/<id>` or `storage/cache/<id>`,
+//! built from the validated blob id). This module is just the read / write / exists
+//! primitives over whatever storage the target platform has.
 //!
 //! - **Native** uses the filesystem through `tokio::fs`, so a large blob's read or
 //!   write runs on the blocking pool instead of stalling the sync loop.

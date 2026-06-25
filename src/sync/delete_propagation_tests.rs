@@ -50,7 +50,6 @@ async fn run_cycle(
         kp,
         lib,
         Some(storage as &dyn CloudHome),
-        &NoopBlobSource,
         None,
     )
     .await
@@ -106,7 +105,6 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &NoopBlobSource,
     )
     .await
     .expect("B open_db_and_pull");
@@ -489,7 +487,6 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &NoopBlobSource,
     )
     .await
     .expect("B open_db_and_pull");

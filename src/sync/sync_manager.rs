@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use tracing::info;
 
-use crate::blob::{BlobSource, BlobUploadObserver};
+use crate::blob::BlobUploadObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::Database;
@@ -49,7 +49,6 @@ pub struct SyncManager {
     encryption_service: Option<EncryptionService>,
     db: Database,
     clock: ClockRef,
-    blob_source: Arc<dyn BlobSource>,
     observer: Option<Arc<dyn BlobUploadObserver>>,
 
     /// coven's `_updated_at` register, the same `Arc<Hlc>` the owned [`Database`]
@@ -95,7 +94,6 @@ impl SyncManager {
         encryption_service: Option<EncryptionService>,
         db: Database,
         clock: ClockRef,
-        blob_source: Arc<dyn BlobSource>,
         observer: Option<Arc<dyn BlobUploadObserver>>,
     ) -> Self {
         let hlc = db.hlc();
@@ -105,7 +103,6 @@ impl SyncManager {
             encryption_service,
             db,
             clock,
-            blob_source,
             observer,
             hlc,
             sync_loop_handle: RwLock::new(None),
@@ -195,7 +192,6 @@ impl SyncManager {
                 self.db.clone(),
                 self.clock.clone(),
                 library_dir,
-                self.blob_source.clone(),
                 self.observer.clone(),
             ));
             handle.start();

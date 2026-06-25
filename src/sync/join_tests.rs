@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use crate::blob::BlobSync;
 use crate::clock::SystemClock;
 use crate::config::Config;
 use crate::database::{Database, DbError};
@@ -24,6 +25,7 @@ use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::join::{join_from_invite_code, open_db_and_pull, JoinError};
 use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::session::BlobDecl;
 use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SNAPSHOT_BLOB_BACKFILL_PENDING,
 };
@@ -68,7 +70,6 @@ async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Co
         None,
         Arc::new(SystemClock),
         ids,
-        |_| Box::new(NoopBlobSource),
         |_| {},
     )
     .await
@@ -225,7 +226,6 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &NoopBlobSource,
     )
     .await
     .expect("B open_db_and_pull");
@@ -256,7 +256,6 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &keypair,
         &lib_b,
         None,
-        &NoopBlobSource,
         None,
     )
     .await
@@ -281,13 +280,13 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 /// follows starts past the snapshot's cursors, so the INSERT changeset that first
 /// carried the photo (seq <= cursor) is never re-walked and the per-changeset
 /// blob download never fires for it. Without the bootstrap backfill, the
-/// bootstrapped device has the photo row but the file at its `local_path` is
-/// absent — a synced album renders a placeholder cover. Asserts the file lands.
+/// bootstrapped device has the photo row but no blob file in its cache — a synced
+/// album renders a placeholder cover. Asserts the file lands.
 #[tokio::test]
 async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[9u8; 32]));
     let storage = MockSyncStorage::new();
-    let tables = test_synced_tables();
+    let tables = test_synced_tables_with_blob(BlobDecl::new("photos", BlobSync::Mirrored));
 
     // Owner A: a shared note with a cover photo, both captured into the snapshot.
     let db_a = open_test_db();
@@ -327,28 +326,24 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     .expect("push snapshot");
 
     // The cover blob exists in the cloud (uploaded when A first imported the
-    // album), keyed `photos/photo1` as `PhotoBlobSource` maps a cover row. The
-    // mock ignores the scope, so any resolved scope seeds it.
+    // album), keyed `photos/photo1` master-scoped as the declaration maps a cover
+    // row.
     storage
         .put_blob(
             "photos",
             "photo1",
-            crate::blob::ResolvedScope::Derived("n1".to_string()),
+            crate::blob::ResolvedScope::Master,
             None,
             b"cover-bytes".to_vec(),
         )
         .await
         .expect("seed cover blob");
 
-    // Device B bootstraps from the snapshot, then runs the real bootstrap path
-    // with a plan that maps `note_photos` rows to blobs. A `Mirrored` blob is
+    // Device B bootstraps from the snapshot, then runs the real bootstrap path,
+    // which derives `note_photos`'s blob from the declaration. A `Mirrored` blob is
     // system-pinned on reconciliation, so it lands in B's pinned cache folder
-    // (`storage/pinned/<id>`), which coven owns — not the plan's `dir`, which is the
-    // push's upload source.
+    // (`storage/pinned/<id>`), which coven owns and builds from the validated id.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let plan = PhotoBlobSource {
-        dir: lib_b.join("photos"),
-    };
     let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
     let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
@@ -362,7 +357,6 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &plan,
     )
     .await
     .expect("B open_db_and_pull");
@@ -399,7 +393,7 @@ async fn backfill_pending(db: &Database) -> bool {
 async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[11u8; 32]));
     let storage = MockSyncStorage::new();
-    let tables = test_synced_tables();
+    let tables = test_synced_tables_with_blob(BlobDecl::new("photos", BlobSync::Mirrored));
 
     // Owner A: a shared note with a cover photo, both captured into the snapshot.
     let db_a = open_test_db();
@@ -442,11 +436,8 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     // bootstrap time (e.g. A's upload of it hadn't landed). So the bootstrap's
     // download attempt fails.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let plan = PhotoBlobSource {
-        dir: lib_b.join("photos"),
-    };
     // A reconciled `Mirrored` blob is system-pinned, so it lands in B's pinned cache
-    // folder, not the plan's `dir`.
+    // folder.
     let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 
     let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
@@ -460,7 +451,6 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         &storage,
         &boot.cursors,
         &lib_b,
-        &plan,
     )
     .await
     .expect("B open_db_and_pull");
@@ -508,7 +498,6 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         &keypair,
         &lib_b,
         None,
-        &plan,
         None,
     )
     .await

@@ -22,6 +22,7 @@ use std::sync::RwLock;
 use rusqlite::OptionalExtension;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
+use crate::blob::{cache, BlobRef, BlobScope, BlobSync};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
@@ -30,7 +31,8 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::test_helpers::{create_synced_schema, test_synced_tables, PhotoBlobSource};
+use crate::sync::session::BlobDecl;
+use crate::sync::test_helpers::{create_synced_schema, test_synced_tables_with_blob};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -40,7 +42,7 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 fn open_device(device_id: &str) -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
-        test_synced_tables(),
+        test_synced_tables_with_blob(BlobDecl::new("photos", BlobSync::Mirrored)),
         device_id.to_string(),
         create_synced_schema,
     )
@@ -48,22 +50,18 @@ fn open_device(device_id: &str) -> Database {
     db
 }
 
-/// Run one full sync cycle for `device_id` over `storage`, with a `PhotoBlobSource`
-/// rooted at `blob_dir` so `note_photos` rows map to blobs there. Plaintext at
-/// rest, no live cloud home (changeset + blob I/O go through `storage`).
+/// Run one full sync cycle for `device_id` over `storage`. coven derives
+/// `note_photos`'s blob from the declaration on the synced set. Plaintext at rest,
+/// no live cloud home (changeset + blob I/O go through `storage`).
 async fn run_cycle(
     storage: &CloudSyncStorage,
     db: &Database,
     device_id: &str,
     library_dir: &LibraryDir,
-    blob_dir: &Path,
 ) {
     let cipher = RwLock::new(CloudCipher::Plaintext);
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new(device_id.to_string());
-    let blob_plan = PhotoBlobSource {
-        dir: blob_dir.to_path_buf(),
-    };
 
     run_single_sync_cycle(
         storage,
@@ -76,7 +74,6 @@ async fn run_cycle(
         &keypair,
         library_dir,
         None,
-        &blob_plan,
         None,
     )
     .await
@@ -155,11 +152,8 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     console_error_panic_hook::set_once();
 
     let cloud = InMemoryCloudHome::new();
-    // Each device's upload-source dir (where A's photo plaintext lives, the push's
-    // source) and its own library dir (where B's pull writes the blob into the
-    // pinned cache, `storage/pinned/<id>` — coven-owned, distinct from the source).
-    let dir_a = Path::new("/coven-blob-test/device-a");
-    let dir_b = Path::new("/coven-blob-test/device-b");
+    // Each device's own library dir; B's pull writes the blob into its pinned cache
+    // (`storage/pinned/<id>`), which coven owns and builds from the validated id.
     let lib_a = LibraryDir::new(std::path::Path::new("/coven-blob-test/lib-a"));
     let lib_b = LibraryDir::new(std::path::Path::new("/coven-blob-test/lib-b"));
 
@@ -180,12 +174,19 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     .await
     .expect("device A insert");
 
-    // The photo's plaintext lives on A's OPFS at the path `PhotoBlobSource` derives
-    // (`dir_a/photo-1`). The push reads it through `local_blob` and uploads it.
+    // The host stages the cover into A's pinned cache (the inline push reads it
+    // there to upload). On wasm this exercises the cache write over OPFS.
     let photo_bytes = b"\x89PNG\r\n\x1a\n fake image bytes for photo-1".to_vec();
-    crate::local_blob::write(&dir_a.join("photo-1"), &photo_bytes)
+    let cover = BlobRef {
+        namespace: "photos".to_string(),
+        id: "photo-1".to_string(),
+        scope: BlobScope::Master,
+        cloud_path: None,
+        sync: BlobSync::Mirrored,
+    };
+    cache::stage_blob(&db_a, &lib_a, &cover, &photo_bytes, true)
         .await
-        .expect("write photo to A's OPFS");
+        .expect("stage photo into A's cache");
 
     let storage_a = CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
@@ -193,7 +194,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
     );
-    run_cycle(&storage_a, &db_a, "device-a", &lib_a, dir_a).await;
+    run_cycle(&storage_a, &db_a, "device-a", &lib_a).await;
 
     // B has not pulled, so the blob is not in B's pinned cache yet.
     let b_pinned = lib_b.pinned_blob_path("photo-1").expect("pinned blob path");
@@ -211,7 +212,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
     );
-    run_cycle(&storage_b, &db_b, "device-b", &lib_b, dir_b).await;
+    run_cycle(&storage_b, &db_b, "device-b", &lib_b).await;
 
     // The row crossed...
     let has_photo_row = db_b

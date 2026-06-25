@@ -24,10 +24,13 @@
 //!   drains tombstones and runs the GC each round after it pulls.
 //!
 //! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`BlobSync`],
-//! [`BlobSource`], [`BlobUploadObserver`]/[`DrainControl`]) are the vocabulary
-//! both halves and the host speak.
+//! [`BlobUploadObserver`]/[`DrainControl`]) are the vocabulary both halves and the
+//! host speak. Which rows carry blobs is not a runtime callback but a per-table
+//! declaration ([`crate::sync::session::BlobDecl`]) coven resolves into a
+//! [`decl::BlobDecls`] each cycle to derive the blob set itself.
 
 pub mod cache;
+pub mod decl;
 pub mod delete;
 pub mod upload;
 
@@ -49,19 +52,15 @@ mod upload_tests;
 #[cfg(test)]
 mod delete_tests;
 
-use std::path::PathBuf;
-
 #[cfg(feature = "share-proxy")]
 use serde::{Deserialize, Serialize};
 
-use crate::changeset::RowChange;
-
 /// A blob's logical cloud reference: just its `(namespace, id)`, with none of the
-/// local-disk or encryption-scope detail a [`BlobRef`] carries. This is the
-/// shape that may cross into a cloud manifest — a share authorizes blobs by their
-/// logical id, and coven hashes each to its `{namespace}/{ab}/{cd}/{id}` cloud
-/// key internally. A `BlobRef`'s `local_path`/`scope` must never reach the cloud,
-/// so the manifest references this `(namespace, id)`-only type instead.
+/// encryption-scope detail a [`BlobRef`] carries. This is the shape that may cross
+/// into a cloud manifest — a share authorizes blobs by their logical id, and coven
+/// hashes each to its `{namespace}/{ab}/{cd}/{id}` cloud key internally. A
+/// `BlobRef`'s `scope` must never reach the cloud, so the manifest references this
+/// `(namespace, id)`-only type instead.
 #[cfg(feature = "share-proxy")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobId {
@@ -162,7 +161,11 @@ pub enum BlobSync {
     OnDemand,
 }
 
-/// A blob referenced by a changeset: its cloud identity plus the local file.
+/// A blob a row references: its cloud identity and encryption scope. coven derives
+/// it from the row's declared columns ([`crate::sync::session::BlobDecl`]) via
+/// [`decl::BlobDecls`]; the bytes always live in coven's own cache
+/// (`storage/pinned/<id>` / `storage/cache/<id>`, built from the validated id —
+/// see [`cache`]), never at a host path.
 #[derive(Debug, Clone)]
 pub struct BlobRef {
     /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`
@@ -170,14 +173,6 @@ pub struct BlobRef {
     pub namespace: String,
     /// Blob id (typically the id of the blob-bearing row).
     pub id: String,
-    /// Local plaintext file the push reads to upload this blob — the **upload
-    /// source**, nothing more. It may live OUTSIDE coven's library dir (an
-    /// unmanaged-origin file the host imported in place for a cloud-only release) or
-    /// be a copy the host staged into the cache; coven reads it, never copies or
-    /// ingests it. It is NOT the pull destination: a pulled blob lands in the cache
-    /// (`storage/pinned/<id>` / `storage/cache/<id>`), which coven owns and builds
-    /// from the validated blob id — see [`cache`].
-    pub local_path: PathBuf,
     /// Encryption scope for this blob.
     pub scope: BlobScope,
     /// The consumer's readable cloud-relative path for this blob, e.g.
@@ -190,36 +185,6 @@ pub struct BlobRef {
     /// ([`BlobSync::Mirrored`]) or skips it for later on-demand fetch
     /// ([`BlobSync::OnDemand`]).
     pub sync: BlobSync,
-}
-
-/// Maps the host's blob-bearing rows to the blobs that must move with them.
-///
-/// The host knows which of its tables carry blobs, how to locate the local file,
-/// and each blob's retention class ([`BlobSync`]). coven uploads a referenced
-/// blob before pushing the changeset that carries its row, and on pull downloads
-/// the [`BlobSync::Mirrored`] ones before applying the incoming changeset.
-pub trait BlobSource: Send + Sync {
-    /// The blobs a single row-change references. coven calls this for both
-    /// directions — over a pushed changeset's changes to find what to upload, and
-    /// over an incoming changeset's changes to find what to download — since a
-    /// row maps to the same blobs whichever way it is moving.
-    fn blobs_for_change(&self, change: &RowChange) -> Vec<BlobRef>;
-
-    /// Every blob the rows currently in `conn` reference that must be present on
-    /// local disk — the snapshot-bootstrap analogue of [`Self::blobs_for_change`].
-    ///
-    /// A device that bootstraps from a snapshot receives the catalog rows but no
-    /// per-row blob files: the snapshot is a whole-DB image, and the incremental
-    /// pull that follows starts past the snapshot's cursors, so the original
-    /// INSERT changesets that carried those blobs are never re-walked. coven
-    /// reads the bootstrapped DB through this method to download the blobs those
-    /// rows reference (skipping any whose local file already exists).
-    ///
-    /// No default impl: a default returning empty would silently reintroduce the
-    /// blanks-after-bootstrap bug for any host that forgot to implement it. The
-    /// host enumerates the same blob-bearing tables `blobs_for_change` recognizes,
-    /// reading them from the DB instead of from a [`RowChange`] stream.
-    fn blobs_in_db(&self, conn: &rusqlite::Connection) -> rusqlite::Result<Vec<BlobRef>>;
 }
 
 /// What the outbox drain should do after a successful upload, returned by

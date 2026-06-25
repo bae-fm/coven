@@ -94,9 +94,9 @@ impl From<StorageError> for BlobCacheError {
 ///
 /// This is for bytes a host wants a local copy of that the push then uploads — e.g.
 /// a release the user is taking from cloud-only to pinned, whose audio bae copies in
-/// before the push reads it. It is NOT for an unmanaged (invisible-to-coven) file or
-/// a cloud-only source that stays external: those are never ingested, only read by
-/// the push from [`BlobRef::local_path`].
+/// before the push reads it. The pinned sibling [`stage_blob`] (with `pinned`) is
+/// what a host calls for a Mirrored blob the inline push reads back via
+/// [`read_staged`].
 ///
 /// After the bytes land, [`evict_to_budget`] runs so a stage that pushes `cache/`
 /// over `max_cache_size` evicts its oldest files back under budget (a no-op when
@@ -157,6 +157,84 @@ pub(crate) async fn populate_pinned(
     crate::local_blob::write_atomic(&dest, plaintext)
         .await
         .map_err(BlobCacheError::Io)
+}
+
+/// The host-facing staging call: put a blob's plaintext into the cache so the
+/// inline push can read it locally and a later read serves it without a cloud
+/// round-trip. `pinned` writes to the protected `pinned/` folder (budget-exempt —
+/// for a [`BlobSync::Mirrored`] blob, system-pinned on every device, which the
+/// host stages when it writes the blob-bearing row); otherwise to the evictable
+/// `cache/`.
+///
+/// The unified entry over [`populate_pinned`] and [`write_blob`]: the inline push
+/// reads what was staged here via [`read_staged`].
+pub async fn stage_blob(
+    db: &Database,
+    library_dir: &LibraryDir,
+    blob: &BlobRef,
+    bytes: &[u8],
+    pinned: bool,
+) -> Result<(), BlobCacheError> {
+    if pinned {
+        populate_pinned(library_dir, &blob.id, bytes).await
+    } else {
+        write_blob(db, library_dir, blob, bytes).await
+    }
+}
+
+/// Read a blob's plaintext from the local cache only — `pinned/<id>` or
+/// `cache/<id>` — returning `None` when it is in neither folder. No cloud fetch:
+/// this is the inline push reading the bytes it is about to upload (the blob is
+/// not yet in the cloud), and a host staged them via [`stage_blob`]. A `None`
+/// tells the push the blob is not ready, so it aborts rather than publishing a row
+/// whose blob never reached the cloud.
+pub async fn read_staged(
+    library_dir: &LibraryDir,
+    id: &str,
+) -> Result<Option<Vec<u8>>, BlobCacheError> {
+    let pinned = library_dir.pinned_blob_path(id)?;
+    let cache = library_dir.cache_blob_path(id)?;
+    for path in [&pinned, &cache] {
+        match crate::local_blob::exists(path).await {
+            Ok(true) => {
+                return crate::local_blob::read(path)
+                    .await
+                    .map(Some)
+                    .map_err(BlobCacheError::Io);
+            }
+            Ok(false) => {}
+            Err(e) => return Err(BlobCacheError::Io(e)),
+        }
+    }
+    Ok(None)
+}
+
+/// Drop a blob's local cache copy from BOTH folders (`pinned/<id>` and
+/// `cache/<id>`), the apply-side cleanup when an incoming changeset deletes a
+/// blob-bearing row (a gate retract or a genuine delete). A peer drops only its
+/// own local cache here — it never writes a cloud tombstone, which belongs to the
+/// deleting/unmanaging owner. The `pinned/` copy is budget-exempt, so without this
+/// it would leak forever once the row is gone.
+///
+/// An absent file in either folder is the expected case (a blob is in at most one
+/// folder, or neither), not an error. Every other I/O failure is surfaced.
+pub async fn drop_cached_blob(library_dir: &LibraryDir, id: &str) -> Result<(), BlobCacheError> {
+    for path in [
+        library_dir.pinned_blob_path(id)?,
+        library_dir.cache_blob_path(id)?,
+    ] {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(BlobCacheError::Io(format!(
+                    "drop cached blob {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Read a blob's whole contents, serving the local file on a hit and fetching from

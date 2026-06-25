@@ -3,7 +3,7 @@
 By default, every row of a synced table reaches every device that shares the
 library. To keep some rows on one device, never synced, the host *gates* the
 table: a row syncs only while a condition holds. The host declares the gate per
-table on the [`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable)
+table on the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable)
 values it passes to
 [`Database::open`](rustdoc:method:coven::database::Database::open), and coven
 enforces it on both paths a row can take to another device: the per-cycle
@@ -15,7 +15,7 @@ under it, should stay on the device that made it.
 
 ## Declaring a gate
 
-[`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable) has three forms:
+[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has three forms:
 
 ```rust
 SyncedTable::new("todos")                              // no gate of its own

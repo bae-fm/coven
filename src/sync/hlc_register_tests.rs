@@ -111,7 +111,6 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         &keypair,
         &ld,
         None,
-        &NoopBlobSource,
         None,
     )
     .await
@@ -152,7 +151,6 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         "dev-a",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobSource,
     )
     .await
     .expect("pull into A");
@@ -259,7 +257,6 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobSource,
     )
     .await
     .expect("pull");
@@ -414,7 +411,6 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
         "dev-b",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobSource,
     )
     .await;
 
@@ -489,7 +485,6 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
         "dev-b",
         &HashMap::new(),
         &temp_library_dir().1,
-        &NoopBlobSource,
     )
     .await;
 
@@ -581,7 +576,6 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         &keypair,
         &ld,
         None,
-        &NoopBlobSource,
         None,
     )
     .await;

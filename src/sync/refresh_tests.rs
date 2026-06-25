@@ -27,7 +27,6 @@ use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     bootstrap_chain, make_entry, open_test_db, pubkey_hex, temp_library_dir, MockSyncStorage,
-    NoopBlobSource,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
@@ -75,7 +74,6 @@ async fn run_cycle(
         keypair,
         ld,
         Some(storage as &dyn crate::storage::cloud::CloudHome),
-        &NoopBlobSource,
         None,
     )
     .await

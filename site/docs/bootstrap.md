@@ -21,7 +21,7 @@ one pass:
    file. This copy still holds every table, including ones that never sync.
 2. Local-only tables (any table the host did not pass to
    [`Database::open`](rustdoc:method:coven::database::Database::open) as a
-   [`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable), plus coven's
+   [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable), plus coven's
    own `sync_cursors`, `sync_state`, and `cloud_outbox`) have their rows deleted.
    Their schema stays, so the restored database opens against the same schema it
    was snapshotted at, but a device-local row (say a `device_settings` table
@@ -200,9 +200,9 @@ download never fires for them. A bootstrapped device would otherwise have the ro
 but none of the files they point at (a synced album shows a placeholder cover).
 
 [`reconcile_snapshot_blobs`](rustdoc:fn:coven::sync::snapshot::reconcile_snapshot_blobs)
-closes that gap. It reads the blobs the host's
-[`BlobSource`](/docs/blobs#the-blob-source) finds in the bootstrapped database and
-downloads the `Mirrored` ones into the [cache](/docs/cache)
+closes that gap. It derives the blobs the
+[declarations](/docs/blobs#declaring-which-rows-carry-blobs) find in the
+bootstrapped database and downloads the `Mirrored` ones into the [cache](/docs/cache)
 (`storage/pinned/<id>`), skipping any already present. `OnDemand` blobs are left
 for first read, the same as in a steady-state pull. The bootstrap records a pending
 flag in `sync_state`; each later cycle re-runs the reconciliation until every

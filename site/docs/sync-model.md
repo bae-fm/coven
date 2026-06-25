@@ -19,7 +19,7 @@ bootstrap from a snapshot has its own page, [Bootstrap](/docs/bootstrap).
 
 coven owns the SQLite connection. The host opens it once through
 [`Database::open`](rustdoc:method:coven::database::Database::open), passing the
-synced tables as [`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable)
+synced tables as [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable)
 values. Every synced table must have a text `id` primary key at column 0 and an
 `_updated_at TEXT NOT NULL` column. A table not in the set is local-only and
 never leaves the device. From then on the host runs all its SQL through

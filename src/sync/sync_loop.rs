@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
 
-use crate::blob::{BlobSource, BlobUploadObserver};
+use crate::blob::BlobUploadObserver;
 use crate::changeset::RowChange;
 use crate::clock::ClockRef;
 use crate::database::Database;
@@ -61,7 +61,6 @@ struct SyncLoopInner {
     cipher: Arc<std::sync::RwLock<CloudCipher>>,
     db: Database,
     user_keypair: UserKeypair,
-    blob_source: Arc<dyn BlobSource>,
     observer: Option<Arc<dyn BlobUploadObserver>>,
 }
 
@@ -71,7 +70,6 @@ impl SyncLoopHandle {
         db: Database,
         clock: ClockRef,
         library_dir: LibraryDir,
-        blob_source: Arc<dyn BlobSource>,
         observer: Option<Arc<dyn BlobUploadObserver>>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
@@ -86,7 +84,6 @@ impl SyncLoopHandle {
                 cipher: components.cipher,
                 db,
                 user_keypair: components.user_keypair,
-                blob_source,
                 observer,
             }),
             clock,
@@ -319,7 +316,6 @@ async fn run_single_cycle(
         &inner.user_keypair,
         library_dir,
         Some(cloud_home),
-        inner.blob_source.as_ref(),
         inner.observer.as_deref(),
     )
     .await

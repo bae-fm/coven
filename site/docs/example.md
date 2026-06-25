@@ -59,7 +59,7 @@ let (db, stamper) = Database::open(
 
 Every synced table carries an `id` text primary key at column 0 and an
 `_updated_at TEXT NOT NULL` column. The
-[`SyncedTable`](rustdoc:enum:coven::sync::session::SyncedTable) values declare how
+[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values declare how
 each table is gated:
 [`new`](rustdoc:method:coven::sync::session::SyncedTable::new) syncs every row,
 [`gated_by`](rustdoc:method:coven::sync::session::SyncedTable::gated_by) makes a
@@ -148,9 +148,10 @@ let encryption_service = coven::encryption::EncryptionService::new(&encryption_k
 Once a provider is connected, build the
 [`SyncManager`](rustdoc:struct:coven::sync::sync_manager::SyncManager). It takes
 the same `db` handle (and shares its clock), a config provider that returns the
-host's current config on each call, a wall-clock source, and a
-[`BlobSource`](rustdoc:trait:coven::blob::BlobSource) (below). Construction is
-synchronous and never fails, the seeding already happened in `open`.
+host's current config on each call, and a wall-clock source. Which rows carry blobs
+is declared on the synced tables passed to `open` (see [Attachments](#attachments)),
+not here. Construction is synchronous and never fails, the seeding already happened
+in `open`.
 
 ```rust
 use std::sync::Arc;
@@ -163,7 +164,6 @@ let manager = coven::sync::sync_manager::SyncManager::new(
     encryption_service,
     db.clone(),
     Arc::new(coven::clock::SystemClock),
-    Arc::new(TodoBlobSource),
     None, // optional BlobUploadObserver
 );
 
@@ -218,72 +218,39 @@ version, a file that failed to download); show it as is.
 ## Attachments
 
 If a todo carries a file, that file is a blob. coven moves blobs with the rows
-that reference them: the host implements
-[`BlobSource`](rustdoc:trait:coven::blob::BlobSource) to map a row change to the
-blobs it references. coven calls it in both directions, over outgoing changes to
-find what to upload and over incoming ones to find what to download. Each
-[`BlobRef`](rustdoc:struct:coven::blob::BlobRef) names a cloud namespace, the blob
-id, the local plaintext path coven reads it from on push, a
-[`BlobScope`](rustdoc:enum:coven::blob::BlobScope) (`Master` for a key every member
-holds, or `Derived` for a per-scope key), and a
+that reference them, and it learns which rows carry one from a per-table
+*declaration*, not a runtime callback. The host marks the blob-bearing synced table
+with [`carries_blob`](rustdoc:method:coven::sync::session::SyncedTable::carries_blob)
+when it builds the set it passes to `open`, naming the columns that locate each blob
+plus its cloud namespace, a
+[`BlobScopeSpec`](rustdoc:enum:coven::sync::session::BlobScopeSpec)
+(`Master` for a key every member holds, `Derived` for a fixed per-scope key, or
+`ItemColumn` for a per-item key keyed by a column), and a
 [`BlobSync`](rustdoc:enum:coven::blob::BlobSync) retention class (`Mirrored` to keep
-it on every device, `OnDemand` to fetch it on first read).
+it on every device, `OnDemand` to fetch it on first read):
 
 ```rust
-struct TodoBlobSource;
+use coven::blob::BlobSync;
+use coven::sync::session::BlobDecl;
 
-impl coven::blob::BlobSource for TodoBlobSource {
-    fn blobs_for_change(
-        &self,
-        change: &coven::changeset::RowChange,
-    ) -> Vec<coven::blob::BlobRef> {
-        if change.table != "todos" {
-            return Vec::new();
-        }
-        let Some(id) = change.pk().map(str::to_string) else {
-            return Vec::new();
-        };
-        vec![coven::blob::BlobRef {
-            namespace: "todo-files".to_string(),
-            local_path: file_path(&id),
-            scope: coven::blob::BlobScope::Master,
-            cloud_path: None, // opaque home: keyed by id
-            sync: coven::blob::BlobSync::Mirrored,
-            id,
-        }]
-    }
-
-    // The whole-database analogue, used to fetch blobs after a snapshot bootstrap.
-    fn blobs_in_db(
-        &self,
-        conn: &coven::rusqlite::Connection,
-    ) -> coven::rusqlite::Result<Vec<coven::blob::BlobRef>> {
-        let mut stmt = conn.prepare("SELECT id FROM todos")?;
-        let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        ids.map(|id| {
-            let id = id?;
-            Ok(coven::blob::BlobRef {
-                namespace: "todo-files".to_string(),
-                local_path: file_path(&id),
-                scope: coven::blob::BlobScope::Master,
-                cloud_path: None,
-                sync: coven::blob::BlobSync::Mirrored,
-                id,
-            })
-        })
-        .collect()
-    }
-}
+// In the set you pass to `Database::open`, declare the blob on `todos`:
+//   blob id = the row's primary key; opaque home, so no cloud_path column;
+//   master-scoped; kept on every device.
+SyncedTable::new("todos").carries_blob(BlobDecl::new("todo-files", BlobSync::Mirrored))
 ```
 
-coven encrypts the file on upload; on pull it downloads, decrypts, and writes the
+coven resolves the declaration against the live schema each cycle and derives every
+blob a row references itself — what to upload on push, what to download on pull,
+whose cache to drop on a delete, and what to backfill after a snapshot bootstrap.
+It encrypts the file on upload; on pull it downloads, decrypts, and writes the
 plaintext into its own [cache](/docs/cache), which the host reads back through
-`read_blob`. `local_path` is only the upload source, never the pull destination.
-The host can also enqueue work directly with
+`read_blob`. The host stages a blob's bytes into the cache with
+[`stage_blob`](rustdoc:fn:coven::blob::cache::stage_blob) when it writes the
+blob-bearing row, and can enqueue out-of-band uploads/deletes with
 [`enqueue_upload`](rustdoc:method:coven::database::Database::enqueue_upload) and
 [`enqueue_delete`](rustdoc:method:coven::database::Database::enqueue_delete). The
-[Blobs](/docs/blobs) page covers the outbox and the cloud layout, and the
-[Cache](/docs/cache) page covers the device-local read side.
+[Blobs](/docs/blobs) page covers the declaration, the outbox, and the cloud layout,
+and the [Cache](/docs/cache) page covers the device-local read side.
 
 ## Share with a teammate
 

@@ -90,7 +90,8 @@ present file would be wasteful and could hide a real fault.
 ## Mirrored and on-demand
 
 Whether a blob lands in the cache automatically depends on its retention class,
-declared on the [`BlobRef`](/docs/blobs#the-blob-source) as a
+declared per blob in the table's
+[declaration](/docs/blobs#declaring-which-rows-carry-blobs) as a
 [`BlobSync`](rustdoc:enum:coven::blob::BlobSync):
 
 - `Mirrored`: downloaded on pull and kept on every device. Part of "having the

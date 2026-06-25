@@ -23,7 +23,8 @@ use super::membership::{MemberRole, MembershipChain, MembershipCoord, Membership
 use super::push::SCHEMA_VERSION;
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
-use crate::blob::{BlobSource, BlobSync};
+use crate::blob::decl::BlobDecls;
+use crate::blob::BlobSync;
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::library_dir::LibraryDir;
@@ -155,8 +156,20 @@ pub async fn pull_changes(
     our_device_id: &str,
     cursors: &HashMap<String, u64>,
     library_dir: &LibraryDir,
-    blob_source: &dyn BlobSource,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
+    // The blob declarations, resolved once per pull from the synced set + live
+    // schema, the same gate-sibling model the push and snapshot backfill build.
+    // Drives both the download-before-apply of Mirrored blobs and the apply-side
+    // cache drop for deleted blob-bearing rows.
+    let blob_decls = {
+        let tables = tables.to_vec();
+        db.call(move |conn| {
+            BlobDecls::from_tables(conn, &tables)
+                .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))
+        })
+        .await
+        .map_err(|e| PullError::Apply(e.0))?
+    };
     // The receiver's current wall-clock millis, read once from the register clock
     // and passed down to bound an incoming `_updated_at`'s physical component. A
     // stamp grossly beyond this (plus a generous offline allowance) is a broken
@@ -544,7 +557,7 @@ pub async fn pull_changes(
             let blobs_ok = download_changeset_blobs(
                 db,
                 &changes,
-                blob_source,
+                &blob_decls,
                 storage,
                 library_dir,
                 &in_changeset_keys,
@@ -580,6 +593,13 @@ pub async fn pull_changes(
                     changeset: changeset_bytes.clone(),
                 });
             }
+
+            // A changeset that DELETEs a blob-bearing row (a gate retract or a
+            // genuine delete) leaves this peer holding the blob's local cache copy.
+            // Drop both folders for it — the `pinned/` copy is budget-exempt and
+            // would otherwise leak forever once the row is gone. A peer NEVER writes
+            // a cloud tombstone here; that belongs to the deleting/unmanaging owner.
+            drop_deleted_blob_caches(&changes, &blob_decls, library_dir).await;
 
             advance_max_updated_at(
                 &mut result.max_applied_updated_at,
@@ -914,10 +934,10 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
 }
 
 /// Download the `Mirrored` blobs a changeset references. Returns true if all
-/// succeeded. The host's [`BlobSource`] decides which row-changes carry blobs and
-/// their cloud namespace/scope/retention class; the per-blob download runs through
-/// [`download_blobs`], which writes each into `storage/pinned/<id>` under
-/// `library_dir` (the cache, not the host's `local_path`).
+/// succeeded. coven derives which rows carry blobs and their cloud
+/// namespace/scope/retention class from the declarations in `blob_decls`; the
+/// per-blob download runs through [`download_blobs`], which writes each into
+/// `storage/pinned/<id>` under `library_dir` (coven's own cache).
 ///
 /// Only [`BlobSync::Mirrored`] blobs are downloaded — those are part of having the
 /// library on every device. An [`BlobSync::OnDemand`] blob is recorded by the
@@ -929,14 +949,14 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
 async fn download_changeset_blobs(
     db: &Database,
     changes: &[RowChange],
-    blob_source: &dyn BlobSource,
+    blob_decls: &BlobDecls,
     storage: &dyn SyncStorage,
     library_dir: &LibraryDir,
     in_changeset_keys: &HashMap<String, [u8; 32]>,
 ) -> bool {
     download_blobs(
         db,
-        mirrored_blobs(blob_source, changes),
+        mirrored_blobs(blob_decls, changes),
         storage,
         library_dir,
         in_changeset_keys,
@@ -944,17 +964,38 @@ async fn download_changeset_blobs(
     .await
 }
 
-/// The `Mirrored` blobs the `changes` reference, mapping each change through the
-/// host's [`BlobSource`] and keeping only the class a pulling device downloads.
-fn mirrored_blobs(
-    blob_source: &dyn BlobSource,
-    changes: &[RowChange],
-) -> Vec<crate::blob::BlobRef> {
+/// The `Mirrored` blobs the `changes` reference, derived per row from the
+/// declarations and keeping only the class a pulling device downloads.
+fn mirrored_blobs(blob_decls: &BlobDecls, changes: &[RowChange]) -> Vec<crate::blob::BlobRef> {
     changes
         .iter()
-        .flat_map(|change| blob_source.blobs_for_change(change))
+        .filter_map(|change| blob_decls.ref_from_change(change))
         .filter(|blob| blob.sync == BlobSync::Mirrored)
         .collect()
+}
+
+/// Drop the local cache copy of every blob a deleted row in `changes` references.
+/// Runs after a changeset applies: a DELETE of a blob-bearing row (a gate retract
+/// or a genuine delete) must not leave this peer's budget-exempt `pinned/` copy
+/// behind. Best-effort — a failed drop is logged, not fatal — because the row is
+/// already deleted and the bytes are at worst a leaked cache file, never wrong
+/// state; both retention classes are dropped (a deleted row needs neither).
+async fn drop_deleted_blob_caches(
+    changes: &[RowChange],
+    blob_decls: &BlobDecls,
+    library_dir: &LibraryDir,
+) {
+    for change in changes {
+        if change.op != crate::changeset::ChangeOp::Delete {
+            continue;
+        }
+        let Some(blob) = blob_decls.ref_from_change(change) else {
+            continue;
+        };
+        if let Err(e) = crate::blob::cache::drop_cached_blob(library_dir, &blob.id).await {
+            warn!(id = %blob.id, error = %e, "failed to drop cache for a deleted blob-bearing row");
+        }
+    }
 }
 
 /// Resolve a blob's public scope to its internal key scope WITHOUT requiring the
@@ -987,11 +1028,10 @@ async fn resolve_pull_scope(
 /// system-pinned the moment it lands — part of having the library on every device —
 /// so its bytes go to the protected `pinned/` folder, not the evictable `cache/`.
 /// The destination is coven-built from the validated blob id; the cache owns where a
-/// pulled blob lives. The host's `BlobRef::local_path` is the push's upload source,
-/// not a pull destination.
+/// pulled blob lives.
 ///
-/// Each blob's public scope is resolved to the internal key scope here — not in
-/// [`BlobSource`], which has no DB — via [`resolve_pull_scope`], which consults
+/// Each blob's public scope is resolved to the internal key scope here — the blob
+/// declaration carries no key — via [`resolve_pull_scope`], which consults
 /// `in_changeset_keys` (item keys the current changeset mints) before the DB so
 /// resolution does not depend on the changeset being applied. A blob whose item
 /// key is missing is a failed download (logged, `all_ok = false`) so a caller
