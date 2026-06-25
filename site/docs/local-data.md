@@ -101,9 +101,15 @@ component (the root row, its descendants, and the ancestors the new row keeps
 alive) as full inserts in that cycle. The subtree lands complete, not as an
 update to rows the peer is missing.
 
-The reverse, true to false, is a freeze: coven stops emitting the row but does
-not retract what peers already hold. It never sends a delete to take a shared
-row back.
+The reverse, true to false, is a retract: coven emits deletes for the rows that
+leave the shared set so peers remove them — the mirror of the false-to-true
+re-emit. The candidate rows are the structural connected component of the roots
+that flipped this cycle, minus any row still kept by another root (a sibling that
+shares an ancestor is spared; a now-childless ancestor is deleted too). The
+flipping device keeps its own rows (now gated-false, local-only): retract writes
+only to the outgoing changeset, never deletes locally, and fires once on the flip
+cycle. A root that was never shared has nothing on peers to retract, so it emits
+nothing.
 
 ## Where it runs
 

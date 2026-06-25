@@ -23,8 +23,13 @@
 //! whole now-visible subtree (peers never saw it while it was private), so the
 //! promotion lands as a complete consistent subtree on every peer.
 //!
-//! Revoke (gate true→false) is a *freeze*: the row simply stops being emitted.
-//! coven does not retract already-synced rows from peers.
+//! Revoke (gate true→false) is a *retract*: when a previously-shared root flips
+//! true→false this cycle, the rows that leave the shared set are emitted as
+//! DELETEs so peers remove them — the exact mirror of the false→true re-emit. The
+//! flipping device keeps its rows locally (now gated-false = local-only); retract
+//! writes only to the outbound changeset, never to the live tables, and fires once
+//! on the flip cycle. A root that was never shared has nothing on peers to retract
+//! and emits nothing.
 //!
 //! ## How it is built
 //!
@@ -39,6 +44,12 @@
 //!   restricted to the roots that flipped this cycle, and merge them into the
 //!   output. The changegroup dedups by primary key, so a row already present
 //!   from the captured changeset is not duplicated.
+//! - **Retract on flip** is the reverse `sqlite3session_diff`: we create the
+//!   session on the *empty* clone and diff `from = "main"` (populated → empty
+//!   yields a full-state DELETE per current row), then scope those DELETEs to the
+//!   rows leaving the shared set — the structural connected component of the roots
+//!   that flipped true→false this cycle, minus the rows still kept by another
+//!   managed root — and merge them in.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -162,18 +173,25 @@ impl Drop for Changegroup {
     }
 }
 
-/// A raw-FFI session wrapper used only by [`full_state_changeset`]'s re-emit
-/// diff, which runs entirely against the raw `*mut sqlite3` the gate already
-/// holds (alongside the changegroup, also raw FFI). The capture session that
-/// records host writes lives in [`crate::database`] on `rusqlite::session`; this
-/// is a throwaway diff session, not that one.
+/// A raw-FFI session wrapper used only by the full-state diffs
+/// ([`full_state_changeset`]'s re-emit INSERTs and [`full_state_deletes`]'s
+/// retract DELETEs), which run entirely against the raw `*mut sqlite3` the gate
+/// already holds (alongside the changegroup, also raw FFI). The capture session
+/// that records host writes lives in [`crate::database`] on `rusqlite::session`;
+/// this is a throwaway diff session, not that one.
 struct DiffSession {
     raw: *mut ffi::sqlite3_session,
 }
 
 impl DiffSession {
-    unsafe fn new(db: *mut ffi::sqlite3) -> Result<Self, GateError> {
-        let db_name = CString::new("main").unwrap();
+    /// Create a diff session bound to the schema named `schema` (`"main"` for the
+    /// re-emit direction, the empty-clone alias for the retract direction). The
+    /// diff transforms the `from_db` table into this bound schema's table, so
+    /// which schema the session binds to picks the direction: bound to `main` with
+    /// `from = empty` yields INSERTs; bound to `empty` with `from = "main"` yields
+    /// DELETEs.
+    unsafe fn new(db: *mut ffi::sqlite3, schema: &str) -> Result<Self, GateError> {
+        let db_name = CString::new(schema).unwrap();
         let mut raw: *mut ffi::sqlite3_session = ptr::null_mut();
         let rc = ffi::sqlite3session_create(db, db_name.as_ptr(), &mut raw);
         if rc != ffi::SQLITE_OK as c_int {
@@ -191,8 +209,10 @@ impl DiffSession {
         Ok(())
     }
 
-    /// Record the changes that would transform `from_db.tbl` into `main.tbl`.
-    /// With an empty `from_db.tbl`, that is a full-state INSERT per current row.
+    /// Record the changes that would transform `from_db.tbl` into the table of the
+    /// schema this session is bound to. Bound to `main` with an empty `from_db`,
+    /// that is a full-state INSERT per current row; bound to the empty clone with
+    /// `from_db = "main"`, it is a full-state DELETE per current row.
     unsafe fn diff(&self, from_db: &str, tbl: &str) -> Result<(), GateError> {
         let from = CString::new(from_db).unwrap();
         let table = CString::new(tbl).unwrap();
@@ -599,7 +619,7 @@ fn chain_to_gate_depth(gate_map: &HashMap<String, TableGate>, name: &str) -> Opt
 /// The gated FK edges of the schema, as `parent table -> [(child table, child's
 /// FK column name)]`: for every gated table, each of its FKs that points at
 /// another gated table contributes an edge under the *target* (the parent). The
-/// fixpoint walk in [`connected_kept_component`] follows these down-edges
+/// fixpoint walk in [`connected_component`] follows these down-edges
 /// directly; [`fk_topological_order`] uses the same edges (discarding the FK
 /// column) so the parent-first order is derived from one definition, not a second
 /// parallel FK scan.
@@ -699,8 +719,9 @@ unsafe fn fk_topological_order(
 }
 
 /// Gate a captured outbound changeset: cut gated-false rows (and their gated
-/// descendants), and re-emit the full subtree of any root that flipped
-/// false→true this cycle.
+/// descendants), re-emit the full subtree of any root that flipped false→true
+/// this cycle as INSERTs, and emit DELETEs for the rows that leave the shared set
+/// when a root flips true→false this cycle (retract).
 ///
 /// Runs on the connection coven owns; gating reads current row state from the
 /// live tables (capture stays enabled here, disabled only around the pull's
@@ -729,6 +750,11 @@ unsafe fn gate_outbound_raw(
     // component re-emitted (peers never had it while private) — descendants AND
     // always-shared ancestors. Keyed by `(root table, root id)`.
     let mut flipped_roots: HashSet<(String, String)> = HashSet::new();
+
+    // Roots that flip true→false this cycle were shared and must be retracted: the
+    // rows leaving their shared set are emitted as DELETEs below (pass 2), so peers
+    // remove them. Keyed by `(root table, root id)`. The mirror of flipped_roots.
+    let mut retracted_roots: HashSet<(String, String)> = HashSet::new();
 
     // Gated parents a kept row's UPDATE repoints an FK onto. The new parent may
     // be a subtree peers never received (cut until this reparent made it
@@ -772,6 +798,28 @@ unsafe fn gate_outbound_raw(
                 }
                 return Ok(());
             }
+
+            // A gated root flipping true→false this cycle was shared; emit DELETEs
+            // for the rows leaving its shared set (pass 2). Skip the captured
+            // UPDATE-to-false: a peer applying it would freeze a zombie (the row
+            // stops updating but is never removed); the synthetic DELETE replaces
+            // it. A root that was never shared has no true→false transition and is
+            // handled by the ordinary cut path below (it emits nothing).
+            let retracts = row.op == ffi::SQLITE_UPDATE
+                && row.old_truth(*gate_col) == Some(true)
+                && row.new_truth(*gate_col) == Some(false);
+            if retracts {
+                match row.pk() {
+                    Some(pk) => {
+                        retracted_roots.insert((row.table.clone(), pk.to_string()));
+                    }
+                    None => debug!(
+                        table = %row.table,
+                        "gate: retracted root row has no primary key; its subtree cannot be retracted"
+                    ),
+                }
+                return Ok(());
+            }
         }
 
         // A DELETE propagates iff the row was shared before this changeset removed
@@ -809,6 +857,12 @@ unsafe fn gate_outbound_raw(
     // Pass 2: re-emit full subtrees for flipped roots and reparent targets.
     if !flipped_roots.is_empty() || !reparent_seeds.is_empty() {
         reemit_subtrees(db, gates, &flipped_roots, &reparent_seeds, &group)?;
+    }
+
+    // Pass 2 (retract): emit DELETEs for the rows leaving the shared set of any
+    // root that flipped true→false this cycle. The mirror of reemit_subtrees.
+    if !retracted_roots.is_empty() {
+        reemit_retract_deletes(db, gates, &retracted_roots, &group)?;
     }
 
     group.output()
@@ -892,7 +946,7 @@ unsafe fn reemit_subtrees(
     // parent's whole kept component lands on peers.
     let mut seeds = flipped_roots.clone();
     seeds.extend(reparent_seeds.iter().cloned());
-    let reemit_ids = connected_kept_component(db, gates, &seeds)?;
+    let reemit_ids = connected_component(db, gates, &seeds, true)?;
 
     let diff_bytes = full_state_changeset(db, gates)?;
     if diff_bytes.is_empty() {
@@ -912,29 +966,98 @@ unsafe fn reemit_subtrees(
     })
 }
 
-/// The whole connected component of currently-kept gated rows reachable from the
-/// flipped roots, walking the live FK graph in BOTH directions: *up* to gated
-/// ancestors (release → album → artist) and *down* to currently-kept children
-/// (album → its kept releases; artist → its kept join rows). Crucially, a kept
-/// child pulled in *down* has its own ancestors walked *up* in turn — a join row
-/// (album_artists) reached as a kept child of an album drags in the second artist
-/// it credits (a featured artist who does not own the album), which the snapshot
-/// `keep_clause` also keeps. The result is the transitive closure, so a fresh
-/// peer materializes the same connected graph the snapshot prune would.
+/// Emit DELETEs for the rows that leave the shared set when each retracted root's
+/// gate flips true→false this cycle — the exact mirror of [`reemit_subtrees`].
 ///
-/// This reconstructs in row-walk form the same relation `keep_clause` expresses
-/// recursively; computing it as a fixed up-then-one-level-down pass under-emits
-/// any kept row reachable only sideways. A worklist to a fixpoint, cycle-guarded
-/// by the visited set, is the only correct shape.
+/// The candidate set is the *structural* connected component of the retracted
+/// roots ([`connected_component`] with `restrict_to_kept = false`): the same
+/// bidirectional FK closure the re-emit path walks, except the down-walk follows
+/// live FK edges WITHOUT a kept-filter. The rows still physically exist locally —
+/// only the root's gate column changed — so a kept-filter would wrongly exclude
+/// the root's own descendants (they inherit the now-false gate).
 ///
-/// The seed is the flipped roots themselves. Re-walking their descendants here is
-/// harmless: the changegroup dedups by primary key and the apply conflict handler
-/// resolves a duplicate INSERT by LWW, so over-emitting never corrupts a peer;
-/// only under-emitting does.
-unsafe fn connected_kept_component(
+/// From that candidate set we keep only the rows NO LONGER kept under the
+/// post-flip live state (`!gates.row_kept`). That single filter does both jobs:
+/// it SPARES a sibling still held by another managed root sharing an album/artist
+/// ancestor (that sibling is still kept), and it INCLUDES a now-childless
+/// `gated_by_descendants` ancestor (album/artist) so it is DELETEd too (it is no
+/// longer kept).
+///
+/// The DELETEs are synthesized by [`full_state_deletes`] (a DELETE per live gated
+/// row, scoped here to the to-delete set). The changegroup dedups by primary key,
+/// so a row both locally deleted this cycle and synthetically retracted resolves
+/// to a single DELETE. `full_state_deletes` only carries rows still present in
+/// `main`, so a row the captured changeset already removed never collides here.
+unsafe fn reemit_retract_deletes(
     db: *mut ffi::sqlite3,
     gates: &Gates,
-    flipped_roots: &HashSet<(String, String)>,
+    retracted_roots: &HashSet<(String, String)>,
+    group: &Changegroup,
+) -> Result<(), GateError> {
+    let component = connected_component(db, gates, retracted_roots, false)?;
+
+    // Keep only the rows no longer kept under the post-flip live state. The live db
+    // already reflects the gate flip when gate_outbound runs, so the retracted
+    // root and its now-orphaned descendants/ancestors read not-kept, while a
+    // sibling still held by another managed root reads kept and is spared.
+    let mut to_delete: HashSet<(String, String)> = HashSet::new();
+    for (table, id) in component {
+        if !gates.row_kept(db, &table, &id)? {
+            to_delete.insert((table, id));
+        }
+    }
+    if to_delete.is_empty() {
+        return Ok(());
+    }
+
+    let delete_bytes = full_state_deletes(db, gates)?;
+    if delete_bytes.is_empty() {
+        return Ok(());
+    }
+
+    for_each_change(&delete_bytes, |iter, row| {
+        let in_to_delete = row
+            .pk()
+            .is_some_and(|pk| to_delete.contains(&(row.table.clone(), pk.to_string())));
+        if in_to_delete {
+            group.add_change(iter)?;
+        }
+        Ok(())
+    })
+}
+
+/// The whole connected component of gated rows reachable from `seeds`, walking the
+/// live FK graph in BOTH directions: *up* to gated ancestors (release → album →
+/// artist) and *down* to gated children (album → its releases; artist → its join
+/// rows). Crucially, a child pulled in *down* has its own ancestors walked *up* in
+/// turn — a join row (album_artists) reached as a child of an album drags in the
+/// second artist it credits (a featured artist who does not own the album), which
+/// the snapshot `keep_clause` also keeps. The result is the transitive closure,
+/// cycle-guarded by the visited set.
+///
+/// `restrict_to_kept` governs only the *down*-walk (the *up*-walk is unconditional
+/// either way, so an ancestor is always reached and the caller can make its share
+/// decision):
+///
+/// - `true` (re-emit, false→true): descend only into currently-*kept* children, so
+///   the component is exactly the row set the snapshot `keep_clause` keeps — the
+///   rows a fresh peer must materialize. Reconstructs in row-walk form the same
+///   relation `keep_clause` expresses recursively.
+/// - `false` (retract, true→false): descend *structurally* into every child by
+///   live FK, no kept-filter. At retract time the root's gate column has already
+///   flipped false, so its descendants are no longer kept; a kept-filtered walk
+///   would never reach them. The retract caller filters the structural component
+///   by post-flip `row_kept` to decide which rows actually leave the shared set.
+///
+/// Over-collecting is safe for both callers (re-emit dedups by PK and resolves a
+/// duplicate INSERT by LWW; retract filters by `row_kept` before emitting); only
+/// under-collecting fails, so the closure is computed in full rather than as a
+/// fixed up-then-one-level-down pass.
+unsafe fn connected_component(
+    db: *mut ffi::sqlite3,
+    gates: &Gates,
+    seeds: &HashSet<(String, String)>,
+    restrict_to_kept: bool,
 ) -> Result<HashSet<(String, String)>, GateError> {
     // Down-edges: for each gated table, the gated tables that hold an FK
     // referencing it, paired with the referrer's FK column name. Built once from
@@ -943,7 +1066,7 @@ unsafe fn connected_kept_component(
     let down_edges = gated_fk_child_edges(db, &gates.tables)?;
 
     let mut out: HashSet<(String, String)> = HashSet::new();
-    let mut work: Vec<(String, String)> = flipped_roots.iter().cloned().collect();
+    let mut work: Vec<(String, String)> = seeds.iter().cloned().collect();
     while let Some((table, id)) = work.pop() {
         if !out.insert((table.clone(), id.clone())) {
             continue; // already visited: cycle-guard and dedup.
@@ -957,11 +1080,12 @@ unsafe fn connected_kept_component(
                 work.push((parent, parent_id));
             }
         }
-        // Down: every currently-kept gated child referencing this row.
+        // Down: each gated child referencing this row — filtered to kept children
+        // for re-emit, taken structurally (every live FK edge) for retract.
         if let Some(children) = down_edges.get(table.as_str()) {
             for (child_table, fk) in children {
                 for child_id in rows_referencing(db, child_table, fk, &id)? {
-                    if gates.row_kept(db, child_table, &child_id)? {
+                    if !restrict_to_kept || gates.row_kept(db, child_table, &child_id)? {
                         work.push((child_table.clone(), child_id));
                     }
                 }
@@ -1005,12 +1129,17 @@ unsafe fn rows_referencing(
     Ok(ids)
 }
 
-/// Diff every gated table (`main`) against an empty schema-identical clone,
-/// producing full-state INSERTs for all currently-present rows of those tables.
-unsafe fn full_state_changeset(db: *mut ffi::sqlite3, gates: &Gates) -> Result<Vec<u8>, GateError> {
-    // Attach a fresh empty in-memory db and recreate each gated table's schema
-    // in it, copied verbatim from sqlite_master so the diff sees identical
-    // tables. A unique alias avoids colliding with any host-attached db.
+/// Attach a fresh empty in-memory db, recreate each gated table's schema in it
+/// (copied verbatim from `sqlite_master` so a diff sees identical tables), run
+/// `f` against the clone, and always detach afterward. Both full-state diff
+/// directions share this setup; they differ only in which schema the diff session
+/// binds to. `f` receives the clone alias and the gated tables in parent-first
+/// order. A unique alias avoids colliding with any host-attached db.
+unsafe fn with_empty_clone<R>(
+    db: *mut ffi::sqlite3,
+    gates: &Gates,
+    f: impl FnOnce(&str, &[&str]) -> Result<R, GateError>,
+) -> Result<R, GateError> {
     let alias = "coven_gate_empty";
     let attach = format!("ATTACH DATABASE ':memory:' AS {alias}");
     exec_sql(db, &attach)?;
@@ -1024,13 +1153,7 @@ unsafe fn full_state_changeset(db: *mut ffi::sqlite3, gates: &Gates) -> Result<V
             let in_alias = rewrite_create_into_schema(&create, tbl, alias);
             exec_sql(db, &in_alias)?;
         }
-
-        let session = DiffSession::new(db)?;
-        for tbl in &tables {
-            session.attach(tbl)?;
-            session.diff(alias, tbl)?;
-        }
-        session.changeset()
+        f(alias, &tables)
     })();
 
     // Always detach, even on error. A failed detach leaves the clone attached
@@ -1041,6 +1164,43 @@ unsafe fn full_state_changeset(db: *mut ffi::sqlite3, gates: &Gates) -> Result<V
     }
 
     result
+}
+
+/// Diff every gated table (`main`) against an empty schema-identical clone,
+/// producing full-state INSERTs for all currently-present rows of those tables.
+/// The session binds to `main` and diffs `from = empty`, so empty → main is an
+/// INSERT per current row.
+unsafe fn full_state_changeset(db: *mut ffi::sqlite3, gates: &Gates) -> Result<Vec<u8>, GateError> {
+    with_empty_clone(db, gates, |alias, tables| {
+        let session = DiffSession::new(db, "main")?;
+        for tbl in tables {
+            session.attach(tbl)?;
+            session.diff(alias, tbl)?;
+        }
+        session.changeset()
+    })
+}
+
+/// Diff every gated table against an empty schema-identical clone in the REVERSE
+/// direction of [`full_state_changeset`], producing full-state DELETEs for all
+/// currently-present rows of those tables. The session binds to the empty clone
+/// and diffs `from = "main"`, so main → empty is a DELETE per current row (a row
+/// present in `from` but absent in the session db). The retract path scopes these
+/// to the rows leaving the shared set.
+///
+/// The FFI argument order is what makes the direction (verified by the retract
+/// peer-apply tests): `sqlite3session_diff` records the changes that transform the
+/// `from_db` table into the session-bound table, so binding the session to the
+/// empty clone and passing `from = "main"` yields DELETEs.
+unsafe fn full_state_deletes(db: *mut ffi::sqlite3, gates: &Gates) -> Result<Vec<u8>, GateError> {
+    with_empty_clone(db, gates, |alias, tables| {
+        let session = DiffSession::new(db, alias)?;
+        for tbl in tables {
+            session.attach(tbl)?;
+            session.diff("main", tbl)?;
+        }
+        session.changeset()
+    })
 }
 
 /// Whether `row`'s effective gate is true (it should be kept/shared).
@@ -1367,7 +1527,7 @@ unsafe fn gated_root_id(
         }
         // An ancestor has no gated-ancestor root in the downward sense this
         // scoping uses; its re-emit is driven by the kept-component closure in
-        // `connected_kept_component`, not by the flipped-root descendant test.
+        // `connected_component`, not by the flipped-root descendant test.
         Some(TableGate::Parent { .. }) => Ok(None),
     }
 }
@@ -3044,6 +3204,470 @@ mod tests {
             query_int(&peer, "SELECT COUNT(*) FROM albums WHERE id = 'AL'"),
             1,
             "the duplicate INSERT did not create a second album row"
+        );
+    }
+
+    // ---- retract (gate true→false) -------------------------------------------
+
+    fn has_op(
+        changes: &[crate::changeset::RowChange],
+        table: &str,
+        pk: &str,
+        op: ChangeOp,
+    ) -> bool {
+        changes
+            .iter()
+            .any(|c| c.table == table && c.pk() == Some(pk) && c.op == op)
+    }
+
+    #[test]
+    fn retract_emits_deletes_and_local_rows_remain() {
+        let c = conn();
+        create_synced_schema(&c);
+        let tables = test_synced_tables();
+
+        // Cycle 1: a shared note with children (inserted shared=1 → flip emits the
+        // subtree as INSERTs).
+        let _ = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Public', 'b', 1, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+                 VALUES ('p1', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+
+        // Cycle 2: flip the gate false. The captured UPDATE-to-false is skipped;
+        // the gate synthesizes DELETEs for the root and its now-private subtree.
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE notes SET shared = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(
+            has_op(&changes, "notes", "n1", ChangeOp::Delete),
+            "the retracted root is emitted as a DELETE"
+        );
+        assert!(
+            has_op(&changes, "note_tags", "t1", ChangeOp::Delete),
+            "the tag child leaves the shared set as a DELETE"
+        );
+        assert!(
+            has_op(&changes, "note_photos", "p1", ChangeOp::Delete),
+            "the photo child leaves the shared set as a DELETE"
+        );
+        assert!(
+            changes.iter().all(|c| c.op == ChangeOp::Delete),
+            "retract emits only DELETEs (verifies the reverse session_diff direction)"
+        );
+
+        // The local rows stay — retract is peer-only, never a local DELETE FROM.
+        assert!(row_exists(&c, "SELECT 1 FROM notes WHERE id = 'n1'"));
+        assert!(row_exists(&c, "SELECT 1 FROM note_tags WHERE id = 't1'"));
+        assert!(row_exists(&c, "SELECT 1 FROM note_photos WHERE id = 'p1'"));
+    }
+
+    #[test]
+    fn peer_applies_retract_and_subtree_is_removed() {
+        let c = conn();
+        create_synced_schema(&c);
+        let tables = test_synced_tables();
+
+        // Share the subtree to a peer.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Public', 'b', 1, '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+                 VALUES ('t1', 'n1', 'green', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+                 VALUES ('p1', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+        let peer = conn();
+        create_synced_schema(&peer);
+        apply_changeset_lww(&peer, &out1, &tables, crate::sync::hlc::now_wall_ms())
+            .expect("apply share");
+        assert!(row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"));
+        assert!(row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"));
+        assert!(row_exists(
+            &peer,
+            "SELECT 1 FROM note_photos WHERE id = 'p1'"
+        ));
+
+        // Retract and apply: the whole subtree is gone on the peer.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE notes SET shared = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
+        );
+        apply_changeset_lww(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
+            .expect("apply retract");
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
+            "peer drops the retracted root"
+        );
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"),
+            "peer drops the tag child"
+        );
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM note_photos WHERE id = 'p1'"),
+            "peer drops the photo child"
+        );
+    }
+
+    #[test]
+    fn retract_one_of_two_managed_roots_spares_sibling_and_ancestor() {
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
+
+        // Two managed releases under one album/artist, with a track each.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R2', 'AL', 1, '0000000001000-0000-dev1')",
+                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
+                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T2', 'R2', '0000000001000-0000-dev1')",
+            ],
+        );
+        let peer = conn();
+        create_album_schema(&peer);
+        apply_album(&peer, &out1);
+
+        // Retract only R1.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+        );
+        let changes = walk(&out2).expect("walk");
+        assert!(
+            has_op(&changes, "releases", "R1", ChangeOp::Delete),
+            "R1 deleted"
+        );
+        assert!(
+            has_op(&changes, "tracks", "T1", ChangeOp::Delete),
+            "T1 deleted"
+        );
+        assert!(
+            !has_row(&changes, "releases", "R2"),
+            "the sibling managed release is spared"
+        );
+        assert!(
+            !has_row(&changes, "tracks", "T2"),
+            "the sibling's track is spared"
+        );
+        assert!(
+            !has_row(&changes, "albums", "AL"),
+            "the album is spared (still has a managed release)"
+        );
+        assert!(!has_row(&changes, "artists", "AR"), "the artist is spared");
+        assert!(
+            !has_row(&changes, "album_artists", "AA"),
+            "the join row is spared"
+        );
+
+        apply_album(&peer, &out2);
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "R1 gone on peer"
+        );
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            "T1 gone on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R2'"),
+            "R2 kept on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T2'"),
+            "T2 kept on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "album kept on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            "artist kept on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            "join row kept on peer"
+        );
+    }
+
+    #[test]
+    fn retract_last_root_under_ancestor_deletes_ancestor() {
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
+
+        // A single managed release under an album/artist.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
+            ],
+        );
+        let peer = conn();
+        create_album_schema(&peer);
+        apply_album(&peer, &out1);
+
+        // Retract the last managed release: the now-childless album AND artist are
+        // deleted too.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+        );
+        let changes = walk(&out2).expect("walk");
+        for (table, pk) in [
+            ("releases", "R1"),
+            ("tracks", "T1"),
+            ("albums", "AL"),
+            ("artists", "AR"),
+            ("album_artists", "AA"),
+        ] {
+            assert!(
+                has_op(&changes, table, pk, ChangeOp::Delete),
+                "{table}.{pk} is deleted when the last managed root is retracted"
+            );
+        }
+
+        apply_album(&peer, &out2);
+        assert!(!row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"));
+        assert!(!row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T1'"));
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "the now-childless album is deleted on the peer"
+        );
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            "the now-childless artist is deleted on the peer"
+        );
+        assert!(!row_exists(
+            &peer,
+            "SELECT 1 FROM album_artists WHERE id = 'AA'"
+        ));
+    }
+
+    #[test]
+    fn gated_false_root_from_start_emits_no_deletes() {
+        let c = conn();
+        create_synced_schema(&c);
+        let tables = test_synced_tables();
+
+        // Cycle 1: a private note (never shared). Nothing emitted.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'Private', 'b', 0, '0000000001000-0000-dev1', '2026-01-01')",
+            ],
+        );
+        assert!(
+            walk(&out1).expect("walk").is_empty(),
+            "a gated-false root inserted private emits nothing — no DELETE"
+        );
+
+        // Cycle 2: edit the still-private note (no gate transition). The update is
+        // cut as before; no retract fires (there was never a true→false flip).
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE notes SET body = 'edited', _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
+        );
+        assert!(
+            walk(&out2).expect("walk").is_empty(),
+            "editing a never-shared gated-false root emits nothing — retract only fires on a true→false transition"
+        );
+    }
+
+    #[test]
+    fn reshare_after_retract_reemits_inserts() {
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
+
+        // Cycle 1: a private subtree (release unmanaged). Nothing escapes.
+        let _ = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
+                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1')",
+            ],
+        );
+        let peer = conn();
+        create_album_schema(&peer);
+
+        // Cycle 2: share (false→true). Peer gets the whole component.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+        );
+        apply_album(&peer, &out2);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "shared to peer"
+        );
+
+        // Cycle 3: retract (true→false). Peer loses the component.
+        let out3 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R1'"],
+        );
+        apply_album(&peer, &out3);
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "retracted from peer"
+        );
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "album retracted"
+        );
+
+        // Cycle 4: re-share (false→true) re-emits full INSERTs — round-trip.
+        let out4 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000004000-0000-dev1' WHERE id = 'R1'"],
+        );
+        let changes = walk(&out4).expect("walk");
+        for (table, pk) in [
+            ("releases", "R1"),
+            ("tracks", "T1"),
+            ("albums", "AL"),
+            ("artists", "AR"),
+            ("album_artists", "AA"),
+        ] {
+            assert!(
+                has_op(&changes, table, pk, ChangeOp::Insert),
+                "{table}.{pk} re-emitted as an INSERT on re-share"
+            );
+        }
+        apply_album(&peer, &out4);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "re-shared to peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            "track back on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "album back on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            "artist back on peer"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM album_artists WHERE id = 'AA'"),
+            "join row back"
+        );
+    }
+
+    #[test]
+    fn multi_device_share_then_retract() {
+        // Device A shares a subtree (false→true), device B applies it; A retracts
+        // (true→false), B applies and the subtree is gone on B.
+        let a = conn();
+        create_album_schema(&a);
+        let tables = album_tables();
+        let b = conn();
+        create_album_schema(&b);
+
+        // A builds a private subtree, then flips it shared.
+        let _ = capture_and_gate(
+            &a,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-devA')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-devA')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-devA')",
+                "INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-devA')",
+            ],
+        );
+        let share = capture_and_gate(
+            &a,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-devA' WHERE id = 'R1'"],
+        );
+        apply_album(&b, &share);
+        assert!(
+            row_exists(&b, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "B has the release"
+        );
+        assert!(
+            row_exists(&b, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            "B has the track"
+        );
+        assert!(
+            row_exists(&b, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "B has the album"
+        );
+
+        // A retracts; B applies; the subtree is gone on B while A keeps it locally.
+        let retract = capture_and_gate(
+            &a,
+            &tables,
+            &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-devA' WHERE id = 'R1'"],
+        );
+        apply_album(&b, &retract);
+        assert!(
+            !row_exists(&b, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "B drops the release"
+        );
+        assert!(
+            !row_exists(&b, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            "B drops the track"
+        );
+        assert!(
+            !row_exists(&b, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "B drops the album"
+        );
+
+        // A keeps the rows locally — retract is peer-only.
+        assert!(
+            row_exists(&a, "SELECT 1 FROM releases WHERE id = 'R1'"),
+            "A keeps the release"
+        );
+        assert!(
+            row_exists(&a, "SELECT 1 FROM tracks WHERE id = 'T1'"),
+            "A keeps the track"
+        );
+        assert!(
+            row_exists(&a, "SELECT 1 FROM albums WHERE id = 'AL'"),
+            "A keeps the album"
         );
     }
 }

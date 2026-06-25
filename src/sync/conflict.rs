@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use rusqlite::hooks::Action;
 use rusqlite::session::{ChangesetItem, ConflictAction, ConflictType};
 use rusqlite::Connection;
 use tracing::warn;
@@ -104,9 +105,12 @@ impl TableSchema {
 /// FOREIGN_KEY conflicts never reach here — [`super::apply`] resolves them before
 /// calling this, because that conflict type's iterator does not expose the row.
 ///
-/// For DATA/CONFLICT, `item.new_value(uat)` is the incoming `_updated_at` and
-/// `item.conflict(uat)` the existing local one; either can be absent (an
-/// unchanged column in an UPDATE) → `None` → OMIT (keep local). Both are parsed
+/// For DATA/CONFLICT, the incoming `_updated_at` is read from the side the op
+/// records — `item.new_value(uat)` for an INSERT/UPDATE, `item.old_value(uat)` for
+/// a DELETE (which has no "new" side) — and `item.conflict(uat)` is the existing
+/// local one; either can be absent (an unchanged column in an UPDATE) → `None` →
+/// OMIT (keep local). So a DELETE wins the conflict iff its recorded stamp is newer
+/// than the local row's, the same LWW rule as every other op. Both are parsed
 /// as HLC [`Timestamp`]s; an unparseable value keeps local. A grossly-future
 /// incoming stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`]
 /// — is refused (kept local) so a broken clock can't win every conflict. `fk_flag`
@@ -147,7 +151,21 @@ pub fn lww_conflict_handler(
                     }
                 }
             };
-            let incoming = read_stamp(item.new_value(uat), "incoming");
+            // The incoming `_updated_at` lives on whichever side the op records: a
+            // DELETE carries only its old values (no "new" side), an INSERT/UPDATE
+            // carry the new value. Reading `new_value` for a DELETE returns None,
+            // which would keep local and leave a DELETE whose row diverges from the
+            // peer's copy unapplied — a zombie (the exact strand gate retract fixes,
+            // where the retracted root's flip bumped its gate column + `_updated_at`
+            // so its synthetic DELETE no longer matches the peer's pre-flip row).
+            let incoming_is_delete =
+                matches!(item.op().map(|o| o.code()), Ok(Action::SQLITE_DELETE));
+            let incoming_raw = if incoming_is_delete {
+                item.old_value(uat)
+            } else {
+                item.new_value(uat)
+            };
+            let incoming = read_stamp(incoming_raw, "incoming");
             let local = read_stamp(item.conflict(uat), "local");
 
             match (incoming, local) {

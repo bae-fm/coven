@@ -12,7 +12,9 @@
 /// peers. [`SyncedTable::gated_by`] makes it a *gated root*: a boolean column
 /// whose truth decides, per row, whether that row (and its declared
 /// FK-descendants) is shared. A gated-false root and its subtree stay local;
-/// flipping the gate true re-emits the whole now-visible subtree to peers.
+/// flipping the gate true re-emits the whole now-visible subtree to peers, and
+/// flipping it false again retracts that subtree from peers (emitting deletes for
+/// the rows leaving the shared set) while the rows stay local.
 ///
 /// [`SyncedTable::gated_by_descendants`] is the upward complement: an
 /// always-shared *ancestor* that should sync only while at least one gated
