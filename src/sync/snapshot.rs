@@ -1658,14 +1658,15 @@ mod tests {
     }
 
     /// coven's own bookkeeping tables (`sync_state`, `sync_cursors`,
-    /// `cloud_outbox`) are per-device: a peer's cursors, pending outbox, and HLC
-    /// high-water must NOT ride a snapshot to a restoring device — inheriting them
-    /// would make the new device think it had already pulled the snapshotter's
-    /// peers, or replay the snapshotter's blob queue. They are not in the synced
-    /// set, so the table-level clear must strip their rows while keeping the
-    /// schemas (so the restored DB opens and coven can immediately write its own
-    /// fresh bookkeeping). This guards that present-but-empty invariant, which the
-    /// other snapshot tests miss because their schema omits coven's tables.
+    /// `cloud_outbox`, `local_blob_refs`) are per-device: a peer's cursors, pending
+    /// outbox, HLC high-water, and external-file refs must NOT ride a snapshot to a
+    /// restoring device — inheriting them would make the new device think it had
+    /// already pulled the snapshotter's peers, replay the snapshotter's blob queue,
+    /// or read a peer's local file paths. They are not in the synced set, so the
+    /// table-level clear must strip their rows while keeping the schemas (so the
+    /// restored DB opens and coven can immediately write its own fresh
+    /// bookkeeping). This guards that present-but-empty invariant, which the other
+    /// snapshot tests miss because their schema omits coven's tables.
     #[tokio::test]
     async fn snapshot_does_not_carry_bookkeeping_tables_to_a_restoring_device() {
         let db_a = synced_conn();
@@ -1688,6 +1689,11 @@ mod tests {
                  VALUES ('upload', 'f1', 'blobs/f1', '{}', '2026-01-01')",
                 crate::blob::BlobScope::Master.to_outbox_str()
             ),
+        );
+        exec(
+            &db_a,
+            "INSERT INTO local_blob_refs (blob_id, namespace, path, size) \
+             VALUES ('f1', 'audio', '/Users/peer/Music/track.flac', 1234)",
         );
         // A synced row that SHOULD cross, to prove the snapshot still carries data.
         exec(
@@ -1729,7 +1735,12 @@ mod tests {
         );
 
         // Each bookkeeping table is present (schema kept) but empty (rows cleared).
-        for table in ["sync_state", "sync_cursors", "cloud_outbox"] {
+        for table in [
+            "sync_state",
+            "sync_cursors",
+            "cloud_outbox",
+            "local_blob_refs",
+        ] {
             assert!(
                 row_exists(
                     &db_b,

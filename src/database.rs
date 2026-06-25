@@ -33,7 +33,7 @@ use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
 
-use crate::db::{OutboxEntry, OutboxOperation, MIGRATION_SQL};
+use crate::db::{ExternalBlob, OutboxEntry, OutboxOperation, MIGRATION_SQL};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
 use crate::sync::session::SyncedTable;
 
@@ -899,6 +899,78 @@ impl Database {
                 (error, attempted_at, id),
             )
             .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    // ---- Local blob refs (external user files) ----
+
+    /// Register an external blob ref: map `blob_id` to the user-owned file at
+    /// `path`, whose plaintext length is `size`. Insert-or-replace on `blob_id`, so
+    /// a relocate (the user picks a new folder; the host recomputes each path and
+    /// re-registers) overwrites the prior row. coven reads this file but does not
+    /// own it; a read validates it by presence + size (see
+    /// [`crate::db`]'s `local_blob_refs` and [`crate::blob::cache::read_blob`]).
+    pub async fn register_external_blob(
+        &self,
+        blob_id: &str,
+        namespace: &str,
+        path: &Path,
+        size: u64,
+    ) -> Result<(), DbError> {
+        let path = path.to_str().ok_or_else(|| {
+            DbError(format!(
+                "external blob path for {blob_id} is not valid UTF-8: {path:?}"
+            ))
+        })?;
+        let (blob_id, namespace, path) =
+            (blob_id.to_string(), namespace.to_string(), path.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO local_blob_refs (blob_id, namespace, path, size) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(blob_id) DO UPDATE SET \
+                     namespace = excluded.namespace, \
+                     path = excluded.path, \
+                     size = excluded.size",
+                (blob_id, namespace, path, size as i64),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// Remove the external blob ref for `blob_id`, so the blob resolves through the
+    /// normal cache/cloud path again. A no-op if no ref is registered.
+    pub async fn clear_external_blob(&self, blob_id: &str) -> Result<(), DbError> {
+        let blob_id = blob_id.to_string();
+        self.call(move |conn| {
+            conn.execute("DELETE FROM local_blob_refs WHERE blob_id = ?1", [blob_id])
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// The external user-owned file `blob_id` resolves to, or `None` when no ref is
+    /// registered (the blob is owned-cache/cloud, not external). The locality-aware
+    /// read consults this before the cache/cloud resolution.
+    pub async fn external_blob(&self, blob_id: &str) -> Result<Option<ExternalBlob>, DbError> {
+        let blob_id = blob_id.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT path, size FROM local_blob_refs WHERE blob_id = ?1",
+                [blob_id],
+                |r| {
+                    Ok(ExternalBlob {
+                        path: std::path::PathBuf::from(r.get::<_, String>(0)?),
+                        size: r.get::<_, i64>(1)? as u64,
+                    })
+                },
+            )
+            .optional()
             .map_err(DbError::from)
         })
         .await

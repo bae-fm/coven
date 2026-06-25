@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use super::cache::{
     clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
+    BlobCacheError,
 };
 use crate::blob::{BlobRef, BlobScope, BlobSync, ResolvedScope};
 use crate::database::Database;
@@ -295,6 +296,17 @@ fn ramp(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
+/// Write `bytes` to an external user-owned file under `base/external/<name>` and
+/// return its absolute path — a file outside coven's `storage/` cache folders,
+/// the source a `local_blob_refs` row points at.
+fn write_external_file(base: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let dir = base.join("external");
+    std::fs::create_dir_all(&dir).expect("create external dir");
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).expect("write external file");
+    path
+}
+
 /// A ranged read of a CACHED blob is served from the local plaintext file: after a
 /// whole-file read populates `cache/<id>`, the cloud copy is deleted so any cloud
 /// fallback would fail, and ranged reads (a mid-file window and an `offset > 0`
@@ -470,6 +482,200 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
             .expect("zero-length read is not an error")
             .is_empty(),
         "a zero-length read is an empty result on the local-file path too",
+    );
+}
+
+// ---- External refs (local_blob_refs, locality-aware read) ----
+
+/// A registered external ref serves the user's own file: `read_blob` returns the
+/// whole file and `open_blob_stream` returns a correct slice of it, both with
+/// nothing in the cloud — so any fallthrough to a cloud fetch would fail. An
+/// external read also populates neither cache folder (it owns no cache copy).
+#[tokio::test]
+async fn external_ref_read_serves_the_user_file_without_the_cloud() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("extr-aaaa", "audio", BlobSync::OnDemand);
+    let full = ramp(5000);
+    let path = write_external_file(tmp.path(), "song.flac", &full);
+
+    db.register_external_blob(&blob.id, &blob.namespace, &path, full.len() as u64)
+        .await
+        .expect("register external ref");
+
+    let whole = read_blob(&db, &ld, &storage, &blob)
+        .await
+        .expect("read serves the external file (no cloud copy exists)");
+    assert_eq!(
+        whole, full,
+        "the whole read returns the external file's bytes"
+    );
+
+    let (offset, len) = (1234u64, 1000u64);
+    let mid = open_blob_stream(&db, &ld, &storage, &blob, full.len() as u64, offset, len)
+        .await
+        .expect("ranged read off the external file");
+    assert_eq!(
+        mid,
+        &full[offset as usize..(offset + len) as usize],
+        "the ranged read returns the correct slice of the external file",
+    );
+
+    assert!(
+        !ld.pinned_blob_path(&blob.id).unwrap().exists()
+            && !ld.cache_blob_path(&blob.id).unwrap().exists(),
+        "an external read populates neither cache folder",
+    );
+}
+
+/// A missing external file is [`BlobCacheError::ExternalMissing`] and a present
+/// file whose length differs from the registered size is
+/// [`BlobCacheError::ExternalSizeMismatch`] — both terminal. A cloud copy exists
+/// under the same id in each case, so a fallthrough would SUCCEED with those
+/// bytes: it must not, proving no cloud fallback.
+#[tokio::test]
+async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (tmp, ld) = temp_library_dir();
+
+    let cloud_bytes = b"CLOUD-FALLBACK-BYTES".to_vec();
+
+    // Missing file: a ref pointing at a path that does not exist.
+    let missing = blob_ref("extm-aaaa", "audio", BlobSync::OnDemand);
+    put_cloud_blob(&storage, &missing.id, &missing.namespace, &cloud_bytes).await;
+    let missing_path = tmp.path().join("external").join("gone.flac");
+    db.register_external_blob(&missing.id, &missing.namespace, &missing_path, 1234)
+        .await
+        .expect("register missing external ref");
+    let err = read_blob(&db, &ld, &storage, &missing)
+        .await
+        .expect_err("a missing external file is terminal, never a cloud fetch");
+    assert!(
+        matches!(err, BlobCacheError::ExternalMissing { .. }),
+        "a missing external file maps to ExternalMissing: {err:?}",
+    );
+
+    // Present file, wrong length: register a size one byte off the real file.
+    let mism = blob_ref("exts-aaaa", "audio", BlobSync::OnDemand);
+    put_cloud_blob(&storage, &mism.id, &mism.namespace, &cloud_bytes).await;
+    let actual = ramp(2000);
+    let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
+    db.register_external_blob(
+        &mism.id,
+        &mism.namespace,
+        &mism_path,
+        actual.len() as u64 + 1,
+    )
+    .await
+    .expect("register size-mismatched external ref");
+    let err = read_blob(&db, &ld, &storage, &mism)
+        .await
+        .expect_err("a size-mismatched external file is terminal, never a cloud fetch");
+    assert!(
+        matches!(err, BlobCacheError::ExternalSizeMismatch { .. }),
+        "a length != registered size maps to ExternalSizeMismatch: {err:?}",
+    );
+}
+
+/// `clear_external_blob` removes the ref so the blob resolves through the normal
+/// cache/cloud path again: while registered the read serves the external file
+/// (nothing in the cloud); after clearing, a now-present cloud copy is what the
+/// read returns and the fetch populates the cache.
+#[tokio::test]
+async fn clear_external_blob_restores_the_cache_cloud_path() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("extc-aaaa", "audio", BlobSync::OnDemand);
+    let ext_bytes = ramp(1500);
+    let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
+    db.register_external_blob(&blob.id, &blob.namespace, &path, ext_bytes.len() as u64)
+        .await
+        .expect("register external ref");
+
+    let got = read_blob(&db, &ld, &storage, &blob)
+        .await
+        .expect("external read while the ref is registered");
+    assert_eq!(
+        got, ext_bytes,
+        "the registered ref serves the external file"
+    );
+
+    // Clear the ref, then put a DIFFERENT payload in the cloud: the blob now
+    // resolves through cache/cloud and returns the cloud bytes.
+    db.clear_external_blob(&blob.id)
+        .await
+        .expect("clear external ref");
+    let cloud_bytes = b"NOW-FROM-THE-CLOUD".to_vec();
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &cloud_bytes).await;
+    let got = read_blob(&db, &ld, &storage, &blob)
+        .await
+        .expect("after clearing, the read fetches from the cloud");
+    assert_eq!(
+        got, cloud_bytes,
+        "with the external ref cleared the blob resolves through cache/cloud again",
+    );
+    assert!(
+        ld.cache_blob_path(&blob.id).unwrap().exists(),
+        "the cloud fetch populated the evictable cache",
+    );
+}
+
+/// An external ref is checked first, so it wins over a same-id owned-cache file
+/// (the managed/unmanaged invariant keeps them mutually exclusive, but this proves
+/// the first-match resolution directly): with a cache file staged AND an external
+/// ref registered for the same id, both the whole and ranged reads return the
+/// external file's bytes.
+#[tokio::test]
+async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("extp-aaaa", "audio", BlobSync::OnDemand);
+
+    // Stage a distinct payload into the owned cache under the same id.
+    let cache_bytes = b"OWNED-CACHE-BYTES".to_vec();
+    write_blob(&db, &ld, &blob, &cache_bytes)
+        .await
+        .expect("stage a same-id cache file");
+    assert!(ld.cache_blob_path(&blob.id).unwrap().exists());
+
+    // Register an external ref with its own distinct payload.
+    let ext_bytes = ramp(2048);
+    let path = write_external_file(tmp.path(), "precedence.flac", &ext_bytes);
+    db.register_external_blob(&blob.id, &blob.namespace, &path, ext_bytes.len() as u64)
+        .await
+        .expect("register external ref");
+
+    let got = read_blob(&db, &ld, &storage, &blob)
+        .await
+        .expect("read with both an external ref and a cache file");
+    assert_eq!(
+        got, ext_bytes,
+        "the external ref wins over the same-id cache file (checked first)",
+    );
+
+    let (offset, len) = (100u64, 500u64);
+    let mid = open_blob_stream(
+        &db,
+        &ld,
+        &storage,
+        &blob,
+        ext_bytes.len() as u64,
+        offset,
+        len,
+    )
+    .await
+    .expect("ranged read with both present");
+    assert_eq!(
+        mid,
+        &ext_bytes[offset as usize..(offset + len) as usize],
+        "the ranged read also serves the external file, not the cache file",
     );
 }
 

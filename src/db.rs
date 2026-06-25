@@ -1,9 +1,9 @@
 //! coven's bookkeeping schema, the `item_keys` synced table, and the
 //! cloud-outbox row types.
 //!
-//! coven owns three device-local bookkeeping tables — `sync_cursors`,
-//! `sync_state`, `cloud_outbox` — plus the library-global synced table
-//! `item_keys`, all created by `MIGRATION_SQL`, which
+//! coven owns four device-local bookkeeping tables — `sync_cursors`,
+//! `sync_state`, `cloud_outbox`, `local_blob_refs` — plus the library-global
+//! synced table `item_keys`, all created by `MIGRATION_SQL`, which
 //! [`crate::database::Database::open`] runs against the connection coven owns.
 //! The host no longer implements any of this; it runs its own SQL through
 //! [`crate::database::Database::call`] and reads/writes the outbox through the
@@ -62,12 +62,39 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     UNIQUE(operation, cloud_key)
 );
 
+-- Device-local map from a blob id to an external user-owned file coven reads
+-- but does not own (an Unmanaged release plays the user's own file). A weaker
+-- storage class than the owned cache: validate-on-read by presence + size, never
+-- self-heal. Device-local like the bookkeeping tables — no `_updated_at`, never
+-- in the synced-table set, never snapshotted — so external refs stay on the one
+-- device that registered them and never cross to a peer.
+CREATE TABLE IF NOT EXISTS local_blob_refs (
+    blob_id   TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    path      TEXT NOT NULL,   -- absolute external path coven reads but does NOT own
+    size      INTEGER NOT NULL -- plaintext length; validate-on-read
+);
+
 CREATE TABLE IF NOT EXISTS item_keys (
     item_id TEXT PRIMARY KEY,
     key BLOB NOT NULL,
     _updated_at TEXT NOT NULL
 );
 ";
+
+/// An external user-owned file a blob id resolves to, read back from a
+/// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file
+/// coven references but does not own); `size` is its registered plaintext length,
+/// against which a read validates the file by presence + size. The `namespace`
+/// stays on the row but is not part of the read shape, so it is not carried here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalBlob {
+    /// Absolute path to the external file coven reads but does not own.
+    pub path: std::path::PathBuf,
+    /// The file's plaintext length at registration. A read fails loud if the
+    /// file's current length differs (truncated, replaced) — validate-on-read.
+    pub size: u64,
+}
 
 /// A pending cloud blob operation from the `cloud_outbox` table.
 ///

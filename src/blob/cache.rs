@@ -18,6 +18,11 @@
 //! (one filesystem, atomic) so a blob never appears in both folders or neither
 //! mid-move.
 //!
+//! Both reads resolve external-ref → cache → cloud. An external ref (a
+//! `local_blob_refs` row — an Unmanaged release's user-owned file coven reads but
+//! does not own) is checked first and read straight from the user's path,
+//! validated by presence + size with no cloud fallback; it is mutually exclusive
+//! with the owned cache by the managed/unmanaged invariant. Failing that:
 //! [`read_blob`] returns the entire blob (a miss fetches + decrypts it and
 //! populates `cache/`); [`open_blob_stream`] serves a plaintext byte range for a
 //! host streaming or seeking (a miss range-reads + decrypts from the cloud but
@@ -62,6 +67,23 @@ pub enum BlobCacheError {
     /// sweep), or a scope that couldn't be resolved to an encryption key. Carries a
     /// human-readable cause.
     Io(String),
+    /// A registered external blob ref (an Unmanaged release's user-owned file)
+    /// points at a file that is no longer there — the user moved, renamed, or
+    /// deleted it. Terminal: an external blob has no cloud copy to fall back to, so
+    /// this never re-fetches. The host surfaces a "files missing / moved" state
+    /// whose actions are relocate (pick the new folder, re-register) or re-import.
+    ExternalMissing {
+        id: String,
+        path: std::path::PathBuf,
+    },
+    /// A registered external blob's file is present but its length no longer matches
+    /// the registered `size` — the user truncated it or replaced it with a
+    /// different-length file. Terminal like [`Self::ExternalMissing`]: validate-on-
+    /// read is presence + size, and a mismatch is not the bytes coven registered.
+    ExternalSizeMismatch {
+        id: String,
+        path: std::path::PathBuf,
+    },
 }
 
 impl std::fmt::Display for BlobCacheError {
@@ -70,6 +92,14 @@ impl std::fmt::Display for BlobCacheError {
             BlobCacheError::Path(e) => write!(f, "blob path error: {e}"),
             BlobCacheError::Storage(e) => write!(f, "blob cache storage error: {e}"),
             BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
+            BlobCacheError::ExternalMissing { id, path } => {
+                write!(f, "external blob {id} is missing at {}", path.display())
+            }
+            BlobCacheError::ExternalSizeMismatch { id, path } => write!(
+                f,
+                "external blob {id} at {} no longer matches its registered size",
+                path.display()
+            ),
         }
     }
 }
@@ -232,22 +262,50 @@ pub async fn drop_cached_blob(library_dir: &LibraryDir, id: &str) -> Result<(), 
     Ok(())
 }
 
-/// Read a blob's whole contents, serving the local file on a hit and fetching from
-/// the cloud (into `cache/`) on a miss.
+/// Read a blob's whole contents, resolving external-ref → cache → cloud.
 ///
-/// A hit is the file existing in `pinned/<id>` OR `cache/<id>` — its existence is
-/// the entire test, no table consulted. A miss resolves the blob's scope to its
-/// encryption key, downloads + decrypts it via [`SyncStorage::get_blob`], writes it
-/// atomically to `cache/<id>` (unpinned — a plain read populates the evictable
-/// cache, never the protected one), and returns the bytes it just fetched. The
-/// post-populate [`evict_to_budget`] sweep is best-effort: a fetch that succeeded
-/// returns its bytes even if eviction then fails (logged, not returned).
+/// An external ref (a `local_blob_refs` row — an Unmanaged release's user-owned
+/// file) is checked first: if one is registered for this id, the bytes are read
+/// straight from the user's path and validated by presence + size, with NO cloud
+/// fallback (an Unmanaged blob has no cloud copy). A vanished file is
+/// [`BlobCacheError::ExternalMissing`]; a length that no longer matches the
+/// registered size is [`BlobCacheError::ExternalSizeMismatch`] — both terminal.
+/// An external ref and an owned-cache copy are mutually exclusive by the
+/// managed/unmanaged invariant, so a match here is the whole read.
+///
+/// Otherwise the owned cache: a hit is the file existing in `pinned/<id>` OR
+/// `cache/<id>` — its existence is the entire test, no table consulted. A miss
+/// resolves the blob's scope to its encryption key, downloads + decrypts it via
+/// [`SyncStorage::get_blob`], writes it atomically to `cache/<id>` (unpinned — a
+/// plain read populates the evictable cache, never the protected one), and returns
+/// the bytes it just fetched. The post-populate [`evict_to_budget`] sweep is
+/// best-effort: a fetch that succeeded returns its bytes even if eviction then
+/// fails (logged, not returned).
 pub async fn read_blob(
     db: &Database,
     library_dir: &LibraryDir,
     storage: &dyn SyncStorage,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
+    // External ref first: an Unmanaged release plays the user's own file, read
+    // straight from its path. Validate-on-read by presence + size; no cloud
+    // fallback, because these bytes only ever lived at the user's path.
+    if let Some(ext) = lookup_external_ref(db, &blob.id).await? {
+        let bytes = crate::local_blob::read(&ext.path).await.map_err(|_| {
+            BlobCacheError::ExternalMissing {
+                id: blob.id.clone(),
+                path: ext.path.clone(),
+            }
+        })?;
+        if bytes.len() as u64 != ext.size {
+            return Err(BlobCacheError::ExternalSizeMismatch {
+                id: blob.id.clone(),
+                path: ext.path,
+            });
+        }
+        return Ok(bytes);
+    }
+
     let pinned = library_dir.pinned_blob_path(&blob.id)?;
     let cache = library_dir.cache_blob_path(&blob.id)?;
 
@@ -306,6 +364,13 @@ pub async fn read_blob(
 /// past `source_size` (or an overflow) is an error, never a short read — the same
 /// contract [`crate::sync::cloud_storage::BlobRangeReader::read`] enforces.
 ///
+/// **External ref** (a `local_blob_refs` row — an Unmanaged release's user-owned
+/// file): the validated range is read straight from the user's path via
+/// [`crate::local_blob::read_range`], with NO cloud fallback. A vanished or short
+/// file is [`BlobCacheError::ExternalMissing`] (a short file already fails loud in
+/// `read_range`). Checked first, before the owned cache; the two are mutually
+/// exclusive by the managed/unmanaged invariant.
+///
 /// **Cache hit** (`pinned/<id>` OR `cache/<id>` exists): the local file is the
 /// whole plaintext, so the slice is read straight off disk at `offset` — no
 /// decryption, no cloud. **Cache miss**: the range is fetched and decrypted from
@@ -326,9 +391,9 @@ pub async fn open_blob_stream(
     offset: u64,
     len: u64,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    // The range contract, applied once for both serving paths. A zero-length read
+    // The range contract, applied once for all serving paths. A zero-length read
     // is empty without touching disk or cloud; an out-of-range read is an error
-    // before either path runs, so the local-file path can't silently short-read.
+    // before any path runs, so the local-file path can't silently short-read.
     if len == 0 {
         return Ok(Vec::new());
     }
@@ -343,6 +408,19 @@ pub async fn open_blob_stream(
             "blob range {offset}..{end} for {} exceeds blob size {source_size}",
             blob.id
         )));
+    }
+
+    // External ref first: serve the range straight from the user's file. The
+    // window was validated against `source_size` above, and `read_range` reads
+    // exactly `len` (failing loud on a short file). No cloud fallback (an Unmanaged
+    // blob has no cloud copy); a missing or short file is terminal.
+    if let Some(ext) = lookup_external_ref(db, &blob.id).await? {
+        return crate::local_blob::read_range(&ext.path, offset, len)
+            .await
+            .map_err(|_| BlobCacheError::ExternalMissing {
+                id: blob.id.clone(),
+                path: ext.path,
+            });
     }
 
     let pinned = library_dir.pinned_blob_path(&blob.id)?;
@@ -611,6 +689,19 @@ pub async fn evict_to_budget(
         );
     }
     Ok(())
+}
+
+/// Look up the external file ref for `id`, mapping the DB error into the cache's
+/// error type. Shared by [`read_blob`] and [`open_blob_stream`], which both check
+/// for an external ref (an Unmanaged release's user-owned file) before the owned
+/// cache/cloud resolution.
+async fn lookup_external_ref(
+    db: &Database,
+    id: &str,
+) -> Result<Option<crate::db::ExternalBlob>, BlobCacheError> {
+    db.external_blob(id)
+        .await
+        .map_err(|e| BlobCacheError::Io(format!("look up external blob ref for {id}: {e}")))
 }
 
 /// Resolve a blob's scope to its encryption key and download + decrypt its bytes
