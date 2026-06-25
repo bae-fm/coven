@@ -173,9 +173,9 @@ impl Drop for Changegroup {
     }
 }
 
-/// A raw-FFI session wrapper used only by the full-state diffs
-/// ([`full_state_changeset`]'s re-emit INSERTs and [`full_state_deletes`]'s
-/// retract DELETEs), which run entirely against the raw `*mut sqlite3` the gate
+/// A raw-FFI session wrapper used only by [`full_state_diff`] (the re-emit
+/// INSERTs and the retract DELETEs), which runs entirely against the raw
+/// `*mut sqlite3` the gate
 /// already holds (alongside the changegroup, also raw FFI). The capture session
 /// that records host writes lives in [`crate::database`] on `rusqlite::session`;
 /// this is a throwaway diff session, not that one.
@@ -948,7 +948,7 @@ unsafe fn reemit_subtrees(
     seeds.extend(reparent_seeds.iter().cloned());
     let reemit_ids = connected_component(db, gates, &seeds, true)?;
 
-    let diff_bytes = full_state_changeset(db, gates)?;
+    let diff_bytes = full_state_diff(db, gates, FullStateDirection::Inserts)?;
     if diff_bytes.is_empty() {
         return Ok(());
     }
@@ -983,11 +983,12 @@ unsafe fn reemit_subtrees(
 /// `gated_by_descendants` ancestor (album/artist) so it is DELETEd too (it is no
 /// longer kept).
 ///
-/// The DELETEs are synthesized by [`full_state_deletes`] (a DELETE per live gated
-/// row, scoped here to the to-delete set). The changegroup dedups by primary key,
-/// so a row both locally deleted this cycle and synthetically retracted resolves
-/// to a single DELETE. `full_state_deletes` only carries rows still present in
-/// `main`, so a row the captured changeset already removed never collides here.
+/// The DELETEs are synthesized by [`full_state_diff`] with
+/// [`FullStateDirection::Deletes`] (a DELETE per live gated row, scoped here to
+/// the to-delete set). The changegroup dedups by primary key, so a row both
+/// locally deleted this cycle and synthetically retracted resolves to a single
+/// DELETE. That diff only carries rows still present in `main`, so a row the
+/// captured changeset already removed never collides here.
 unsafe fn reemit_retract_deletes(
     db: *mut ffi::sqlite3,
     gates: &Gates,
@@ -1010,7 +1011,7 @@ unsafe fn reemit_retract_deletes(
         return Ok(());
     }
 
-    let delete_bytes = full_state_deletes(db, gates)?;
+    let delete_bytes = full_state_diff(db, gates, FullStateDirection::Deletes)?;
     if delete_bytes.is_empty() {
         return Ok(());
     }
@@ -1166,38 +1167,40 @@ unsafe fn with_empty_clone<R>(
     result
 }
 
-/// Diff every gated table (`main`) against an empty schema-identical clone,
-/// producing full-state INSERTs for all currently-present rows of those tables.
-/// The session binds to `main` and diffs `from = empty`, so empty → main is an
-/// INSERT per current row.
-unsafe fn full_state_changeset(db: *mut ffi::sqlite3, gates: &Gates) -> Result<Vec<u8>, GateError> {
-    with_empty_clone(db, gates, |alias, tables| {
-        let session = DiffSession::new(db, "main")?;
-        for tbl in tables {
-            session.attach(tbl)?;
-            session.diff(alias, tbl)?;
-        }
-        session.changeset()
-    })
+/// Which direction a full-state diff against the empty clone runs. The two
+/// directions are exact mirrors: `sqlite3session_diff` records the changes that
+/// transform the `from_db` table into the session-bound table, so the
+/// bind/`from` pairing — not a flag inside SQLite — is what sets the direction
+/// (verified by the retract peer-apply tests).
+enum FullStateDirection {
+    /// Bind the session to `main`, diff `from = empty`: empty → main yields a
+    /// full-state INSERT per current row (the re-emit, false→true).
+    Inserts,
+    /// Bind the session to the empty clone, diff `from = "main"`: main → empty
+    /// yields a full-state DELETE per current row (present in `from`, absent in
+    /// the session db). The retract path (true→false) scopes these to the rows
+    /// leaving the shared set.
+    Deletes,
 }
 
-/// Diff every gated table against an empty schema-identical clone in the REVERSE
-/// direction of [`full_state_changeset`], producing full-state DELETEs for all
-/// currently-present rows of those tables. The session binds to the empty clone
-/// and diffs `from = "main"`, so main → empty is a DELETE per current row (a row
-/// present in `from` but absent in the session db). The retract path scopes these
-/// to the rows leaving the shared set.
-///
-/// The FFI argument order is what makes the direction (verified by the retract
-/// peer-apply tests): `sqlite3session_diff` records the changes that transform the
-/// `from_db` table into the session-bound table, so binding the session to the
-/// empty clone and passing `from = "main"` yields DELETEs.
-unsafe fn full_state_deletes(db: *mut ffi::sqlite3, gates: &Gates) -> Result<Vec<u8>, GateError> {
+/// Diff every gated table against an empty schema-identical clone, producing a
+/// full-state changeset for all currently-present rows of those tables —
+/// [`FullStateDirection::Inserts`] for the re-emit, [`FullStateDirection::Deletes`]
+/// for the retract.
+unsafe fn full_state_diff(
+    db: *mut ffi::sqlite3,
+    gates: &Gates,
+    direction: FullStateDirection,
+) -> Result<Vec<u8>, GateError> {
     with_empty_clone(db, gates, |alias, tables| {
-        let session = DiffSession::new(db, alias)?;
+        let (session_schema, from_schema) = match direction {
+            FullStateDirection::Inserts => ("main", alias),
+            FullStateDirection::Deletes => (alias, "main"),
+        };
+        let session = DiffSession::new(db, session_schema)?;
         for tbl in tables {
             session.attach(tbl)?;
-            session.diff("main", tbl)?;
+            session.diff(from_schema, tbl)?;
         }
         session.changeset()
     })
