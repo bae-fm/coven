@@ -75,6 +75,9 @@ pub enum BlobCacheError {
     ExternalMissing {
         id: String,
         path: std::path::PathBuf,
+        /// The underlying read failure — a missing file or a real I/O error,
+        /// preserved rather than collapsed so the host sees why the read failed.
+        source: String,
     },
     /// A registered external blob's file is present but its length no longer matches
     /// the registered `size` — the user truncated it or replaced it with a
@@ -92,9 +95,11 @@ impl std::fmt::Display for BlobCacheError {
             BlobCacheError::Path(e) => write!(f, "blob path error: {e}"),
             BlobCacheError::Storage(e) => write!(f, "blob cache storage error: {e}"),
             BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
-            BlobCacheError::ExternalMissing { id, path } => {
-                write!(f, "external blob {id} is missing at {}", path.display())
-            }
+            BlobCacheError::ExternalMissing { id, path, source } => write!(
+                f,
+                "external blob {id} could not be read at {}: {source}",
+                path.display()
+            ),
             BlobCacheError::ExternalSizeMismatch { id, path } => write!(
                 f,
                 "external blob {id} at {} no longer matches its registered size",
@@ -290,19 +295,7 @@ pub async fn read_blob(
     // External ref first: an Unmanaged release plays the user's own file, read
     // straight from its path. Validate-on-read by presence + size; no cloud
     // fallback, because these bytes only ever lived at the user's path.
-    if let Some(ext) = lookup_external_ref(db, &blob.id).await? {
-        let bytes = crate::local_blob::read(&ext.path).await.map_err(|_| {
-            BlobCacheError::ExternalMissing {
-                id: blob.id.clone(),
-                path: ext.path.clone(),
-            }
-        })?;
-        if bytes.len() as u64 != ext.size {
-            return Err(BlobCacheError::ExternalSizeMismatch {
-                id: blob.id.clone(),
-                path: ext.path,
-            });
-        }
+    if let Some(bytes) = read_external(db, &blob.id, ExternalRead::Whole).await? {
         return Ok(bytes);
     }
 
@@ -414,13 +407,8 @@ pub async fn open_blob_stream(
     // window was validated against `source_size` above, and `read_range` reads
     // exactly `len` (failing loud on a short file). No cloud fallback (an Unmanaged
     // blob has no cloud copy); a missing or short file is terminal.
-    if let Some(ext) = lookup_external_ref(db, &blob.id).await? {
-        return crate::local_blob::read_range(&ext.path, offset, len)
-            .await
-            .map_err(|_| BlobCacheError::ExternalMissing {
-                id: blob.id.clone(),
-                path: ext.path,
-            });
+    if let Some(bytes) = read_external(db, &blob.id, ExternalRead::Range { offset, len }).await? {
+        return Ok(bytes);
     }
 
     let pinned = library_dir.pinned_blob_path(&blob.id)?;
@@ -702,6 +690,57 @@ async fn lookup_external_ref(
     db.external_blob(id)
         .await
         .map_err(|e| BlobCacheError::Io(format!("look up external blob ref for {id}: {e}")))
+}
+
+/// A whole-blob vs ranged read of an external (unmanaged) file. The two cache reads
+/// share the external-ref preflight; only the local read primitive differs.
+enum ExternalRead {
+    Whole,
+    Range { offset: u64, len: u64 },
+}
+
+/// Serve a read from the blob's external file when one is registered, else `None`
+/// so the caller falls through to the cache/cloud path. The external file is the
+/// only copy — no cloud fallback. A failed read surfaces its underlying cause as
+/// [`BlobCacheError::ExternalMissing`] (the error is preserved, not collapsed); for
+/// a whole read, a length that no longer matches the registered `size` is
+/// [`BlobCacheError::ExternalSizeMismatch`].
+async fn read_external(
+    db: &Database,
+    id: &str,
+    op: ExternalRead,
+) -> Result<Option<Vec<u8>>, BlobCacheError> {
+    let Some(ext) = lookup_external_ref(db, id).await? else {
+        return Ok(None);
+    };
+    let bytes = match op {
+        ExternalRead::Whole => {
+            let bytes = crate::local_blob::read(&ext.path).await.map_err(|e| {
+                BlobCacheError::ExternalMissing {
+                    id: id.to_string(),
+                    path: ext.path.clone(),
+                    source: e,
+                }
+            })?;
+            if bytes.len() as u64 != ext.size {
+                return Err(BlobCacheError::ExternalSizeMismatch {
+                    id: id.to_string(),
+                    path: ext.path,
+                });
+            }
+            bytes
+        }
+        ExternalRead::Range { offset, len } => {
+            crate::local_blob::read_range(&ext.path, offset, len)
+                .await
+                .map_err(|e| BlobCacheError::ExternalMissing {
+                    id: id.to_string(),
+                    path: ext.path,
+                    source: e,
+                })?
+        }
+    };
+    Ok(Some(bytes))
 }
 
 /// Resolve a blob's scope to its encryption key and download + decrypt its bytes
