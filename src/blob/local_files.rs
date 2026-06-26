@@ -21,6 +21,9 @@
 //! becomes Local). The read path checks the local store before the cache (see
 //! [`cache::read_blob`](super::cache::read_blob)), so a host-provided Local blob is
 //! served from here with no cloud round-trip.
+//!
+//! See the [blob concept tree](crate::blob) for where the local store sits in the
+//! whole storage model.
 
 use crate::library_dir::{LibraryDir, PathTokenError};
 

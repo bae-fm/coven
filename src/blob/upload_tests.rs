@@ -575,7 +575,7 @@ fn backoff_window_is_exponential_and_capped() {
     assert_eq!(backoff_window(50), Duration::seconds(3600));
 }
 
-/// The whole multi-device flow for managed (cloud) content. Device A creates a
+/// The whole multi-device flow for Remote (cloud) content. Device A creates a
 /// library, invites device B (wrapping the library master key to B's identity),
 /// mints a per-release item key, and uploads a release's audio through the real
 /// upload drain scoped to that item. `drain_uploads` resolves the `Item` scope to

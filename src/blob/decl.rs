@@ -17,6 +17,10 @@
 //! root's subtree (the make-Remote / make-Local transitions), and
 //! [`BlobDecls::row_for_blob`] to map an uploaded blob back to its row (the
 //! make-Remote completion check).
+//!
+//! A declaration's two blob properties — [`Provenance`] (the Local story) and
+//! [`CacheFill`] (the Remote story) — are described by the [blob concept
+//! tree](crate::blob).
 
 use std::collections::HashMap;
 

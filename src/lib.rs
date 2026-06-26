@@ -43,6 +43,35 @@
 //!   A local-only library that never connects a provider simply stamps and
 //!   writes rows through `Database::call` without ever building a `SyncManager`,
 //!   an `EncryptionService`, or a cloud config.
+//!
+//! # Blob storage model
+//!
+//! A blob is opaque bytes a synced row references — a photo, an audio file, a
+//! cover image. Each blob declares two orthogonal properties and has one runtime
+//! state. [`blob`] holds the full concept tree; the summary:
+//!
+//! - **Provenance** ([`blob::Provenance`]) — where the bytes live while the blob is
+//!   *Local*. *User-provided*: the user's own file at a path coven references (the
+//!   Remote→Local restore writes back to a user path, so it needs one).
+//!   *Host-provided*: data the host hands coven, which coven keeps in its own local
+//!   store at `storage/local/<namespace>/<id>` (no path needed to restore).
+//! - **Cache fill** ([`blob::CacheFill`]) — how a device gets the bytes while the
+//!   blob is *Remote*. [`CacheEager`](blob::CacheFill::CacheEager) fetches into the
+//!   cache on pull (cover art, so a grid renders from local bytes);
+//!   [`CacheLazy`](blob::CacheFill::CacheLazy) fetches on first read (audio).
+//! - **Locality** — the state: *Local* (bytes on-device, in the user's file or
+//!   coven's local store) or *Remote* (bytes in the cloud, each device's copy a
+//!   cache copy). `make_remote` uploads the bytes and flips a gated root's gate on;
+//!   `make_local` brings them back to a local file and flips it off (see
+//!   [`blob::transition`]).
+//!
+//! The **cache** ([`blob::cache`]) is a Remote-only mechanism: it holds
+//! re-fetchable copies of Remote blobs under `storage/cache/<namespace>/…`
+//! (evictable, against a per-namespace size budget — [`Database::set_cache_budget`])
+//! and `storage/pinned/<namespace>/…` (kept). A Local blob is never in the cache,
+//! and `CacheEager`/`CacheLazy`/pin/budget describe a blob only while it is Remote.
+//! An *asset* (a cover, an artist image — [`sync::session::SyncedTable::asset`])
+//! rides its subject's gate but never keeps the subject alive.
 
 // The blob engine: the vocabulary types plus the two lifecycle halves —
 // `blob::cache` (bytes on disk, folder-truth retention) and `blob::upload` (drain

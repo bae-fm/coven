@@ -34,6 +34,9 @@
 //! Every destructive step is enqueued durably *inside* the one commit, and nothing
 //! destructive happens before it, so there is no representable half-state and retry
 //! after a crash is idempotent.
+//!
+//! See the [blob concept tree](crate::blob) for how Local/Remote, provenance, and
+//! the cache fit together.
 
 use rusqlite::OptionalExtension;
 

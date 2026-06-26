@@ -154,10 +154,10 @@ pub enum OutboxOperation {
         /// always has one — a delete, which touches no key, has none.
         scope: crate::blob::BlobScope,
         /// Whether the drain populates the protected cache folder
-        /// (`storage/pinned/<id>`) from the plaintext on a successful upload, so a
-        /// pinned managed blob is kept local and budget-exempt with no later cloud
-        /// round-trip. `false` populates nothing on write — the evictable
-        /// `storage/cache/<id>` fills on a later read-miss instead.
+        /// (`storage/pinned/<namespace>/<id>`) from the plaintext on a successful
+        /// upload, so a pinned Remote blob is kept local and budget-exempt with no
+        /// later cloud round-trip. `false` populates nothing on write — the evictable
+        /// `storage/cache/<namespace>/<id>` fills on a later read-miss instead.
         retain_pinned: bool,
     },
     /// Delete a cloud blob. The drain turns it into a signed cloud tombstone (the

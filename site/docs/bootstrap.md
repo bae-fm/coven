@@ -202,11 +202,11 @@ but none of the files they point at (a synced album shows a placeholder cover).
 [`reconcile_snapshot_blobs`](rustdoc:fn:coven::sync::snapshot::reconcile_snapshot_blobs)
 closes that gap. It derives the blobs the
 [declarations](/docs/blobs#declaring-which-rows-carry-blobs) find in the
-bootstrapped database and downloads the `Mirrored` ones into the [cache](/docs/cache)
-(`storage/pinned/<id>`), skipping any already present. `OnDemand` blobs are left
-for first read, the same as in a steady-state pull. The bootstrap records a pending
+bootstrapped database and downloads the `CacheEager` ones into the [cache](/docs/cache)
+(`storage/cache/<namespace>/<id>`), skipping any already present. `CacheLazy` blobs are
+left for first read, the same as in a steady-state pull. The bootstrap records a pending
 flag in `sync_state`; each later cycle re-runs the reconciliation until every
-referenced `Mirrored` blob is on disk, so a blob whose object was not yet in the
+referenced `CacheEager` blob is on disk, so a blob whose object was not yet in the
 cloud at bootstrap is fetched on a later cycle rather than lost. A caught-up library
 clears the flag and pays nothing.
 

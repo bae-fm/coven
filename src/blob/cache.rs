@@ -6,7 +6,8 @@
 //! the cache: a user-provided Local blob is the user's own file at a path (an
 //! external ref); a host-provided Local blob is in the local store (see
 //! [`local_files`](super::local_files)). So `CacheEager`/`CacheLazy`/pin/budget all
-//! describe a blob only while it is Remote.
+//! describe a blob only while it is Remote. See the [blob concept tree](crate::blob)
+//! for where the cache sits in the whole storage model.
 //!
 //! There is no cache table. A cached Remote blob is in **exactly one** of two
 //! folders under the library dir, or in neither. Both are segmented by the blob's

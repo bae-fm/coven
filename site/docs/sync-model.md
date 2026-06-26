@@ -92,16 +92,16 @@ push the staged file is cleared and `local_seq` advances. A device's sequence
 numbers start at 1; the first changeset is `local_seq + 1` over an initial
 `local_seq` of 0.
 
-Blob-before-row ordering is the host's responsibility, not a global push gate.
+Blob-before-row ordering rides the gate, owned by coven, not a global push gate.
 The cycle publishes whatever the gate emits; it does not hold the whole changeset
-back while the outbox drains. A host with rows that reference async-outbox blobs
-keeps each such row's gate column off until its blobs upload, then flips it on
-(typically in `on_blob_uploaded`). While the gate column is off the gate cuts the
-row; when it flips on the gate re-emits the row's full subtree, so a peer never
-learns of a row whose blob is not yet in the cloud. The observer can return
-`DrainControl::Publish` to break the drain the moment a unit's blobs land, so the
-cycle publishes that unit instead of waiting for the rest of the batch, and the
-loop then runs the next cycle promptly to keep draining.
+back while the outbox drains. A gated root stays gated-off (local-only) while its
+blobs upload; coven's `make_remote` flips the gate on the instant the last upload
+lands — within the upload drain — and breaks the drain so the cycle publishes that
+root. While the gate is off the gate cuts the root's rows; when it flips on the gate
+re-emits the root's full subtree, so a peer never learns of a row whose blob is not
+yet in the cloud. The host's
+[`BlobTransitionObserver`](/docs/blobs#observing-transitions-and-uploads) only reports
+progress and completion — coven, not the host, decides when to publish.
 
 ### Pull
 
@@ -117,7 +117,7 @@ order. For each one it:
   removed member or a read-only Follower is rejected);
 - applies the changeset with last-writer-wins (capture disabled only around this
   one apply, then re-enabled);
-- downloads any `Mirrored` blobs it references into the [cache](/docs/cache).
+- downloads any `CacheEager` blobs it references into the [cache](/docs/cache).
 
 The cursor for that device advances to a sequence number only after the changeset
 is accepted (or deliberately skipped) and its blobs downloaded. A failed blob

@@ -164,7 +164,7 @@ let manager = coven::sync::sync_manager::SyncManager::new(
     encryption_service,
     db.clone(),
     Arc::new(coven::clock::SystemClock),
-    None, // optional BlobUploadObserver
+    None, // optional BlobTransitionObserver
 );
 
 manager.start_sync().await;
@@ -225,18 +225,22 @@ when it builds the set it passes to `open`, naming the columns that locate each 
 plus its cloud namespace, a
 [`BlobScopeSpec`](rustdoc:enum:coven::sync::session::BlobScopeSpec)
 (`Master` for a key every member holds, `Derived` for a fixed per-scope key, or
-`ItemColumn` for a per-item key keyed by a column), and a
-[`BlobSync`](rustdoc:enum:coven::blob::BlobSync) retention class (`Mirrored` to keep
-it on every device, `OnDemand` to fetch it on first read):
+`ItemColumn` for a per-item key keyed by a column), a
+[`Provenance`](rustdoc:enum:coven::blob::Provenance) (the Local story:
+`UserProvided` for the user's own file, `HostProvided` for data coven keeps), and a
+[`CacheFill`](rustdoc:enum:coven::blob::CacheFill) (the Remote story: `CacheEager` to
+fetch it into the cache on pull, `CacheLazy` to fetch on first read):
 
 ```rust
-use coven::blob::BlobSync;
+use coven::blob::{CacheFill, Provenance};
 use coven::sync::session::BlobDecl;
 
 // In the set you pass to `Database::open`, declare the blob on `todos`:
 //   blob id = the row's primary key; opaque home, so no cloud_path column;
-//   master-scoped; kept on every device.
-SyncedTable::new("todos").carries_blob(BlobDecl::new("todo-files", BlobSync::Mirrored))
+//   master-scoped; the user's own file, fetched into every device's cache on pull.
+SyncedTable::new("todos").carries_blob(
+    BlobDecl::new("todo-files", Provenance::UserProvided, CacheFill::CacheEager),
+)
 ```
 
 coven resolves the declaration against the live schema each cycle and derives every
@@ -244,9 +248,9 @@ blob a row references itself — what to upload on push, what to download on pul
 whose cache to drop on a delete, and what to backfill after a snapshot bootstrap.
 It encrypts the file on upload; on pull it downloads, decrypts, and writes the
 plaintext into its own [cache](/docs/cache), which the host reads back through
-`read_blob`. The host stages a blob's bytes into the cache with
-[`stage_blob`](rustdoc:fn:coven::blob::cache::stage_blob) when it writes the
-blob-bearing row, and can enqueue out-of-band uploads/deletes with
+`read_blob`. Where the bytes come from is the blob's provenance — the user's own
+file (user-provided) or coven's local store (host-provided) — and a host can also
+enqueue out-of-band uploads/deletes with
 [`enqueue_upload`](rustdoc:method:coven::database::Database::enqueue_upload) and
 [`enqueue_delete`](rustdoc:method:coven::database::Database::enqueue_delete). The
 [Blobs](/docs/blobs) page covers the declaration, the outbox, and the cloud layout,

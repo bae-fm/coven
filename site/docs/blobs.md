@@ -20,12 +20,12 @@ Blob-bearing-ness is a per-table declaration, not a runtime callback. The host
 marks a synced table with
 [`carries_blob`](rustdoc:method:coven::sync::session::SyncedTable::carries_blob),
 passing a [`BlobDecl`](rustdoc:struct:coven::sync::session::BlobDecl) that names the
-columns locating each blob plus its namespace, encryption scope, and retention
-class:
+columns locating each blob plus its namespace, encryption scope, provenance, and
+cache fill:
 
 ```rust
 SyncedTable::new("todo_attachments").carries_blob(
-    BlobDecl::new("attachments", BlobSync::Mirrored)
+    BlobDecl::new("attachments", Provenance::UserProvided, CacheFill::CacheEager)
         // .with_id_column("file_id")              // defaults to the PK ("id")
         // .with_cloud_path_column("path")         // for a browsable home
         // .with_scope(BlobScopeSpec::ItemColumn("todo_id"))
@@ -38,7 +38,8 @@ pub struct BlobDecl {
     pub namespace: String,                  // cloud namespace, e.g. "attachments"
     pub cloud_path_column: Option<String>,  // readable-key column for a browsable home
     pub scope: BlobScopeSpec,               // Master | Derived(name) | ItemColumn(col)
-    pub sync: BlobSync,                     // Mirrored | OnDemand
+    pub provenance: Provenance,             // UserProvided | HostProvided  (the Local story)
+    pub fill: CacheFill,                    // CacheEager | CacheLazy       (the Remote story)
 }
 ```
 
@@ -66,34 +67,50 @@ pub struct BlobRef {
     pub id: String,                 // blob id, from the id column (the row's id by default)
     pub scope: BlobScope,           // Master | Derived(id) | Item(id)
     pub cloud_path: Option<String>, // readable path for a browsable home
-    pub sync: BlobSync,             // Mirrored | OnDemand
+    pub provenance: Provenance,     // UserProvided | HostProvided
+    pub fill: CacheFill,            // CacheEager | CacheLazy
 }
 ```
 
-A pulled blob's bytes always land in coven's own [cache](/docs/cache)
-(`storage/pinned/<id>` / `storage/cache/<id>`, built from the validated id); the
+A pulled blob is Remote: its bytes land in coven's own [cache](/docs/cache)
+(`storage/cache/<namespace>/<id>`, built from the validated namespace + id); the
 host never names where a blob file lives.
 
 `cloud_path` is consulted only by a [browsable home](#browsable-home-blob-paths);
 an opaque home (the default) ignores it, so leave the `cloud_path_column` unset
 unless the home is browsable.
 
-### Retention class
+### Cache fill
 
-[`BlobSync`](rustdoc:enum:coven::blob::BlobSync) is the one retention knob the
-host turns, declared per blob and read the same way on every device:
+[`CacheFill`](rustdoc:enum:coven::blob::CacheFill) is the blob's **Remote story**:
+how a device gets the bytes once the blob is Remote, declared per blob and read the
+same way on every device:
 
-- `Mirrored`: downloaded on pull and kept on every device, part of "having the
-  library". A todo's photo, an album's cover art.
-- `OnDemand`: uploaded on push but skipped on pull. A pulling device fetches it on
-  first read instead of up front. Large blobs a device may never open, audio being
-  the case it exists for.
+- `CacheEager`: fetched into the cache on pull, on every device — part of "having
+  the library". A todo's photo, an album's cover art.
+- `CacheLazy`: skipped on pull; a device fetches it into the cache on first read
+  instead of up front. Large blobs a device may never open, audio being the case it
+  exists for.
 
-The class has to be a declared property, not a per-device choice: a device
-deciding during its own pull whether to fetch a blob can only read the blob's
-declared class, never what another device chose locally. What a device then does
-with a downloaded blob (keep it, evict it, pin it) is the [cache](/docs/cache)'s
-job.
+The fill has to be a declared property, not a per-device choice: a device deciding
+during its own pull whether to fetch a blob can only read the blob's declared fill,
+never what another device chose locally. The cache is a Remote-only mechanism — what
+a device does with a cached blob (keep it, evict it, pin it) is the
+[cache](/docs/cache)'s job — so `CacheEager`/`CacheLazy`/pin/budget describe a blob
+only while it is Remote, never while it is Local.
+
+### Provenance
+
+[`Provenance`](rustdoc:enum:coven::blob::Provenance) is the blob's **Local story**:
+where the bytes live while the blob is Local. Orthogonal to the cache fill — a blob
+declares both:
+
+- `UserProvided`: the user's own file at a path coven references but does not own.
+  Bringing the blob back from Remote writes the bytes to a user file, so it needs a
+  destination path.
+- `HostProvided`: data the host hands coven, kept in coven's own local store at
+  `storage/local/<namespace>/<id>`. Bringing it back from Remote restores it there,
+  no path needed.
 
 ## Encryption scope
 
@@ -133,25 +150,25 @@ and the `item_keys` table stays empty.
 
 ## How a blob moves out
 
-A blob reaches the cloud one of two ways.
+A blob reaches the cloud one of two ways, split by [provenance](#provenance).
 
-**Inline with the changeset.** A `Mirrored` blob a row in the *outgoing* changeset
-references is uploaded by the cycle itself, before the envelope is packed and
-pushed: coven reads the plaintext from its [cache](/docs/cache) (the host stages it
-there when it writes the row — see [Staging a blob](#staging-a-blob-for-upload)),
-resolves the scope to a key, encrypts, and writes to the blob's cloud key. Only
-`Mirrored` rides this inline path; an `OnDemand` blob is uploaded through the outbox
-below. This path is synchronous and reports no progress. If the blob is not staged
-in the cache, the cycle **aborts** rather than publishing a row that points at a
-blob the cloud does not hold: the authoring device is the only one with the file, so
-a published-but-missing blob would 404 on every puller permanently. The next cycle
-retries once the blob is staged.
+**Inline with the changeset (host-provided).** coven owns a host-provided blob's
+bytes — in its local store or its cache — so it uploads each one inline as its row
+reaches the *outgoing* changeset, before the envelope is packed and pushed: it reads
+the plaintext, resolves the scope to a key, encrypts, and writes to the blob's cloud
+key. This is provenance-based, regardless of cache fill. If the bytes are not on
+disk the cycle **aborts** rather than publishing a row that points at a blob the
+cloud does not hold: a published-but-missing blob would 404 on every puller
+permanently. The next cycle retries once the bytes are present.
 
-**Through the upload outbox.** For a blob uploaded out of band, with progress and
-retry (audio is the case), the host writes the plaintext and enqueues an upload:
+**Through the upload outbox (user-provided).** A user-provided blob is the user's
+own file; coven uploads it from that path through the durable upload outbox, with
+progress and retry. The `make_remote` transition enqueues one upload per
+user-provided blob of a gated root; a host can also enqueue an upload directly for
+an out-of-band file (audio is the case):
 
 ```rust
-db.enqueue_upload(file_id, cloud_key, source_path, scope, created_at).await?;
+db.enqueue_upload(file_id, cloud_key, source_path, scope, retain_pinned, created_at).await?;
 ```
 
 `cloud_key` is the final cloud object key, persisted verbatim on the row.
@@ -208,11 +225,11 @@ The pull has no inbox table. It is inline:
 [`pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes) downloads the blobs an
 incoming changeset references (derived from the declarations) *before* applying it,
 so a row is never applied before its blobs are durable. A downloaded blob lands in
-the [cache](/docs/cache), at `storage/pinned/<id>` under the library directory,
-decrypted under its scope. A download is skipped when the file is already present,
-which makes the step idempotent.
+the [cache](/docs/cache), at `storage/cache/<namespace>/<id>` under the library
+directory, decrypted under its scope. A download is skipped when the file is already
+present, which makes the step idempotent.
 
-Only `Mirrored` blobs download here. An `OnDemand` blob is skipped on pull and
+Only `CacheEager` blobs download here. A `CacheLazy` blob is skipped on pull and
 fetched on its first [`read_blob`](/docs/cache#reading-a-blob).
 
 When the applied changeset **deletes** a blob-bearing row (a
@@ -310,51 +327,57 @@ The two schemes at a glance:
 | Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
 | Blob with no `cloud_path` | keyed by id | surfaced error |
 
-## Staging a blob for upload
+## Where a blob's bytes come from
 
-coven never reaches outside its own storage for a blob's bytes: the plaintext lives
-in coven's [cache](/docs/cache), keyed by the validated blob id, and flows one way
-out (cache → cloud) while a pulled blob flows the other (cloud → cache, read back
-through [`read_blob`](/docs/cache#reading-a-blob)). The host puts a blob's bytes
-into the cache with
-[`stage_blob`](rustdoc:fn:coven::blob::cache::stage_blob) when it writes the
-blob-bearing row: `pinned` for a `Mirrored` blob (system-pinned on every device,
-which the inline push reads back to upload) or unpinned for one the outbox uploads.
-A blob the cycle finds unstaged is not ready to publish (see
-[How a blob moves out](#how-a-blob-moves-out)).
+coven uploads a blob from whichever local copy its [provenance](#provenance) names.
+A **host-provided** blob is data the host hands coven, which coven keeps in its own
+local store at `storage/local/<namespace>/<id>` (via
+[`local_files::store`](rustdoc:fn:coven::blob::local_files::store)); the inline push
+reads it back to upload, then moves the copy into the [cache](/docs/cache) as the
+blob becomes Remote. A **user-provided** blob is the user's own file at a path coven
+references; `make_remote` uploads it straight from that path. Either way coven never
+reaches outside the copy it was given, and a blob whose bytes aren't present is not
+ready to publish (see [How a blob moves out](#how-a-blob-moves-out)).
 
-## Observing uploads
+## Observing transitions and uploads
 
 The host can pass a
-[`BlobUploadObserver`](rustdoc:trait:coven::blob::BlobUploadObserver) to watch each
-outbox upload. The whole observer is optional; two of its methods default to a
-no-op:
+[`BlobTransitionObserver`](rustdoc:trait:coven::blob::BlobTransitionObserver) to
+watch uploads and the locality transitions. It only *reports* — coven owns flipping
+the gate and deciding when a cycle publishes. The whole observer is optional; most
+methods default to a no-op:
 
 ```rust
 #[async_trait::async_trait]
-pub trait BlobUploadObserver: Send + Sync {
-    async fn on_blob_upload_started(&self, file_id: &str);
-    async fn on_blob_upload_progress(&self, file_id: &str, bytes_done: u64, bytes_total: u64) {}
-    async fn on_blob_uploaded(&self, file_id: &str) -> DrainControl;
-    async fn on_blob_upload_failed(&self, file_id: &str, error: &str);
+pub trait BlobTransitionObserver: Send + Sync {
+    async fn on_blob_upload_started(&self, blob_id: &str);
+    async fn on_blob_upload_progress(&self, blob_id: &str, bytes_done: u64, bytes_total: u64) {}
+    async fn on_blob_uploaded(&self, blob_id: &str);
+    async fn on_blob_upload_failed(&self, blob_id: &str, error: &str);
     fn should_skip_uploads(&self) -> bool { false }
+
+    // make_remote / make_local completion, and make_local per-blob progress:
+    async fn on_root_made_remote(&self, root_table: &str, root_id: &str) {}
+    async fn on_root_made_local(&self, root_table: &str, root_id: &str) {}
+    async fn on_blob_materialize_progress(
+        &self, root_table: &str, root_id: &str, blob_id: &str, done: u64, total: u64,
+    ) {}
 }
 ```
 
-The callbacks track attempts, not blobs. `on_blob_upload_started` fires once before
-each attempt, so a blob that fails twice then succeeds fires it three times.
-`on_blob_uploaded` fires once, when the entry leaves the queue.
-`on_blob_upload_failed` fires on each failed attempt and carries the error string;
-the entry stays queued for retry. A todos app wires these into the attachment's row:
-started shows "uploading", uploaded shows "synced", failed shows "will retry".
+The upload callbacks track attempts, not blobs. `on_blob_upload_started` fires once
+before each attempt, so a blob that fails twice then succeeds fires it three times.
+`on_blob_uploaded` fires once, when the entry leaves the queue — notification only,
+since coven, not the host, flips the gate and breaks the drain to publish a completed
+`make_remote`. `on_blob_upload_failed` fires on each failed attempt and carries the
+error string; the entry stays queued for retry. A todos app wires these into the
+attachment's row: started shows "uploading", uploaded shows "synced", failed shows
+"will retry".
 
-`on_blob_uploaded` returns a
-[`DrainControl`](rustdoc:enum:coven::blob::DrainControl). `Continue` keeps draining
-the next queued upload; `Publish` stops the drain so the current cycle publishes
-before continuing. A host that flips a gate column on once a unit's last blob lands
-returns `Publish` from that same call, so the unit's now-shareable rows reach peers
-without waiting for the rest of the batch; the entries still queued drain on the
-next cycle, which the loop runs promptly.
+`on_root_made_remote` / `on_root_made_local` fire when coven *completes* a
+transition (including one resumed after a restart), so the host's row-updated event
+survives a crash rather than being lost with an in-memory flag.
+`on_blob_materialize_progress` moves a `make_local`'s per-file progress bar.
 
 `on_blob_upload_progress` reports bytes reaching the cloud between start and the
 terminal callback, so a per-file bar moves instead of jumping from 0 to 100%.

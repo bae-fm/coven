@@ -12,17 +12,23 @@ kept, and how a user pins a blob to keep it offline.
 
 The cache is coven's, under the library directory. The examples use a todos app
 whose `todo_attachments` rows each point at a photo; a music app would point at
-audio instead, which is the case the on-demand half of the cache exists for.
+audio instead, which is the case the lazy half of the cache exists for.
+
+The cache holds **Remote** blobs only — bytes that also live in the cloud, so a
+cache copy is always re-fetchable. A **Local** blob is never in the cache: it is
+the user's own file at a path (user-provided) or coven's own copy in the local
+store (host-provided). See [Blobs](/docs/blobs) for that distinction.
 
 ## Two folders, no table
 
-A blob is in exactly one of two folders under the library directory, or in
-neither:
+A Remote blob is in exactly one of two folders under the library directory, or in
+neither. Both are segmented by the blob's namespace, so each namespace's cache
+evicts against its own budget without touching another's:
 
 ```
-storage/pinned/{ab}/{cd}/<id>    protected, never evicted
-storage/cache/{ab}/{cd}/<id>     opportunistic, evictable
-neither                          remote-only: no file, fetched on next read
+storage/pinned/<namespace>/{ab}/{cd}/<id>   protected, never evicted
+storage/cache/<namespace>/{ab}/{cd}/<id>    opportunistic, evictable
+neither                                     remote-only: no file, fetched on next read
 ```
 
 `{ab}` and `{cd}` are the first two byte-pairs of the dash-stripped id (the same
@@ -53,12 +59,15 @@ contents.
 let bytes = coven::blob::cache::read_blob(&db, &library_dir, &storage, &blob).await?;
 ```
 
-It checks `pinned/<id>` then `cache/<id>`; a file in either folder is a hit and
-is read straight off disk. On a miss it resolves the blob's
+It resolves by where the bytes are, in order: a **user-provided Local** blob is
+read from the user's own file (an external ref), a **host-provided Local** blob
+from the local store — both with no cloud fallback. Otherwise the **cache** —
+`pinned/<namespace>/<id>` then `cache/<namespace>/<id>`, a file in either folder a
+hit read straight off disk. On a cache miss it resolves the blob's
 [scope](/docs/blobs#encryption-scope) to a key, downloads and decrypts the object
-from the cloud, writes the plaintext to `cache/<id>` (the evictable folder, never
-the protected one), and returns the bytes it just fetched. A plain read populates
-the cache; it never pins.
+from the cloud, writes the plaintext to `cache/<namespace>/<id>` (the evictable
+folder, never the protected one), and returns the bytes it just fetched. A plain
+read populates the cache; it never pins.
 
 [`open_blob_stream`](rustdoc:fn:coven::blob::cache::open_blob_stream) is the
 ranged sibling, for a host that streams or seeks a large blob (audio playback)
@@ -79,40 +88,41 @@ short read. A cache hit reads the slice straight off the local plaintext file at
 `offset`, with no decryption. A miss range-reads and decrypts only the covering
 chunks from the cloud (see [`BlobRangeReader`](/docs/storage#ranged-reads)).
 
-A ranged miss writes **no** cache file. A partial file under `cache/<id>` would
-be read as the whole blob by `read_blob`, since presence is the only truth, so
-only the whole-file `read_blob` ever populates the cache.
+A ranged miss writes **no** cache file. A partial file under `cache/<namespace>/<id>`
+would be read as the whole blob by `read_blob`, since presence is the only truth,
+so only the whole-file `read_blob` ever populates the cache.
 
 On either path, a failure to even check whether a file exists (a broken
 filesystem) is surfaced, never collapsed into a miss: re-downloading over a
 present file would be wasteful and could hide a real fault.
 
-## Mirrored and on-demand
+## Cache fill: eager and lazy
 
-Whether a blob lands in the cache automatically depends on its retention class,
-declared per blob in the table's
+Whether a Remote blob lands in the cache automatically depends on its **cache
+fill**, declared per blob in the table's
 [declaration](/docs/blobs#declaring-which-rows-carry-blobs) as a
-[`BlobSync`](rustdoc:enum:coven::blob::BlobSync):
+[`CacheFill`](rustdoc:enum:coven::blob::CacheFill):
 
-- `Mirrored`: downloaded on pull and kept on every device. Part of "having the
-  library", e.g. a todo's photo or an album's cover art. The pull writes it into
-  `storage/pinned/<id>` directly, so it is present and protected from the moment
-  the row arrives.
-- `OnDemand`: uploaded on push but skipped on pull. A pulling device does not
-  fetch it up front; the first `read_blob` does, populating `cache/<id>`. This is
-  for large blobs a device may never open, audio being the motivating case.
+- `CacheEager`: fetched into the cache on every device's pull. Part of "having the
+  library", e.g. an album's cover art, so a grid renders from local bytes without a
+  fetch. It lands in the **evictable** `storage/cache/<namespace>/<id>` — it is not
+  pinned, so if it later falls out of its namespace's budget it shows a placeholder
+  until the next read re-fetches it.
+- `CacheLazy`: skipped on pull. A pulling device does not fetch it up front; the
+  first `read_blob` does, populating `cache/<namespace>/<id>`. This is for large
+  blobs a device may never open, audio being the motivating case.
 
-So a `Mirrored` blob is system-pinned, and an `OnDemand` blob is cached lazily
-and evictably unless the user pins it.
+Both fills cache evictably; the difference is only *when* the bytes arrive (on pull
+vs. on first read). Neither is pinned automatically — pinning is a separate, manual
+gesture below.
 
 ## Pinning
 
-`Mirrored` blobs aside, a device caches `OnDemand` blobs only as they are read,
-and the cache is evictable. Pinning is how a user keeps a chosen blob local and
+The cache is evictable. Pinning is how a user keeps a chosen Remote blob local and
 safe from eviction (an offline-for-the-flight gesture).
 
 [`pin`](rustdoc:fn:coven::blob::cache::pin) ensures a blob is both present and
-protected, in `storage/pinned/<id>`:
+protected, in `storage/pinned/<namespace>/<id>`:
 
 ```rust
 coven::blob::cache::pin(&db, &library_dir, &storage, &blobs).await?;
@@ -120,43 +130,44 @@ coven::blob::cache::pin(&db, &library_dir, &storage, &blobs).await?;
 
 A pin *populates*, it is not a flag flip. Three cases per blob: already in
 `pinned/` (nothing to do); in `cache/` (rename it into `pinned/`, promoting a
-blob a read already fetched with no cloud round-trip); in neither (fetch from the
-cloud straight into `pinned/`). It takes `BlobRef`s rather than bare ids because
-the from-absent case needs the blob's cloud coordinates (namespace, scope,
-cloud_path), which an id alone lacks. It is idempotent.
+blob a read or an eager pull already fetched with no cloud round-trip); in neither
+(fetch from the cloud straight into `pinned/`). It takes `BlobRef`s rather than
+bare ids because the from-absent case needs the blob's cloud coordinates
+(namespace, scope, cloud_path), which an id alone lacks. It is idempotent.
 
 [`unpin`](rustdoc:fn:coven::blob::cache::unpin) drops the protection: it moves
-`pinned/<id>` back to `cache/<id>`, so the file stays (still readable) but becomes
-evictable again. It is not a delete.
-
-Unpinning is valid only on an `OnDemand` blob. A `Mirrored` blob's pin is a
-*system* pin, re-asserted on every pull because the blob is part of having the
-library, so unpinning one is meaningless and is rejected with an error rather
-than silently skipped. The class is checked before any file is touched.
+`pinned/<namespace>/<id>` back to `cache/<namespace>/<id>`, so the file stays
+(still readable) but becomes evictable again. It is not a delete. Unpin works on
+any blob regardless of its `CacheFill`; a `CacheEager` blob that was never pinned
+is already evictable, so unpinning it is a no-op.
 
 ## The size budget
 
-`pinned/` grows with what the user chose to keep and what the library mirrors;
-`cache/` grows with what gets read. Left unbounded the evictable cache would grow
-forever, so the host can set a per-device budget,
-[`max_cache_size`](rustdoc:method:coven::database::Database::set_max_cache_size),
+`pinned/` grows with what the user chose to keep; `cache/` grows with what gets
+fetched. Left unbounded the evictable cache would grow forever, so the host can set
+a **per-namespace** budget,
+[`set_cache_budget`](rustdoc:method:coven::database::Database::set_cache_budget),
 in bytes:
 
 ```rust
-db.set_max_cache_size(2 * 1024 * 1024 * 1024).await?; // 2 GiB
+db.set_cache_budget("audio", 2 * 1024 * 1024 * 1024).await?; // 2 GiB for audio
+db.set_cache_budget("covers", 64 * 1024 * 1024).await?;      // 64 MiB for covers
 ```
 
-The budget counts **only** the files under `cache/`. `pinned/` is structurally
-exempt, because the eviction sweep never looks there: a pinned blob (user or
-system) can never be evicted, whatever the budget. With no budget set
-([`get_max_cache_size`](rustdoc:method:coven::database::Database::get_max_cache_size)
-returns `None`) eviction is off and the cache is unbounded until the host opts
-into a limit.
+Each namespace evicts independently against its own budget, so a small namespace
+(`covers`) is never wiped by pressure from a big one (`audio`). The budget counts
+**only** the files under that namespace's `cache/<namespace>/`. `pinned/` is
+structurally exempt, because the eviction sweep never looks there: a pinned blob
+can never be evicted, whatever the budget; the local store is never walked either.
+With no budget set for a namespace
+([`get_cache_budget`](rustdoc:method:coven::database::Database::get_cache_budget)
+returns `None`) eviction is off for it and that namespace's cache is unbounded
+until the host opts into a limit.
 
 [`evict_to_budget`](rustdoc:fn:coven::blob::cache::evict_to_budget) runs
-synchronously after every populate (a `read_blob` miss-write, or a
-[`write_blob`](rustdoc:fn:coven::blob::cache::write_blob) stage). It sums the
-`cache/` files and, if the total is over budget, deletes the oldest by
+synchronously after every populate into a namespace (a `read_blob` miss-write, or a
+[`write_blob`](rustdoc:fn:coven::blob::cache::write_blob)). It sums that namespace's
+`cache/<namespace>/` files and, if the total is over budget, deletes the oldest by
 modification time until the total is back under it. Modification time is the
 recency proxy: there is no `last_accessed` column (the same folder-truth tradeoff
 the whole cache makes), so the oldest-written file goes first. Pinning, not access
@@ -174,14 +185,14 @@ already succeeded, so the bytes are durably cached. A cache briefly over budget 
 not wrong state (the next populate's sweep corrects it), so an eviction failure is
 logged and the read or stage still returns its bytes.
 
-## Staging and clearing
+## Writing and clearing
 
-[`write_blob`](rustdoc:fn:coven::blob::cache::write_blob) stages host bytes into
-`cache/<id>` so a later read serves them locally and a pin can promote them
-without a cloud round-trip. This is for bytes a host already holds and is about to
-upload (a release going from cloud-only to pinned, whose audio the host copies in
-before the push reads it). It is not for a blob that stays external and is only
-read as an upload source; see [local files](/docs/blobs#local-files).
+[`write_blob`](rustdoc:fn:coven::blob::cache::write_blob) writes a Remote blob's
+plaintext into the evictable `cache/<namespace>/<id>` when coven already has the
+bytes in hand — the make-Remote transition moving a just-uploaded host-provided
+blob's local-store copy into the cache — so the cache is populated on write rather
+than fetched on first read. After the write it runs the namespace's
+`evict_to_budget` sweep, never dropping the bytes it just wrote.
 
 [`clear_cache`](rustdoc:fn:coven::blob::cache::clear_cache) drops the whole
 evictable cache in one sweep: it removes all of `storage/cache/` and leaves
@@ -192,10 +203,10 @@ actually be gone.
 
 ## At a glance
 
-| | `storage/pinned/` | `storage/cache/` |
+| | `storage/pinned/<namespace>/` | `storage/cache/<namespace>/` |
 | --- | --- | --- |
-| Holds | system-pinned `Mirrored` blobs, user-pinned `OnDemand` blobs | read-populated `OnDemand` blobs, host-staged bytes |
-| Counts toward `max_cache_size` | no (exempt) | yes |
-| Evicted by budget sweep | never | oldest-by-mtime when over budget |
+| Holds | user-pinned Remote blobs | eagerly-pulled (`CacheEager`) + read-populated (`CacheLazy`) Remote blobs |
+| Counts toward the namespace budget | no (exempt) | yes |
+| Evicted by budget sweep | never | oldest-by-mtime when over the namespace budget |
 | Cleared by `clear_cache` | no | yes |
-| Populated by | `pin`, the pull's `Mirrored` download | `read_blob` miss, `write_blob` |
+| Populated by | `pin` | the pull's `CacheEager` download, `read_blob` miss, `write_blob` |

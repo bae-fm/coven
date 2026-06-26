@@ -126,7 +126,7 @@ impl SyncManager {
     /// configured storage mode (see [`CloudCipher::for_storage`]): `Encrypted`
     /// under the library key for an opaque home, `Plaintext` for a browsable one.
     /// `None` only for an opaque home with no encryption service (a locked
-    /// library). A host streaming a managed blob builds a
+    /// library). A host streaming a Remote blob builds a
     /// [`BlobRangeReader`](crate::sync::cloud_storage::BlobRangeReader) with this
     /// so a read applies the same protection the upload sealed under — the same
     /// cipher this manager builds the sync loop with in `start_sync`.

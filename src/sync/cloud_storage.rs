@@ -62,7 +62,7 @@ impl CloudCipher {
     /// `encryption` is the library master service; it is required for (and only
     /// consulted on) an opaque home. `None` is returned only for an opaque home
     /// with no service (a locked library) — a browsable home is always
-    /// `Plaintext` regardless. A host streaming a managed blob via
+    /// `Plaintext` regardless. A host streaming a Remote blob via
     /// [`BlobRangeReader`] builds the reader with this cipher so a read applies
     /// the same protection the upload sealed under.
     pub fn for_storage(

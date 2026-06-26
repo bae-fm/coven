@@ -273,8 +273,8 @@ pub enum CacheFill {
 /// live depends on its locality and provenance: a user-provided Local blob is the
 /// user's file at its path; a host-provided Local blob is in coven's local store
 /// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
-/// copy (`storage/pinned/<id>` / `storage/cache/<id>`, built from the validated id —
-/// see [`cache`]).
+/// copy (`storage/pinned/<namespace>/<id>` / `storage/cache/<namespace>/<id>`, built
+/// from the validated namespace + id — see [`cache`]).
 #[derive(Debug, Clone)]
 pub struct BlobRef {
     /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`

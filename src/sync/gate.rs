@@ -18,7 +18,9 @@
 //! FK graph, never declared — except a child the host marks an *asset*
 //! ([`SyncedTable::asset`](super::session::SyncedTable::asset)), a decoration
 //! (cover, artist image) that rides its subject's gate but never grants keep, so
-//! it is excluded from the subject's keep-children.
+//! it is excluded from the subject's keep-children. An asset is typically a
+//! host-provided blob; see the [blob concept tree](crate::blob) for the blob-side
+//! vocabulary.
 //!
 //! [`gate_outbound`] is the one entry point. Given the changeset a cycle
 //! captured, it returns a new changeset with gated-false rows cut, plus — when a

@@ -316,11 +316,11 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         "a gated-off (Local) release does not reach a peer",
     );
 
-    // A manages it: enqueue the upload + intent, then the next cycle's drain
+    // A makes it Remote: enqueue the upload + intent, then the next cycle's drain
     // uploads the blob and flips the gate.
     make_remote(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
         .await
-        .expect("manage");
+        .expect("make_remote");
     let recorder = Recorder::default();
     let result = run_cycle(
         &storage,
@@ -354,16 +354,16 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     assert_eq!(
         std::fs::read(&pinned).unwrap(),
         bytes,
-        "A keeps the managed blob pinned (plaintext)",
+        "A keeps the Remote blob pinned (plaintext)",
     );
     assert!(
         result.resume_drain_promptly,
-        "completing a manage breaks the drain so the cycle publishes the subtree",
+        "completing a make_remote breaks the drain so the cycle publishes the subtree",
     );
     assert_eq!(
         *recorder.made_remote.lock().unwrap(),
         vec![("notes".to_string(), "n1".to_string())],
-        "on_root_made_remote fires for the completed manage",
+        "on_root_made_remote fires for the completed make_remote",
     );
 
     // B pulls and now gets the subtree, and fetches the CacheLazy blob on read.
@@ -383,7 +383,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     assert_eq!(fetched, bytes, "B reads the original audio from the cloud");
 }
 
-/// A unmanages a managed release. B's subtree is DELETEd (gate retract) and the
+/// A makes a Remote release Local. B's subtree is DELETEd (gate retract) and the
 /// cloud blob is tombstoned, while A keeps the external file and reads from it.
 #[tokio::test]
 async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
@@ -408,15 +408,15 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         &bytes,
     )
     .await;
-    // A pushes the managed release; B pulls it.
+    // A pushes the Remote release; B pulls it.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
-        "B has the managed release",
+        "B has the Remote release",
     );
 
-    // A unmanages it to a chosen folder.
+    // A makes it Local to a chosen folder.
     let dest_dir = tmp_a.path().join("dest");
     let dest_path = dest_dir.join("photoaaa.flac");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
@@ -435,7 +435,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         &cancel,
     )
     .await
-    .expect("unmanage");
+    .expect("make_local");
 
     assert_eq!(shared_flag(&db_a, "n1").await, 0, "A's release is Local");
     assert_eq!(
@@ -668,7 +668,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 // Cancel
 // ===========================================================================
 
-/// Cancelling an in-flight manage clears the intent and the still-pending uploads,
+/// Cancelling an in-flight make_remote clears the intent and the still-pending uploads,
 /// and tombstones any blob that already landed. The gate never flips.
 #[tokio::test]
 async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
@@ -686,7 +686,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
 
     make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
-        .expect("manage");
+        .expect("make_remote");
     assert_eq!(pending_uploads(&db).await, 2, "both uploads queued");
 
     // Drain with photobbb's source removed: photoaaa uploads (not the last, no flip), photobbb fails.
@@ -705,14 +705,14 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     );
     assert!(
         has_intent(&db, "notes", "n1").await,
-        "the manage is still in flight"
+        "the make_remote is still in flight"
     );
 
     // Cancel: the gate stays off, photoaaa (already uploaded) is tombstoned and its pinned
     // copy dropped, photobbb's pending upload is removed, the intent is cleared.
     cancel_make_remote(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
         .await
-        .expect("cancel manage");
+        .expect("cancel make_remote");
     assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
     assert!(
         !has_intent(&db, "notes", "n1").await,
@@ -730,8 +730,8 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     );
 }
 
-/// The drain's cancel-in-gap path: an upload whose gated root has no manage intent
-/// (a manage cancelled while this blob was in flight) is tombstoned and its cache
+/// The drain's cancel-in-gap path: an upload whose gated root has no make_remote
+/// intent (a make_remote cancelled while this blob was in flight) is tombstoned and its cache
 /// dropped, not flipped.
 #[tokio::test]
 async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
@@ -750,7 +750,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
         b"orphan-bytes",
     )
     .await;
-    // Enqueue the upload with NO intent (models a manage whose intent + pending row
+    // Enqueue the upload with NO intent (models a make_remote whose intent + pending row
     // were cancelled, but this blob was already in flight in the drain).
     db.enqueue_upload(
         "photoaaa",
@@ -779,7 +779,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     );
 }
 
-/// Cancelling an unmanage before the commit deletes the partial dest copies and
+/// Cancelling a make_local before the commit deletes the partial dest copies and
 /// leaves the release Remote with nothing tombstoned.
 #[tokio::test]
 async fn cancel_make_local_before_commit_stays_remote() {
@@ -809,7 +809,7 @@ async fn cancel_make_local_before_commit_stays_remote() {
         &cancel,
     )
     .await
-    .expect_err("a cancelled unmanage aborts");
+    .expect_err("a cancelled make_local aborts");
     assert!(matches!(
         err,
         crate::blob::transition::MakeLocalError::Cancelled
@@ -824,7 +824,7 @@ async fn cancel_make_local_before_commit_stays_remote() {
     assert!(!dest_path.exists(), "no partial dest copy left behind");
 }
 
-/// An unmanage that can't write a dest file aborts before the commit: the release
+/// A make_local that can't write a dest file aborts before the commit: the release
 /// stays Remote, the cloud blob is untouched, and no delete is queued.
 #[tokio::test]
 async fn make_local_dest_failure_stays_remote_no_tombstones() {
@@ -950,7 +950,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
 // Crash idempotency
 // ===========================================================================
 
-/// Crash mid-manage (some blobs uploaded, the gate not flipped): the release stays
+/// Crash mid-make_remote (some blobs uploaded, the gate not flipped): the release stays
 /// validly Local-uploading, and re-running the drain converges to Remote once
 /// the remaining blob lands — no half-state, the re-upload is an idempotent overwrite.
 #[tokio::test]
@@ -967,10 +967,10 @@ async fn make_remote_crash_before_flip_redrain_converges() {
 
     make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
-        .expect("manage");
+        .expect("make_remote");
 
     // "Crash" after photoaaa uploads but before completion: remove photobbb's source so the
-    // first drain uploads only photoaaa, leaving the manage in flight.
+    // first drain uploads only photoaaa, leaving the make_remote in flight.
     std::fs::remove_file(&src2).unwrap();
     drain_uploads(&db, &storage, &enc, &lib, &SystemClock, &hlc, None)
         .await
@@ -978,7 +978,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     assert_eq!(shared_flag(&db, "n1").await, 0, "still Local-uploading");
     assert!(
         has_intent(&db, "notes", "n1").await,
-        "the manage marker survives"
+        "the make_remote marker survives"
     );
     assert_eq!(
         pending_uploads(&db).await,
@@ -1004,7 +1004,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     assert!(db.external_blob("photobbb").await.unwrap().is_none());
 }
 
-/// An aborted unmanage (here via cancel) leaves the release Remote; retrying from
+/// An aborted make_local (here via cancel) leaves the release Remote; retrying from
 /// scratch converges to Local with the cloud delete enqueued — re-materialize +
 /// re-commit is idempotent.
 #[tokio::test]
@@ -1062,7 +1062,7 @@ async fn make_local_abort_then_retry_converges() {
         &fresh,
     )
     .await
-    .expect("retry unmanage");
+    .expect("retry make_local");
     assert_eq!(shared_flag(&db, "n1").await, 0, "converged to Local");
     assert_eq!(std::fs::read(&dest_path).unwrap(), bytes);
     assert_eq!(
@@ -1075,8 +1075,8 @@ async fn make_local_abort_then_retry_converges() {
 // Round trip
 // ===========================================================================
 
-/// manage → unmanage → manage on one device. The re-manage re-uploads to the same
-/// cloud key, whose drain cancels the unmanage's tombstone, and flips the gate back
+/// make_remote → make_local → make_remote on one device. The second make_remote re-uploads
+/// to the same cloud key, whose drain cancels the make_local's tombstone, and flips the gate back
 /// on. The release ends Remote with the blob in the cloud and no external ref.
 #[tokio::test]
 async fn round_trip_make_remote_make_local_make_remote() {
@@ -1088,7 +1088,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let (tmp, lib) = temp_library_dir();
     let bytes = b"round-trip-audio".to_vec();
 
-    // Start Local, manage to Remote.
+    // Start Local, make it Remote.
     seed_local_release(
         &db,
         &tmp.path().join("user"),
@@ -1100,11 +1100,11 @@ async fn round_trip_make_remote_make_local_make_remote() {
     .await;
     make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
-        .expect("manage 1");
+        .expect("make_remote 1");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
-    assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after manage");
+    assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after make_remote");
 
-    // Unmanage back to local.
+    // Make it Local again.
     let dest_path = tmp.path().join("dest/photoaaa.flac");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
@@ -1121,28 +1121,28 @@ async fn round_trip_make_remote_make_local_make_remote() {
         &cancel,
     )
     .await
-    .expect("unmanage");
+    .expect("make_local");
     // The retract cycle writes the tombstone.
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
-    assert_eq!(shared_flag(&db, "n1").await, 0, "Local after unmanage");
+    assert_eq!(shared_flag(&db, "n1").await, 0, "Local after make_local");
     assert!(
         storage
             .exists("blob_tombstones/photos/cv/photoaaa.flac")
             .await
             .unwrap(),
-        "the unmanage tombstoned the cloud blob",
+        "the make_local tombstoned the cloud blob",
     );
 
-    // Re-manage: the external file (now at dest) is re-uploaded, the drain cancels
+    // Second make_remote: the external file (now at dest) is re-uploaded, the drain cancels
     // the tombstone, and the gate flips back on.
     make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
-        .expect("manage 2");
+        .expect("make_remote 2");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
     assert_eq!(
         shared_flag(&db, "n1").await,
         1,
-        "Remote again after re-manage"
+        "Remote again after the second make_remote"
     );
     assert!(
         db.external_blob("photoaaa").await.unwrap().is_none(),

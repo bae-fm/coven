@@ -29,7 +29,7 @@ with a native implementation and a browser one.
 Because the browser runs one thread and reqwest's wasm response types are `!Send`,
 coven's storage traits ([`CloudHome`](rustdoc:trait:coven::storage::cloud::CloudHome),
 [`SyncStorage`](rustdoc:trait:coven::sync::storage::SyncStorage),
-[`BlobUploadObserver`](rustdoc:trait:coven::blob::BlobUploadObserver)) relax from
+[`BlobTransitionObserver`](rustdoc:trait:coven::blob::BlobTransitionObserver)) relax from
 `Send + Sync` to `?Send` on wasm through the
 [`MaybeThreadSafe`](rustdoc:trait:coven::MaybeThreadSafe) marker, empty on wasm,
 `Send + Sync` on native. The same source builds both ways.

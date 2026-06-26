@@ -849,8 +849,8 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 /// coven derives the blobs the DB at `db_path` references from the blob
 /// declarations in `tables`, then downloads the `CacheEager` ones via the same
 /// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into the
-/// evictable cache `storage/cache/<id>` under `library_dir`, skipping any already
-/// present in either cache folder. A failed download is logged there and reflected
+/// evictable cache `storage/cache/<namespace>/<id>` under `library_dir`, skipping
+/// any already present in either cache folder. A failed download is logged there and reflected
 /// in the returned flag; the bootstrap that calls this records the not-yet-complete
 /// state in
 /// [`SNAPSHOT_BLOB_BACKFILL_PENDING`], and each subsequent sync cycle re-runs this
@@ -895,7 +895,7 @@ pub(crate) async fn reconcile_snapshot_blobs(
     // goes through the DB (issue #111's pull path uses the map for keys minted in
     // the changeset being applied; the bootstrap has no such changeset). The blobs
     // are `CacheEager`, so `download_blobs` writes each into the evictable cache
-    // `storage/cache/<id>` under `library_dir`.
+    // `storage/cache/<namespace>/<id>` under `library_dir`.
     let all_ok = crate::sync::pull::download_blobs(
         db,
         blobs,
@@ -2685,7 +2685,7 @@ mod tests {
         });
         storage.add_changeset("M", k, cs_insert.clone());
 
-        // M later pushes a "manage release" UPDATE as seq K+1 = 2, raising M's
+        // M later pushes a follow-up edit as seq K+1 = 2, raising M's
         // head to 2 — but this edit is NOT in any snapshot yet.
         let cs_update = changeset_bytes_for(|db| {
             exec(
@@ -2868,7 +2868,7 @@ mod tests {
         assert_eq!(
             query_text(&db_c, "SELECT title FROM notes WHERE id = 'n1'"),
             "Published",
-            "device C must receive the managed edit through B's snapshot + pull"
+            "device C must receive the edit through B's snapshot + pull"
         );
     }
 
