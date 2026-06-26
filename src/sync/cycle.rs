@@ -55,10 +55,10 @@ pub struct SyncCycleResult {
     pub asset_downloads_failed: bool,
     /// Row changes from applied changesets, for the host to map to domain events.
     pub row_changes: Vec<RowChange>,
-    /// The outbox drain broke this cycle to publish a just-completed manage (coven
-    /// flipped a root's gate the moment its last blob landed), so the loop should run
-    /// the next cycle promptly to drain + publish the rest instead of waiting the
-    /// idle interval.
+    /// The outbox drain broke this cycle to publish a just-completed make_remote
+    /// (coven flipped a root's gate the moment its last blob landed), so the loop
+    /// should run the next cycle promptly to drain + publish the rest instead of
+    /// waiting the idle interval.
     pub resume_drain_promptly: bool,
 }
 
@@ -234,12 +234,12 @@ pub async fn run_single_sync_cycle(
     };
 
     // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
-    // the gate column: a managing root stays gated off until its last blob lands,
-    // and coven flips it on inside the drain (the manage completion), breaking the
-    // drain so this cycle publishes the now-shareable subtree instead of waiting for
-    // the whole batch. The changeset is gated per row, not by a global "any upload
-    // pending" flag. The drain reports whether it broke to publish, which drives the
-    // loop's cadence below.
+    // the gate column: a root being made Remote stays gated off until its last
+    // user-provided blob lands, and coven flips it on inside the drain (the
+    // make_remote completion), breaking the drain so this cycle publishes the
+    // now-shareable subtree instead of waiting for the whole batch. The changeset is
+    // gated per row, not by a global "any upload pending" flag. The drain reports
+    // whether it broke to publish, which drives the loop's cadence below.
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
         match crate::blob::upload::drain_uploads(db, ch, cipher, library_dir, clock, hlc, observer)

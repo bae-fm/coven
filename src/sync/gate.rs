@@ -565,8 +565,8 @@ impl Gates {
     /// absent from the live db.
     ///
     /// The blob-transition drain uses this to map a just-uploaded blob's row to the
-    /// gated root a manage tracks: a `release_files` row resolves up to its
-    /// `releases` root, whose `blob_manage_intents` row the completion check reads.
+    /// gated root a make_remote tracks: a `release_files` row resolves up to its
+    /// `releases` root, whose `blob_make_remote_intents` row the completion check reads.
     pub(crate) fn resolve_root_of(
         &self,
         conn: &Connection,
@@ -588,7 +588,7 @@ impl Gates {
     /// subtree is returned whatever its gate currently reads.
     ///
     /// [`crate::blob::decl::BlobDecls::refs_for_root`] maps these rows to the blobs
-    /// a transition uploads (manage) or materializes (unmanage).
+    /// a transition uploads (make_remote) or materializes (make_local).
     pub(crate) fn subtree_rows(
         &self,
         conn: &Connection,
@@ -630,8 +630,8 @@ impl Gates {
 
 /// Write a gated root's gate column on (`true`) or off (`false`), stamping
 /// `_updated_at` so the flip sorts causally and is captured into this cycle's
-/// changeset. The single place the transition commits flip a gate — manage
-/// completion (on) and unmanage (off) — so the write shape lives here once. Runs on
+/// changeset. The single place the transition commits flip a gate — make_remote
+/// completion (on) and make_local (off) — so the write shape lives here once. Runs on
 /// the caller's connection/transaction.
 pub(crate) fn write_gate(
     conn: &Connection,

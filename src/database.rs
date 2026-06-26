@@ -741,7 +741,7 @@ impl Database {
 
     /// Transaction-composable form of [`enqueue_delete`](Self::enqueue_delete):
     /// runs on a connection the host already holds inside a [`call`](Self::call)
-    /// closure, so coven's `unmanage` can flip a root's gate false and enqueue its
+    /// closure, so coven's `make_local` can flip a root's gate false and enqueue its
     /// blob deletes in one transaction — the tombstone can't be lost to a crash
     /// between the flip and a separate enqueue. A delete touches no key, so it
     /// carries no scope (the column is NULL for a delete row).
@@ -906,8 +906,8 @@ impl Database {
     /// Transaction-composable form of
     /// [`register_external_blob`](Self::register_external_blob): runs on a
     /// connection the host already holds inside a [`call`](Self::call) closure, so
-    /// coven's `unmanage` can flip a root's gate false and register the external
-    /// refs for its now-local files in one transaction. Insert-or-replace on
+    /// coven's `make_local` can flip a root's gate false and register the external
+    /// refs for its now-local user files in one transaction. Insert-or-replace on
     /// `blob_id`, so a relocate overwrites the prior row.
     pub fn register_external_blob_on(
         conn: &Connection,
@@ -944,30 +944,32 @@ impl Database {
 
     /// Transaction-composable form of
     /// [`clear_external_blob`](Self::clear_external_blob): runs on a connection the
-    /// host already holds inside a [`call`](Self::call) closure, so coven's `manage`
-    /// completion can flip a root's gate true and drop the external refs for its
-    /// now-cloud-backed blobs in one transaction. A no-op if no ref is registered.
+    /// host already holds inside a [`call`](Self::call) closure, so coven's
+    /// `make_remote` completion can flip a root's gate true and drop the external
+    /// refs for its now-cloud-backed blobs in one transaction. A no-op if no ref is
+    /// registered.
     pub fn clear_external_blob_on(conn: &Connection, blob_id: &str) -> Result<(), DbError> {
         conn.execute("DELETE FROM local_blob_refs WHERE blob_id = ?1", [blob_id])
             .map(|_| ())
             .map_err(DbError::from)
     }
 
-    // ---- Blob manage intents (device-local in-flight manage markers) ----
+    // ---- Blob make-Remote intents (device-local in-flight make_remote markers) ----
 
-    /// Record an in-flight manage of `(root_table, root_id)` as a presence marker.
-    /// Transaction-composable: coven's `manage` inserts this in the same
-    /// transaction that enqueues the root's blob uploads, so an in-flight manage is
-    /// a durable, atomic fact (the upload drain's completion check reads it to know
-    /// an uploaded blob's root is a manage to finish, and it survives a restart).
-    /// The pin choice rides each upload row's `retain_pinned`, not this marker.
-    pub fn insert_manage_intent_on(
+    /// Record an in-flight make_remote of `(root_table, root_id)` as a presence
+    /// marker. Transaction-composable: coven's `make_remote` inserts this in the same
+    /// transaction that enqueues the root's user-provided blob uploads, so an
+    /// in-flight make_remote is a durable, atomic fact (the upload drain's completion
+    /// check reads it to know an uploaded blob's root is a make_remote to finish, and
+    /// it survives a restart). The pin choice rides each upload row's `retain_pinned`,
+    /// not this marker.
+    pub fn insert_make_remote_intent_on(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
     ) -> Result<(), DbError> {
         conn.execute(
-            "INSERT OR REPLACE INTO blob_manage_intents (root_table, root_id) \
+            "INSERT OR REPLACE INTO blob_make_remote_intents (root_table, root_id) \
              VALUES (?1, ?2)",
             (root_table, root_id),
         )
@@ -975,32 +977,33 @@ impl Database {
         .map_err(DbError::from)
     }
 
-    /// Remove the manage intent for `(root_table, root_id)`. Transaction-composable
-    /// so it commits with the gate flip (on completion) or with the cancel cleanup.
-    pub fn delete_manage_intent_on(
+    /// Remove the make_remote intent for `(root_table, root_id)`.
+    /// Transaction-composable so it commits with the gate flip (on completion) or
+    /// with the cancel cleanup.
+    pub fn delete_make_remote_intent_on(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
     ) -> Result<(), DbError> {
         conn.execute(
-            "DELETE FROM blob_manage_intents WHERE root_table = ?1 AND root_id = ?2",
+            "DELETE FROM blob_make_remote_intents WHERE root_table = ?1 AND root_id = ?2",
             (root_table, root_id),
         )
         .map(|_| ())
         .map_err(DbError::from)
     }
 
-    /// Whether a manage is in flight for `(root_table, root_id)`. Read inside the
-    /// upload drain's completion check to tell a manage to finish (`true`) from an
-    /// orphan upload of a cancelled manage to tombstone (`false`). Synchronous (runs
-    /// on a connection the caller already holds).
-    pub fn manage_intent_exists(
+    /// Whether a make_remote is in flight for `(root_table, root_id)`. Read inside
+    /// the upload drain's completion check to tell a make_remote to finish (`true`)
+    /// from an orphan upload of a cancelled make_remote to tombstone (`false`).
+    /// Synchronous (runs on a connection the caller already holds).
+    pub fn make_remote_intent_exists(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
     ) -> Result<bool, DbError> {
         conn.query_row(
-            "SELECT 1 FROM blob_manage_intents WHERE root_table = ?1 AND root_id = ?2",
+            "SELECT 1 FROM blob_make_remote_intents WHERE root_table = ?1 AND root_id = ?2",
             (root_table, root_id),
             |_| Ok(()),
         )
@@ -1010,8 +1013,9 @@ impl Database {
     }
 
     /// The external user-owned file `blob_id` resolves to, or `None` when no ref is
-    /// registered (the blob is owned-cache/cloud, not external). The locality-aware
-    /// read consults this before the cache/cloud resolution.
+    /// registered (the blob is host-provided local-store, cache, or cloud — not a
+    /// user-provided external file). The locality-aware read consults this before the
+    /// local-store / cache / cloud resolution.
     pub async fn external_blob(&self, blob_id: &str) -> Result<Option<ExternalBlob>, DbError> {
         let blob_id = blob_id.to_string();
         self.call(move |conn| {

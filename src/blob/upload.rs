@@ -2,12 +2,11 @@
 //! each blob under its scope and writing it to the cloud with coalesced progress.
 //!
 //! The engine owns a blob's whole local-durability lifecycle. [`cache`](super::cache)
-//! is the device-local half (bytes on disk, pin/unpin, eviction); this is the
-//! cloud half (local-only → uploaded). The host stages a blob (writing it locally
-//! and enqueuing an upload row on `(operation, cloud_key)`), and the sync cycle
-//! calls [`drain_uploads`] each round before it pushes: the drain reads each
-//! pending row, seals the local plaintext under the blob's scope, and writes it to
-//! the cloud.
+//! is the device-local half for Remote blobs (bytes on disk, pin/unpin, eviction);
+//! this is the cloud half (local-only → uploaded). A make_remote enqueues an upload
+//! row per user-provided blob on `(operation, cloud_key)`, and the sync cycle calls
+//! [`drain_uploads`] each round before it pushes: the drain reads each pending row,
+//! seals the local plaintext under the blob's scope, and writes it to the cloud.
 //!
 //! The queue persists the **final cloud object key** the host built at enqueue
 //! (the `cloud_key` column), not the `(namespace, id, cloud_path)` a [`BlobRef`]
@@ -34,7 +33,7 @@ use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
-use crate::blob::{BlobScope, BlobTransitionObserver, CacheFill};
+use crate::blob::{BlobScope, BlobTransitionObserver, Provenance};
 use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
 use crate::library_dir::LibraryDir;
@@ -180,8 +179,8 @@ async fn resolve_and_seal(
 pub struct DrainOutcome {
     /// Number of successful uploads this pass.
     pub uploaded: usize,
-    /// The drain stopped early because an upload just *completed a manage*: the
-    /// last of a gated root's blobs landed, so coven flipped the root's gate true
+    /// The drain stopped early because an upload just *completed a make_remote*: the
+    /// last of a gated root's user-provided blobs landed, so coven flipped the gate true
     /// and broke the drain so this cycle publishes the now-shareable subtree (and
     /// the loop runs the next cycle promptly to drain any other root's blobs).
     /// `false` when the queue drained in one pass (or stopped on a pause / left
@@ -199,8 +198,8 @@ pub struct DrainOutcome {
 /// the queue or get re-attempted every cycle. The `observer` (if any) is notified
 /// as each attempt starts, succeeds, or fails.
 ///
-/// coven owns the manage *completion*: after a successful upload it walks the
-/// blob's row up to its gated root, and if that root has a `blob_manage_intents`
+/// coven owns the make_remote *completion*: after a successful upload it walks the
+/// blob's row up to its gated root, and if that root has a `blob_make_remote_intents`
 /// row with no other pending upload, takes the single atomic commit
 /// `{remove the final outbox row + flip the gate true + drop the root's external
 /// refs + delete the intent}` and breaks the drain so this cycle publishes the
@@ -209,8 +208,8 @@ pub struct DrainOutcome {
 /// invariant: until it commits the row is present, so a crash re-runs the
 /// (idempotent overwrite) upload and retries the flip — there is no window where
 /// the blobs are up but the gate isn't, with nothing queued to drive it. An upload
-/// whose root has NO intent is an orphan from a cancelled manage: it is tombstoned
-/// (and its cache dropped) rather than flipped.
+/// whose root has NO intent is an orphan from a cancelled make_remote: it is
+/// tombstoned (and its cache dropped) rather than flipped.
 pub async fn drain_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
@@ -230,9 +229,9 @@ pub async fn drain_uploads(
     let mut count = 0;
     let mut yielded_for_publish = false;
 
-    // The blob/gate model the manage completion check reads, resolved once from the
-    // declared set + live schema (the schema can't change mid-drain). An upload's
-    // row → gated root → its `blob_manage_intents` lookup all run off these. The
+    // The blob/gate model the make_remote completion check reads, resolved once from
+    // the declared set + live schema (the schema can't change mid-drain). An upload's
+    // row → gated root → its `blob_make_remote_intents` lookup all run off these. The
     // gate-column map lets the flip name the root's gate column. Built only when
     // there is something to drain; a build failure aborts the drain (nothing was
     // uploaded, the rows stay queued, the next cycle retries).
@@ -358,7 +357,7 @@ pub async fn drain_uploads(
                 // A successful write wins over any pending deletion: remove the
                 // tombstone a prior cycle (possibly another device) wrote for this
                 // key, so the GC won't reclaim the blob we just re-uploaded — the
-                // round-trip re-manage case (a prior unmanage tombstoned this key).
+                // round-trip re-make_remote case (a prior make_local tombstoned this key).
                 // The enqueue layer already drops a same-device pending delete row;
                 // this covers a tombstone already committed to the cloud. The cancel
                 // must not be lost if it fails (a surviving tombstone past its grace
@@ -382,7 +381,7 @@ pub async fn drain_uploads(
                 // The post-upload commit: mint the gate-flip stamp off coven's HLC
                 // (the same register the host stamps rows from, so the flip sorts
                 // causally and is captured into this cycle's changeset), then in one
-                // DB call complete a manage (flip), continue, or tombstone an orphan.
+                // DB call complete a make_remote (flip), continue, or tombstone an orphan.
                 let stamp = hlc.now().to_string();
                 let outcome = commit_after_upload(
                     db,
@@ -401,7 +400,7 @@ pub async fn drain_uploads(
                 match outcome {
                     Ok(PostUpload::Continued) => {}
                     Ok(PostUpload::Orphan) => {
-                        // A cancelled manage left this blob uploaded with no intent;
+                        // A cancelled make_remote left this blob uploaded with no intent;
                         // it is tombstoned in the commit above. Drop its local cache
                         // copy too (a `retain_pinned` upload populated `pinned/`,
                         // which is budget-exempt and would otherwise leak).
@@ -411,7 +410,7 @@ pub async fn drain_uploads(
                             warn!("failed to drop the cache copy of orphaned blob {file_id}: {e}");
                         }
                     }
-                    Ok(PostUpload::ManageCompleted {
+                    Ok(PostUpload::MadeRemote {
                         root_table,
                         root_id,
                         external_paths,
@@ -423,13 +422,13 @@ pub async fn drain_uploads(
                         for path in external_paths {
                             if let Err(e) = crate::local_blob::remove_file(&path).await {
                                 warn!(
-                                    "manage of {root_table}/{root_id} completed but deleting the external source {}: {e}",
+                                    "make_remote of {root_table}/{root_id} completed but deleting the external source {}: {e}",
                                     path.display()
                                 );
                             }
                         }
                         if let Some(obs) = observer {
-                            obs.on_root_managed(&root_table, &root_id).await;
+                            obs.on_root_made_remote(&root_table, &root_id).await;
                         }
                         // Break so this cycle publishes the now-shareable subtree;
                         // any other root's blobs drain on the promptly-run next cycle.
@@ -466,27 +465,28 @@ pub async fn drain_uploads(
 /// What the post-upload commit did, so the drain can run the cloud-/filesystem-side
 /// effects (which can't run inside the DB transaction) and decide whether to break.
 enum PostUpload {
-    /// A plain upload (no gated root) or a non-final manage upload: the outbox row
-    /// was removed. Nothing more for the drain to do.
+    /// A plain upload (no gated root) or a non-final make_remote upload: the outbox
+    /// row was removed. Nothing more for the drain to do.
     Continued,
-    /// The blob was uploaded but its gated root has no manage intent — an orphan
-    /// from a cancelled manage. Its cloud delete was enqueued (tombstone) and its
-    /// outbox row removed in the commit; the drain drops its local cache copy.
+    /// The blob was uploaded but its gated root has no make_remote intent — an orphan
+    /// from a cancelled make_remote. Its cloud delete was enqueued (tombstone) and
+    /// its outbox row removed in the commit; the drain drops its local cache copy.
     Orphan,
-    /// This upload completed a manage: the single atomic commit flipped the gate
+    /// This upload completed a make_remote: the single atomic commit flipped the gate
     /// true, dropped the root's external refs, removed the final outbox row, and
     /// deleted the intent. The drain deletes the now-redundant external source files
-    /// and notifies `on_root_managed`, then breaks to publish the subtree.
-    ManageCompleted {
+    /// and notifies `on_root_made_remote`, then breaks to publish the subtree.
+    MadeRemote {
         root_table: String,
         root_id: String,
         external_paths: Vec<PathBuf>,
     },
 }
 
-/// Build the gate model, blob declarations, and the root→gate-column map the manage
-/// completion check reads, once per drain pass. All three resolve off the declared
-/// synced-table set + the live schema, so they're built together in one DB call.
+/// Build the gate model, blob declarations, and the root→gate-column map the
+/// make_remote completion check reads, once per drain pass. All three resolve off
+/// the declared synced-table set + the live schema, so they're built together in
+/// one DB call.
 async fn build_transition_models(
     db: &Database,
 ) -> Result<(Arc<Gates>, Arc<BlobDecls>, Arc<HashMap<String, String>>), String> {
@@ -509,7 +509,7 @@ async fn build_transition_models(
 
 /// The post-upload bookkeeping for one successful upload, as one DB call so the
 /// completion check and the flip it gates are atomic: map the blob to its row and
-/// gated root, then either complete a manage (the single atomic flip commit),
+/// gated root, then either complete a make_remote (the single atomic flip commit),
 /// continue (remove the row), or tombstone an orphan.
 #[allow(clippy::too_many_arguments)]
 async fn commit_after_upload(
@@ -542,27 +542,28 @@ async fn commit_after_upload(
             return Ok(PostUpload::Continued);
         };
 
-        // No intent ⇒ a cancelled manage left this blob orphaned in the cloud.
+        // No intent ⇒ a cancelled make_remote left this blob orphaned in the cloud.
         // Tombstone it (enqueue_delete drops the upload row and adds the delete), in
         // one commit so a crash can't drop the row while leaving no tombstone.
-        if !Database::manage_intent_exists(conn, &root_table, &root_id)? {
+        if !Database::make_remote_intent_exists(conn, &root_table, &root_id)? {
             let tx = conn.unchecked_transaction()?;
             Database::enqueue_delete_on(&tx, &cloud_key, &now_rfc)?;
             tx.commit().map_err(DbError::from)?;
             return Ok(PostUpload::Orphan);
         }
 
-        // A manage is in flight for this root. It completes iff no OTHER CacheLazy blob
-        // of its subtree still has a pending upload (this entry's row is still present
-        // — it's removed inside the flip commit below). Scoped to CacheLazy: those are
-        // the blobs a manage enqueues, so a CacheEager blob's unrelated upload neither
-        // blocks completion nor gets its external ref cleared here.
+        // A make_remote is in flight for this root. It completes iff no OTHER
+        // user-provided blob of its subtree still has a pending upload (this entry's
+        // row is still present — it's removed inside the flip commit below). Scoped to
+        // user-provided: those are the blobs make_remote enqueues, so a host-provided
+        // blob's inline-push upload neither blocks completion nor gets an external ref
+        // cleared here.
         let refs = decls
             .refs_for_root(conn, &gates, &root_table, &root_id)
             .map_err(|e| DbError(e.to_string()))?;
         let blob_ids: Vec<String> = refs
             .iter()
-            .filter(|b| b.sync == CacheFill::CacheLazy)
+            .filter(|b| b.provenance == Provenance::UserProvided)
             .map(|b| b.id.clone())
             .collect();
         if count_other_pending_uploads(conn, &blob_ids, final_outbox_id)? > 0 {
@@ -576,7 +577,7 @@ async fn commit_after_upload(
         // present, so a crash re-runs the idempotent upload and retries this flip.
         let gate_col = gate_columns.get(&root_table).ok_or_else(|| {
             DbError(format!(
-                "manage completion: gated root {root_table} has no gate column"
+                "make_remote completion: gated root {root_table} has no gate column"
             ))
         })?;
         let external_paths = external_source_paths(conn, &blob_ids)?;
@@ -587,9 +588,9 @@ async fn commit_after_upload(
         for id in &blob_ids {
             Database::clear_external_blob_on(&tx, id)?;
         }
-        Database::delete_manage_intent_on(&tx, &root_table, &root_id)?;
+        Database::delete_make_remote_intent_on(&tx, &root_table, &root_id)?;
         tx.commit().map_err(DbError::from)?;
-        Ok(PostUpload::ManageCompleted {
+        Ok(PostUpload::MadeRemote {
             root_table,
             root_id,
             external_paths,
@@ -601,7 +602,7 @@ async fn commit_after_upload(
 /// The non-completing post-upload outcome: remove the upload's outbox row (and, on a
 /// failed tombstone-cancel, its durable `cancel` row) in one transaction, so the two
 /// statements commit together. The `Continued` branches — a plain upload with no
-/// gated root, and a non-final manage upload — share this single commit shape.
+/// gated root, and a non-final make_remote upload — share this single commit shape.
 fn commit_finish(
     conn: &Connection,
     id: i64,
@@ -640,7 +641,7 @@ fn finish_outbox_row(
 
 /// How many pending uploads remain for the given blob ids, excluding the row
 /// `exclude_id` (the just-uploaded entry, whose row is removed inside the flip
-/// commit). Zero means this upload was the last of the manage's subtree.
+/// commit). Zero means this upload was the last of the make_remote's subtree.
 fn count_other_pending_uploads(
     conn: &Connection,
     blob_ids: &[String],
@@ -662,12 +663,12 @@ fn count_other_pending_uploads(
         .map_err(DbError::from)
 }
 
-/// The external source-file paths registered for the given blob ids (an Unmanaged
+/// The external source-file paths registered for the given blob ids (a Local
 /// release's user files). Read before the flip commit clears the refs, so the drain
-/// can delete the now-redundant originals post-commit. These are the manage's
-/// CacheLazy blobs, each registered external at manage time, so a missing ref is
-/// unexpected — logged (not silently skipped) so the absence is visible; the only
-/// consequence is a source file left undeleted.
+/// can delete the now-redundant originals post-commit. These are the make_remote's
+/// user-provided blobs, each registered external at make_remote time, so a missing
+/// ref is unexpected — logged (not silently skipped) so the absence is visible; the
+/// only consequence is a source file left undeleted.
 fn external_source_paths(conn: &Connection, blob_ids: &[String]) -> Result<Vec<PathBuf>, DbError> {
     let mut out = Vec::new();
     for id in blob_ids {
@@ -682,7 +683,7 @@ fn external_source_paths(conn: &Connection, blob_ids: &[String]) -> Result<Vec<P
         match path {
             Some(path) => out.push(PathBuf::from(path)),
             None => warn!(
-                "manage completion: blob {id} has no external ref to delete (already cleared?)"
+                "make_remote completion: blob {id} has no external ref to delete (already cleared?)"
             ),
         }
     }

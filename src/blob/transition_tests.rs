@@ -1,16 +1,17 @@
-//! Tests for the coven-owned manage / unmanage transitions.
+//! Tests for the coven-owned make-Remote / make-Local transitions.
 //!
-//! These drive the real transition functions ([`manage_blobs`],
-//! [`cancel_manage_blobs`], [`unmanage_blobs`]) and the upload drain's completion
+//! These drive the real transition functions ([`make_remote`],
+//! [`cancel_make_remote`], [`make_local`]) and the upload drain's completion
 //! flip against a real [`Database`] and a [`MockSyncStorage`] that serves as both
 //! the sync storage and the cloud home. A `Plaintext` cipher + `Plain` blob-path
 //! scheme keep what the drain writes and what a read fetches byte-identical through
 //! the mock, so a blob round-trips as plaintext across devices.
 //!
 //! The synthetic schema stands in for a release: `notes` is the gated root (a
-//! release), `note_photos` is its blob-bearing child (a release file). Managing a
-//! note uploads its photos and flips `shared` on; unmanaging materializes them back
-//! and flips it off (the gate retract removes the subtree from peers).
+//! release), `note_photos` is its user-provided blob-bearing child (a release file),
+//! and `note_covers` is its host-provided asset child (a cover). Making a note
+//! Remote uploads its blobs and flips `shared` on; making it Local materializes them
+//! back and flips it off (the gate retract removes the subtree from peers).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,9 +20,12 @@ use std::sync::{Mutex, RwLock};
 use async_trait::async_trait;
 use tokio::sync::watch;
 
-use crate::blob::transition::{cancel_manage_blobs, manage_blobs, unmanage_blobs};
+use crate::blob::transition::{cancel_make_remote, make_local, make_remote};
 use crate::blob::upload::drain_uploads;
-use crate::blob::{cache, BlobRef, BlobScope, BlobTransitionObserver, CacheFill, ResolvedScope};
+use crate::blob::{
+    cache, local_files, BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
+    ResolvedScope,
+};
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::keys::UserKeypair;
@@ -33,13 +37,22 @@ use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    exec, open_test_db_with_blob, query_text, row_exists, temp_library_dir, MockSyncStorage,
+    exec, open_test_db_with_blob, open_test_db_with_user_and_host_blobs, query_text, row_exists,
+    temp_library_dir, MockSyncStorage,
 };
 
-/// The blob declaration for `note_photos`: a release file, keyed by the readable
-/// cloud path (browsable home), fetched on demand, master-scoped.
+/// The blob declaration for `note_photos`: a release file — user-provided ·
+/// `CacheLazy`, keyed by the readable cloud path (browsable home), master-scoped.
 fn photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", CacheFill::CacheLazy).with_cloud_path_column("cloud_path")
+    BlobDecl::new("photos", Provenance::UserProvided, CacheFill::CacheLazy)
+        .with_cloud_path_column("cloud_path")
+}
+
+/// The blob declaration for `note_covers`: a host-provided · `CacheEager` asset,
+/// keyed by the readable cloud path, master-scoped.
+fn cover_decl() -> BlobDecl {
+    BlobDecl::new("covers", Provenance::HostProvided, CacheFill::CacheEager)
+        .with_cloud_path_column("cloud_path")
 }
 
 fn plaintext() -> RwLock<CloudCipher> {
@@ -53,15 +66,28 @@ fn photo_ref(id: &str, cloud_path: &str) -> BlobRef {
         id: id.to_string(),
         scope: BlobScope::Master,
         cloud_path: Some(cloud_path.to_string()),
-        sync: CacheFill::CacheLazy,
+        provenance: Provenance::UserProvided,
+        fill: CacheFill::CacheLazy,
+    }
+}
+
+/// The `BlobRef` a host builds to read a cover (matching `cover_decl`).
+fn cover_ref(id: &str, cloud_path: &str) -> BlobRef {
+    BlobRef {
+        namespace: "covers".to_string(),
+        id: id.to_string(),
+        scope: BlobScope::Master,
+        cloud_path: Some(cloud_path.to_string()),
+        provenance: Provenance::HostProvided,
+        fill: CacheFill::CacheEager,
     }
 }
 
 /// Records the transition observer's completion + materialize callbacks.
 #[derive(Default)]
 struct Recorder {
-    managed: Mutex<Vec<(String, String)>>,
-    unmanaged: Mutex<Vec<(String, String)>>,
+    made_remote: Mutex<Vec<(String, String)>>,
+    made_local: Mutex<Vec<(String, String)>>,
     materialized: Mutex<Vec<(String, u64, u64)>>,
 }
 
@@ -70,14 +96,14 @@ impl BlobTransitionObserver for Recorder {
     async fn on_blob_upload_started(&self, _blob_id: &str) {}
     async fn on_blob_uploaded(&self, _blob_id: &str) {}
     async fn on_blob_upload_failed(&self, _blob_id: &str, _error: &str) {}
-    async fn on_root_managed(&self, root_table: &str, root_id: &str) {
-        self.managed
+    async fn on_root_made_remote(&self, root_table: &str, root_id: &str) {
+        self.made_remote
             .lock()
             .unwrap()
             .push((root_table.to_string(), root_id.to_string()));
     }
-    async fn on_root_unmanaged(&self, root_table: &str, root_id: &str) {
-        self.unmanaged
+    async fn on_root_made_local(&self, root_table: &str, root_id: &str) {
+        self.made_local
             .lock()
             .unwrap()
             .push((root_table.to_string(), root_id.to_string()));
@@ -127,7 +153,7 @@ async fn run_cycle(
     .expect("cycle")
 }
 
-/// Insert the gated note + its blob-bearing photo row, `shared` (Managed) or not.
+/// Insert the gated note + its blob-bearing photo row, `shared` (Remote) or not.
 /// The two seeders below differ only in this flag and where the blob's bytes live.
 async fn seed_release_rows(
     db: &Database,
@@ -154,9 +180,9 @@ async fn seed_release_rows(
     .await;
 }
 
-/// Insert an Unmanaged release: a gated-off note plus a blob-bearing photo with an
+/// Insert a Local release: a gated-off note plus a blob-bearing photo with an
 /// external source file registered for it. Returns the external source path.
-async fn seed_unmanaged_release(
+async fn seed_local_release(
     db: &Database,
     user_dir: &std::path::Path,
     note_id: &str,
@@ -175,9 +201,9 @@ async fn seed_unmanaged_release(
 }
 
 /// Add a second blob-bearing photo (with its external source registered) to a
-/// release already seeded by [`seed_unmanaged_release`] — for the multi-blob tests.
+/// release already seeded by [`seed_local_release`] — for the multi-blob tests.
 /// Returns the external source path.
-async fn add_unmanaged_photo(
+async fn add_local_photo(
     db: &Database,
     user_dir: &std::path::Path,
     note_id: &str,
@@ -201,9 +227,9 @@ async fn add_unmanaged_photo(
     src
 }
 
-/// Insert a Managed release: a gated-on note plus a photo whose blob is already in
+/// Insert a Remote release: a gated-on note plus a photo whose blob is already in
 /// the cloud (plaintext, at the readable key the `Plain` scheme derives).
-async fn seed_managed_release(
+async fn seed_remote_release(
     storage: &MockSyncStorage,
     db: &Database,
     note_id: &str,
@@ -248,20 +274,20 @@ async fn pending_deletes(db: &Database) -> Vec<String> {
 
 async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
     let (rt, ri) = (root_table.to_string(), root_id.to_string());
-    db.call(move |conn| Database::manage_intent_exists(conn, &rt, &ri))
+    db.call(move |conn| Database::make_remote_intent_exists(conn, &rt, &ri))
         .await
         .unwrap()
 }
 
 // ===========================================================================
-// Multi-device manage / unmanage
+// Multi-device make_remote / make_local
 // ===========================================================================
 
-/// A imports an Unmanaged release and manages it. Device B receives the subtree
+/// A imports a Local release and makes it Remote. Device B receives the subtree
 /// ONLY after the blob is up (the gate stays off until the flip), A keeps the blob
 /// pinned and the external source deleted, and B fetches the CacheLazy blob on read.
 #[tokio::test]
-async fn multi_device_manage_publishes_only_after_blobs_are_up() {
+async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
     let kp_a = UserKeypair::generate();
@@ -270,7 +296,7 @@ async fn multi_device_manage_publishes_only_after_blobs_are_up() {
     let (tmp_a, lib_a) = temp_library_dir();
     let bytes = b"RELEASE-AUDIO-BYTES-one-file".to_vec();
 
-    let src = seed_unmanaged_release(
+    let src = seed_local_release(
         &db_a,
         &tmp_a.path().join("user"),
         "n1",
@@ -287,12 +313,12 @@ async fn multi_device_manage_publishes_only_after_blobs_are_up() {
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
     assert!(
         !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
-        "a gated-off (Unmanaged) release does not reach a peer",
+        "a gated-off (Local) release does not reach a peer",
     );
 
     // A manages it: enqueue the upload + intent, then the next cycle's drain
     // uploads the blob and flips the gate.
-    manage_blobs(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
+    make_remote(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
         .await
         .expect("manage");
     let recorder = Recorder::default();
@@ -311,7 +337,7 @@ async fn multi_device_manage_publishes_only_after_blobs_are_up() {
     // The flip completed this cycle: the gate is on, the intent is gone, the
     // external ref is dropped, the source file is deleted, the blob is pinned, and
     // the drain broke to publish.
-    assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Managed");
+    assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
     assert!(
         !has_intent(&db_a, "notes", "n1").await,
         "the intent is cleared"
@@ -335,9 +361,9 @@ async fn multi_device_manage_publishes_only_after_blobs_are_up() {
         "completing a manage breaks the drain so the cycle publishes the subtree",
     );
     assert_eq!(
-        *recorder.managed.lock().unwrap(),
+        *recorder.made_remote.lock().unwrap(),
         vec![("notes".to_string(), "n1".to_string())],
-        "on_root_managed fires for the completed manage",
+        "on_root_made_remote fires for the completed manage",
     );
 
     // B pulls and now gets the subtree, and fetches the CacheLazy blob on read.
@@ -360,7 +386,7 @@ async fn multi_device_manage_publishes_only_after_blobs_are_up() {
 /// A unmanages a managed release. B's subtree is DELETEd (gate retract) and the
 /// cloud blob is tombstoned, while A keeps the external file and reads from it.
 #[tokio::test]
-async fn multi_device_unmanage_retracts_peer_and_tombstones_cloud() {
+async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
     let kp_a = UserKeypair::generate();
@@ -373,7 +399,7 @@ async fn multi_device_unmanage_retracts_peer_and_tombstones_cloud() {
     let (_tmp_b, lib_b) = temp_library_dir();
     let bytes = b"MANAGED-AUDIO-going-back-local".to_vec();
 
-    seed_managed_release(
+    seed_remote_release(
         &storage,
         &db_a,
         "n1",
@@ -396,7 +422,7 @@ async fn multi_device_unmanage_retracts_peer_and_tombstones_cloud() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     let recorder = Recorder::default();
-    unmanage_blobs(
+    make_local(
         &db_a,
         &storage,
         &lib_a,
@@ -411,11 +437,7 @@ async fn multi_device_unmanage_retracts_peer_and_tombstones_cloud() {
     .await
     .expect("unmanage");
 
-    assert_eq!(
-        shared_flag(&db_a, "n1").await,
-        0,
-        "A's release is Unmanaged"
-    );
+    assert_eq!(shared_flag(&db_a, "n1").await, 0, "A's release is Local");
     assert_eq!(
         std::fs::read(&dest_path).unwrap(),
         bytes,
@@ -432,7 +454,7 @@ async fn multi_device_unmanage_retracts_peer_and_tombstones_cloud() {
         "the cloud blob's delete is enqueued in the same commit as the flip",
     );
     assert_eq!(
-        *recorder.unmanaged.lock().unwrap(),
+        *recorder.made_local.lock().unwrap(),
         vec![("notes".to_string(), "n1".to_string())],
     );
     assert_eq!(
@@ -472,13 +494,172 @@ async fn multi_device_unmanage_retracts_peer_and_tombstones_cloud() {
 }
 
 // ===========================================================================
+// Host-provided lifecycle (the cover rides the inline push, not the outbox)
+// ===========================================================================
+
+/// A release with a user-provided audio file AND a host-provided cover, through both
+/// transitions. make_remote: the audio uploads via the outbox and flips the gate;
+/// the gate flip re-emits the subtree and the cycle's inline push uploads the cover
+/// (host-provided) from the local store and moves that copy into the cache. A peer
+/// pulls the cover eagerly (`CacheEager`) into its cache. make_local: the audio goes
+/// back to its dest (external ref) and the cover back to the local store (NO dest),
+/// both cloud copies tombstoned.
+#[tokio::test]
+async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp_a = UserKeypair::generate();
+    let hlc_a = Hlc::new("A".to_string());
+    let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
+    let (tmp_a, lib_a) = temp_library_dir();
+    let audio = b"RELEASE-AUDIO".to_vec();
+    let cover = b"RELEASE-COVER".to_vec();
+
+    // Seed a gated-off release: a note + a user-provided audio (external ref) + a
+    // host-provided cover (in the local store).
+    let src = seed_local_release(
+        &db_a,
+        &tmp_a.path().join("user"),
+        "n1",
+        "photoaaa",
+        "cv/photoaaa.flac",
+        &audio,
+    )
+    .await;
+    exec(
+        &db_a,
+        "INSERT INTO note_covers (id, note_id, _updated_at, created_at, cloud_path) \
+         VALUES ('coveraaa', 'n1', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+    )
+    .await;
+    local_files::store(&lib_a, "covers", "coveraaa", &cover)
+        .await
+        .expect("store the host-provided cover in the local store");
+
+    // A cycle while gated off: nothing reaches a peer.
+    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+
+    // make_remote: the audio drains, the gate flips, and this cycle's inline push
+    // uploads the cover from the local store and moves it into the cache.
+    make_remote(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
+        .await
+        .expect("make_remote");
+    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+
+    assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
+    assert!(
+        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        "the host-provided cover is uploaded to the cloud",
+    );
+    assert!(
+        lib_a.cache_blob_path("coveraaa").unwrap().exists(),
+        "the cover's local-store copy moved into the evictable cache",
+    );
+    assert!(
+        !lib_a
+            .local_blob_path("covers", "coveraaa")
+            .unwrap()
+            .exists(),
+        "the cover is no longer in the local store (it is Remote now)",
+    );
+
+    // B pulls: the cover (CacheEager) lands in B's cache; the audio (CacheLazy) does not.
+    let db_b = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
+    let (_tmp_b, lib_b) = temp_library_dir();
+    crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
+    assert!(
+        lib_b.cache_blob_path("coveraaa").unwrap().exists(),
+        "B fetches the CacheEager cover eagerly into its cache",
+    );
+    assert!(
+        !lib_b.cache_blob_path("photoaaa").unwrap().exists()
+            && !lib_b.pinned_blob_path("photoaaa").unwrap().exists(),
+        "B does not fetch the CacheLazy audio on pull",
+    );
+    assert_eq!(
+        cache::read_blob(
+            &db_b,
+            &lib_b,
+            &storage,
+            &cover_ref("coveraaa", "cv/cover.jpg")
+        )
+        .await
+        .expect("B reads the cover"),
+        cover,
+        "B's cover bytes match",
+    );
+
+    // make_local: the audio back to its dest (external ref), the cover back to the
+    // local store (no dest), both cloud copies tombstoned.
+    let dest_path = tmp_a.path().join("dest/photoaaa.flac");
+    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+    make_local(
+        &db_a,
+        &storage,
+        &lib_a,
+        BlobPathScheme::Plain,
+        &hlc_a,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect("make_local");
+
+    assert_eq!(
+        shared_flag(&db_a, "n1").await,
+        0,
+        "the release is Local again"
+    );
+    assert_eq!(
+        std::fs::read(&dest_path).unwrap(),
+        audio,
+        "the user-provided audio is materialized to its required dest",
+    );
+    assert_eq!(
+        db_a.external_blob("photoaaa").await.unwrap().unwrap().path,
+        dest_path,
+        "the audio is registered as an external ref",
+    );
+    assert!(
+        lib_a
+            .local_blob_path("covers", "coveraaa")
+            .unwrap()
+            .exists(),
+        "the host-provided cover is back in the local store (no dest needed)",
+    );
+    assert!(
+        db_a.external_blob("coveraaa").await.unwrap().is_none(),
+        "the host-provided cover registers NO external ref",
+    );
+    let mut deletes = pending_deletes(&db_a).await;
+    deletes.sort();
+    assert_eq!(
+        deletes,
+        vec![
+            "covers/cv/cover.jpg".to_string(),
+            "photos/cv/photoaaa.flac".to_string(),
+        ],
+        "both cloud copies are tombstoned in the make_local commit",
+    );
+    // The source the user imported from is gone (deleted post make_remote upload).
+    assert!(
+        !src.exists(),
+        "the original imported audio was deleted on make_remote"
+    );
+}
+
+// ===========================================================================
 // Cancel
 // ===========================================================================
 
 /// Cancelling an in-flight manage clears the intent and the still-pending uploads,
 /// and tombstones any blob that already landed. The gate never flips.
 #[tokio::test]
-async fn cancel_manage_clears_pending_and_tombstones_uploaded() {
+async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
     let hlc = Hlc::new("A".to_string());
@@ -488,11 +669,10 @@ async fn cancel_manage_clears_pending_and_tombstones_uploaded() {
 
     // Two photos under one release.
     let _src1 =
-        seed_unmanaged_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.flac", b"first").await;
-    let src2 =
-        add_unmanaged_photo(&db, &user, "n1", "photobbb", "cv/photobbb.flac", b"second").await;
+        seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.flac", b"first").await;
+    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.flac", b"second").await;
 
-    manage_blobs(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
+    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
         .expect("manage");
     assert_eq!(pending_uploads(&db).await, 2, "both uploads queued");
@@ -518,14 +698,10 @@ async fn cancel_manage_clears_pending_and_tombstones_uploaded() {
 
     // Cancel: the gate stays off, photoaaa (already uploaded) is tombstoned and its pinned
     // copy dropped, photobbb's pending upload is removed, the intent is cleared.
-    cancel_manage_blobs(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
+    cancel_make_remote(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
         .await
         .expect("cancel manage");
-    assert_eq!(
-        shared_flag(&db, "n1").await,
-        0,
-        "the release stays Unmanaged"
-    );
+    assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
     assert!(
         !has_intent(&db, "notes", "n1").await,
         "the intent is cleared"
@@ -553,7 +729,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_library_dir();
 
-    let src = seed_unmanaged_release(
+    let src = seed_local_release(
         &db,
         &tmp.path().join("user"),
         "n1",
@@ -592,23 +768,23 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
 }
 
 /// Cancelling an unmanage before the commit deletes the partial dest copies and
-/// leaves the release Managed with nothing tombstoned.
+/// leaves the release Remote with nothing tombstoned.
 #[tokio::test]
-async fn cancel_unmanage_before_commit_stays_managed() {
+async fn cancel_make_local_before_commit_stays_remote() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_library_dir();
     let bytes = b"still-managed".to_vec();
 
-    seed_managed_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
 
     let dest_path = tmp.path().join("dest/photoaaa.flac");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     // Already cancelled (initial value true) before the first materialize.
     let (_cancel_tx, cancel) = watch::channel(true);
 
-    let err = unmanage_blobs(
+    let err = make_local(
         &db,
         &storage,
         &lib,
@@ -624,10 +800,10 @@ async fn cancel_unmanage_before_commit_stays_managed() {
     .expect_err("a cancelled unmanage aborts");
     assert!(matches!(
         err,
-        crate::blob::transition::UnmanageError::Cancelled
+        crate::blob::transition::MakeLocalError::Cancelled
     ));
 
-    assert_eq!(shared_flag(&db, "n1").await, 1, "the release stays Managed");
+    assert_eq!(shared_flag(&db, "n1").await, 1, "the release stays Remote");
     assert!(
         db.external_blob("photoaaa").await.unwrap().is_none(),
         "no external ref registered"
@@ -637,16 +813,16 @@ async fn cancel_unmanage_before_commit_stays_managed() {
 }
 
 /// An unmanage that can't write a dest file aborts before the commit: the release
-/// stays Managed, the cloud blob is untouched, and no delete is queued.
+/// stays Remote, the cloud blob is untouched, and no delete is queued.
 #[tokio::test]
-async fn unmanage_dest_failure_stays_managed_no_tombstones() {
+async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_library_dir();
     let bytes = b"managed-bytes".to_vec();
 
-    seed_managed_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
 
     // Block the dest: make the dest's parent dir a FILE, so create_dir_all fails.
     let blocker = tmp.path().join("blocker");
@@ -655,7 +831,7 @@ async fn unmanage_dest_failure_stays_managed_no_tombstones() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path)].into();
     let (_cancel_tx, cancel) = watch::channel(false);
 
-    let err = unmanage_blobs(
+    let err = make_local(
         &db,
         &storage,
         &lib,
@@ -671,10 +847,10 @@ async fn unmanage_dest_failure_stays_managed_no_tombstones() {
     .expect_err("the dest write fails");
     assert!(matches!(
         err,
-        crate::blob::transition::UnmanageError::Write { .. }
+        crate::blob::transition::MakeLocalError::Write { .. }
     ));
 
-    assert_eq!(shared_flag(&db, "n1").await, 1, "the release stays Managed");
+    assert_eq!(shared_flag(&db, "n1").await, 1, "the release stays Remote");
     assert!(
         db.external_blob("photoaaa").await.unwrap().is_none(),
         "no external ref"
@@ -699,10 +875,10 @@ async fn unmanage_dest_failure_stays_managed_no_tombstones() {
 // ===========================================================================
 
 /// Crash mid-manage (some blobs uploaded, the gate not flipped): the release stays
-/// validly Unmanaged-uploading, and re-running the drain converges to Managed once
+/// validly Local-uploading, and re-running the drain converges to Remote once
 /// the remaining blob lands — no half-state, the re-upload is an idempotent overwrite.
 #[tokio::test]
-async fn manage_crash_before_flip_redrain_converges() {
+async fn make_remote_crash_before_flip_redrain_converges() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
     let hlc = Hlc::new("A".to_string());
@@ -710,11 +886,10 @@ async fn manage_crash_before_flip_redrain_converges() {
     let (tmp, lib) = temp_library_dir();
     let user = tmp.path().join("user");
 
-    seed_unmanaged_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.flac", b"first").await;
-    let src2 =
-        add_unmanaged_photo(&db, &user, "n1", "photobbb", "cv/photobbb.flac", b"second").await;
+    seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.flac", b"first").await;
+    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.flac", b"second").await;
 
-    manage_blobs(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
+    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
         .expect("manage");
 
@@ -724,7 +899,7 @@ async fn manage_crash_before_flip_redrain_converges() {
     drain_uploads(&db, &storage, &enc, &lib, &SystemClock, &hlc, None)
         .await
         .expect("partial drain");
-    assert_eq!(shared_flag(&db, "n1").await, 0, "still Unmanaged-uploading");
+    assert_eq!(shared_flag(&db, "n1").await, 0, "still Local-uploading");
     assert!(
         has_intent(&db, "notes", "n1").await,
         "the manage marker survives"
@@ -743,7 +918,7 @@ async fn manage_crash_before_flip_redrain_converges() {
     drain_uploads(&db, &storage, &enc, &lib, &SystemClock, &hlc, None)
         .await
         .expect("resume drain");
-    assert_eq!(shared_flag(&db, "n1").await, 1, "converged to Managed");
+    assert_eq!(shared_flag(&db, "n1").await, 1, "converged to Remote");
     assert!(
         !has_intent(&db, "notes", "n1").await,
         "the intent is cleared"
@@ -753,25 +928,25 @@ async fn manage_crash_before_flip_redrain_converges() {
     assert!(db.external_blob("photobbb").await.unwrap().is_none());
 }
 
-/// An aborted unmanage (here via cancel) leaves the release Managed; retrying from
-/// scratch converges to Unmanaged with the cloud delete enqueued — re-materialize +
+/// An aborted unmanage (here via cancel) leaves the release Remote; retrying from
+/// scratch converges to Local with the cloud delete enqueued — re-materialize +
 /// re-commit is idempotent.
 #[tokio::test]
-async fn unmanage_abort_then_retry_converges() {
+async fn make_local_abort_then_retry_converges() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_library_dir();
     let bytes = b"materialize-me".to_vec();
 
-    seed_managed_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
 
     let dest_path = tmp.path().join("dest/photoaaa.flac");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
 
-    // First attempt is cancelled before the commit (the "crash"): still Managed.
+    // First attempt is cancelled before the commit (the "crash"): still Remote.
     let (_cancel_tx, cancelled) = watch::channel(true);
-    let err = unmanage_blobs(
+    let err = make_local(
         &db,
         &storage,
         &lib,
@@ -786,19 +961,19 @@ async fn unmanage_abort_then_retry_converges() {
     .await
     .expect_err("aborted");
     assert!(
-        matches!(err, crate::blob::transition::UnmanageError::Cancelled),
+        matches!(err, crate::blob::transition::MakeLocalError::Cancelled),
         "the abort surfaces Cancelled, got {err:?}"
     );
     assert_eq!(
         shared_flag(&db, "n1").await,
         1,
-        "still Managed after the abort"
+        "still Remote after the abort"
     );
 
-    // Retry from scratch: converges to Unmanaged with the file materialized and the
+    // Retry from scratch: converges to Local with the file materialized and the
     // cloud delete enqueued.
     let (_fresh_tx, fresh) = watch::channel(false);
-    unmanage_blobs(
+    make_local(
         &db,
         &storage,
         &lib,
@@ -812,7 +987,7 @@ async fn unmanage_abort_then_retry_converges() {
     )
     .await
     .expect("retry unmanage");
-    assert_eq!(shared_flag(&db, "n1").await, 0, "converged to Unmanaged");
+    assert_eq!(shared_flag(&db, "n1").await, 0, "converged to Local");
     assert_eq!(std::fs::read(&dest_path).unwrap(), bytes);
     assert_eq!(
         pending_deletes(&db).await,
@@ -826,9 +1001,9 @@ async fn unmanage_abort_then_retry_converges() {
 
 /// manage → unmanage → manage on one device. The re-manage re-uploads to the same
 /// cloud key, whose drain cancels the unmanage's tombstone, and flips the gate back
-/// on. The release ends Managed with the blob in the cloud and no external ref.
+/// on. The release ends Remote with the blob in the cloud and no external ref.
 #[tokio::test]
-async fn round_trip_manage_unmanage_manage() {
+async fn round_trip_make_remote_make_local_make_remote() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
     let kp = UserKeypair::generate();
@@ -837,8 +1012,8 @@ async fn round_trip_manage_unmanage_manage() {
     let (tmp, lib) = temp_library_dir();
     let bytes = b"round-trip-audio".to_vec();
 
-    // Start Unmanaged, manage to Managed.
-    seed_unmanaged_release(
+    // Start Local, manage to Remote.
+    seed_local_release(
         &db,
         &tmp.path().join("user"),
         "n1",
@@ -847,17 +1022,17 @@ async fn round_trip_manage_unmanage_manage() {
         &bytes,
     )
     .await;
-    manage_blobs(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
+    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
         .expect("manage 1");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
-    assert_eq!(shared_flag(&db, "n1").await, 1, "Managed after manage");
+    assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after manage");
 
     // Unmanage back to local.
     let dest_path = tmp.path().join("dest/photoaaa.flac");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
-    unmanage_blobs(
+    make_local(
         &db,
         &storage,
         &lib,
@@ -873,7 +1048,7 @@ async fn round_trip_manage_unmanage_manage() {
     .expect("unmanage");
     // The retract cycle writes the tombstone.
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
-    assert_eq!(shared_flag(&db, "n1").await, 0, "Unmanaged after unmanage");
+    assert_eq!(shared_flag(&db, "n1").await, 0, "Local after unmanage");
     assert!(
         storage
             .exists("blob_tombstones/photos/cv/photoaaa.flac")
@@ -884,14 +1059,14 @@ async fn round_trip_manage_unmanage_manage() {
 
     // Re-manage: the external file (now at dest) is re-uploaded, the drain cancels
     // the tombstone, and the gate flips back on.
-    manage_blobs(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
+    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
         .expect("manage 2");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
     assert_eq!(
         shared_flag(&db, "n1").await,
         1,
-        "Managed again after re-manage"
+        "Remote again after re-manage"
     );
     assert!(
         db.external_blob("photoaaa").await.unwrap().is_none(),

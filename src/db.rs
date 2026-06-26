@@ -2,7 +2,7 @@
 //! cloud-outbox row types.
 //!
 //! coven owns five device-local bookkeeping tables — `sync_cursors`,
-//! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_manage_intents` — plus
+//! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents` — plus
 //! the library-global synced table `item_keys`, all created by `MIGRATION_SQL`,
 //! which
 //! [`crate::database::Database::open`] runs against the connection coven owns.
@@ -64,8 +64,8 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
 );
 
 -- Device-local map from a blob id to an external user-owned file coven reads
--- but does not own (an Unmanaged release plays the user's own file). A weaker
--- storage class than the owned cache: validate-on-read by presence + size, never
+-- but does not own (a user-provided Local blob plays the user's own file). A weaker
+-- storage class than the cache: validate-on-read by presence + size, never
 -- self-heal. Device-local like the bookkeeping tables — no `_updated_at`, never
 -- in the synced-table set, never snapshotted — so external refs stay on the one
 -- device that registered them and never cross to a peer.
@@ -76,17 +76,17 @@ CREATE TABLE IF NOT EXISTS local_blob_refs (
     size      INTEGER NOT NULL -- plaintext length; validate-on-read
 );
 
--- Device-local marker for an in-flight manage (Unmanaged → Managed): coven owns
+-- Device-local marker for an in-flight make_remote (Local → Remote): coven owns
 -- the transition, so this row makes it durable. It is set in the same transaction
--- that enqueues the root's blob uploads, and removed in the same transaction that
--- flips the gate true once the last upload lands (the single commit point). It is a
--- pure presence marker: its existence tells the upload drain's completion check that
--- an uploaded blob's root is a manage to finish (vs. an orphan from a cancelled
--- manage to tombstone), and it makes completion + cancel idempotent across a
--- restart. The pin choice rides each upload row's `retain_pinned`, not this marker.
--- Device-local like the other bookkeeping tables — no `_updated_at`, never synced or
--- snapshotted.
-CREATE TABLE IF NOT EXISTS blob_manage_intents (
+-- that enqueues the root's user-provided blob uploads, and removed in the same
+-- transaction that flips the gate true once the last upload lands (the single commit
+-- point). It is a pure presence marker: its existence tells the upload drain's
+-- completion check that an uploaded blob's root is a make_remote to finish (vs. an
+-- orphan from a cancelled make_remote to tombstone), and it makes completion +
+-- cancel idempotent across a restart. The pin choice rides each upload row's
+-- `retain_pinned`, not this marker. Device-local like the other bookkeeping tables —
+-- no `_updated_at`, never synced or snapshotted.
+CREATE TABLE IF NOT EXISTS blob_make_remote_intents (
     root_table TEXT NOT NULL,
     root_id    TEXT NOT NULL,
     PRIMARY KEY (root_table, root_id)

@@ -125,6 +125,9 @@ impl SyncedTable {
 /// Where a blob-bearing table's blob columns live, declared by the host so coven
 /// can derive every blob a row references without a runtime callback. Resolved
 /// against the live schema into a [`crate::blob::decl::BlobDecls`] each cycle.
+///
+/// A blob declares two orthogonal properties: [`provenance`](BlobDecl::provenance)
+/// (its Local story) and [`fill`](BlobDecl::fill) (its Remote story).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobDecl {
     /// The column holding the blob id. Defaults to the primary key (`id`, column
@@ -138,9 +141,14 @@ pub struct BlobDecl {
     pub cloud_path_column: Option<String>,
     /// How the blob is scoped for encryption (see [`BlobScopeSpec`]).
     pub scope: BlobScopeSpec,
-    /// The blob's retention class: [`crate::blob::CacheFill::CacheEager`] (downloaded
-    /// on every device) or [`crate::blob::CacheFill::CacheLazy`] (fetched on read).
-    pub sync: crate::blob::CacheFill,
+    /// The blob's **Local story**: [`crate::blob::Provenance::UserProvided`] (the
+    /// user's file at a path) or [`crate::blob::Provenance::HostProvided`] (coven's
+    /// own copy in the local store).
+    pub provenance: crate::blob::Provenance,
+    /// The blob's **Remote story**: [`crate::blob::CacheFill::CacheEager`] (fetched
+    /// into the cache on every pull) or [`crate::blob::CacheFill::CacheLazy`]
+    /// (fetched into the cache on first read).
+    pub fill: crate::blob::CacheFill,
 }
 
 /// How a blob's encryption scope is declared on a blob-bearing table. coven
@@ -158,16 +166,22 @@ pub enum BlobScopeSpec {
 }
 
 impl BlobDecl {
-    /// A blob declaration in `namespace` with retention class `sync`, the blob id
-    /// taken from the primary key (`id`), no readable cloud path, master-scoped.
-    /// Refine with the `with_*` builders.
-    pub fn new(namespace: impl Into<String>, sync: crate::blob::CacheFill) -> Self {
+    /// A blob declaration in `namespace` with the given `provenance` (its Local
+    /// story) and cache `fill` (its Remote story), the blob id taken from the
+    /// primary key (`id`), no readable cloud path, master-scoped. Refine with the
+    /// `with_*` builders.
+    pub fn new(
+        namespace: impl Into<String>,
+        provenance: crate::blob::Provenance,
+        fill: crate::blob::CacheFill,
+    ) -> Self {
         BlobDecl {
             id_column: "id".to_string(),
             namespace: namespace.into(),
             cloud_path_column: None,
             scope: BlobScopeSpec::Master,
-            sync,
+            provenance,
+            fill,
         }
     }
 

@@ -24,7 +24,7 @@ use super::push::SCHEMA_VERSION;
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
 use crate::blob::decl::BlobDecls;
-use crate::blob::CacheFill;
+use crate::blob::{CacheFill, Provenance};
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::library_dir::LibraryDir;
@@ -595,13 +595,14 @@ pub async fn pull_changes(
             }
 
             // A changeset that DELETEs a blob-bearing row (a gate retract or a
-            // genuine delete) leaves this peer holding the blob's local cache copy.
-            // Drop both folders for it — the `pinned/` copy is budget-exempt and
-            // would otherwise leak forever once the row is gone. A peer NEVER writes
-            // a cloud tombstone here; that belongs to the deleting/unmanaging owner.
-            if let Err(e) = drop_deleted_blob_caches(&changes, &blob_decls, library_dir).await {
+            // genuine delete) leaves this peer holding the blob's local copy. Drop
+            // it wherever it is — the cache (both folders; the `pinned/` copy is
+            // budget-exempt) and the local store — or it would leak forever once the
+            // row is gone. A peer NEVER writes a cloud tombstone here; that belongs
+            // to the deleting / make-Local owner.
+            if let Err(e) = drop_deleted_blob_local(&changes, &blob_decls, library_dir).await {
                 warn!(
-                    "Dropping caches for deleted blob rows failed for {}/{}: {e}; \
+                    "Dropping local copies for deleted blob rows failed for {}/{}: {e}; \
                      cursor not advanced, will retry next cycle",
                     head.device_id, seq
                 );
@@ -943,13 +944,14 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
 
 /// Download the `CacheEager` blobs a changeset references. Returns true if all
 /// succeeded. coven derives which rows carry blobs and their cloud
-/// namespace/scope/retention class from the declarations in `blob_decls`; the
-/// per-blob download runs through [`download_blobs`], which writes each into
-/// `storage/pinned/<id>` under `library_dir` (coven's own cache).
+/// namespace/scope/cache fill from the declarations in `blob_decls`; the per-blob
+/// download runs through [`download_blobs`], which writes each into the evictable
+/// cache `storage/cache/<id>` under `library_dir`.
 ///
-/// Only [`CacheFill::CacheEager`] blobs are downloaded — those are part of having the
-/// library on every device. An [`CacheFill::CacheLazy`] blob is recorded by the
-/// applied row but its bytes are fetched on first read, so it is skipped here.
+/// Only [`CacheFill::CacheEager`] blobs are downloaded — those a device fetches into
+/// the cache on every pull (so the grid is instant). A [`CacheFill::CacheLazy`] blob
+/// is recorded by the applied row but its bytes are fetched on first read, so it is
+/// skipped here.
 ///
 /// `in_changeset_keys` are the item keys this changeset itself mints, so an
 /// `Item(id)`-scoped blob resolves its key WITHOUT the changeset having been
@@ -964,7 +966,7 @@ async fn download_changeset_blobs(
 ) -> bool {
     download_blobs(
         db,
-        mirrored_blobs(blob_decls, changes),
+        cache_eager_blobs(blob_decls, changes),
         storage,
         library_dir,
         in_changeset_keys,
@@ -973,28 +975,48 @@ async fn download_changeset_blobs(
 }
 
 /// The `CacheEager` blobs the `changes` reference, derived per row from the
-/// declarations. The class a pulling device downloads before applying, and the
-/// one the inline push uploads before publishing — so both call this.
-pub(crate) fn mirrored_blobs(
+/// declarations. The cache fill a pulling device fetches into its cache before
+/// applying the rows — fill-based, regardless of provenance.
+pub(crate) fn cache_eager_blobs(
     blob_decls: &BlobDecls,
     changes: &[RowChange],
 ) -> Vec<crate::blob::BlobRef> {
     changes
         .iter()
         .filter_map(|change| blob_decls.ref_from_change(change))
-        .filter(|blob| blob.sync == CacheFill::CacheEager)
+        .filter(|blob| blob.fill == CacheFill::CacheEager)
         .collect()
 }
 
-/// Drop the local cache copy of every blob a deleted row in `changes` references.
-/// Runs after a changeset applies: a DELETE of a blob-bearing row (a gate retract
-/// or a genuine delete) must not leave this peer's budget-exempt `pinned/` copy
-/// behind. A failed drop is propagated, not swallowed: the caller leaves the cursor
-/// unadvanced and retries the whole changeset next cycle, so the cleanup is never
-/// silently lost. Retry is safe — re-applying the changeset is idempotent and
-/// `drop_cached_blob` ignores an already-absent file. Both retention folders are
-/// dropped; a deleted row needs neither.
-async fn drop_deleted_blob_caches(
+/// The **host-provided** blobs the `changes` reference, derived per row from the
+/// declarations. The inline push uploads these before publishing the changeset:
+/// coven owns a host-provided blob's bytes (in its local store or cache), so it can
+/// upload it inline as its row reaches a changeset — provenance-based, regardless of
+/// cache fill. A user-provided blob is the user's own file, uploaded only via
+/// `make_remote` (which reads the user's path), so it is never on this inline path.
+pub(crate) fn host_provided_blobs(
+    blob_decls: &BlobDecls,
+    changes: &[RowChange],
+) -> Vec<crate::blob::BlobRef> {
+    changes
+        .iter()
+        .filter_map(|change| blob_decls.ref_from_change(change))
+        .filter(|blob| blob.provenance == Provenance::HostProvided)
+        .collect()
+}
+
+/// Drop the local copy of every blob a deleted row in `changes` references —
+/// wherever it is: the cache (a Remote blob's `pinned/` + `cache/` copies) and the
+/// local store (a host-provided Local blob). Runs after a changeset applies: a
+/// DELETE of a blob-bearing row (a gate retract or a genuine delete) must not leave
+/// this peer's budget-exempt `pinned/` copy or its local-store copy behind. A failed
+/// drop is propagated, not swallowed: the caller leaves the cursor unadvanced and
+/// retries the whole changeset next cycle, so the cleanup is never silently lost.
+/// Retry is safe — re-applying the changeset is idempotent and both drops ignore an
+/// already-absent file. A peer normally holds a host-provided blob in its cache (it
+/// was pulled there), but the local-store drop covers the case where the bytes are
+/// there too; a deleted row needs neither.
+async fn drop_deleted_blob_local(
     changes: &[RowChange],
     blob_decls: &BlobDecls,
     library_dir: &LibraryDir,
@@ -1007,6 +1029,9 @@ async fn drop_deleted_blob_caches(
             continue;
         };
         crate::blob::cache::drop_cached_blob(library_dir, &blob.id).await?;
+        crate::blob::local_files::drop_blob(library_dir, &blob.namespace, &blob.id)
+            .await
+            .map_err(crate::blob::cache::BlobCacheError::from)?;
     }
     Ok(())
 }
@@ -1032,16 +1057,17 @@ async fn resolve_pull_scope(
     }
 }
 
-/// Download each blob in `blobs` into `storage/pinned/<id>` under `library_dir`,
-/// decrypting via storage (which returns plaintext) and writing the bytes
-/// atomically. Returns true if every blob succeeded. Skips blobs already present in
-/// `pinned/`.
+/// Download each blob in `blobs` into the evictable cache `storage/cache/<id>` under
+/// `library_dir`, decrypting via storage (which returns plaintext) and writing the
+/// bytes atomically. Returns true if every blob succeeded. Skips blobs already
+/// present in either cache folder (`pinned/` or `cache/`).
 ///
-/// Only `CacheEager` blobs reach here (callers filter), and a `CacheEager` blob is
-/// system-pinned the moment it lands — part of having the library on every device —
-/// so its bytes go to the protected `pinned/` folder, not the evictable `cache/`.
-/// The destination is coven-built from the validated blob id; the cache owns where a
-/// pulled blob lives.
+/// Only `CacheEager` blobs reach here (callers filter). On a peer the release is
+/// Remote, so a `CacheEager` blob's bytes are a cache copy — evictable +
+/// re-fetchable, not pinned: it lands in `storage/cache/<id>`. (A cover that later
+/// falls out of the cache budget shows a placeholder until the next read re-fetches
+/// it; covers are not pinned.) The destination is coven-built from the validated
+/// blob id.
 ///
 /// Each blob's public scope is resolved to the internal key scope here — the blob
 /// declaration carries no key — via [`resolve_pull_scope`], which consults
@@ -1090,10 +1116,20 @@ pub(crate) async fn download_blobs(
             }
         }
 
-        // The coven-built destination: `storage/pinned/<id>`. Building it validates
-        // the id again (and that it can form the `{ab}/{cd}` shard); a failure is the
-        // same bad-data refusal as the token check above.
-        let dest = match library_dir.pinned_blob_path(&blob.id) {
+        // The coven-built destination: the evictable cache `storage/cache/<id>`.
+        // Building it validates the id again (and that it can form the `{ab}/{cd}`
+        // shard); a failure is the same bad-data refusal as the token check above. A
+        // pinned copy (in `pinned/`) is checked for presence below but never written
+        // here — a pull populates the evictable cache, never the kept folder.
+        let dest = match library_dir.cache_blob_path(&blob.id) {
+            Ok(p) => p,
+            Err(e) => {
+                error!(id = %blob.id, "cannot build cache blob path ({e}); refusing");
+                all_ok = false;
+                continue;
+            }
+        };
+        let pinned = match library_dir.pinned_blob_path(&blob.id) {
             Ok(p) => p,
             Err(e) => {
                 error!(id = %blob.id, "cannot build pinned blob path ({e}); refusing");
@@ -1102,13 +1138,13 @@ pub(crate) async fn download_blobs(
             }
         };
 
-        match crate::local_blob::exists(&dest).await {
-            // Already system-pinned on disk — don't re-download.
+        // Already on disk in either cache folder — don't re-download. A failed
+        // existence check is a local-disk fault, not a missing blob — and the
+        // download's own write would hit the same fault. Hold the cursor and retry
+        // next cycle rather than treat the error as absence.
+        match cached_in_either_folder(&dest, &pinned).await {
             Ok(true) => continue,
             Ok(false) => {}
-            // A failed existence check is a local-disk fault, not a missing blob —
-            // and the download's own write would hit the same fault. Hold the cursor
-            // and retry next cycle rather than treat the error as absence.
             Err(e) => {
                 error!(id = %blob.id, error = %e, "cannot check for local blob; holding");
                 all_ok = false;
@@ -1135,7 +1171,7 @@ pub(crate) async fn download_blobs(
             .await
         {
             Ok(bytes) => {
-                // Atomic write so a crash can't leave a torn `pinned/<id>` a later
+                // Atomic write so a crash can't leave a torn `cache/<id>` a later
                 // read trusts as complete: the file appears whole or not at all,
                 // which the row-before-blob ordering and the cache's presence-is-truth
                 // model both depend on.
@@ -1151,6 +1187,22 @@ pub(crate) async fn download_blobs(
         }
     }
     all_ok
+}
+
+/// Whether a pulled blob is already on disk in either cache folder (`cache/` or
+/// `pinned/`), so a pull doesn't re-download a blob a read already cached or the
+/// user pinned. An existence-check failure (a broken filesystem) is surfaced, never
+/// collapsed into "absent": re-downloading over a present file would mask the fault.
+async fn cached_in_either_folder(
+    cache: &std::path::Path,
+    pinned: &std::path::Path,
+) -> Result<bool, String> {
+    for path in [cache, pinned] {
+        if crate::local_blob::exists(path).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Debug)]

@@ -12,16 +12,17 @@
 //!
 //! From that one model coven derives every blob set it needs:
 //! [`BlobDecls::ref_from_change`] over a changeset row (push upload / pull
-//! download / apply-side cache drop), [`BlobDecls::refs_in_db`] over the whole DB
-//! (snapshot-bootstrap backfill), [`BlobDecls::refs_for_root`] over a gated root's
-//! subtree (the manage/unmanage transitions), and [`BlobDecls::row_for_blob`] to
-//! map an uploaded blob back to its row (the manage completion check).
+//! download / apply-side local-copy drop), [`BlobDecls::refs_in_db`] over the whole
+//! DB (snapshot-bootstrap backfill), [`BlobDecls::refs_for_root`] over a gated
+//! root's subtree (the make-Remote / make-Local transitions), and
+//! [`BlobDecls::row_for_blob`] to map an uploaded blob back to its row (the
+//! make-Remote completion check).
 
 use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::blob::{BlobRef, BlobScope, CacheFill};
+use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::changeset::RowChange;
 use crate::sync::gate::Gates;
 use crate::sync::session::{quote_ident, BlobScopeSpec, SyncedTable};
@@ -64,7 +65,8 @@ impl From<rusqlite::Error> for BlobDeclError {
 /// same order a changeset reports its columns, so an index reads either source).
 struct TableBlob {
     namespace: String,
-    sync: CacheFill,
+    provenance: Provenance,
+    fill: CacheFill,
     /// Index of the blob-id column.
     id_col: usize,
     /// Name of the blob-id column. The index reads a row top-to-bottom; the name
@@ -87,8 +89,8 @@ enum ResolvedScopeSpec {
 
 impl TableBlob {
     /// Build the [`BlobRef`] for one of this table's rows from the per-row `id`,
-    /// `scope`, and `cloud_path` plus this table's fixed namespace and sync class.
-    /// Shared by [`BlobDecls::ref_from_change`] (changeset row) and
+    /// `scope`, and `cloud_path` plus this table's fixed namespace, provenance, and
+    /// cache fill. Shared by [`BlobDecls::ref_from_change`] (changeset row) and
     /// [`BlobDecls::refs_in_db`] (live row), which differ only in how they read
     /// those per-row values.
     fn blob_ref(&self, id: String, scope: BlobScope, cloud_path: Option<String>) -> BlobRef {
@@ -97,7 +99,8 @@ impl TableBlob {
             id,
             scope,
             cloud_path,
-            sync: self.sync,
+            provenance: self.provenance,
+            fill: self.fill,
         }
     }
 
@@ -169,7 +172,8 @@ impl BlobDecls {
                 t.name().to_string(),
                 TableBlob {
                     namespace: decl.namespace.clone(),
-                    sync: decl.sync,
+                    provenance: decl.provenance,
+                    fill: decl.fill,
                     id_col,
                     id_col_name: decl.id_column.clone(),
                     cloud_path_col,
@@ -226,9 +230,9 @@ impl BlobDecls {
     /// rows ([`Gates::subtree_rows`] — a pure down-walk, so a release's files but
     /// not a sibling release's) and reads each blob-bearing row by primary key.
     ///
-    /// `manage` enqueues an upload per `CacheLazy` blob here; `unmanage` materializes
-    /// each blob here back to a user file. A row in the subtree whose table carries
-    /// no blob (a `tracks` join row) contributes nothing.
+    /// `make_remote` enqueues an upload per user-provided blob here; `make_local`
+    /// materializes each blob here back to a local file. A row in the subtree whose
+    /// table carries no blob (a `tracks` join row) contributes nothing.
     pub fn refs_for_root(
         &self,
         conn: &Connection,
@@ -258,8 +262,9 @@ impl BlobDecls {
     /// The `(table, primary key)` of the row carrying the blob with id `blob_id`, or
     /// `None` if no blob-bearing row does (a plain upload with no backing row, e.g.
     /// in a drain test). Searches each blob-bearing table for a row whose declared
-    /// blob-id column equals `blob_id`. The manage completion check uses this to map
-    /// a just-uploaded blob back to its row, then resolves that row's gated root.
+    /// blob-id column equals `blob_id`. The make-Remote completion check uses this
+    /// to map a just-uploaded blob back to its row, then resolves that row's gated
+    /// root.
     pub fn row_for_blob(
         &self,
         conn: &Connection,

@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::blob::transition::{self, ManageError, UnmanageError};
+use crate::blob::transition::{self, MakeLocalError, MakeRemoteError};
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
@@ -232,7 +232,7 @@ impl SyncManager {
     }
 
     // =========================================================================
-    // Blob locality transitions (manage / unmanage / cancel)
+    // Blob locality transitions (make_remote / make_local / cancel_make_remote)
     // =========================================================================
 
     /// The blob-path scheme the configured home keys objects under (`Hashed` for an
@@ -242,21 +242,23 @@ impl SyncManager {
         BlobPathScheme::for_storage((self.config_provider)().cloud_home.storage)
     }
 
-    /// Start managing `(root_table, root_id)` (Unmanaged → Managed): enqueue an
-    /// upload per CacheLazy blob from its external file and record the manage intent,
+    /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
+    /// user-provided blob from its external file and record the make_remote intent,
     /// then return. The drain uploads each and flips the gate true on the last (see
-    /// [`crate::blob::transition::manage_blobs`]); `on_root_managed` fires then.
-    /// `pin` keeps the managed blobs in coven's protected cache.
-    pub async fn manage(
+    /// [`crate::blob::transition::make_remote`]); the gate flip re-emits the subtree,
+    /// the cycle's inline push uploads the root's host-provided blobs, and
+    /// `on_root_made_remote` fires. `pin` keeps the uploaded blobs in coven's cache
+    /// as pinned (offline) copies.
+    pub async fn make_remote(
         &self,
         root_table: &str,
         root_id: &str,
         pin: bool,
-    ) -> Result<(), ManageError> {
+    ) -> Result<(), MakeRemoteError> {
         if !self.is_sync_ready() {
-            return Err(ManageError::SyncNotReady);
+            return Err(MakeRemoteError::SyncNotReady);
         }
-        transition::manage_blobs(
+        transition::make_remote(
             &self.db,
             self.blob_path_scheme(),
             &self.hlc,
@@ -269,15 +271,19 @@ impl SyncManager {
         Ok(())
     }
 
-    /// Cancel an in-flight manage of `(root_table, root_id)`: clear its intent and
-    /// pending uploads and tombstone any blob that already landed. The gate never
-    /// flips, so the root stays Unmanaged.
-    pub async fn cancel_manage(&self, root_table: &str, root_id: &str) -> Result<(), ManageError> {
+    /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent
+    /// and pending uploads and tombstone any blob that already landed. The gate never
+    /// flips, so the root stays Local.
+    pub async fn cancel_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), MakeRemoteError> {
         if !self.is_sync_ready() {
-            return Err(ManageError::SyncNotReady);
+            return Err(MakeRemoteError::SyncNotReady);
         }
         let library_dir = (self.config_provider)().library_dir;
-        transition::cancel_manage_blobs(
+        transition::cancel_make_remote(
             &self.db,
             &library_dir,
             self.blob_path_scheme(),
@@ -290,23 +296,27 @@ impl SyncManager {
         Ok(())
     }
 
-    /// Unmanage `(root_table, root_id)` (Managed → Unmanaged): materialize each blob
-    /// back to the file named in `dest` (blob id → destination path) durability-first,
-    /// then flip the gate false, register the external refs, and enqueue the cloud
-    /// deletes in one atomic commit. Awaitable; `cancel` aborts before the commit
-    /// (the root stays Managed). Per-blob materialize progress and the completion
-    /// event reach the observer this manager was built with.
-    pub async fn unmanage(
+    /// Make `(root_table, root_id)` Local (Remote → Local): bring each blob back to a
+    /// local file durability-first — a user-provided blob to the path named in `dest`
+    /// (blob id → destination path), a host-provided blob to coven's local store (no
+    /// dest) — then flip the gate false, register the user-provided external refs,
+    /// and enqueue the cloud deletes in one atomic commit. Awaitable; `cancel` aborts
+    /// before the commit (the root stays Remote). `dest` carries user-provided ids
+    /// only. Per-blob materialize progress and the completion event reach the
+    /// observer this manager was built with.
+    pub async fn make_local(
         &self,
         root_table: &str,
         root_id: &str,
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
-    ) -> Result<(), UnmanageError> {
-        let sync_loop = self.sync_loop_handle().ok_or(UnmanageError::SyncNotReady)?;
+    ) -> Result<(), MakeLocalError> {
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(MakeLocalError::SyncNotReady)?;
         let library_dir = (self.config_provider)().library_dir;
         let storage: &dyn SyncStorage = &**sync_loop.storage();
-        transition::unmanage_blobs(
+        transition::make_local(
             &self.db,
             storage,
             &library_dir,

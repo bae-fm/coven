@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{cache, CacheFill};
+use crate::blob::{local_files, CacheFill, Provenance};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -23,29 +23,18 @@ use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
 /// The common `note_photos` blob declaration: namespace `"photos"`, master scope,
-/// `CacheEager` (downloaded on pull), hashed scheme.
+/// host-provided · `CacheEager` (a cover — fetched into the cache on pull), hashed
+/// scheme.
 fn photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", CacheFill::CacheEager)
+    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
 }
 
-/// Stage `bytes` into `ld`'s pinned cache under blob id `id`, the way a host stages
-/// a CacheEager cover before the inline push reads it to upload.
-async fn stage_pinned(
-    db: &crate::database::Database,
-    ld: &crate::library_dir::LibraryDir,
-    id: &str,
-    bytes: &[u8],
-) {
-    let blob = crate::blob::BlobRef {
-        namespace: "photos".to_string(),
-        id: id.to_string(),
-        scope: crate::blob::BlobScope::Master,
-        cloud_path: None,
-        sync: CacheFill::CacheEager,
-    };
-    cache::stage_blob(db, ld, &blob, bytes, true)
+/// Store `bytes` into `ld`'s local store under blob id `id`, the way a host stores a
+/// host-provided cover (its Local home) before the inline push reads it to upload.
+async fn store_local(ld: &crate::library_dir::LibraryDir, id: &str, bytes: &[u8]) {
+    local_files::store(ld, "photos", id, bytes)
         .await
-        .expect("stage pinned blob");
+        .expect("store host-provided blob in the local store");
 }
 
 #[tokio::test]
@@ -288,9 +277,8 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         .expect("put_blob");
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    // Destination pulls. A `CacheEager` photo is system-pinned on pull, so it lands in
-    // the library dir's pinned cache (`storage/pinned/<id>`) — which coven owns and
-    // builds from the validated id.
+    // Destination pulls. A `CacheEager` photo lands in the library dir's evictable
+    // cache (`storage/cache/<id>`) on pull — which coven builds from the validated id.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_library_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
@@ -298,22 +286,31 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     let downloaded =
-        std::fs::read(ld.pinned_blob_path("p1ab").expect("pinned path")).expect("downloaded photo");
+        std::fs::read(ld.cache_blob_path("p1ab").expect("cache path")).expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
 }
 
 /// A `CacheLazy` blob's row still crosses to the puller, but its bytes are NOT
 /// downloaded on pull (it streams on demand, fetched on first read) — the opposite
-/// pull outcome from the `CacheEager` round-trip above. The retention-class split is
-/// a declared property: `note_photos` carries a `CacheLazy` blob here.
+/// pull outcome from the `CacheEager` round-trip above. The split is declared:
+/// `note_photos` carries a user-provided · `CacheLazy` blob here.
 #[tokio::test]
-async fn on_demand_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
+async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     let storage = MockSyncStorage::new();
-    let audio_tables =
-        || test_synced_tables_with_blob(BlobDecl::new("audio", CacheFill::CacheLazy));
+    let audio_tables = || {
+        test_synced_tables_with_blob(BlobDecl::new(
+            "audio",
+            Provenance::UserProvided,
+            CacheFill::CacheLazy,
+        ))
+    };
 
-    // Source: a shared note + an audio row, declared CacheLazy.
-    let db1 = open_test_db_with_blob(BlobDecl::new("audio", CacheFill::CacheLazy));
+    // Source: a shared note + an audio row, declared user-provided · CacheLazy.
+    let db1 = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
     exec(
         &db1,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -328,9 +325,9 @@ async fn on_demand_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     .await;
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
-    // Drive the real push path. The inline push uploads only CacheEager blobs, so the
-    // CacheLazy audio is NOT uploaded here — it goes via the durable outbox in the
-    // managed-blob flow, not this changeset-blob upload.
+    // Drive the real push path. The inline push uploads only host-provided blobs, so
+    // the user-provided audio is NOT uploaded here — it goes via the durable outbox in
+    // the make_remote flow, not this changeset-blob upload.
     let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
     let (_t1, ld1) = temp_library_dir();
@@ -361,13 +358,13 @@ async fn on_demand_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     .await
     .expect("push_changeset");
 
-    // The CacheLazy blob was NOT uploaded by the inline push.
+    // The user-provided blob was NOT uploaded by the inline push.
     assert!(
         storage
             .get_blob("audio", "audio1", crate::blob::ResolvedScope::Master, None)
             .await
             .is_err(),
-        "the inline push must not upload a CacheLazy blob",
+        "the inline push must not upload a user-provided blob",
     );
 
     // The blob reaches the cloud by some other path (the outbox, in the real flow);
@@ -384,7 +381,11 @@ async fn on_demand_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         .expect("plant audio blob");
 
     // Destination pulls.
-    let db2 = open_test_db_with_blob(BlobDecl::new("audio", CacheFill::CacheLazy));
+    let db2 = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
     let (_t, ld) = temp_library_dir();
     let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
@@ -399,7 +400,7 @@ async fn on_demand_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         "the row carrying the CacheLazy blob still reaches the peer",
     );
     // ...but the blob was NOT downloaded to the puller's cache: CacheLazy is fetched
-    // on first read, not mirrored on pull.
+    // on first read, not eagerly on pull.
     assert!(
         !ld.pinned_blob_path("audio1").unwrap().exists()
             && !ld.cache_blob_path("audio1").unwrap().exists(),
@@ -416,8 +417,9 @@ async fn on_demand_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
 async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
     let storage = MockSyncStorage::new();
 
-    // A shared note + a CacheEager cover row, but the cover is deliberately never
-    // staged into the cache, so the inline push's cache read finds nothing.
+    // A shared note + a host-provided cover row, but the cover is deliberately never
+    // stored in the local store, so the inline push finds nothing in either the local
+    // store or the cache.
     let db1 = open_test_db_with_blob(photo_decl());
     exec(
         &db1,
@@ -461,7 +463,8 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
 /// The `note_photos` declaration for the plain (browsable) scheme: the blob's
 /// readable cloud key comes from the row's `cloud_path` column.
 fn readable_photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", CacheFill::CacheEager).with_cloud_path_column("cloud_path")
+    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
+        .with_cloud_path_column("cloud_path")
 }
 
 /// A plain-scheme home stores a changeset-driven blob at the consumer's readable
@@ -499,7 +502,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     )
     .await;
     // The host stages the cover into the cache before the inline push reads it.
-    stage_pinned(&db1, &ld1, "p1cover", plaintext).await;
+    store_local(&ld1, "p1cover", plaintext).await;
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let service = SyncService::new("dev1".to_string());
@@ -559,8 +562,8 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    // A `CacheEager` cover is system-pinned on pull → it lands in B's pinned cache.
-    let downloaded = std::fs::read(ld.pinned_blob_path("p1cover").expect("pinned path"))
+    // A `CacheEager` cover lands in B's evictable cache on pull.
+    let downloaded = std::fs::read(ld.cache_blob_path("p1cover").expect("cache path"))
         .expect("device B downloaded cover");
     assert_eq!(
         downloaded, plaintext,
@@ -586,7 +589,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // Device A: a note and its cover photo, scoped to a per-library derived key.
     let plaintext = b"COVER-ART-BYTES";
     let decl = || {
-        BlobDecl::new("photos", CacheFill::CacheEager)
+        BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
             .with_scope(BlobScopeSpec::Derived("covers".to_string()))
     };
 
@@ -605,7 +608,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     )
     .await;
     // The host stages the cover into the cache before the inline push reads it.
-    stage_pinned(&db1, &ld1, "p1cover", plaintext).await;
+    store_local(&ld1, "p1cover", plaintext).await;
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let service = SyncService::new("dev1".to_string());
@@ -662,9 +665,8 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
         "WithPhoto"
     );
-    // A `CacheEager` cover is system-pinned on pull → it lands in B's pinned cache,
-    // not the plan's `dir`.
-    let downloaded = std::fs::read(ld.pinned_blob_path("p1cover").expect("pinned path"))
+    // A `CacheEager` cover lands in B's evictable cache on pull.
+    let downloaded = std::fs::read(ld.cache_blob_path("p1cover").expect("cache path"))
         .expect("device B downloaded photo");
     assert_eq!(
         downloaded, plaintext,
@@ -673,11 +675,11 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
 }
 
 /// When a peer applies a changeset that DELETEs a blob-bearing row (a gate retract
-/// or a genuine delete), it drops that blob's local cache from BOTH folders — the
-/// budget-exempt `pinned/` copy would otherwise leak forever once the row is gone.
-/// The peer drops only its own local cache; it never writes a cloud tombstone.
+/// or a genuine delete), it drops that blob's local copy — both cache folders and the
+/// local store — or it would leak forever once the row is gone. The peer drops only
+/// its own local copy; it never writes a cloud tombstone.
 #[tokio::test]
-async fn applying_a_blob_bearing_delete_drops_both_cache_copies() {
+async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let storage = MockSyncStorage::new();
 
     // Source dev1: a note + a CacheEager cover row, the cover present in the cloud.
@@ -704,13 +706,13 @@ async fn applying_a_blob_bearing_delete_drops_both_cache_copies() {
         .expect("plant cover");
     storage.store_changeset("dev1", 1, &cs1, SCHEMA_VERSION);
 
-    // dev2 pulls → the CacheEager cover lands system-pinned in `pinned/`.
+    // dev2 pulls → the CacheEager cover lands in the evictable cache.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_library_dir();
     let (cursors, _) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
     assert!(
-        ld.pinned_blob_path("pdel1234").unwrap().exists(),
-        "the cover is system-pinned after the first pull",
+        ld.cache_blob_path("pdel1234").unwrap().exists(),
+        "the cover lands in the evictable cache after the first pull",
     );
 
     // dev1 deletes the cover row; dev2 pulls the DELETE.
@@ -722,7 +724,7 @@ async fn applying_a_blob_bearing_delete_drops_both_cache_copies() {
     assert!(
         !ld.pinned_blob_path("pdel1234").unwrap().exists()
             && !ld.cache_blob_path("pdel1234").unwrap().exists(),
-        "applying the blob-bearing DELETE drops both cache copies",
+        "applying the blob-bearing DELETE drops the cache copies",
     );
 }
 
@@ -1725,7 +1727,10 @@ mod blob_path_traversal {
         assert!(!result.asset_downloads_failed);
         assert_eq!(updated.get("dev1"), Some(&1));
         let written =
-            std::fs::read(ld.pinned_blob_path("p1ab").expect("pinned path")).expect("blob written");
-        assert_eq!(written, b"PHOTOBYTES", "the blob lands in the pinned cache");
+            std::fs::read(ld.cache_blob_path("p1ab").expect("cache path")).expect("blob written");
+        assert_eq!(
+            written, b"PHOTOBYTES",
+            "the blob lands in the evictable cache"
+        );
     }
 }

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{BlobScope, CacheFill, ResolvedScope};
+use crate::blob::{BlobScope, CacheFill, Provenance, ResolvedScope};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -181,7 +181,7 @@ async fn reading_a_wrong_length_item_key_errors() {
 /// the pull downloads it: this exercise is about resolving the item key during
 /// download-before-apply, not the on-demand skip.
 fn item_photo_decl() -> BlobDecl {
-    BlobDecl::new("audio", CacheFill::CacheEager)
+    BlobDecl::new("audio", Provenance::HostProvided, CacheFill::CacheEager)
         .with_scope(BlobScopeSpec::ItemColumn("note_id".to_string()))
 }
 
@@ -306,14 +306,13 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
 
     // The item key replayed via the changeset, and the production
     // `download_changeset_blobs` resolved it and wrote the decrypted blob to B. A
-    // `CacheEager` blob is system-pinned on pull, so it lands in B's pinned cache
-    // (`storage/pinned/<id>`) — coven-owned — not the plan's `dir`.
+    // `CacheEager` blob lands in B's evictable cache (`storage/cache/<id>`) on pull.
     assert_eq!(
         db_b.item_key("note-1").await.expect("B post-pull read"),
         Some(item_key),
         "the item key replayed to device B via the changeset"
     );
-    let landed = std::fs::read(ld.pinned_blob_path("blob-1").expect("pinned path"))
+    let landed = std::fs::read(ld.cache_blob_path("blob-1").expect("cache path"))
         .expect("the pull wrote the blob to B's disk");
     assert_eq!(
         landed, plaintext,

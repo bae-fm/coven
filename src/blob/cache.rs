@@ -1,48 +1,55 @@
-//! The device-local blob cache: bytes on disk, keyed by blob id, with the folder
-//! the file lives in as the only retention truth.
+//! The device-local cache for **Remote** blobs: bytes on disk, keyed by blob id,
+//! with the folder the file lives in as the only retention truth.
 //!
-//! There is no cache table. A blob is in **exactly one** of two folders under the
-//! library dir, or in neither:
+//! The cache holds copies of Remote blobs only — re-fetchable from the cloud,
+//! evictable to a size budget, kept-or-dropped per pin. A **Local** blob is not in
+//! the cache: a user-provided Local blob is the user's own file at a path (an
+//! external ref); a host-provided Local blob is in the local store (see
+//! [`local_files`](super::local_files)). So `CacheEager`/`CacheLazy`/pin/budget all
+//! describe a blob only while it is Remote.
 //!
-//! - `storage/pinned/{ab}/{cd}/<id>` — protected, budget-exempt. A `CacheEager` blob
-//!   system-pinned on pull (cover art every device keeps), or a `CacheLazy` blob the
-//!   user pinned for offline.
-//! - `storage/cache/{ab}/{cd}/<id>` — opportunistic, evictable. Fetched-on-read
-//!   `CacheLazy` audio, or bytes a host staged before a push uploads them.
-//! - neither — remote-only. No file, no row; fetched from the cloud on the next read.
+//! There is no cache table. A cached Remote blob is in **exactly one** of two
+//! folders under the library dir, or in neither:
 //!
-//! Presence is the file on disk; pinned-ness is which folder. Nothing the two
+//! - `storage/pinned/{ab}/{cd}/<id>` — kept, budget-exempt. A Remote blob's cache
+//!   copy the user pinned for offline (kept from eviction).
+//! - `storage/cache/{ab}/{cd}/<id>` — opportunistic, evictable. A blob fetched on
+//!   read (`CacheLazy`) or eagerly on pull (`CacheEager`).
+//! - neither — not cached. No file; fetched from the cloud on the next read.
+//!
+//! Presence is the file on disk; kept-ness is which folder. Nothing the two
 //! `readdir`s can't answer, so no metadata sidecar to keep in sync with the disk.
 //! Every write is atomic ([`crate::local_blob::write_atomic`]) so a crash can't leave
 //! a torn file a read would trust, and pin/unpin are a `rename` within `storage/`
 //! (one filesystem, atomic) so a blob never appears in both folders or neither
 //! mid-move.
 //!
-//! Both reads resolve external-ref → cache → cloud. An external ref (a
-//! `local_blob_refs` row — an Unmanaged release's user-owned file coven reads but
-//! does not own) is checked first and read straight from the user's path,
-//! validated by presence + size with no cloud fallback; it is mutually exclusive
-//! with the owned cache by the managed/unmanaged invariant. Failing that:
-//! [`read_blob`] returns the entire blob (a miss fetches + decrypts it and
-//! populates `cache/`); [`open_blob_stream`] serves a plaintext byte range for a
-//! host streaming or seeking (a miss range-reads + decrypts from the cloud but
-//! populates nothing — a partial file would be read as the whole blob, since
-//! presence is the only truth).
+//! Both reads resolve, *by where the bytes are*, in order: **external ref**
+//! (a `local_blob_refs` row — a user-provided Local blob's user-owned file coven
+//! reads but does not own) → **local store** (a host-provided Local blob, see
+//! [`local_files`](super::local_files)) → **cache** (a Remote blob's local copy) →
+//! **cloud** (a Remote blob not yet cached). The first two are the Local forms,
+//! read straight from disk with no cloud fallback; the cloud is reached only for a
+//! Remote blob not yet cached. [`read_blob`] returns the entire blob (a cloud miss
+//! fetches + decrypts it and populates `cache/`); [`open_blob_stream`] serves a
+//! plaintext byte range for a host streaming or seeking (a cloud miss range-reads +
+//! decrypts but populates nothing — a partial file would be read as the whole blob,
+//! since presence is the only truth).
 //!
 //! The cache has a size budget, `max_cache_size`, the host sets per device (see
 //! [`Database::set_max_cache_size`]). It counts **only** the files under `cache/`
-//! — `pinned/` is structurally exempt, since the sweep never looks there. After
-//! every populate ([`read_blob`]'s miss-write and [`write_blob`]),
-//! [`evict_to_budget`] sums the `cache/` files and, if their total exceeds the
-//! budget, deletes the oldest by modification time until the total is back under
-//! it. Modification time is the recency proxy — there is no `last_accessed`
-//! column, the same folder-truth trade-off the whole cache makes; pinning already
-//! retains the blobs the user chose to keep local. With the budget unset eviction is off and the cache
-//! grows without bound. [`clear_cache`] drops all of `cache/` in one sweep
-//! regardless of the budget; a pinned blob (in `pinned/`) survives either way
-//! because it lives in the other folder.
+//! — `pinned/` is structurally exempt, and `storage/local` (the local store) is
+//! never walked at all. After every populate ([`read_blob`]'s miss-write and
+//! [`write_blob`]), [`evict_to_budget`] sums the `cache/` files and, if their total
+//! exceeds the budget, deletes the oldest by modification time until the total is
+//! back under it. Modification time is the recency proxy — there is no
+//! `last_accessed` column, the same folder-truth trade-off the whole cache makes;
+//! pinning retains the Remote blobs the user chose to keep local. With the budget
+//! unset eviction is off and the cache grows without bound. [`clear_cache`] drops
+//! all of `cache/` in one sweep regardless of the budget; a pinned blob (in
+//! `pinned/`) survives either way because it lives in the other folder.
 
-use crate::blob::{BlobRef, CacheFill};
+use crate::blob::BlobRef;
 use crate::database::Database;
 use crate::library_dir::{LibraryDir, PathTokenError};
 use crate::sync::storage::{StorageError, SyncStorage};
@@ -67,8 +74,8 @@ pub enum BlobCacheError {
     /// sweep), or a scope that couldn't be resolved to an encryption key. Carries a
     /// human-readable cause.
     Io(String),
-    /// A registered external blob ref (an Unmanaged release's user-owned file)
-    /// points at a file that is no longer there — the user moved, renamed, or
+    /// A registered external blob ref (a user-provided Local blob's user-owned
+    /// file) points at a file that is no longer there — the user moved, renamed, or
     /// deleted it. Terminal: an external blob has no cloud copy to fall back to, so
     /// this never re-fetches. The host surfaces a "files missing / moved" state
     /// whose actions are relocate (pick the new folder, re-register) or re-import.
@@ -123,21 +130,29 @@ impl From<StorageError> for BlobCacheError {
     }
 }
 
-/// Stage host bytes into the cache so a later read serves them locally and a pin can
-/// promote them to `pinned/` without a cloud round-trip. The bytes land at
-/// `storage/cache/<id>` (unpinned, evictable) via an atomic write.
+impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
+    fn from(e: crate::blob::local_files::LocalBlobError) -> Self {
+        use crate::blob::local_files::LocalBlobError;
+        match e {
+            LocalBlobError::Path(p) => BlobCacheError::Path(p),
+            LocalBlobError::Io(s) => BlobCacheError::Io(s),
+        }
+    }
+}
+
+/// Write a Remote blob's plaintext into the evictable cache (`storage/cache/<id>`)
+/// via an atomic write, so a later read serves it locally without a cloud
+/// round-trip and a pin can promote it to `pinned/`.
 ///
-/// This is for bytes a host wants a local copy of that the push then uploads — e.g.
-/// a release the user is taking from cloud-only to pinned, whose audio bae copies in
-/// before the push reads it. The pinned sibling [`stage_blob`] (with `pinned`) is
-/// what a host calls for a CacheEager blob the inline push reads back via
-/// [`read_staged`].
+/// Used when a blob becomes Remote and coven already has its plaintext in hand —
+/// the inline push moving a just-uploaded host-provided blob's local-store copy
+/// into the cache — so the cache is populated on write rather than fetch-on-read.
 ///
-/// After the bytes land, [`evict_to_budget`] runs so a stage that pushes `cache/`
+/// After the bytes land, [`evict_to_budget`] runs so a write that pushes `cache/`
 /// over `max_cache_size` evicts its oldest files back under budget (a no-op when
 /// no budget is set). The just-written file is passed as `protect`, so it is
-/// excluded from eviction — this stage can never drop the very bytes it produced.
-/// Eviction is best-effort: the stage has already succeeded, so an eviction failure
+/// excluded from eviction — this write can never drop the very bytes it produced.
+/// Eviction is best-effort: the write has already succeeded, so an eviction failure
 /// is logged and swallowed, not returned (see below).
 pub async fn write_blob(
     db: &Database,
@@ -149,28 +164,28 @@ pub async fn write_blob(
     crate::local_blob::write_atomic(&dest, bytes)
         .await
         .map_err(BlobCacheError::Io)?;
-    // Staging into `cache/` may have pushed it over budget; evict the oldest files
-    // back under it, never the file just written (passed as `protect`). A no-op when
-    // no budget is set.
+    // The write into `cache/` may have pushed it over budget; evict the oldest
+    // files back under it, never the file just written (passed as `protect`). A
+    // no-op when no budget is set.
     //
-    // Eviction is best-effort and must not fail the stage: the write above already
+    // Eviction is best-effort and must not fail the write: the write above already
     // succeeded, so the bytes are durably in `cache/`. The cache being briefly over
     // its budget is not wrong state — it self-corrects on the next populate's sweep —
-    // so failing a successful stage because cleanup failed would be wrong. Log and
+    // so failing a successful write because cleanup failed would be wrong. Log and
     // continue.
     if let Err(e) = evict_to_budget(db, library_dir, Some(&dest)).await {
         tracing::warn!(
-            "write_blob: staged {} but eviction failed (cache may be over budget until the next populate): {e}",
+            "write_blob: wrote {} but eviction failed (cache may be over budget until the next populate): {e}",
             dest.display()
         );
     }
     Ok(())
 }
 
-/// Write a blob's plaintext straight into the PROTECTED cache folder
-/// (`storage/pinned/<id>`), so a just-uploaded pinned managed blob is kept local
-/// and budget-exempt with no later cloud round-trip. The pinned sibling of
-/// [`write_blob`] (which stages into the evictable `storage/cache/<id>`).
+/// Write a Remote blob's plaintext straight into the KEPT cache folder
+/// (`storage/pinned/<id>`), so a just-uploaded blob the user pinned for offline is
+/// kept local and budget-exempt with no later cloud round-trip. The kept sibling of
+/// [`write_blob`] (which writes into the evictable `storage/cache/<id>`).
 ///
 /// Called by the upload drain after a successful upload whose entry is
 /// `retain_pinned`: the same plaintext the drain already read to seal is written
@@ -179,7 +194,7 @@ pub async fn write_blob(
 /// the cloud.
 ///
 /// Unlike [`write_blob`] there is NO post-write eviction: `pinned/` is structurally
-/// exempt from the size budget (the sweep never walks it), so a pinned populate can
+/// exempt from the size budget (the sweep never walks it), so a kept populate can
 /// neither push the evictable cache over budget nor be trimmed. The write is atomic
 /// ([`crate::local_blob::write_atomic`]), the same torn-file guard every cache write
 /// relies on.
@@ -194,35 +209,14 @@ pub(crate) async fn populate_pinned(
         .map_err(BlobCacheError::Io)
 }
 
-/// The host-facing staging call: put a blob's plaintext into the cache so the
-/// inline push can read it locally and a later read serves it without a cloud
-/// round-trip. `pinned` writes to the protected `pinned/` folder (budget-exempt —
-/// for a [`CacheFill::CacheEager`] blob, system-pinned on every device, which the
-/// host stages when it writes the blob-bearing row); otherwise to the evictable
-/// `cache/`.
-///
-/// The unified entry over [`populate_pinned`] and [`write_blob`]: the inline push
-/// reads what was staged here via [`read_staged`].
-pub async fn stage_blob(
-    db: &Database,
-    library_dir: &LibraryDir,
-    blob: &BlobRef,
-    bytes: &[u8],
-    pinned: bool,
-) -> Result<(), BlobCacheError> {
-    if pinned {
-        populate_pinned(library_dir, &blob.id, bytes).await
-    } else {
-        write_blob(db, library_dir, blob, bytes).await
-    }
-}
-
-/// Read a blob's plaintext from the local cache only — `pinned/<id>` or
-/// `cache/<id>` — returning `None` when it is in neither folder. No cloud fetch:
-/// this is the inline push reading the bytes it is about to upload (the blob is
-/// not yet in the cloud), and a host staged them via [`stage_blob`]. A `None`
-/// tells the push the blob is not ready, so it aborts rather than publishing a row
-/// whose blob never reached the cloud.
+/// Read a Remote blob's plaintext from the cache only — `pinned/<id>` or
+/// `cache/<id>` — returning `None` when it is in neither folder. No cloud fetch and
+/// no local-store check: this is the inline push's crash-recovery read of a
+/// host-provided blob whose local-store copy was already moved into the cache by a
+/// prior cycle. The primary read is from the local store
+/// ([`local_files::read`](super::local_files::read)); this is the fallback. A `None`
+/// from both tells the push the blob is not ready, so it aborts rather than
+/// publishing a row whose blob never reached the cloud.
 pub async fn read_staged(
     library_dir: &LibraryDir,
     id: &str,
@@ -244,12 +238,14 @@ pub async fn read_staged(
     Ok(None)
 }
 
-/// Drop a blob's local cache copy from BOTH folders (`pinned/<id>` and
-/// `cache/<id>`), the apply-side cleanup when an incoming changeset deletes a
-/// blob-bearing row (a gate retract or a genuine delete). A peer drops only its
-/// own local cache here — it never writes a cloud tombstone, which belongs to the
-/// deleting/unmanaging owner. The `pinned/` copy is budget-exempt, so without this
-/// it would leak forever once the row is gone.
+/// Drop a Remote blob's cache copy from BOTH folders (`pinned/<id>` and
+/// `cache/<id>`), part of the apply-side cleanup when an incoming changeset deletes
+/// a blob-bearing row (a gate retract or a genuine delete). A peer drops only its
+/// own cache copy here — it never writes a cloud tombstone, which belongs to the
+/// deleting / make-Local owner. The `pinned/` copy is budget-exempt, so without
+/// this it would leak forever once the row is gone. (The local store is dropped
+/// separately by the apply-side caller — a peer holds the blob in the cache, not
+/// the local store, but the caller drops both wherever the bytes are.)
 ///
 /// An absent file in either folder is the expected case (a blob is in at most one
 /// folder, or neither), not an error. Every other I/O failure is surfaced.
@@ -267,35 +263,49 @@ pub async fn drop_cached_blob(library_dir: &LibraryDir, id: &str) -> Result<(), 
     Ok(())
 }
 
-/// Read a blob's whole contents, resolving external-ref → cache → cloud.
+/// Read a blob's whole contents, resolving — *by where the bytes are* —
+/// external-ref → local store → cache → cloud.
 ///
-/// An external ref (a `local_blob_refs` row — an Unmanaged release's user-owned
-/// file) is checked first: if one is registered for this id, the bytes are read
-/// straight from the user's path and validated by presence + size, with NO cloud
-/// fallback (an Unmanaged blob has no cloud copy). A vanished file is
+/// An **external ref** (a `local_blob_refs` row — a user-provided Local blob's
+/// user-owned file) is checked first: if one is registered for this id, the bytes
+/// are read straight from the user's path and validated by presence + size, with
+/// NO cloud fallback (a Local blob has no cloud copy). A vanished file is
 /// [`BlobCacheError::ExternalMissing`]; a length that no longer matches the
 /// registered size is [`BlobCacheError::ExternalSizeMismatch`] — both terminal.
-/// An external ref and an owned-cache copy are mutually exclusive by the
-/// managed/unmanaged invariant, so a match here is the whole read.
 ///
-/// Otherwise the owned cache: a hit is the file existing in `pinned/<id>` OR
-/// `cache/<id>` — its existence is the entire test, no table consulted. A miss
-/// resolves the blob's scope to its encryption key, downloads + decrypts it via
-/// [`SyncStorage::get_blob`], writes it atomically to `cache/<id>` (unpinned — a
-/// plain read populates the evictable cache, never the protected one), and returns
-/// the bytes it just fetched. The post-populate [`evict_to_budget`] sweep is
-/// best-effort: a fetch that succeeded returns its bytes even if eviction then
-/// fails (logged, not returned).
+/// The **local store** is next: a host-provided Local blob lives at
+/// `storage/local/<namespace>/<id>` (see [`local_files`](super::local_files)), read
+/// straight from disk with no cloud fallback. The external ref and the local store
+/// are the two Local forms — mutually exclusive by provenance — so a hit in either
+/// is the whole read.
+///
+/// Otherwise the **cache** (a Remote blob's local copy): a hit is the file existing
+/// in `pinned/<id>` OR `cache/<id>` — its existence is the entire test, no table
+/// consulted. A **cloud** miss resolves the blob's scope to its encryption key,
+/// downloads + decrypts it via [`SyncStorage::get_blob`], writes it atomically to
+/// `cache/<id>` (evictable — a fetch-on-read populates the evictable cache, never
+/// the kept folder), and returns the bytes it just fetched. The post-populate
+/// [`evict_to_budget`] sweep is best-effort: a fetch that succeeded returns its
+/// bytes even if eviction then fails (logged, not returned).
 pub async fn read_blob(
     db: &Database,
     library_dir: &LibraryDir,
     storage: &dyn SyncStorage,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    // External ref first: an Unmanaged release plays the user's own file, read
-    // straight from its path. Validate-on-read by presence + size; no cloud
+    // External ref first: a user-provided Local blob plays the user's own file,
+    // read straight from its path. Validate-on-read by presence + size; no cloud
     // fallback, because these bytes only ever lived at the user's path.
     if let Some(bytes) = read_external(db, &blob.id, ExternalRead::Whole).await? {
+        return Ok(bytes);
+    }
+
+    // Local store next: a host-provided Local blob is coven's own copy, read
+    // straight from `storage/local/<namespace>/<id>`. No cloud fallback — a Local
+    // blob has no cloud copy.
+    if let Some(bytes) =
+        crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id).await?
+    {
         return Ok(bytes);
     }
 
@@ -357,12 +367,17 @@ pub async fn read_blob(
 /// past `source_size` (or an overflow) is an error, never a short read — the same
 /// contract [`crate::sync::cloud_storage::BlobRangeReader::read`] enforces.
 ///
-/// **External ref** (a `local_blob_refs` row — an Unmanaged release's user-owned
-/// file): the validated range is read straight from the user's path via
+/// **External ref** (a `local_blob_refs` row — a user-provided Local blob's
+/// user-owned file): the validated range is read straight from the user's path via
 /// [`crate::local_blob::read_range`], with NO cloud fallback. A vanished or short
 /// file is [`BlobCacheError::ExternalMissing`] (a short file already fails loud in
-/// `read_range`). Checked first, before the owned cache; the two are mutually
-/// exclusive by the managed/unmanaged invariant.
+/// `read_range`). Checked first.
+///
+/// **Local store** (`storage/local/<namespace>/<id>` exists): a host-provided Local
+/// blob, the range read straight off disk via
+/// [`local_files::read_range`](super::local_files::read_range), no cloud fallback.
+/// The external ref and the local store are the two Local forms, mutually exclusive
+/// by provenance.
 ///
 /// **Cache hit** (`pinned/<id>` OR `cache/<id>` exists): the local file is the
 /// whole plaintext, so the slice is read straight off disk at `offset` — no
@@ -405,9 +420,18 @@ pub async fn open_blob_stream(
 
     // External ref first: serve the range straight from the user's file. The
     // window was validated against `source_size` above, and `read_range` reads
-    // exactly `len` (failing loud on a short file). No cloud fallback (an Unmanaged
+    // exactly `len` (failing loud on a short file). No cloud fallback (a Local
     // blob has no cloud copy); a missing or short file is terminal.
     if let Some(bytes) = read_external(db, &blob.id, ExternalRead::Range { offset, len }).await? {
+        return Ok(bytes);
+    }
+
+    // Local store next: a host-provided Local blob, range-read from coven's own
+    // copy. No cloud fallback — a Local blob has no cloud copy.
+    if let Some(bytes) =
+        crate::blob::local_files::read_range(library_dir, &blob.namespace, &blob.id, offset, len)
+            .await?
+    {
         return Ok(bytes);
     }
 
@@ -456,15 +480,34 @@ pub async fn open_blob_stream(
         .map_err(BlobCacheError::Storage)
 }
 
+/// Move a host-provided blob's local-store copy (`storage/local/<namespace>/<id>`)
+/// into the evictable cache (`storage/cache/<id>`), the local-side completion of a
+/// host-provided blob's Local → Remote transition: once the inline push has uploaded
+/// it, its on-device copy is a cache copy (evictable, re-fetchable), no longer the
+/// Local home. A `rename` within `storage/` (one filesystem, atomic on native), so
+/// the blob is never in both stores or neither mid-move; the destination's
+/// `{ab}/{cd}` shard is created first. No eviction sweep runs — a `rename` populates
+/// nothing the budget counts until the next read; the cover is now Remote and
+/// re-fetchable if it does fall out.
+pub async fn move_local_into_cache(
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+) -> Result<(), BlobCacheError> {
+    let from = library_dir.local_blob_path(namespace, id)?;
+    let to = library_dir.cache_blob_path(id)?;
+    rename_within_storage(&from, &to).await
+}
+
 /// Ensure a blob is local AND protected: present in `storage/pinned/<id>`, exempt
 /// from the evictable cache. A pin POPULATES — if the blob isn't cached it is
 /// fetched first — so it is not a flag flip. Idempotent.
 ///
 /// Three cases per blob: already in `pinned/` (nothing to do); in `cache/` (rename
-/// it into `pinned/`, so a previously-staged or read-populated blob is promoted with
-/// no cloud fetch); in neither (fetch from the cloud and write straight to
-/// `pinned/`). `&[BlobRef]` rather than ids because the fetch needs the blob's cloud
-/// coordinates (namespace, scope, cloud_path) an id alone lacks.
+/// it into `pinned/`, so a read-populated or eagerly-pulled blob is promoted with no
+/// cloud fetch); in neither (fetch from the cloud and write straight to `pinned/`).
+/// `&[BlobRef]` rather than ids because the fetch needs the blob's cloud coordinates
+/// (namespace, scope, cloud_path) an id alone lacks.
 pub async fn pin(
     db: &Database,
     library_dir: &LibraryDir,
@@ -508,22 +551,15 @@ pub async fn pin(
     Ok(())
 }
 
-/// Drop a blob's protection: move `storage/pinned/<id>` → `storage/cache/<id>` so
-/// the file stays (still readable) but is now evictable. Not a delete.
+/// Drop a Remote blob's pin: move `storage/pinned/<id>` → `storage/cache/<id>` so
+/// the cache copy stays (still readable) but is now evictable. Not a delete.
 ///
-/// Only valid on a `CacheLazy` blob. A `CacheEager` blob's pin is a SYSTEM pin —
-/// re-asserted every pull because the blob is part of having the library — so
-/// unpinning it is meaningless and REJECTED with an error (fail loud, not a silent
-/// skip that would leave the caller thinking it succeeded). The class is checked
-/// before any file is touched.
+/// A pin keeps a specific Remote blob's cache copy from eviction; unpin reverses it
+/// regardless of the blob's [`CacheFill`] — a `CacheEager` blob lands in the
+/// evictable cache on pull (it is not auto-pinned), so unpinning one that was never
+/// pinned is simply a no-op (it is already as-evictable-as-it-gets).
 pub async fn unpin(library_dir: &LibraryDir, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
     for blob in blobs {
-        if blob.sync == CacheFill::CacheEager {
-            return Err(BlobCacheError::Io(format!(
-                "cannot unpin CacheEager blob {}: its system pin is not user-removable",
-                blob.id
-            )));
-        }
         let pinned = library_dir.pinned_blob_path(&blob.id)?;
         let cache = library_dir.cache_blob_path(&blob.id)?;
 
@@ -570,10 +606,10 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
 /// the device's `max_cache_size` budget. The cache layer's size enforcement, run
 /// synchronously after every populate ([`read_blob`]'s miss-write, [`write_blob`]).
 ///
-/// The budget counts **only** the files under `cache/` — `pinned/` is never walked,
-/// so a pinned (or system-pinned `CacheEager`) blob is structurally exempt and can
-/// never be evicted. With no budget set this is a no-op: the cache is unlimited
-/// until the host opts into one.
+/// The budget counts **only** the files under `cache/` — `pinned/` is never walked
+/// (nor is the local store under `storage/local/`), so a pinned blob is structurally
+/// exempt and can never be evicted. With no budget set this is a no-op: the cache is
+/// unlimited until the host opts into one.
 ///
 /// Recency is the file's modification time. There is no `last_accessed` column —
 /// the same folder-truth trade-off the whole cache makes — so the oldest-written
@@ -681,8 +717,8 @@ pub async fn evict_to_budget(
 
 /// Look up the external file ref for `id`, mapping the DB error into the cache's
 /// error type. Shared by [`read_blob`] and [`open_blob_stream`], which both check
-/// for an external ref (an Unmanaged release's user-owned file) before the owned
-/// cache/cloud resolution.
+/// for an external ref (a user-provided Local blob's user-owned file) before the
+/// local-store / cache / cloud resolution.
 async fn lookup_external_ref(
     db: &Database,
     id: &str,
@@ -692,8 +728,8 @@ async fn lookup_external_ref(
         .map_err(|e| BlobCacheError::Io(format!("look up external blob ref for {id}: {e}")))
 }
 
-/// A whole-blob vs ranged read of an external (unmanaged) file. The two cache reads
-/// share the external-ref preflight; only the local read primitive differs.
+/// A whole-blob vs ranged read of an external (user-provided Local) file. The two
+/// reads share the external-ref preflight; only the local read primitive differs.
 enum ExternalRead {
     Whole,
     Range { offset: u64, len: u64 },

@@ -98,21 +98,25 @@ impl SyncService {
             }
         };
 
-        // Step 3: upload the CacheEager blobs the outgoing changeset references,
+        // Step 3: upload the HOST-PROVIDED blobs the outgoing changeset references,
         // before the envelope, so pullers can fetch them as soon as they see the
-        // change. Only CacheEager blobs (e.g. cover art) ride this inline path: their
-        // rows are ungated, so a cover row pushes the cycle it is written and the
-        // pull's blob-before-row invariant needs the cover in the cloud first — and
-        // this path uploads in the same cycle. A CacheLazy blob (audio) is gated, so
-        // its row never reaches a changeset until its blob is already uploaded via
-        // the durable outbox; it is intentionally NOT uploaded here.
+        // change. coven owns a host-provided blob's bytes (in its local store while
+        // Local, or its cache once moved), so it can upload one inline as its row
+        // reaches a changeset — whether the row is ungated or just re-emitted by a
+        // make_remote gate flip. The pull's blob-before-row invariant needs the blob
+        // in the cloud first, and this path uploads in the same cycle. A
+        // user-provided blob is the user's own file, uploaded only via the durable
+        // outbox (make_remote, which reads the user's path), so it is intentionally
+        // NOT uploaded here.
         //
-        // The plaintext is read from coven's own cache, where a CacheEager blob is
-        // staged (system-pinned) when the host writes its row (see
-        // [`crate::blob::cache::stage_blob`]). A blob absent from the cache means
-        // the row is not ready to publish — a missing blob would make pullers 404 on
-        // it permanently (the seq advances; the row is never a fresh INSERT again) —
-        // so the cycle aborts rather than skipping the upload.
+        // The plaintext is read from the host-provided Local home — coven's local
+        // store, where the host stored the blob when it wrote the row — falling back
+        // to the cache (a prior cycle that uploaded but crashed before the move). A
+        // blob absent from both means its row is not ready to publish — a missing
+        // blob would make pullers 404 on it permanently (the seq advances; the row is
+        // never a fresh INSERT again) — so the cycle aborts rather than skipping the
+        // upload. After a successful upload the blob is Remote, so its local-store
+        // copy moves into the cache (a cache copy is evictable + re-fetchable).
         if let Some(ref cs) = outgoing_cs {
             let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
             let tables = tables.to_vec();
@@ -123,28 +127,45 @@ impl SyncService {
                 })
                 .await
                 .map_err(|e| SyncCycleError::AssetScan(e.0))?;
-            for blob in crate::sync::pull::mirrored_blobs(&blob_decls, &changes) {
-                let bytes = match crate::blob::cache::read_staged(library_dir, &blob.id).await {
-                    Ok(Some(bytes)) => bytes,
-                    Ok(None) => {
-                        error!(
-                            id = %blob.id,
-                            "blob not staged in the cache; aborting push so the changeset \
-                             is not published without its blob"
-                        );
-                        return Err(SyncCycleError::BlobMissing(format!(
-                            "blob {} not staged in the local cache",
-                            blob.id
-                        )));
-                    }
-                    // A real cache-read failure is not "absent" — abort the cycle
-                    // rather than silently dropping the upload.
-                    Err(e) => {
-                        return Err(SyncCycleError::AssetUpload(format!(
-                            "reading staged blob for {}: {e}",
-                            blob.id
-                        )));
-                    }
+            for blob in crate::sync::pull::host_provided_blobs(&blob_decls, &changes) {
+                // The Local home for a host-provided blob is the local store; the
+                // cache fallback covers a re-run after a crash that uploaded but did
+                // not finish the move.
+                let local =
+                    match crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id)
+                        .await
+                    {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return Err(SyncCycleError::AssetUpload(format!(
+                                "reading local-store blob for {}: {e}",
+                                blob.id
+                            )));
+                        }
+                    };
+                let was_in_local_store = local.is_some();
+                let bytes = match local {
+                    Some(bytes) => bytes,
+                    None => match crate::blob::cache::read_staged(library_dir, &blob.id).await {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => {
+                            error!(
+                                id = %blob.id,
+                                "host-provided blob is in neither the local store nor the cache; \
+                                 aborting push so the changeset is not published without its blob"
+                            );
+                            return Err(SyncCycleError::BlobMissing(format!(
+                                "host-provided blob {} is in neither the local store nor the cache",
+                                blob.id
+                            )));
+                        }
+                        Err(e) => {
+                            return Err(SyncCycleError::AssetUpload(format!(
+                                "reading cached blob for {}: {e}",
+                                blob.id
+                            )));
+                        }
+                    },
                 };
                 // Resolve the host's public scope to the internal key scope before
                 // storage encrypts. An `Item(id)` scope reads the key from
@@ -164,6 +185,21 @@ impl SyncService {
                     .await
                     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
                 info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
+
+                // The blob is now Remote. If its bytes were in the local store (its
+                // Local home), move that copy into the cache — its on-device copy is
+                // now a cache copy. The move is the load-bearing step (a host-provided
+                // blob left in the local store would read as Local); reached only on a
+                // successful upload, so the bytes are durably in the cloud first.
+                if was_in_local_store {
+                    crate::blob::cache::move_local_into_cache(
+                        library_dir,
+                        &blob.namespace,
+                        &blob.id,
+                    )
+                    .await
+                    .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+                }
             }
         }
 

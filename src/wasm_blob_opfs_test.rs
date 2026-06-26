@@ -22,7 +22,7 @@ use std::sync::RwLock;
 use rusqlite::OptionalExtension;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
-use crate::blob::{cache, BlobRef, BlobScope, CacheFill};
+use crate::blob::{local_files, CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
@@ -42,7 +42,11 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 fn open_device(device_id: &str) -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
-        test_synced_tables_with_blob(BlobDecl::new("photos", CacheFill::CacheEager)),
+        test_synced_tables_with_blob(BlobDecl::new(
+            "photos",
+            Provenance::HostProvided,
+            CacheFill::CacheEager,
+        )),
         device_id.to_string(),
         create_synced_schema,
     )
@@ -174,19 +178,13 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     .await
     .expect("device A insert");
 
-    // The host stages the cover into A's pinned cache (the inline push reads it
-    // there to upload). On wasm this exercises the cache write over OPFS.
+    // The host stores the cover (host-provided) in A's local store — its Local home,
+    // which the inline push reads to upload. On wasm this exercises the local-store
+    // write over OPFS.
     let photo_bytes = b"\x89PNG\r\n\x1a\n fake image bytes for photo-1".to_vec();
-    let cover = BlobRef {
-        namespace: "photos".to_string(),
-        id: "photo-1".to_string(),
-        scope: BlobScope::Master,
-        cloud_path: None,
-        sync: CacheFill::CacheEager,
-    };
-    cache::stage_blob(&db_a, &lib_a, &cover, &photo_bytes, true)
+    local_files::store(&lib_a, "photos", "photo-1", &photo_bytes)
         .await
-        .expect("stage photo into A's cache");
+        .expect("store photo in A's local store");
 
     let storage_a = CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
@@ -196,16 +194,16 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     );
     run_cycle(&storage_a, &db_a, "device-a", &lib_a).await;
 
-    // B has not pulled, so the blob is not in B's pinned cache yet.
-    let b_pinned = lib_b.pinned_blob_path("photo-1").expect("pinned blob path");
+    // B has not pulled, so the blob is not in B's cache yet.
+    let b_cache = lib_b.cache_blob_path("photo-1").expect("cache blob path");
     assert_eq!(
-        crate::local_blob::exists(&b_pinned).await,
+        crate::local_blob::exists(&b_cache).await,
         Ok(false),
         "the photo must not be in B's cache before B syncs",
     );
 
     // Device B: one cycle pulls A's changeset, applies the note + photo rows, and
-    // `download_blobs` writes the photo (a CacheEager blob) into B's pinned cache.
+    // `download_blobs` writes the photo (a CacheEager blob) into B's evictable cache.
     let storage_b = CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
@@ -228,13 +226,13 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         .expect("query note_photos on B");
     assert!(has_photo_row, "device B applied the note_photos row");
 
-    // ...and so did the blob bytes, written into B's pinned cache by the pull.
+    // ...and so did the blob bytes, written into B's evictable cache by the pull.
     assert_eq!(
-        crate::local_blob::read(&b_pinned)
+        crate::local_blob::read(&b_cache)
             .await
             .expect("read photo from B's OPFS"),
         photo_bytes,
-        "the photo blob reached B's pinned cache with its original bytes",
+        "the photo blob reached B's evictable cache with its original bytes",
     );
 }
 

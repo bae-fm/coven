@@ -50,10 +50,41 @@ pub fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
     ]
 }
 
+/// [`test_synced_tables`] with TWO blob-bearing children of the gated `notes` root:
+/// `note_photos` per `photo_decl` (a release file, user-provided) and `note_covers`
+/// per `cover_decl` (a host-provided asset). Both inherit the `notes` gate, so a
+/// make_remote of a note carries both — the user-provided file through the durable
+/// outbox and the host-provided cover through the inline push — exercising the
+/// per-provenance split in one subtree.
+pub fn test_synced_tables_with_user_and_host_blobs(
+    photo_decl: BlobDecl,
+    cover_decl: BlobDecl,
+) -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("notes").gated_by("shared"),
+        SyncedTable::new("note_tags"),
+        SyncedTable::new("note_photos").carries_blob(photo_decl),
+        SyncedTable::new("note_covers").carries_blob(cover_decl),
+    ]
+}
+
 /// Open a test [`Database`] over the synthetic schema with `note_photos` declared
 /// blob-bearing per `decl`.
 pub fn open_test_db_with_blob(decl: BlobDecl) -> Database {
     open_test_db_schema(test_synced_tables_with_blob(decl), create_synced_schema)
+}
+
+/// Open a test [`Database`] with both `note_photos` (per `photo_decl`) and
+/// `note_covers` (per `cover_decl`) declared blob-bearing — the schema for the
+/// per-provenance transition tests.
+pub fn open_test_db_with_user_and_host_blobs(
+    photo_decl: BlobDecl,
+    cover_decl: BlobDecl,
+) -> Database {
+    open_test_db_schema(
+        test_synced_tables_with_user_and_host_blobs(photo_decl, cover_decl),
+        create_synced_schema,
+    )
 }
 
 /// Create the synthetic test schema on a connection. Used as the host `migrate`
@@ -80,6 +111,14 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
             kind TEXT NOT NULL,
+            _updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            cloud_path TEXT,
+            FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
+        );
+        CREATE TABLE note_covers (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             cloud_path TEXT,

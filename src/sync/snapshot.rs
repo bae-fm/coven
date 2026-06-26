@@ -848,10 +848,11 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 ///
 /// coven derives the blobs the DB at `db_path` references from the blob
 /// declarations in `tables`, then downloads the `CacheEager` ones via the same
-/// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into
-/// `storage/pinned/<id>` under `library_dir`, skipping any already present there. A
-/// failed download is logged there and reflected in the returned flag; the
-/// bootstrap that calls this records the not-yet-complete state in
+/// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into the
+/// evictable cache `storage/cache/<id>` under `library_dir`, skipping any already
+/// present in either cache folder. A failed download is logged there and reflected
+/// in the returned flag; the bootstrap that calls this records the not-yet-complete
+/// state in
 /// [`SNAPSHOT_BLOB_BACKFILL_PENDING`], and each subsequent sync cycle re-runs this
 /// until it returns true, so a blob whose object was not yet in the cloud (or whose
 /// download hit a transient error) at bootstrap is fetched on a later cycle rather
@@ -880,7 +881,7 @@ pub(crate) async fn reconcile_snapshot_blobs(
             .refs_in_db(&conn)
             .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?
             .into_iter()
-            .filter(|blob| blob.sync == crate::blob::CacheFill::CacheEager)
+            .filter(|blob| blob.fill == crate::blob::CacheFill::CacheEager)
             .collect()
     };
 
@@ -893,8 +894,8 @@ pub(crate) async fn reconcile_snapshot_blobs(
     // `item_keys` rows the snapshot itself carried into this DB, so resolution
     // goes through the DB (issue #111's pull path uses the map for keys minted in
     // the changeset being applied; the bootstrap has no such changeset). The blobs
-    // are `CacheEager`, so `download_blobs` writes each to `storage/pinned/<id>`
-    // (system pin) under `library_dir`.
+    // are `CacheEager`, so `download_blobs` writes each into the evictable cache
+    // `storage/cache/<id>` under `library_dir`.
     let all_ok = crate::sync::pull::download_blobs(
         db,
         blobs,

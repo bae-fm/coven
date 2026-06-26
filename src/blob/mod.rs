@@ -7,38 +7,94 @@
 //! the unobfuscated blob-path scheme instead stores each blob at the consumer's
 //! readable [`BlobRef::cloud_path`] so the bucket is browsable.
 //!
-//! This module is the engine; its halves move a blob through its lifecycle
-//! (stage → upload → download → pin/unpin → evict → delete):
+//! # The coven concept tree
 //!
-//! - [`cache`] — the device-local half: bytes on disk keyed by blob id, with the
-//!   folder a file lives in as the only retention truth (`storage/pinned/`
-//!   protected, `storage/cache/` evictable). Stage, read (whole and ranged),
-//!   pin/unpin, clear, and budget eviction.
+//! A blob has two **declared** properties — [`Provenance`] (its Local story) and
+//! [`CacheFill`] (its Remote story) — and one **state**, locality, flipped by the
+//! transitions. The cache is a *mechanism* that serves Remote blobs; it is not a
+//! kind of blob.
+//!
+//! ```text
+//! A blob the host declares with:
+//!
+//! provenance — its LOCAL story: where the bytes live when Local, and the
+//!              Remote→Local path requirement
+//!    ├─ user-provided   the user's file at a path; coven references it.
+//!    │                  Remote→Local writes the bytes back to a user file → NEEDS A PATH.
+//!    └─ host-provided   bae hands coven the data; coven keeps it in its local store.
+//!                       Remote→Local restores it to the local store → no path.
+//!
+//! cache fill — its REMOTE story: how a device gets the bytes when the release is
+//!              Remote. A cache-mechanism setting; applies to ANY blob, regardless of
+//!              provenance, once it is Remote.
+//!    ├─ CacheEager   pulled with the SQL row, right away      (covers — grid is instant)
+//!    └─ CacheLazy    fetched on first read                    (audio — big, fetch what you play)
+//!
+//! and a current state:
+//!
+//! locality
+//!    ├─ Local    bytes on-device — the user's path (user-provided) or coven's local store (host-provided)
+//!    └─ Remote   bytes in the cloud; each device's local copy is a CACHE copy, filled
+//!                per `cache fill`, kept-or-evicted per `pin`
+//!
+//! namespace (bucket)   the blob's category — release_files · covers · artist_images
+//!
+//! transitions
+//!    ├─ Local → Remote   upload the bytes; now cache-distributed to every device per cache fill
+//!    └─ Remote → Local   bring the bytes back to a local file — path required iff user-provided
+//!
+//! cache budget   per-NAMESPACE size limit; each namespace evicts independently, so
+//!                evicting release_files (big) never touches covers (small reserved slice)
+//! pin            keep one specific Remote blob's cache copy from eviction (e.g. a
+//!                release the user pinned for offline)
+//! ```
+//!
+//! ## The cache vs local files
+//!
+//! The cache holds local copies of **Remote** blobs (filled per `cache fill`,
+//! evicted per budget unless pinned). A **Local** blob is not in the cache: a
+//! user-provided Local blob is the user's file at its path (an external ref); a
+//! host-provided Local blob is in coven's local store (see [`local_files`]). The
+//! cache is the mechanism for *remoteness* — so `CacheEager`/`CacheLazy`/pin/budget
+//! describe a blob only while it is Remote, never while it is Local.
+//!
+//! # The engine's halves
+//!
+//! This module is the engine; its halves move a blob through its lifecycle:
+//!
+//! - [`cache`] — the device-local cache for **Remote** blobs: bytes on disk keyed
+//!   by blob id, with the folder a file lives in as the only retention truth
+//!   (`storage/pinned/` protected, `storage/cache/` evictable). Read (whole and
+//!   ranged), pin/unpin, clear, and budget eviction.
+//! - [`local_files`] — coven's own copy of a **host-provided Local** blob, in the
+//!   local store (`storage/local/<namespace>/<id>`). Never evicted; the budget
+//!   sweep never walks it. Store, read, drop.
 //! - [`upload`] — the cloud-write half: drain the durable upload queue, sealing
 //!   each blob under its scope and writing it to the cloud with coalesced progress,
-//!   so a staged local-only blob becomes uploaded. The sync cycle calls the drain
+//!   so a local-only blob becomes uploaded. The sync cycle calls the drain
 //!   each round before it pushes.
 //! - [`delete`] — the cloud-delete half: turn a queued deletion into a signed
 //!   cloud tombstone, hold the blob for a convergence grace so a lagging peer
 //!   isn't stranded, then GC the blob once the grace has passed. The sync cycle
 //!   drains tombstones and runs the GC each round after it pulls.
 //!
-//! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`CacheFill`],
-//! [`BlobTransitionObserver`]) are the vocabulary both halves and the host speak.
-//! Which rows carry blobs is not a runtime callback but a per-table declaration
-//! ([`crate::sync::session::BlobDecl`]) coven resolves into a [`decl::BlobDecls`]
-//! each cycle to derive the blob set itself.
+//! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`Provenance`],
+//! [`CacheFill`], [`BlobTransitionObserver`]) are the vocabulary both halves and
+//! the host speak. Which rows carry blobs is not a runtime callback but a per-table
+//! declaration ([`crate::sync::session::BlobDecl`]) coven resolves into a
+//! [`decl::BlobDecls`] each cycle to derive the blob set itself.
 //!
-//! coven also owns the two locality transitions ([`transition`]): `manage`
-//! (Unmanaged → Managed: upload the user's files, then flip the gate) and
-//! `unmanage` (Managed → Unmanaged: materialize the files back, then retract). The
-//! manage *completion* — flipping the gate the instant the last upload lands —
-//! lives in the [`upload`] drain, the one place that knows an upload just
-//! succeeded.
+//! coven also owns the two locality transitions ([`transition`]): `make_remote`
+//! (Local → Remote: upload the bytes, then flip the gate) and `make_local`
+//! (Remote → Local: bring each blob back to a local file, then retract). The
+//! make-Remote *completion* — flipping the gate the instant the last user-provided
+//! upload lands — lives in the [`upload`] drain, the one place that knows an upload
+//! just succeeded.
 
 pub mod cache;
 pub mod decl;
 pub mod delete;
+pub mod local_files;
 pub mod transition;
 pub mod upload;
 
@@ -54,13 +110,18 @@ mod cache_tests;
 // [`upload`].
 #[cfg(test)]
 mod upload_tests;
-// The coven-owned manage/unmanage transition tests: multi-device manage + unmanage
-// through the real cycle, cancel both directions, the drain's completion flip +
-// cancel-in-gap, crash-idempotency at each commit boundary, and a round-trip. Uses
-// a `watch` cancel signal + `run_single_sync_cycle`, both native-only. See
-// [`transition`].
+// The coven-owned make-Remote / make-Local transition tests: multi-device
+// make_remote + make_local through the real cycle, cancel both directions, the
+// drain's completion flip + cancel-in-gap, crash-idempotency at each commit
+// boundary, and a round-trip. Uses a `watch` cancel signal + `run_single_sync_cycle`,
+// both native-only. See [`transition`].
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod transition_tests;
+// The local-files store's tests: store/read round-trip, a host-provided Local blob
+// surviving a budget sweep (the sweep never walks `local/`), and drop. Native-only
+// because they drive a real temp directory. See [`local_files`].
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod local_files_tests;
 // The delete half's tests: tombstone signing, the drain that writes tombstones,
 // the graced GC that reclaims blobs, upload-cancels-delete at both layers, and the
 // shared `cloud_outbox` row shape. Driven against `InMemoryCloudHome` and
@@ -159,7 +220,29 @@ impl BlobScope {
     }
 }
 
-/// How a blob is retained across devices — the one blob knob the host turns.
+/// A blob's **Local story**: where its bytes live while the blob is Local, and
+/// whether bringing it back from Remote needs a destination path. Orthogonal to
+/// [`CacheFill`] (the Remote story) — a blob declares both.
+///
+/// The cache never enters into this: a Local blob is not a cache copy. Provenance
+/// decides which of the two Local homes holds it, and what `make_local` does to
+/// restore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// The user's own file at a path; coven references it but does not own it
+    /// (tracked as an external ref — see `local_blob_refs`). `make_local` writes
+    /// the bytes back to a user file, so it **needs a destination path**.
+    UserProvided,
+    /// The host hands coven the data; coven keeps its own copy in the local store
+    /// (`storage/local/<namespace>/<id>`, see [`local_files`]). `make_local`
+    /// restores it to the local store, so it needs **no path**.
+    HostProvided,
+}
+
+/// A blob's **Remote story**: how a device gets the bytes once the blob is Remote.
+/// A cache-mechanism setting — it describes a blob only while Remote — that applies
+/// to ANY blob regardless of [`Provenance`]. Orthogonal to provenance; a blob
+/// declares both.
 ///
 /// Both classes are declared per blob and are global (every device reads the same
 /// class from the blob's [`BlobRef`]); the difference is what a device does with
@@ -169,19 +252,24 @@ impl BlobScope {
 /// chose locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheFill {
-    /// Synced to every device: downloaded on pull and kept local. Part of "having
-    /// the library" — e.g. cover art.
+    /// Fetched into the cache on pull, right away, on every device — part of
+    /// "having the library" (e.g. cover art, so the grid is instant). The cache
+    /// copy is evictable + re-fetchable, not pinned.
     CacheEager,
-    /// Uploaded on push but not downloaded on pull: a pulling device skips it and
-    /// fetches it on first read — e.g. audio, which streams on demand.
+    /// Not fetched on pull: a pulling device skips it and fetches it into the cache
+    /// on first read — e.g. audio, which is big and streams on demand.
     CacheLazy,
 }
 
-/// A blob a row references: its cloud identity and encryption scope. coven derives
-/// it from the row's declared columns ([`crate::sync::session::BlobDecl`]) via
-/// [`decl::BlobDecls`]; the bytes always live in coven's own cache
-/// (`storage/pinned/<id>` / `storage/cache/<id>`, built from the validated id —
-/// see [`cache`]), never at a host path.
+/// A blob a row references: its cloud identity, encryption scope, and the two
+/// declared properties ([`provenance`](BlobRef::provenance) +
+/// [`fill`](BlobRef::fill)). coven derives it from the row's declared columns
+/// ([`crate::sync::session::BlobDecl`]) via [`decl::BlobDecls`]. Where its bytes
+/// live depends on its locality and provenance: a user-provided Local blob is the
+/// user's file at its path; a host-provided Local blob is in coven's local store
+/// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
+/// copy (`storage/pinned/<id>` / `storage/cache/<id>`, built from the validated id —
+/// see [`cache`]).
 #[derive(Debug, Clone)]
 pub struct BlobRef {
     /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`
@@ -197,16 +285,19 @@ pub struct BlobRef {
     /// ignored when `Hashed`. `None` is only valid for a `Hashed` home — a `Plain`
     /// home with no `cloud_path` is a surfaced error, never a silent fallback.
     pub cloud_path: Option<String>,
-    /// The blob's retention class. Decides whether a pulling device downloads it
-    /// ([`CacheFill::CacheEager`]) or skips it for later on-demand fetch
-    /// ([`CacheFill::CacheLazy`]).
-    pub sync: CacheFill,
+    /// The blob's **Local story**: where its bytes live while Local, and whether
+    /// `make_local` needs a destination path. See [`Provenance`].
+    pub provenance: Provenance,
+    /// The blob's **Remote story**: whether a pulling device fetches it into the
+    /// cache right away ([`CacheFill::CacheEager`]) or on first read
+    /// ([`CacheFill::CacheLazy`]). See [`CacheFill`].
+    pub fill: CacheFill,
 }
 
 /// Notified about coven's blob transitions, for host-specific bookkeeping and UI:
-/// per-blob upload progress while a manage uploads, per-blob materialize progress
-/// while an unmanage copies files back, and a completion hook per direction the
-/// host turns into its own UI event.
+/// per-blob upload progress while a make_remote uploads, per-blob materialize
+/// progress while a make_local copies files back, and a completion hook per
+/// direction the host turns into its own UI event.
 ///
 /// The host no longer drives the transition — coven owns flipping the gate and
 /// deciding when a cycle publishes — so this observer only *reports*. The upload
@@ -217,10 +308,10 @@ pub struct BlobRef {
 /// only — coven, not the host, flips the gate and breaks the drain to publish),
 /// and `on_blob_upload_failed` when an attempt fails and its entry stays queued.
 ///
-/// `on_root_managed` / `on_root_unmanaged` fire whenever coven *completes* a
+/// `on_root_made_remote` / `on_root_made_local` fire whenever coven *completes* a
 /// transition — including one resumed after a restart — so the host's own
 /// row-updated event survives a restart rather than being lost with an in-memory
-/// flag. `on_blob_materialize_progress` moves an unmanage's per-file progress bar.
+/// flag. `on_blob_materialize_progress` moves a make_local's per-file progress bar.
 ///
 /// `should_skip_uploads` lets the host pause the upload pipeline without touching
 /// the queue: the sync cycle consults it before draining so a paused queue still
@@ -245,7 +336,8 @@ pub trait BlobTransitionObserver: crate::MaybeThreadSafe {
     }
 
     /// The blob was uploaded to the cloud successfully — notification only. coven
-    /// owns flipping the gate and breaking the drain to publish a completed manage.
+    /// owns flipping the gate and breaking the drain to publish a completed
+    /// make_remote.
     async fn on_blob_uploaded(&self, blob_id: &str);
 
     /// An upload attempt failed; the entry remains queued for retry.
@@ -258,24 +350,24 @@ pub trait BlobTransitionObserver: crate::MaybeThreadSafe {
         false
     }
 
-    /// coven completed a manage of `(root_table, root_id)`: every blob is uploaded
-    /// and the gate is flipped true (the subtree publishes this cycle). Fires for a
-    /// restart-resumed completion too, so the host's row-updated event is not lost
-    /// to a crash. The default is a no-op.
-    async fn on_root_managed(&self, root_table: &str, root_id: &str) {
+    /// coven completed a make_remote of `(root_table, root_id)`: every blob is
+    /// uploaded and the gate is flipped true (the subtree publishes this cycle).
+    /// Fires for a restart-resumed completion too, so the host's row-updated event
+    /// is not lost to a crash. The default is a no-op.
+    async fn on_root_made_remote(&self, root_table: &str, root_id: &str) {
         let _ = (root_table, root_id);
     }
 
-    /// coven completed an unmanage of `(root_table, root_id)`: every blob is
-    /// materialized back to a user file, the gate is flipped false (the subtree
-    /// retracts from peers), and the cloud blobs are queued for tombstoning. The
-    /// default is a no-op.
-    async fn on_root_unmanaged(&self, root_table: &str, root_id: &str) {
+    /// coven completed a make_local of `(root_table, root_id)`: every blob is back
+    /// to a local file (a user file for user-provided, the local store for
+    /// host-provided), the gate is flipped false (the subtree retracts from peers),
+    /// and the cloud blobs are queued for tombstoning. The default is a no-op.
+    async fn on_root_made_local(&self, root_table: &str, root_id: &str) {
         let _ = (root_table, root_id);
     }
 
-    /// `done` of `total` of an unmanage's blobs have been materialized back to a
-    /// user file, so the host can move a per-file progress bar. The default is a
+    /// `done` of `total` of a make_local's blobs have been materialized back to a
+    /// local file, so the host can move a per-file progress bar. The default is a
     /// no-op.
     async fn on_blob_materialize_progress(
         &self,

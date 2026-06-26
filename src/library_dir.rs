@@ -212,11 +212,11 @@ impl LibraryDir {
         Ok(self.path.join(Self::hashed_path("storage", file_id)?))
     }
 
-    /// A protected (budget-exempt) blob file: `storage/pinned/{ab}/{cd}/<id>`. The
-    /// cache's truth is the folder a blob's file lives in, not a table — a file
-    /// here is a kept-local blob (a `CacheEager` blob system-pinned on pull, or one
-    /// the user pinned for offline). `Err` if `id` is not a safe, indexable blob
-    /// token (see [`Self::id_shard`]).
+    /// A kept (budget-exempt) cache copy of a **Remote** blob:
+    /// `storage/pinned/{ab}/{cd}/<id>`. The cache's truth is the folder a blob's
+    /// file lives in, not a table — a file here is a Remote blob's cache copy the
+    /// user pinned for offline (kept from eviction). `Err` if `id` is not a safe,
+    /// indexable blob token (see [`Self::id_shard`]).
     pub fn pinned_blob_path(&self, id: &str) -> Result<PathBuf, PathTokenError> {
         Ok(self
             .path
@@ -225,11 +225,12 @@ impl LibraryDir {
             .join(Self::id_shard(id)?))
     }
 
-    /// An opportunistic (evictable) blob file: `storage/cache/{ab}/{cd}/<id>`. A
-    /// file here is a cached-but-unpinned blob — fetched on read, droppable by
-    /// `clear_cache`. The folder it lives in, not a table, is what makes it
-    /// evictable rather than protected. `Err` if `id` is not a safe, indexable blob
-    /// token (see [`Self::id_shard`]).
+    /// An opportunistic (evictable) cache copy of a **Remote** blob:
+    /// `storage/cache/{ab}/{cd}/<id>`. A file here is a cached-but-unpinned blob —
+    /// fetched on read or eagerly on pull, droppable by `clear_cache` or the budget
+    /// sweep. The folder it lives in, not a table, is what makes it evictable rather
+    /// than kept. `Err` if `id` is not a safe, indexable blob token (see
+    /// [`Self::id_shard`]).
     pub fn cache_blob_path(&self, id: &str) -> Result<PathBuf, PathTokenError> {
         Ok(self
             .path
@@ -238,8 +239,28 @@ impl LibraryDir {
             .join(Self::id_shard(id)?))
     }
 
+    /// coven's own copy of a **host-provided Local** blob:
+    /// `storage/local/<namespace>/<id>`. This is NOT a cache copy — it is the blob's
+    /// home while its release is Local (a host-provided blob has no user path). It
+    /// is never evicted: the budget sweep walks only [`Self::cache_dir`], never
+    /// `storage/local`. Both `namespace` and `id` are validated as single path
+    /// tokens (the blob columns come from a row any write-capable member authored),
+    /// so neither can escape the store. `Err` if either is unsafe.
+    pub fn local_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
+        validate_path_token(namespace)?;
+        validate_path_token(id)?;
+        Ok(self
+            .path
+            .join("storage")
+            .join("local")
+            .join(namespace)
+            .join(id))
+    }
+
     /// The evictable-cache root, `storage/cache`. `clear_cache` removes this whole
-    /// subtree (the pinned tree under `storage/pinned` is left untouched).
+    /// subtree, and the budget sweep walks only this tree (the kept tree under
+    /// `storage/pinned` and the local store under `storage/local` are left
+    /// untouched).
     pub fn cache_dir(&self) -> PathBuf {
         self.path.join("storage").join("cache")
     }

@@ -13,7 +13,7 @@ use super::cache::{
     clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
     BlobCacheError,
 };
-use crate::blob::{BlobRef, BlobScope, CacheFill, ResolvedScope};
+use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance, ResolvedScope};
 use crate::database::Database;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::BlobDecl;
@@ -24,22 +24,38 @@ use crate::sync::test_helpers::{
 };
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
-/// retention class `sync`. Blob ids are ≥4 chars so they form the `{ab}/{cd}`
-/// partition shard.
-fn blob_ref(id: &str, namespace: &str, sync: CacheFill) -> BlobRef {
+/// cache `fill` and `Provenance::UserProvided`. Blob ids are ≥4 chars so they form
+/// the `{ab}/{cd}` partition shard. Provenance is fixed because these tests read
+/// from the cache/cloud, where provenance doesn't change the path; the host-provided
+/// local-store read has its own helper ([`host_blob_ref`]).
+fn blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
     BlobRef {
         namespace: namespace.to_string(),
         id: id.to_string(),
         scope: BlobScope::Master,
         cloud_path: None,
-        sync,
+        provenance: Provenance::UserProvided,
+        fill,
+    }
+}
+
+/// A host-provided `BlobRef` (its Local home is coven's local store, not a user
+/// path), for the read-resolution test that exercises the local-store step.
+fn host_blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
+    BlobRef {
+        namespace: namespace.to_string(),
+        id: id.to_string(),
+        scope: BlobScope::Master,
+        cloud_path: None,
+        provenance: Provenance::HostProvided,
+        fill,
     }
 }
 
 /// The `note_photos` declaration for the cache tests: namespace `"photos"`, master
-/// scope, `CacheEager` (downloaded + system-pinned on pull).
+/// scope, host-provided · `CacheEager` (fetched into the cache on pull).
 fn photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", CacheFill::CacheEager)
+    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
 }
 
 /// Put `bytes` into the mock cloud under the flat `{namespace}/{id}` key the mock's
@@ -86,11 +102,13 @@ async fn second_read_is_a_local_hit() {
     );
 }
 
-/// A CacheEager blob pulled in a changeset lands SYSTEM-PINNED: its file is in
-/// `storage/pinned/<id>`, not the evictable `storage/cache/<id>`. (Driven through
-/// the real pull, which routes CacheEager blobs to `download_blobs` → `pinned/`.)
+/// A CacheEager blob pulled in a changeset lands in the EVICTABLE CACHE: its file is
+/// in `storage/cache/<id>`, not the kept `storage/pinned/<id>`. On a peer the release
+/// is Remote, so the blob's local copy is a cache copy (evictable + re-fetchable, not
+/// pinned). (Driven through the real pull, which routes CacheEager blobs to
+/// `download_blobs` → `cache/`.)
 #[tokio::test]
-async fn mirrored_lands_in_pinned_on_pull() {
+async fn cache_eager_lands_in_cache_on_pull() {
     let storage = MockSyncStorage::new();
 
     // Source dev1 records a note + a (non-cover, so master-scoped) photo row.
@@ -108,8 +126,8 @@ async fn mirrored_lands_in_pinned_on_pull() {
     put_cloud_blob(&storage, "ph01abcd", "photos", b"COVERBYTES").await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    // The puller declares the photo a CacheEager blob; the pull writes it under the
-    // library dir's pinned tree.
+    // The puller declares the photo a CacheEager blob; the pull writes it into the
+    // library dir's evictable cache tree.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_library_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
@@ -117,20 +135,21 @@ async fn mirrored_lands_in_pinned_on_pull() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert!(
-        ld.pinned_blob_path("ph01abcd").unwrap().exists(),
-        "a CacheEager blob is system-pinned on pull: it lands in storage/pinned/<id>",
+        ld.cache_blob_path("ph01abcd").unwrap().exists(),
+        "a CacheEager blob lands in the evictable cache on pull: storage/cache/<id>",
     );
     assert!(
-        !ld.cache_blob_path("ph01abcd").unwrap().exists(),
-        "a CacheEager blob does NOT land in the evictable storage/cache/<id>",
+        !ld.pinned_blob_path("ph01abcd").unwrap().exists(),
+        "a CacheEager blob does NOT land system-pinned in storage/pinned/<id>",
     );
 }
 
 /// Pin promotes a cached blob to `pinned/` and that survives a cache sweep; unpin
-/// demotes it back to `cache/` where a sweep then drops it; and unpinning a CacheEager
-/// blob is rejected (its system pin is not user-removable).
+/// demotes it back to `cache/` where a sweep then drops it; and unpinning a
+/// never-pinned CacheEager blob is a no-op (no system pin to reject anymore — a
+/// CacheEager blob lands evictable in the cache on pull).
 #[tokio::test]
-async fn pin_survives_clear_cache_unpin_demotes_and_mirrored_unpin_is_rejected() {
+async fn pin_survives_clear_cache_and_unpin_demotes() {
     let db = open_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
@@ -186,21 +205,24 @@ async fn pin_survives_clear_cache_unpin_demotes_and_mirrored_unpin_is_rejected()
         "an unpinned blob is dropped by a cache sweep",
     );
 
-    // Unpinning a CacheEager blob is rejected: its system pin isn't user-removable.
-    let mirrored = blob_ref("mir-aaaa", "images", CacheFill::CacheEager);
-    let err = unpin(&ld, std::slice::from_ref(&mirrored))
+    // Unpinning a never-pinned CacheEager blob is a harmless no-op: it lands evictable
+    // in the cache on pull (not system-pinned), so there is nothing in `pinned/` to
+    // demote.
+    let eager = blob_ref("mir-aaaa", "images", CacheFill::CacheEager);
+    unpin(&ld, std::slice::from_ref(&eager))
         .await
-        .expect_err("unpinning a CacheEager blob must be rejected");
+        .expect("unpinning a never-pinned CacheEager blob is a no-op");
     assert!(
-        err.to_string().contains("CacheEager"),
-        "the rejection names the CacheEager class: {err}",
+        !ld.pinned_blob_path(&eager.id).unwrap().exists()
+            && !ld.cache_blob_path(&eager.id).unwrap().exists(),
+        "the never-pinned blob is in neither folder",
     );
 }
 
 /// A CacheLazy blob is NOT downloaded on pull (no file in either folder afterward),
 /// and a later read fetches it into the cache on first access.
 #[tokio::test]
-async fn on_demand_fetches_on_first_read() {
+async fn cache_lazy_fetches_on_first_read() {
     let storage = MockSyncStorage::new();
 
     // Source dev1: a note + a photo row the puller's source treats as CacheLazy.
@@ -217,7 +239,11 @@ async fn on_demand_fetches_on_first_read() {
     .await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    let db2 = open_test_db_with_blob(BlobDecl::new("audio", CacheFill::CacheLazy));
+    let db2 = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
     let (_tmp, ld) = temp_library_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
@@ -244,22 +270,22 @@ async fn on_demand_fetches_on_first_read() {
     );
 }
 
-/// `write_blob` stages host bytes straight into the cache (`cache/<id>`), and a
+/// `write_blob` writes host bytes straight into the cache (`cache/<id>`), and a
 /// later `pin` promotes them by renaming — with NO cloud fetch. The cloud copy is
 /// deleted first, so a pin that tried to fetch would fail: it must not.
 #[tokio::test]
-async fn write_blob_stages_to_cache_and_pin_needs_no_cloud_fetch() {
+async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     let db = open_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("stg-aaaa", "audio", CacheFill::CacheLazy);
-    let bytes = b"STAGED-BYTES".to_vec();
+    let bytes = b"CACHED-BYTES".to_vec();
 
-    // Stage the bytes into the cache.
+    // Write the bytes into the cache.
     write_blob(&db, &ld, &blob, &bytes)
         .await
-        .expect("write_blob stages into the cache");
+        .expect("write_blob writes into the cache");
     assert!(
         ld.cache_blob_path(&blob.id).unwrap().exists(),
         "write_blob writes to storage/cache/<id>",
@@ -625,11 +651,11 @@ async fn clear_external_blob_restores_the_cache_cloud_path() {
     );
 }
 
-/// An external ref is checked first, so it wins over a same-id owned-cache file
-/// (the managed/unmanaged invariant keeps them mutually exclusive, but this proves
-/// the first-match resolution directly): with a cache file staged AND an external
-/// ref registered for the same id, both the whole and ranged reads return the
-/// external file's bytes.
+/// An external ref is checked first, so it wins over a same-id cache file (the
+/// provenance invariant keeps them mutually exclusive, but this proves the
+/// first-match resolution directly): with a cache file written AND an external ref
+/// registered for the same id, both the whole and ranged reads return the external
+/// file's bytes.
 #[tokio::test]
 async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
     let db = open_test_db();
@@ -638,11 +664,11 @@ async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
 
     let blob = blob_ref("extp-aaaa", "audio", CacheFill::CacheLazy);
 
-    // Stage a distinct payload into the owned cache under the same id.
+    // Write a distinct payload into the cache under the same id.
     let cache_bytes = b"OWNED-CACHE-BYTES".to_vec();
     write_blob(&db, &ld, &blob, &cache_bytes)
         .await
-        .expect("stage a same-id cache file");
+        .expect("write a same-id cache file");
     assert!(ld.cache_blob_path(&blob.id).unwrap().exists());
 
     // Register an external ref with its own distinct payload.
@@ -676,6 +702,72 @@ async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
         mid,
         &ext_bytes[offset as usize..(offset + len) as usize],
         "the ranged read also serves the external file, not the cache file",
+    );
+}
+
+/// Read resolution walks external ref → local store → cache → cloud in order, each
+/// step winning when present. Stacking distinct payloads at each step and removing
+/// them top-down proves the order: the external ref wins first; with it cleared the
+/// host-provided local store wins (no cloud touched); with the local store dropped
+/// the cache wins; with the cache cleared the cloud is the last resort.
+#[tokio::test]
+async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (tmp, ld) = temp_library_dir();
+
+    // A host-provided blob so the local-store step is in play (its Local home is the
+    // local store, not a user path).
+    let blob = host_blob_ref("res0aaaa", "photos", CacheFill::CacheEager);
+
+    // Stack a distinct payload at each layer.
+    let cloud_bytes = b"FROM-CLOUD".to_vec();
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &cloud_bytes).await;
+    let cache_bytes = b"FROM-CACHE".to_vec();
+    write_blob(&db, &ld, &blob, &cache_bytes)
+        .await
+        .expect("write a cache copy");
+    let store_bytes = b"FROM-LOCAL-STORE".to_vec();
+    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, &store_bytes)
+        .await
+        .expect("store the host-provided local copy");
+    let ext_bytes = b"FROM-EXTERNAL".to_vec();
+    let path = write_external_file(tmp.path(), "res.bin", &ext_bytes);
+    db.register_external_blob(&blob.id, &blob.namespace, &path, ext_bytes.len() as u64)
+        .await
+        .expect("register external ref");
+
+    // 1. External ref wins.
+    assert_eq!(
+        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        ext_bytes,
+        "the external ref is checked first",
+    );
+
+    // 2. Clear the ref → the local store wins (no cloud touched).
+    db.clear_external_blob(&blob.id).await.unwrap();
+    assert_eq!(
+        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        store_bytes,
+        "with no external ref the host-provided local store wins",
+    );
+
+    // 3. Drop the local store → the cache wins.
+    crate::blob::local_files::drop_blob(&ld, &blob.namespace, &blob.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        cache_bytes,
+        "with no local store the cache wins",
+    );
+
+    // 4. Clear the cache → the cloud is the last resort.
+    clear_cache(&ld).await.unwrap();
+    assert_eq!(
+        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        cloud_bytes,
+        "with no local copy at all the cloud is fetched",
     );
 }
 
@@ -789,14 +881,14 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
 
 /// A pinned blob is structurally exempt: it lives in `pinned/`, which the budget
 /// never walks, so it is never evicted no matter how far over budget the cache is.
-/// Here a system-pinned `CacheEager` blob (landed in `pinned/` by a real pull) and a
-/// user-pinned `CacheLazy` blob both survive a tiny budget with the cache flooded.
+/// Here a `CacheEager` blob pulled into the evictable cache and then pinned, plus a
+/// user-pinned `CacheLazy` blob, both survive a tiny budget with the cache flooded.
 #[tokio::test]
 async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let storage = MockSyncStorage::new();
 
-    // dev1 records a note + a (master-scoped) photo row; pull on dev2 system-pins
-    // the CacheEager blob into `pinned/`.
+    // dev1 records a note + a (master-scoped) photo row; pull on dev2 lands the
+    // CacheEager blob in the evictable cache, then a pin promotes it to `pinned/`.
     let db1 = open_test_db();
     let cs = capture_bytes(
         &db1,
@@ -816,18 +908,23 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        ld.pinned_blob_path("mir0aaaa").unwrap().exists(),
-        "the CacheEager blob is system-pinned in pinned/",
+        ld.cache_blob_path("mir0aaaa").unwrap().exists(),
+        "the CacheEager blob lands in the evictable cache on pull",
     );
+    let eager = blob_ref("mir0aaaa", "photos", CacheFill::CacheEager);
+    pin(&db2, &ld, &storage, std::slice::from_ref(&eager))
+        .await
+        .expect("pin the eager blob into pinned/");
+    assert!(ld.pinned_blob_path("mir0aaaa").unwrap().exists());
 
     // Also user-pin a CacheLazy blob into pinned/ (via write_blob → pin).
-    let on_demand = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
-    write_blob(&db2, &ld, &on_demand, &[7u8; 500])
+    let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
+    write_blob(&db2, &ld, &lazy, &[7u8; 500])
         .await
-        .expect("stage on-demand blob");
-    pin(&db2, &ld, &storage, std::slice::from_ref(&on_demand))
+        .expect("write the lazy blob into the cache");
+    pin(&db2, &ld, &storage, std::slice::from_ref(&lazy))
         .await
-        .expect("user-pin the on-demand blob");
+        .expect("user-pin the lazy blob");
     assert!(ld.pinned_blob_path("usr0bbbb").unwrap().exists());
 
     // Flood the evictable cache, then evict to a tiny budget. The pinned files live
@@ -841,7 +938,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
 
     assert!(
         ld.pinned_blob_path("mir0aaaa").unwrap().exists(),
-        "a system-pinned CacheEager blob survives eviction (it is in pinned/)",
+        "a pinned CacheEager blob survives eviction (it is in pinned/)",
     );
     assert!(
         ld.pinned_blob_path("usr0bbbb").unwrap().exists(),
