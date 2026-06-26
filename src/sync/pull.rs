@@ -949,9 +949,9 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
 /// cache `storage/cache/<id>` under `library_dir`.
 ///
 /// Only [`CacheFill::CacheEager`] blobs are downloaded — those a device fetches into
-/// the cache on every pull (so the grid is instant). A [`CacheFill::CacheLazy`] blob
-/// is recorded by the applied row but its bytes are fetched on first read, so it is
-/// skipped here.
+/// the cache on every pull, so a read serves them from local bytes without a fetch.
+/// A [`CacheFill::CacheLazy`] blob is recorded by the applied row but its bytes are
+/// fetched on first read, so it is skipped here.
 ///
 /// `in_changeset_keys` are the item keys this changeset itself mints, so an
 /// `Item(id)`-scoped blob resolves its key WITHOUT the changeset having been

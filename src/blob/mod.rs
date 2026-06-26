@@ -27,8 +27,8 @@
 //! cache fill — its REMOTE story: how a device gets the bytes when the release is
 //!              Remote. A cache-mechanism setting; applies to ANY blob, regardless of
 //!              provenance, once it is Remote.
-//!    ├─ CacheEager   pulled with the SQL row, right away      (covers — grid is instant)
-//!    └─ CacheLazy    fetched on first read                    (audio — big, fetch what you play)
+//!    ├─ CacheEager   fetched into the cache on pull, with the SQL row   (covers)
+//!    └─ CacheLazy    fetched into the cache on first read               (audio — big, fetch what you play)
 //!
 //! and a current state:
 //!
@@ -43,8 +43,8 @@
 //!    ├─ Local → Remote   upload the bytes; now cache-distributed to every device per cache fill
 //!    └─ Remote → Local   bring the bytes back to a local file — path required iff user-provided
 //!
-//! cache budget   per-NAMESPACE size limit; each namespace evicts independently, so
-//!                evicting release_files (big) never touches covers (small reserved slice)
+//! cache budget   a single device-local size limit over `storage/cache`; when the
+//!                total exceeds it the oldest cache copies are evicted
 //! pin            keep one specific Remote blob's cache copy from eviction (e.g. a
 //!                release the user pinned for offline)
 //! ```
@@ -253,8 +253,8 @@ pub enum Provenance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheFill {
     /// Fetched into the cache on pull, right away, on every device — part of
-    /// "having the library" (e.g. cover art, so the grid is instant). The cache
-    /// copy is evictable + re-fetchable, not pinned.
+    /// "having the library" (e.g. cover art, so the grid renders from local bytes
+    /// without a fetch). The cache copy is evictable + re-fetchable, not pinned.
     CacheEager,
     /// Not fetched on pull: a pulling device skips it and fetches it into the cache
     /// on first read — e.g. audio, which is big and streams on demand.

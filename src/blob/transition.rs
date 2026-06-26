@@ -91,6 +91,8 @@ pub enum MakeLocalError {
     NotGated(String),
     #[error("no destination path supplied for user-provided blob {0:?}")]
     MissingDest(String),
+    #[error("destination path for user-provided blob {blob_id:?} is not valid UTF-8: {path}")]
+    NonUtf8Dest { blob_id: String, path: String },
     #[error("read blob {0:?} to materialize: {1}")]
     Read(String, String),
     #[error("write materialized blob {blob_id:?} to {path}: {detail}")]
@@ -103,6 +105,13 @@ pub enum MakeLocalError {
     CloudKey(String, String),
     #[error("make_local cancelled before the commit; the release stays Remote")]
     Cancelled,
+    /// Rolling back a partially-materialized make_local could not remove a
+    /// host-provided blob's local-store copy. Unlike a stray user-folder file, this
+    /// leftover is presence-read by [`cache::read_blob`] AND budget-exempt, so it
+    /// would read as a Local home for a still-Remote blob — surfaced loud so the
+    /// caller retries (a retry re-materializes over it).
+    #[error("could not roll back the local-store copy at {path}: {detail}")]
+    CleanupLocalStore { path: String, detail: String },
     #[error("database error: {0}")]
     Db(#[from] DbError),
 }
@@ -365,19 +374,49 @@ async fn file_len(path: &std::path::Path) -> Result<u64, String> {
 // ===========================================================================
 
 /// One blob materialized back to a local file by [`make_local`], carrying what the
-/// single commit needs: the cloud key to tombstone (every blob), and — for a
-/// user-provided blob — the external file to register (`local_path` Some). A
-/// host-provided blob's bytes live in the local store, tracked by file presence, not
-/// a DB row, so it carries `local_path = None`.
+/// single commit needs, split by provenance — this PR's core axis, so a type
+/// distinction rather than an `Option`. Both variants carry the [`BlobRef`] (its id +
+/// namespace) and the cloud key to tombstone; only a user-provided blob carries a
+/// `dest` to register as an external ref (a host-provided blob's bytes live in the
+/// local store, tracked by file presence, not a DB row).
 #[cfg(not(target_arch = "wasm32"))]
-struct Materialized {
-    id: String,
-    namespace: String,
-    /// The user file to register as an external ref (user-provided), or `None`
-    /// (host-provided — its home is the local store, no ref row).
-    local_path: Option<PathBuf>,
-    size: u64,
-    cloud_key: String,
+enum Materialized {
+    UserProvided {
+        blob: BlobRef,
+        dest: PathBuf,
+        size: u64,
+        cloud_key: String,
+    },
+    HostProvided {
+        blob: BlobRef,
+        size: u64,
+        cloud_key: String,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Materialized {
+    /// The blob id, for the post-commit cache drop (both variants).
+    fn blob_id(&self) -> &str {
+        match self {
+            Materialized::UserProvided { blob, .. } | Materialized::HostProvided { blob, .. } => {
+                &blob.id
+            }
+        }
+    }
+}
+
+/// A local copy a make_local has written, tracked so an abort can roll it back. The
+/// two kinds differ in how a *failed* removal is treated: a user-folder leftover is a
+/// harmless stray (a warning), but a local-store leftover is presence-read by
+/// [`cache::read_blob`] AND budget-exempt, so a failed removal of one is surfaced loud
+/// (see [`cleanup_partial`]).
+#[cfg(not(target_arch = "wasm32"))]
+enum WrittenFile {
+    /// A user-provided blob's materialized file at the user's chosen path.
+    UserPath(PathBuf),
+    /// A host-provided blob's copy in coven's local store.
+    LocalStore(PathBuf),
 }
 
 /// Bring a Remote root's blobs back to local files, then flip it Local in one atomic
@@ -422,8 +461,9 @@ pub async fn make_local(
 
     // Any error after the first local copy is written must roll those files back, so
     // an aborted make_local leaves no partial materialization behind. `written` tracks
-    // what to remove; the loop's result drives the cleanup-or-commit decision.
-    let mut written: Vec<PathBuf> = Vec::new();
+    // what to remove (typed by kind so the rollback treats a local-store leftover
+    // loud); the loop's result drives the cleanup-or-commit decision.
+    let mut written: Vec<WrittenFile> = Vec::new();
     let materialized = match materialize_blobs(
         db,
         storage,
@@ -440,32 +480,63 @@ pub async fn make_local(
     .await
     {
         Ok(m) => m,
-        Err(e) => {
-            cleanup_partial(&written).await;
-            return Err(e);
-        }
+        Err(e) => return Err(roll_back(&written, e).await),
+    };
+
+    // Build the per-blob commit data, converting each user-provided dest to a UTF-8
+    // string FALLIBLY here — before the commit — so a non-UTF-8 path aborts cleanly
+    // (the cloud is still intact, the partials rolled back) instead of being silently
+    // rewritten by a lossy conversion, registered as a wrong external ref, and its
+    // cloud copy tombstoned (data loss). Tuple: (id, namespace, external-ref path or
+    // None, size, cloud key).
+    let stamp = hlc.now().to_string();
+    let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
+    let commit: Vec<(String, String, Option<String>, u64, String)> = match materialized
+        .iter()
+        .map(|m| -> Result<_, MakeLocalError> {
+            Ok(match m {
+                Materialized::UserProvided {
+                    blob,
+                    dest,
+                    size,
+                    cloud_key,
+                } => {
+                    let external_path =
+                        dest.to_str().ok_or_else(|| MakeLocalError::NonUtf8Dest {
+                            blob_id: blob.id.clone(),
+                            path: dest.display().to_string(),
+                        })?;
+                    (
+                        blob.id.clone(),
+                        blob.namespace.clone(),
+                        Some(external_path.to_string()),
+                        *size,
+                        cloud_key.clone(),
+                    )
+                }
+                Materialized::HostProvided {
+                    blob,
+                    size,
+                    cloud_key,
+                } => (
+                    blob.id.clone(),
+                    blob.namespace.clone(),
+                    None,
+                    *size,
+                    cloud_key.clone(),
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(roll_back(&written, e).await),
     };
 
     // The single atomic commit: flip false + register external refs (user-provided
     // only) + enqueue the cloud deletes, together. The destructive cloud delete is
     // durable inside this commit, so a crash right after can never leave the root
     // Local with the cloud blobs un-tombstoned.
-    let stamp = hlc.now().to_string();
-    let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
-    let commit: Vec<(String, Option<String>, u64, String)> = materialized
-        .iter()
-        .map(|m| {
-            (
-                m.namespace.clone(),
-                m.local_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned()),
-                m.size,
-                m.cloud_key.clone(),
-            )
-        })
-        .collect();
-    let ids: Vec<String> = materialized.iter().map(|m| m.id.clone()).collect();
     db.call(move |conn| {
         let tx = conn.unchecked_transaction()?;
         crate::sync::gate::write_gate(
@@ -477,11 +548,11 @@ pub async fn make_local(
             &root_id_owned,
         )
         .map_err(DbError::from)?;
-        for ((namespace, local_path, size, cloud_key), id) in commit.iter().zip(&ids) {
+        for (id, namespace, external_path, size, cloud_key) in &commit {
             // A user-provided blob now lives at the user's path — register the
             // external ref. A host-provided blob lives in the local store, tracked by
             // file presence, so it registers no ref.
-            if let Some(path) = local_path {
+            if let Some(path) = external_path {
                 Database::register_external_blob_on(
                     &tx,
                     id,
@@ -501,8 +572,11 @@ pub async fn make_local(
     // pure redundancy — drop them. A failure leaves only stray cache space; a read
     // serves the local file. Log and go on.
     for m in &materialized {
-        if let Err(e) = cache::drop_cached_blob(library_dir, &m.id).await {
-            tracing::warn!("make_local: failed to drop cache copy of {}: {e}", m.id);
+        if let Err(e) = cache::drop_cached_blob(library_dir, m.blob_id()).await {
+            tracing::warn!(
+                "make_local: failed to drop cache copy of {}: {e}",
+                m.blob_id()
+            );
         }
     }
     if let Some(obs) = observer {
@@ -531,7 +605,7 @@ async fn materialize_blobs(
     refs: &[BlobRef],
     dest: &HashMap<String, PathBuf>,
     cancel: &watch::Receiver<bool>,
-    written: &mut Vec<PathBuf>,
+    written: &mut Vec<WrittenFile>,
 ) -> Result<Vec<Materialized>, MakeLocalError> {
     let total = refs.len() as u64;
     let mut materialized: Vec<Materialized> = Vec::new();
@@ -544,17 +618,34 @@ async fn materialize_blobs(
         let bytes = cache::read_blob(db, library_dir, storage, blob)
             .await
             .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+        let cloud_key = cloud_key_for(scheme, blob)
+            .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e))?;
 
         // Where the blob's bytes go is its provenance's Local home: a user-provided
         // blob to the user's chosen `dest` path (registered as an external ref); a
-        // host-provided blob to coven's local store (no path, no ref).
-        let (target, local_path) = match blob.provenance {
+        // host-provided blob to coven's local store (no path, no ref). The kind is
+        // recorded in `written` so an abort's rollback treats a local-store leftover
+        // loud.
+        let record = match blob.provenance {
             Provenance::UserProvided => {
                 let dest_path = dest
                     .get(&blob.id)
                     .ok_or_else(|| MakeLocalError::MissingDest(blob.id.clone()))?
                     .clone();
-                (dest_path.clone(), Some(dest_path))
+                write_durable(&dest_path, &bytes).await.map_err(|detail| {
+                    MakeLocalError::Write {
+                        blob_id: blob.id.clone(),
+                        path: dest_path.display().to_string(),
+                        detail,
+                    }
+                })?;
+                written.push(WrittenFile::UserPath(dest_path.clone()));
+                Materialized::UserProvided {
+                    blob: blob.clone(),
+                    dest: dest_path,
+                    size: bytes.len() as u64,
+                    cloud_key,
+                }
             }
             Provenance::HostProvided => {
                 let store_path = library_dir
@@ -564,28 +655,22 @@ async fn materialize_blobs(
                         path: format!("local/{}/{}", blob.namespace, blob.id),
                         detail: e.to_string(),
                     })?;
-                (store_path, None)
+                write_durable(&store_path, &bytes).await.map_err(|detail| {
+                    MakeLocalError::Write {
+                        blob_id: blob.id.clone(),
+                        path: store_path.display().to_string(),
+                        detail,
+                    }
+                })?;
+                written.push(WrittenFile::LocalStore(store_path));
+                Materialized::HostProvided {
+                    blob: blob.clone(),
+                    size: bytes.len() as u64,
+                    cloud_key,
+                }
             }
         };
-
-        write_durable(&target, &bytes)
-            .await
-            .map_err(|detail| MakeLocalError::Write {
-                blob_id: blob.id.clone(),
-                path: target.display().to_string(),
-                detail,
-            })?;
-        written.push(target);
-
-        let cloud_key = cloud_key_for(scheme, blob)
-            .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e))?;
-        materialized.push(Materialized {
-            id: blob.id.clone(),
-            namespace: blob.namespace.clone(),
-            local_path,
-            size: bytes.len() as u64,
-            cloud_key,
-        });
+        materialized.push(record);
 
         if let Some(obs) = observer {
             obs.on_blob_materialize_progress(root_table, root_id, &blob.id, (i + 1) as u64, total)
@@ -639,19 +724,50 @@ async fn write_durable(dest: &std::path::Path, bytes: &[u8]) -> Result<(), Strin
     Ok(())
 }
 
-/// Delete the partial local copies an aborted make_local wrote, best-effort. An
-/// already-absent file is not an error ([`crate::local_blob::remove_file`] reports
-/// it as `Ok(false)`); a real removal failure is logged — the system state is
-/// already correct (the root stays Remote, the cloud is intact), so a stray file in
-/// the user's chosen folder or the local store is the most this can leave behind.
+/// Roll back the partial local copies an aborted make_local wrote, then return the
+/// error to surface. Returns the original `abort_err` when the rollback succeeds; if
+/// the rollback itself fails to remove a local-store leftover it returns THAT
+/// instead — the more urgent signal, since that leftover is a readable, budget-exempt
+/// copy of a still-Remote blob (a retry re-materializes over it).
 #[cfg(not(target_arch = "wasm32"))]
-async fn cleanup_partial(written: &[PathBuf]) {
-    for path in written {
-        if let Err(e) = crate::local_blob::remove_file(path).await {
-            tracing::warn!(
-                "make_local cleanup: could not remove {}: {e}",
-                path.display()
-            );
+async fn roll_back(written: &[WrittenFile], abort_err: MakeLocalError) -> MakeLocalError {
+    match cleanup_partial(written).await {
+        Ok(()) => abort_err,
+        Err(cleanup_err) => cleanup_err,
+    }
+}
+
+/// Delete the partial local copies an aborted make_local wrote. A user-folder
+/// leftover is a harmless stray — it needs an external-ref row to ever be read and
+/// the aborted commit registered none — so a failed removal of one is logged and
+/// swallowed. A local-store leftover is NOT harmless: [`cache::read_blob`]
+/// presence-reads the local store and the budget sweep never walks it, so a stray
+/// host-provided copy would read as a Local home for a still-Remote blob and never be
+/// evicted. So a failed local-store removal is surfaced loud
+/// ([`MakeLocalError::CleanupLocalStore`]) rather than swallowed — the caller retries
+/// (the retry re-materializes over it). An already-absent file is not an error
+/// ([`crate::local_blob::remove_file`] reports `Ok(false)`).
+#[cfg(not(target_arch = "wasm32"))]
+async fn cleanup_partial(written: &[WrittenFile]) -> Result<(), MakeLocalError> {
+    for file in written {
+        match file {
+            WrittenFile::UserPath(path) => {
+                if let Err(e) = crate::local_blob::remove_file(path).await {
+                    tracing::warn!(
+                        "make_local cleanup: could not remove stray user file {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+            WrittenFile::LocalStore(path) => {
+                crate::local_blob::remove_file(path)
+                    .await
+                    .map_err(|detail| MakeLocalError::CleanupLocalStore {
+                        path: path.display().to_string(),
+                        detail,
+                    })?;
+            }
         }
     }
+    Ok(())
 }
