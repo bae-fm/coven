@@ -870,6 +870,70 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     );
 }
 
+/// A non-UTF-8 destination path aborts make_local before the cloud delete: the path
+/// conversion fails loud (`NonUtf8Dest`) rather than lossily rewriting the dest,
+/// registering a wrong external ref, and tombstoning the cloud copy. The release
+/// stays Remote, nothing is registered, no tombstone is queued, the cloud is intact.
+#[cfg(unix)]
+#[tokio::test]
+async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_library_dir();
+    let bytes = b"managed-bytes".to_vec();
+
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+
+    // A dest whose filename is not valid UTF-8: `to_str()` returns None, so the
+    // conversion must fail loud instead of lossily rewriting the path. Kept under the
+    // temp dir so the rolled-back partial is contained.
+    let bad = tmp.path().join(OsStr::from_bytes(b"photo-\xff\xfe.flac"));
+    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), bad)].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+
+    let err = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("a non-UTF-8 dest aborts");
+    assert!(matches!(
+        err,
+        crate::blob::transition::MakeLocalError::NonUtf8Dest { .. }
+    ));
+
+    assert_eq!(shared_flag(&db, "n1").await, 1, "the release stays Remote");
+    assert!(
+        db.external_blob("photoaaa").await.unwrap().is_none(),
+        "no external ref registered"
+    );
+    assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
+    assert!(
+        storage
+            .get_blob(
+                "photos",
+                "photoaaa",
+                ResolvedScope::Master,
+                Some("cv/photoaaa.flac")
+            )
+            .await
+            .is_ok(),
+        "the cloud blob is untouched",
+    );
+}
+
 // ===========================================================================
 // Crash idempotency
 // ===========================================================================

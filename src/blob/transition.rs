@@ -374,11 +374,12 @@ async fn file_len(path: &std::path::Path) -> Result<u64, String> {
 // ===========================================================================
 
 /// One blob materialized back to a local file by [`make_local`], carrying what the
-/// single commit needs, split by provenance — this PR's core axis, so a type
-/// distinction rather than an `Option`. Both variants carry the [`BlobRef`] (its id +
-/// namespace) and the cloud key to tombstone; only a user-provided blob carries a
-/// `dest` to register as an external ref (a host-provided blob's bytes live in the
-/// local store, tracked by file presence, not a DB row).
+/// single commit needs, split by provenance — a type distinction rather than an
+/// `Option`, because provenance decides the whole materialization shape. Both
+/// variants carry the [`BlobRef`] (its id + namespace) and the cloud key to
+/// tombstone; only a user-provided blob carries a `dest` to register as an external
+/// ref (a host-provided blob's bytes live in the local store, tracked by file
+/// presence, not a DB row).
 #[cfg(not(target_arch = "wasm32"))]
 enum Materialized {
     UserProvided {
@@ -458,6 +459,22 @@ pub async fn make_local(
         .to_string();
 
     let refs = refs_for_root(db, tables, root_table.to_string(), root_id.to_string()).await?;
+
+    // Validate every provided dest is UTF-8 up front — before any materialization — so
+    // a non-UTF-8 path aborts with nothing written and the cloud intact, rather than
+    // being caught only at commit-building after the destructive materialize (and on a
+    // filesystem that rejects non-UTF-8 names, the write would fail first and that
+    // check would never be reached). An external ref persists the path as a string, so
+    // a non-UTF-8 path cannot be registered; fail loud rather than lossily rewrite it
+    // and tombstone the cloud copy.
+    for (blob_id, path) in dest {
+        if path.to_str().is_none() {
+            return Err(MakeLocalError::NonUtf8Dest {
+                blob_id: blob_id.clone(),
+                path: path.display().to_string(),
+            });
+        }
+    }
 
     // Any error after the first local copy is written must roll those files back, so
     // an aborted make_local leaves no partial materialization behind. `written` tracks
