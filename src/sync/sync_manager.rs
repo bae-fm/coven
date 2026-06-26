@@ -243,7 +243,7 @@ impl SyncManager {
     }
 
     /// Start managing `(root_table, root_id)` (Unmanaged → Managed): enqueue an
-    /// upload per OnDemand blob from its external file and record the manage intent,
+    /// upload per CacheLazy blob from its external file and record the manage intent,
     /// then return. The drain uploads each and flips the gate true on the last (see
     /// [`crate::blob::transition::manage_blobs`]); `on_root_managed` fires then.
     /// `pin` keeps the managed blobs in coven's protected cache.

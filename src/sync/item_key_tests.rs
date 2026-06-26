@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::blob::{BlobScope, BlobSync, ResolvedScope};
+use crate::blob::{BlobScope, CacheFill, ResolvedScope};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -175,13 +175,13 @@ async fn reading_a_wrong_length_item_key_errors() {
 }
 
 /// A `note_photos` blob declaration mapping each row to an `Item`-scoped,
-/// `Mirrored` blob keyed by the row's `note_id` — the public scope a sharing host
+/// `CacheEager` blob keyed by the row's `note_id` — the public scope a sharing host
 /// emits, the one whose resolution `download_changeset_blobs` performs. The
-/// namespace is `audio` (the bulk share payload bae moves this way). `Mirrored` so
+/// namespace is `audio` (the bulk share payload bae moves this way). `CacheEager` so
 /// the pull downloads it: this exercise is about resolving the item key during
 /// download-before-apply, not the on-demand skip.
 fn item_photo_decl() -> BlobDecl {
-    BlobDecl::new("audio", BlobSync::Mirrored)
+    BlobDecl::new("audio", CacheFill::CacheEager)
         .with_scope(BlobScopeSpec::ItemColumn("note_id".to_string()))
 }
 
@@ -306,7 +306,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
 
     // The item key replayed via the changeset, and the production
     // `download_changeset_blobs` resolved it and wrote the decrypted blob to B. A
-    // `Mirrored` blob is system-pinned on pull, so it lands in B's pinned cache
+    // `CacheEager` blob is system-pinned on pull, so it lands in B's pinned cache
     // (`storage/pinned/<id>`) — coven-owned — not the plan's `dir`.
     assert_eq!(
         db_b.item_key("note-1").await.expect("B post-pull read"),

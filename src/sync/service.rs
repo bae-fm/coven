@@ -98,16 +98,16 @@ impl SyncService {
             }
         };
 
-        // Step 3: upload the Mirrored blobs the outgoing changeset references,
+        // Step 3: upload the CacheEager blobs the outgoing changeset references,
         // before the envelope, so pullers can fetch them as soon as they see the
-        // change. Only Mirrored blobs (e.g. cover art) ride this inline path: their
+        // change. Only CacheEager blobs (e.g. cover art) ride this inline path: their
         // rows are ungated, so a cover row pushes the cycle it is written and the
         // pull's blob-before-row invariant needs the cover in the cloud first — and
-        // this path uploads in the same cycle. An OnDemand blob (audio) is gated, so
+        // this path uploads in the same cycle. A CacheLazy blob (audio) is gated, so
         // its row never reaches a changeset until its blob is already uploaded via
         // the durable outbox; it is intentionally NOT uploaded here.
         //
-        // The plaintext is read from coven's own cache, where a Mirrored blob is
+        // The plaintext is read from coven's own cache, where a CacheEager blob is
         // staged (system-pinned) when the host writes its row (see
         // [`crate::blob::cache::stage_blob`]). A blob absent from the cache means
         // the row is not ready to publish — a missing blob would make pullers 404 on

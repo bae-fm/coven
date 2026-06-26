@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::blob::BlobSync;
+use crate::blob::CacheFill;
 use crate::clock::SystemClock;
 use crate::config::Config;
 use crate::database::{Database, DbError};
@@ -286,7 +286,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[9u8; 32]));
     let storage = MockSyncStorage::new();
-    let tables = test_synced_tables_with_blob(BlobDecl::new("photos", BlobSync::Mirrored));
+    let tables = test_synced_tables_with_blob(BlobDecl::new("photos", CacheFill::CacheEager));
 
     // Owner A: a shared note with a cover photo, both captured into the snapshot.
     let db_a = open_test_db();
@@ -340,7 +340,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("seed cover blob");
 
     // Device B bootstraps from the snapshot, then runs the real bootstrap path,
-    // which derives `note_photos`'s blob from the declaration. A `Mirrored` blob is
+    // which derives `note_photos`'s blob from the declaration. A `CacheEager` blob is
     // system-pinned on reconciliation, so it lands in B's pinned cache folder
     // (`storage/pinned/<id>`), which coven owns and builds from the validated id.
     let (_tmp_b, lib_b) = temp_library_dir();
@@ -393,7 +393,7 @@ async fn backfill_pending(db: &Database) -> bool {
 async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[11u8; 32]));
     let storage = MockSyncStorage::new();
-    let tables = test_synced_tables_with_blob(BlobDecl::new("photos", BlobSync::Mirrored));
+    let tables = test_synced_tables_with_blob(BlobDecl::new("photos", CacheFill::CacheEager));
 
     // Owner A: a shared note with a cover photo, both captured into the snapshot.
     let db_a = open_test_db();
@@ -436,7 +436,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     // bootstrap time (e.g. A's upload of it hadn't landed). So the bootstrap's
     // download attempt fails.
     let (_tmp_b, lib_b) = temp_library_dir();
-    // A reconciled `Mirrored` blob is system-pinned, so it lands in B's pinned cache
+    // A reconciled `CacheEager` blob is system-pinned, so it lands in B's pinned cache
     // folder.
     let expected_blob = lib_b.pinned_blob_path("photo1").expect("pinned blob path");
 

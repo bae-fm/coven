@@ -841,13 +841,13 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 /// are never re-walked and the per-changeset blob download never fires for them.
 /// Without this reconciliation a bootstrapped device has the rows but none of the
 /// files they point at (a synced album shows a placeholder cover). Only the
-/// `Mirrored` blobs are reconciled: an `OnDemand` blob (e.g. audio) is fetched on
+/// `CacheEager` blobs are reconciled: a `CacheLazy` blob (e.g. audio) is fetched on
 /// first read, so a bootstrapped device need not download it up front — this scan
 /// filters [`BlobDecls::refs_in_db`](crate::blob::decl::BlobDecls::refs_in_db) to
-/// the `Mirrored` class, the same class the incremental pull downloads.
+/// the `CacheEager` class, the same class the incremental pull downloads.
 ///
 /// coven derives the blobs the DB at `db_path` references from the blob
-/// declarations in `tables`, then downloads the `Mirrored` ones via the same
+/// declarations in `tables`, then downloads the `CacheEager` ones via the same
 /// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into
 /// `storage/pinned/<id>` under `library_dir`, skipping any already present there. A
 /// failed download is logged there and reflected in the returned flag; the
@@ -880,7 +880,7 @@ pub(crate) async fn reconcile_snapshot_blobs(
             .refs_in_db(&conn)
             .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?
             .into_iter()
-            .filter(|blob| blob.sync == crate::blob::BlobSync::Mirrored)
+            .filter(|blob| blob.sync == crate::blob::CacheFill::CacheEager)
             .collect()
     };
 
@@ -893,7 +893,7 @@ pub(crate) async fn reconcile_snapshot_blobs(
     // `item_keys` rows the snapshot itself carried into this DB, so resolution
     // goes through the DB (issue #111's pull path uses the map for keys minted in
     // the changeset being applied; the bootstrap has no such changeset). The blobs
-    // are `Mirrored`, so `download_blobs` writes each to `storage/pinned/<id>`
+    // are `CacheEager`, so `download_blobs` writes each to `storage/pinned/<id>`
     // (system pin) under `library_dir`.
     let all_ok = crate::sync::pull::download_blobs(
         db,

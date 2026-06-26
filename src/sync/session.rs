@@ -138,9 +138,9 @@ pub struct BlobDecl {
     pub cloud_path_column: Option<String>,
     /// How the blob is scoped for encryption (see [`BlobScopeSpec`]).
     pub scope: BlobScopeSpec,
-    /// The blob's retention class: [`crate::blob::BlobSync::Mirrored`] (downloaded
-    /// on every device) or [`crate::blob::BlobSync::OnDemand`] (fetched on read).
-    pub sync: crate::blob::BlobSync,
+    /// The blob's retention class: [`crate::blob::CacheFill::CacheEager`] (downloaded
+    /// on every device) or [`crate::blob::CacheFill::CacheLazy`] (fetched on read).
+    pub sync: crate::blob::CacheFill,
 }
 
 /// How a blob's encryption scope is declared on a blob-bearing table. coven
@@ -161,7 +161,7 @@ impl BlobDecl {
     /// A blob declaration in `namespace` with retention class `sync`, the blob id
     /// taken from the primary key (`id`), no readable cloud path, master-scoped.
     /// Refine with the `with_*` builders.
-    pub fn new(namespace: impl Into<String>, sync: crate::blob::BlobSync) -> Self {
+    pub fn new(namespace: impl Into<String>, sync: crate::blob::CacheFill) -> Self {
         BlobDecl {
             id_column: "id".to_string(),
             namespace: namespace.into(),

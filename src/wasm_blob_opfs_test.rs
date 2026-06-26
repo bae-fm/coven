@@ -22,7 +22,7 @@ use std::sync::RwLock;
 use rusqlite::OptionalExtension;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
-use crate::blob::{cache, BlobRef, BlobScope, BlobSync};
+use crate::blob::{cache, BlobRef, BlobScope, CacheFill};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
@@ -42,7 +42,7 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 fn open_device(device_id: &str) -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
-        test_synced_tables_with_blob(BlobDecl::new("photos", BlobSync::Mirrored)),
+        test_synced_tables_with_blob(BlobDecl::new("photos", CacheFill::CacheEager)),
         device_id.to_string(),
         create_synced_schema,
     )
@@ -182,7 +182,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         id: "photo-1".to_string(),
         scope: BlobScope::Master,
         cloud_path: None,
-        sync: BlobSync::Mirrored,
+        sync: CacheFill::CacheEager,
     };
     cache::stage_blob(&db_a, &lib_a, &cover, &photo_bytes, true)
         .await
@@ -205,7 +205,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     );
 
     // Device B: one cycle pulls A's changeset, applies the note + photo rows, and
-    // `download_blobs` writes the photo (a Mirrored blob) into B's pinned cache.
+    // `download_blobs` writes the photo (a CacheEager blob) into B's pinned cache.
     let storage_b = CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,

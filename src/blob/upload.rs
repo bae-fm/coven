@@ -34,7 +34,7 @@ use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
-use crate::blob::{BlobScope, BlobSync, BlobTransitionObserver};
+use crate::blob::{BlobScope, BlobTransitionObserver, CacheFill};
 use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
 use crate::library_dir::LibraryDir;
@@ -552,17 +552,17 @@ async fn commit_after_upload(
             return Ok(PostUpload::Orphan);
         }
 
-        // A manage is in flight for this root. It completes iff no OTHER OnDemand blob
+        // A manage is in flight for this root. It completes iff no OTHER CacheLazy blob
         // of its subtree still has a pending upload (this entry's row is still present
-        // — it's removed inside the flip commit below). Scoped to OnDemand: those are
-        // the blobs a manage enqueues, so a Mirrored blob's unrelated upload neither
+        // — it's removed inside the flip commit below). Scoped to CacheLazy: those are
+        // the blobs a manage enqueues, so a CacheEager blob's unrelated upload neither
         // blocks completion nor gets its external ref cleared here.
         let refs = decls
             .refs_for_root(conn, &gates, &root_table, &root_id)
             .map_err(|e| DbError(e.to_string()))?;
         let blob_ids: Vec<String> = refs
             .iter()
-            .filter(|b| b.sync == BlobSync::OnDemand)
+            .filter(|b| b.sync == CacheFill::CacheLazy)
             .map(|b| b.id.clone())
             .collect();
         if count_other_pending_uploads(conn, &blob_ids, final_outbox_id)? > 0 {
@@ -665,7 +665,7 @@ fn count_other_pending_uploads(
 /// The external source-file paths registered for the given blob ids (an Unmanaged
 /// release's user files). Read before the flip commit clears the refs, so the drain
 /// can delete the now-redundant originals post-commit. These are the manage's
-/// OnDemand blobs, each registered external at manage time, so a missing ref is
+/// CacheLazy blobs, each registered external at manage time, so a missing ref is
 /// unexpected — logged (not silently skipped) so the absence is visible; the only
 /// consequence is a source file left undeleted.
 fn external_source_paths(conn: &Connection, blob_ids: &[String]) -> Result<Vec<PathBuf>, DbError> {

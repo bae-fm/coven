@@ -7,7 +7,7 @@
 //! the two, with the durable-copy-before-delete ordering and a single atomic commit
 //! point each way:
 //!
-//! - [`manage_blobs`] enqueues an upload per OnDemand blob from its external file
+//! - [`manage_blobs`] enqueues an upload per CacheLazy blob from its external file
 //!   and records a [`blob_manage_intents`](crate::db) marker, then returns. The
 //!   upload drain ([`crate::blob::upload::drain_uploads`]) uploads each and, on the
 //!   last, takes the single commit `{remove the outbox row + flip the gate true +
@@ -21,8 +21,8 @@
 //!   reclaims the cloud blobs after the grace.
 //!
 //! The manage lifecycle (manage / cancel / the drain's completion) operates on the
-//! root's **OnDemand** blobs — the user's own files manage promotes to the cloud. A
-//! Mirrored blob (e.g. cover art coven already syncs eagerly) is never touched by a
+//! root's **CacheLazy** blobs — the user's own files manage promotes to the cloud. A
+//! CacheEager blob (e.g. cover art coven already syncs eagerly) is never touched by a
 //! transition; its cloud copy belongs to the normal push/delete path.
 //!
 //! Every destructive step is enqueued durably *inside* the one commit, and nothing
@@ -31,7 +31,7 @@
 
 use rusqlite::OptionalExtension;
 
-use crate::blob::{cache, BlobRef, BlobSync};
+use crate::blob::{cache, BlobRef, CacheFill};
 use crate::database::{Database, DbError};
 use crate::library_dir::LibraryDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
@@ -59,7 +59,7 @@ pub enum ManageError {
     SyncNotReady,
     #[error("table {0:?} is not a gated root, so it has no managed/unmanaged state")]
     NotGated(String),
-    #[error("nothing to manage: root {0:?}/{1:?} has no OnDemand blobs")]
+    #[error("nothing to manage: root {0:?}/{1:?} has no CacheLazy blobs")]
     NothingToManage(String, String),
     #[error("blob {0:?} is not an external (unmanaged) file, so it cannot be managed")]
     NotExternal(String),
@@ -128,9 +128,9 @@ async fn refs_for_root(
     .await
 }
 
-/// The OnDemand blobs of the gated root's subtree — the user files a manage promotes
+/// The CacheLazy blobs of the gated root's subtree — the user files a manage promotes
 /// to the cloud, and the exact set its cancel (and the drain's completion) act on; a
-/// Mirrored blob is never part of a transition. Rejects a non-gated root. Shared by
+/// CacheEager blob is never part of a transition. Rejects a non-gated root. Shared by
 /// [`manage_blobs`] and [`cancel_manage_blobs`] (both returning a [`ManageError`]).
 async fn on_demand_root_refs(
     db: &Database,
@@ -145,7 +145,7 @@ async fn on_demand_root_refs(
         refs_for_root(db, tables, root_table.to_string(), root_id.to_string())
             .await?
             .into_iter()
-            .filter(|b| b.sync == BlobSync::OnDemand)
+            .filter(|b| b.sync == CacheFill::CacheLazy)
             .collect(),
     )
 }
@@ -162,7 +162,7 @@ fn cloud_key_for(scheme: BlobPathScheme, blob: &BlobRef) -> Result<String, Strin
     .map_err(|e| e.to_string())
 }
 
-/// Start managing `(root_table, root_id)`: verify each OnDemand blob's external
+/// Start managing `(root_table, root_id)`: verify each CacheLazy blob's external
 /// source file, then enqueue an upload per blob and record the manage intent in one
 /// transaction. Returns once enqueued — the upload drain uploads each blob and, on
 /// the last, flips the gate true (see [`crate::blob::upload`]). The caller triggers
@@ -252,10 +252,10 @@ pub async fn manage_blobs(
 }
 
 /// Cancel an in-flight manage of `(root_table, root_id)`: delete the intent and the
-/// root's pending uploads, and tombstone any OnDemand blob that already reached the
+/// root's pending uploads, and tombstone any CacheLazy blob that already reached the
 /// cloud, all in one transaction. The gate never flips, so the root stays Unmanaged.
 ///
-/// Scoped to the OnDemand blobs a manage enqueues — never a Mirrored blob, whose
+/// Scoped to the CacheLazy blobs a manage enqueues — never a CacheEager blob, whose
 /// cloud copy this transition did not create and must not tombstone.
 ///
 /// A blob still in flight when this runs keeps its outbox row (the drain removes it

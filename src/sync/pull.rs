@@ -24,7 +24,7 @@ use super::push::SCHEMA_VERSION;
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
 use crate::blob::decl::BlobDecls;
-use crate::blob::BlobSync;
+use crate::blob::CacheFill;
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::library_dir::LibraryDir;
@@ -159,7 +159,7 @@ pub async fn pull_changes(
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
     // The blob declarations, resolved once per pull from the synced set + live
     // schema, the same gate-sibling model the push and snapshot backfill build.
-    // Drives both the download-before-apply of Mirrored blobs and the apply-side
+    // Drives both the download-before-apply of CacheEager blobs and the apply-side
     // cache drop for deleted blob-bearing rows.
     let blob_decls = {
         let tables = tables.to_vec();
@@ -548,11 +548,11 @@ pub async fn pull_changes(
                 }
             };
 
-            // Download + fsync every Mirrored blob BEFORE applying any row. If
+            // Download + fsync every CacheEager blob BEFORE applying any row. If
             // any fails, skip the whole changeset -- nothing applied, cursor not
             // advanced -- and stop this device's pull so a later seq's success
             // can't carry the cursor past the failed seq (its blobs would then
-            // never be re-fetched). The next cycle resumes at this seq. OnDemand
+            // never be re-fetched). The next cycle resumes at this seq. CacheLazy
             // blobs are not downloaded here — they are fetched on first read.
             let blobs_ok = download_changeset_blobs(
                 db,
@@ -941,14 +941,14 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
     Ok(map)
 }
 
-/// Download the `Mirrored` blobs a changeset references. Returns true if all
+/// Download the `CacheEager` blobs a changeset references. Returns true if all
 /// succeeded. coven derives which rows carry blobs and their cloud
 /// namespace/scope/retention class from the declarations in `blob_decls`; the
 /// per-blob download runs through [`download_blobs`], which writes each into
 /// `storage/pinned/<id>` under `library_dir` (coven's own cache).
 ///
-/// Only [`BlobSync::Mirrored`] blobs are downloaded — those are part of having the
-/// library on every device. An [`BlobSync::OnDemand`] blob is recorded by the
+/// Only [`CacheFill::CacheEager`] blobs are downloaded — those are part of having the
+/// library on every device. An [`CacheFill::CacheLazy`] blob is recorded by the
 /// applied row but its bytes are fetched on first read, so it is skipped here.
 ///
 /// `in_changeset_keys` are the item keys this changeset itself mints, so an
@@ -972,7 +972,7 @@ async fn download_changeset_blobs(
     .await
 }
 
-/// The `Mirrored` blobs the `changes` reference, derived per row from the
+/// The `CacheEager` blobs the `changes` reference, derived per row from the
 /// declarations. The class a pulling device downloads before applying, and the
 /// one the inline push uploads before publishing — so both call this.
 pub(crate) fn mirrored_blobs(
@@ -982,7 +982,7 @@ pub(crate) fn mirrored_blobs(
     changes
         .iter()
         .filter_map(|change| blob_decls.ref_from_change(change))
-        .filter(|blob| blob.sync == BlobSync::Mirrored)
+        .filter(|blob| blob.sync == CacheFill::CacheEager)
         .collect()
 }
 
@@ -1037,7 +1037,7 @@ async fn resolve_pull_scope(
 /// atomically. Returns true if every blob succeeded. Skips blobs already present in
 /// `pinned/`.
 ///
-/// Only `Mirrored` blobs reach here (callers filter), and a `Mirrored` blob is
+/// Only `CacheEager` blobs reach here (callers filter), and a `CacheEager` blob is
 /// system-pinned the moment it lands — part of having the library on every device —
 /// so its bytes go to the protected `pinned/` folder, not the evictable `cache/`.
 /// The destination is coven-built from the validated blob id; the cache owns where a

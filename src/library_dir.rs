@@ -214,7 +214,7 @@ impl LibraryDir {
 
     /// A protected (budget-exempt) blob file: `storage/pinned/{ab}/{cd}/<id>`. The
     /// cache's truth is the folder a blob's file lives in, not a table — a file
-    /// here is a kept-local blob (a `Mirrored` blob system-pinned on pull, or one
+    /// here is a kept-local blob (a `CacheEager` blob system-pinned on pull, or one
     /// the user pinned for offline). `Err` if `id` is not a safe, indexable blob
     /// token (see [`Self::id_shard`]).
     pub fn pinned_blob_path(&self, id: &str) -> Result<PathBuf, PathTokenError> {

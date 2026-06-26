@@ -13,7 +13,7 @@ use super::cache::{
     clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
     BlobCacheError,
 };
-use crate::blob::{BlobRef, BlobScope, BlobSync, ResolvedScope};
+use crate::blob::{BlobRef, BlobScope, CacheFill, ResolvedScope};
 use crate::database::Database;
 use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::BlobDecl;
@@ -26,7 +26,7 @@ use crate::sync::test_helpers::{
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
 /// retention class `sync`. Blob ids are ≥4 chars so they form the `{ab}/{cd}`
 /// partition shard.
-fn blob_ref(id: &str, namespace: &str, sync: BlobSync) -> BlobRef {
+fn blob_ref(id: &str, namespace: &str, sync: CacheFill) -> BlobRef {
     BlobRef {
         namespace: namespace.to_string(),
         id: id.to_string(),
@@ -37,9 +37,9 @@ fn blob_ref(id: &str, namespace: &str, sync: BlobSync) -> BlobRef {
 }
 
 /// The `note_photos` declaration for the cache tests: namespace `"photos"`, master
-/// scope, `Mirrored` (downloaded + system-pinned on pull).
+/// scope, `CacheEager` (downloaded + system-pinned on pull).
 fn photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", BlobSync::Mirrored)
+    BlobDecl::new("photos", CacheFill::CacheEager)
 }
 
 /// Put `bytes` into the mock cloud under the flat `{namespace}/{id}` key the mock's
@@ -60,7 +60,7 @@ async fn second_read_is_a_local_hit() {
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("blob-aaaa", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"THE-BLOB-BYTES".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -86,9 +86,9 @@ async fn second_read_is_a_local_hit() {
     );
 }
 
-/// A Mirrored blob pulled in a changeset lands SYSTEM-PINNED: its file is in
+/// A CacheEager blob pulled in a changeset lands SYSTEM-PINNED: its file is in
 /// `storage/pinned/<id>`, not the evictable `storage/cache/<id>`. (Driven through
-/// the real pull, which routes Mirrored blobs to `download_blobs` → `pinned/`.)
+/// the real pull, which routes CacheEager blobs to `download_blobs` → `pinned/`.)
 #[tokio::test]
 async fn mirrored_lands_in_pinned_on_pull() {
     let storage = MockSyncStorage::new();
@@ -108,7 +108,7 @@ async fn mirrored_lands_in_pinned_on_pull() {
     put_cloud_blob(&storage, "ph01abcd", "photos", b"COVERBYTES").await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    // The puller declares the photo a Mirrored blob; the pull writes it under the
+    // The puller declares the photo a CacheEager blob; the pull writes it under the
     // library dir's pinned tree.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_library_dir();
@@ -118,16 +118,16 @@ async fn mirrored_lands_in_pinned_on_pull() {
     assert!(!result.asset_downloads_failed);
     assert!(
         ld.pinned_blob_path("ph01abcd").unwrap().exists(),
-        "a Mirrored blob is system-pinned on pull: it lands in storage/pinned/<id>",
+        "a CacheEager blob is system-pinned on pull: it lands in storage/pinned/<id>",
     );
     assert!(
         !ld.cache_blob_path("ph01abcd").unwrap().exists(),
-        "a Mirrored blob does NOT land in the evictable storage/cache/<id>",
+        "a CacheEager blob does NOT land in the evictable storage/cache/<id>",
     );
 }
 
 /// Pin promotes a cached blob to `pinned/` and that survives a cache sweep; unpin
-/// demotes it back to `cache/` where a sweep then drops it; and unpinning a Mirrored
+/// demotes it back to `cache/` where a sweep then drops it; and unpinning a CacheEager
 /// blob is rejected (its system pin is not user-removable).
 #[tokio::test]
 async fn pin_survives_clear_cache_unpin_demotes_and_mirrored_unpin_is_rejected() {
@@ -135,7 +135,7 @@ async fn pin_survives_clear_cache_unpin_demotes_and_mirrored_unpin_is_rejected()
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("ond-aaaa", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("ond-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"ON-DEMAND-AUDIO".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -186,24 +186,24 @@ async fn pin_survives_clear_cache_unpin_demotes_and_mirrored_unpin_is_rejected()
         "an unpinned blob is dropped by a cache sweep",
     );
 
-    // Unpinning a Mirrored blob is rejected: its system pin isn't user-removable.
-    let mirrored = blob_ref("mir-aaaa", "images", BlobSync::Mirrored);
+    // Unpinning a CacheEager blob is rejected: its system pin isn't user-removable.
+    let mirrored = blob_ref("mir-aaaa", "images", CacheFill::CacheEager);
     let err = unpin(&ld, std::slice::from_ref(&mirrored))
         .await
-        .expect_err("unpinning a Mirrored blob must be rejected");
+        .expect_err("unpinning a CacheEager blob must be rejected");
     assert!(
-        err.to_string().contains("Mirrored"),
-        "the rejection names the Mirrored class: {err}",
+        err.to_string().contains("CacheEager"),
+        "the rejection names the CacheEager class: {err}",
     );
 }
 
-/// An OnDemand blob is NOT downloaded on pull (no file in either folder afterward),
+/// A CacheLazy blob is NOT downloaded on pull (no file in either folder afterward),
 /// and a later read fetches it into the cache on first access.
 #[tokio::test]
 async fn on_demand_fetches_on_first_read() {
     let storage = MockSyncStorage::new();
 
-    // Source dev1: a note + a photo row the puller's source treats as OnDemand.
+    // Source dev1: a note + a photo row the puller's source treats as CacheLazy.
     let db1 = open_test_db();
     let cs = capture_bytes(
         &db1,
@@ -217,26 +217,26 @@ async fn on_demand_fetches_on_first_read() {
     .await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    let db2 = open_test_db_with_blob(BlobDecl::new("audio", BlobSync::OnDemand));
+    let db2 = open_test_db_with_blob(BlobDecl::new("audio", CacheFill::CacheLazy));
     let (_tmp, ld) = temp_library_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
-    // The row applied, but the OnDemand blob is in neither folder — pull skipped it.
+    // The row applied, but the CacheLazy blob is in neither folder — pull skipped it.
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert!(
         !ld.pinned_blob_path("aud01234").unwrap().exists()
             && !ld.cache_blob_path("aud01234").unwrap().exists(),
-        "an OnDemand blob is not fetched on pull — neither folder holds it",
+        "a CacheLazy blob is not fetched on pull — neither folder holds it",
     );
 
     // Now put it in the cloud and read it: the first read fetches into the cache.
     let bytes = b"AUDIO-PAYLOAD".to_vec();
     put_cloud_blob(&storage, "aud01234", "audio", &bytes).await;
-    let blob = blob_ref("aud01234", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("aud01234", "audio", CacheFill::CacheLazy);
     let got = read_blob(&db2, &ld, &storage, &blob)
         .await
-        .expect("first read fetches the OnDemand blob");
+        .expect("first read fetches the CacheLazy blob");
     assert_eq!(got, bytes);
     assert!(
         ld.cache_blob_path("aud01234").unwrap().exists(),
@@ -253,7 +253,7 @@ async fn write_blob_stages_to_cache_and_pin_needs_no_cloud_fetch() {
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("stg-aaaa", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("stg-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"STAGED-BYTES".to_vec();
 
     // Stage the bytes into the cache.
@@ -318,7 +318,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("blob-aaaa", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &full).await;
 
@@ -372,7 +372,7 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("blob-bbbb", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("blob-bbbb", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &full).await;
 
@@ -412,7 +412,7 @@ async fn full_read_blob_still_populates_the_cache() {
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("blob-cccc", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("blob-cccc", "audio", CacheFill::CacheLazy);
     let bytes = b"WHOLE-FILE-PAYLOAD".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -446,7 +446,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     let full = ramp(1000);
 
     // Non-cached blob: contract enforced before/within the cloud path.
-    let remote = blob_ref("blob-dddd", "audio", BlobSync::OnDemand);
+    let remote = blob_ref("blob-dddd", "audio", CacheFill::CacheLazy);
     put_cloud_blob(&storage, &remote.id, &remote.namespace, &full).await;
     assert!(
         open_blob_stream(&db, &ld, &storage, &remote, full.len() as u64, 900, 200)
@@ -464,7 +464,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
 
     // Cached blob: same contract on the local-file path. Populate the cache, drop
     // the cloud copy so only the local path can serve.
-    let cached = blob_ref("blob-eeee", "audio", BlobSync::OnDemand);
+    let cached = blob_ref("blob-eeee", "audio", CacheFill::CacheLazy);
     put_cloud_blob(&storage, &cached.id, &cached.namespace, &full).await;
     read_blob(&db, &ld, &storage, &cached)
         .await
@@ -497,7 +497,7 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     let storage = MockSyncStorage::new();
     let (tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("extr-aaaa", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("extr-aaaa", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
     let path = write_external_file(tmp.path(), "song.flac", &full);
 
@@ -544,7 +544,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     let cloud_bytes = b"CLOUD-FALLBACK-BYTES".to_vec();
 
     // Missing file: a ref pointing at a path that does not exist.
-    let missing = blob_ref("extm-aaaa", "audio", BlobSync::OnDemand);
+    let missing = blob_ref("extm-aaaa", "audio", CacheFill::CacheLazy);
     put_cloud_blob(&storage, &missing.id, &missing.namespace, &cloud_bytes).await;
     let missing_path = tmp.path().join("external").join("gone.flac");
     db.register_external_blob(&missing.id, &missing.namespace, &missing_path, 1234)
@@ -559,7 +559,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     );
 
     // Present file, wrong length: register a size one byte off the real file.
-    let mism = blob_ref("exts-aaaa", "audio", BlobSync::OnDemand);
+    let mism = blob_ref("exts-aaaa", "audio", CacheFill::CacheLazy);
     put_cloud_blob(&storage, &mism.id, &mism.namespace, &cloud_bytes).await;
     let actual = ramp(2000);
     let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
@@ -590,7 +590,7 @@ async fn clear_external_blob_restores_the_cache_cloud_path() {
     let storage = MockSyncStorage::new();
     let (tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("extc-aaaa", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("extc-aaaa", "audio", CacheFill::CacheLazy);
     let ext_bytes = ramp(1500);
     let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
     db.register_external_blob(&blob.id, &blob.namespace, &path, ext_bytes.len() as u64)
@@ -636,7 +636,7 @@ async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
     let storage = MockSyncStorage::new();
     let (tmp, ld) = temp_library_dir();
 
-    let blob = blob_ref("extp-aaaa", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("extp-aaaa", "audio", CacheFill::CacheLazy);
 
     // Stage a distinct payload into the owned cache under the same id.
     let cache_bytes = b"OWNED-CACHE-BYTES".to_vec();
@@ -733,7 +733,7 @@ async fn stage_with_mtime(
     bytes: &[u8],
     mtime_secs: u64,
 ) {
-    let blob = blob_ref(id, "audio", BlobSync::OnDemand);
+    let blob = blob_ref(id, "audio", CacheFill::CacheLazy);
     write_blob(db, ld, &blob, bytes)
         .await
         .expect("stage blob into cache");
@@ -789,14 +789,14 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
 
 /// A pinned blob is structurally exempt: it lives in `pinned/`, which the budget
 /// never walks, so it is never evicted no matter how far over budget the cache is.
-/// Here a system-pinned `Mirrored` blob (landed in `pinned/` by a real pull) and a
-/// user-pinned `OnDemand` blob both survive a tiny budget with the cache flooded.
+/// Here a system-pinned `CacheEager` blob (landed in `pinned/` by a real pull) and a
+/// user-pinned `CacheLazy` blob both survive a tiny budget with the cache flooded.
 #[tokio::test]
 async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let storage = MockSyncStorage::new();
 
     // dev1 records a note + a (master-scoped) photo row; pull on dev2 system-pins
-    // the Mirrored blob into `pinned/`.
+    // the CacheEager blob into `pinned/`.
     let db1 = open_test_db();
     let cs = capture_bytes(
         &db1,
@@ -817,11 +817,11 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     assert_eq!(result.changesets_applied, 1);
     assert!(
         ld.pinned_blob_path("mir0aaaa").unwrap().exists(),
-        "the Mirrored blob is system-pinned in pinned/",
+        "the CacheEager blob is system-pinned in pinned/",
     );
 
-    // Also user-pin an OnDemand blob into pinned/ (via write_blob → pin).
-    let on_demand = blob_ref("usr0bbbb", "audio", BlobSync::OnDemand);
+    // Also user-pin a CacheLazy blob into pinned/ (via write_blob → pin).
+    let on_demand = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
     write_blob(&db2, &ld, &on_demand, &[7u8; 500])
         .await
         .expect("stage on-demand blob");
@@ -841,11 +841,11 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
 
     assert!(
         ld.pinned_blob_path("mir0aaaa").unwrap().exists(),
-        "a system-pinned Mirrored blob survives eviction (it is in pinned/)",
+        "a system-pinned CacheEager blob survives eviction (it is in pinned/)",
     );
     assert!(
         ld.pinned_blob_path("usr0bbbb").unwrap().exists(),
-        "a user-pinned OnDemand blob survives eviction (it is in pinned/)",
+        "a user-pinned CacheLazy blob survives eviction (it is in pinned/)",
     );
     assert!(
         cache_total_bytes(&ld) <= 10,
@@ -901,7 +901,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
     // read's own eviction must drop the older file (the newest — the one just
     // read — survives).
     db.set_max_cache_size(150).await.expect("set budget");
-    let blob = blob_ref("newer2bb", "audio", BlobSync::OnDemand);
+    let blob = blob_ref("newer2bb", "audio", CacheFill::CacheLazy);
     let bytes = vec![2u8; 100];
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -939,7 +939,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         let id = format!("seqr{i:04}"); // ≥4 chars, distinct per i, for the shard
         let bytes = vec![i; 100];
         put_cloud_blob(&storage, &id, "audio", &bytes).await;
-        let blob = blob_ref(&id, "audio", BlobSync::OnDemand);
+        let blob = blob_ref(&id, "audio", CacheFill::CacheLazy);
 
         let got = read_blob(&db, &ld, &storage, &blob)
             .await

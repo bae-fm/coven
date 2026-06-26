@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::blob::{BlobRef, BlobScope, BlobSync};
+use crate::blob::{BlobRef, BlobScope, CacheFill};
 use crate::changeset::RowChange;
 use crate::sync::gate::Gates;
 use crate::sync::session::{quote_ident, BlobScopeSpec, SyncedTable};
@@ -64,7 +64,7 @@ impl From<rusqlite::Error> for BlobDeclError {
 /// same order a changeset reports its columns, so an index reads either source).
 struct TableBlob {
     namespace: String,
-    sync: BlobSync,
+    sync: CacheFill,
     /// Index of the blob-id column.
     id_col: usize,
     /// Name of the blob-id column. The index reads a row top-to-bottom; the name
@@ -226,7 +226,7 @@ impl BlobDecls {
     /// rows ([`Gates::subtree_rows`] — a pure down-walk, so a release's files but
     /// not a sibling release's) and reads each blob-bearing row by primary key.
     ///
-    /// `manage` enqueues an upload per `OnDemand` blob here; `unmanage` materializes
+    /// `manage` enqueues an upload per `CacheLazy` blob here; `unmanage` materializes
     /// each blob here back to a user file. A row in the subtree whose table carries
     /// no blob (a `tracks` join row) contributes nothing.
     pub fn refs_for_root(

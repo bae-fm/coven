@@ -4,11 +4,11 @@
 //! There is no cache table. A blob is in **exactly one** of two folders under the
 //! library dir, or in neither:
 //!
-//! - `storage/pinned/{ab}/{cd}/<id>` — protected, budget-exempt. A `Mirrored` blob
-//!   system-pinned on pull (cover art every device keeps), or an `OnDemand` blob the
+//! - `storage/pinned/{ab}/{cd}/<id>` — protected, budget-exempt. A `CacheEager` blob
+//!   system-pinned on pull (cover art every device keeps), or a `CacheLazy` blob the
 //!   user pinned for offline.
 //! - `storage/cache/{ab}/{cd}/<id>` — opportunistic, evictable. Fetched-on-read
-//!   `OnDemand` audio, or bytes a host staged before a push uploads them.
+//!   `CacheLazy` audio, or bytes a host staged before a push uploads them.
 //! - neither — remote-only. No file, no row; fetched from the cloud on the next read.
 //!
 //! Presence is the file on disk; pinned-ness is which folder. Nothing the two
@@ -42,7 +42,7 @@
 //! regardless of the budget; a pinned blob (in `pinned/`) survives either way
 //! because it lives in the other folder.
 
-use crate::blob::{BlobRef, BlobSync};
+use crate::blob::{BlobRef, CacheFill};
 use crate::database::Database;
 use crate::library_dir::{LibraryDir, PathTokenError};
 use crate::sync::storage::{StorageError, SyncStorage};
@@ -130,7 +130,7 @@ impl From<StorageError> for BlobCacheError {
 /// This is for bytes a host wants a local copy of that the push then uploads — e.g.
 /// a release the user is taking from cloud-only to pinned, whose audio bae copies in
 /// before the push reads it. The pinned sibling [`stage_blob`] (with `pinned`) is
-/// what a host calls for a Mirrored blob the inline push reads back via
+/// what a host calls for a CacheEager blob the inline push reads back via
 /// [`read_staged`].
 ///
 /// After the bytes land, [`evict_to_budget`] runs so a stage that pushes `cache/`
@@ -197,7 +197,7 @@ pub(crate) async fn populate_pinned(
 /// The host-facing staging call: put a blob's plaintext into the cache so the
 /// inline push can read it locally and a later read serves it without a cloud
 /// round-trip. `pinned` writes to the protected `pinned/` folder (budget-exempt —
-/// for a [`BlobSync::Mirrored`] blob, system-pinned on every device, which the
+/// for a [`CacheFill::CacheEager`] blob, system-pinned on every device, which the
 /// host stages when it writes the blob-bearing row); otherwise to the evictable
 /// `cache/`.
 ///
@@ -511,16 +511,16 @@ pub async fn pin(
 /// Drop a blob's protection: move `storage/pinned/<id>` → `storage/cache/<id>` so
 /// the file stays (still readable) but is now evictable. Not a delete.
 ///
-/// Only valid on an `OnDemand` blob. A `Mirrored` blob's pin is a SYSTEM pin —
+/// Only valid on a `CacheLazy` blob. A `CacheEager` blob's pin is a SYSTEM pin —
 /// re-asserted every pull because the blob is part of having the library — so
 /// unpinning it is meaningless and REJECTED with an error (fail loud, not a silent
 /// skip that would leave the caller thinking it succeeded). The class is checked
 /// before any file is touched.
 pub async fn unpin(library_dir: &LibraryDir, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
     for blob in blobs {
-        if blob.sync == BlobSync::Mirrored {
+        if blob.sync == CacheFill::CacheEager {
             return Err(BlobCacheError::Io(format!(
-                "cannot unpin Mirrored blob {}: its system pin is not user-removable",
+                "cannot unpin CacheEager blob {}: its system pin is not user-removable",
                 blob.id
             )));
         }
@@ -571,7 +571,7 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
 /// synchronously after every populate ([`read_blob`]'s miss-write, [`write_blob`]).
 ///
 /// The budget counts **only** the files under `cache/` — `pinned/` is never walked,
-/// so a pinned (or system-pinned `Mirrored`) blob is structurally exempt and can
+/// so a pinned (or system-pinned `CacheEager`) blob is structurally exempt and can
 /// never be evicted. With no budget set this is a no-op: the cache is unlimited
 /// until the host opts into one.
 ///

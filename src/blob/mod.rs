@@ -23,7 +23,7 @@
 //!   isn't stranded, then GC the blob once the grace has passed. The sync cycle
 //!   drains tombstones and runs the GC each round after it pulls.
 //!
-//! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`BlobSync`],
+//! The types below ([`BlobRef`], [`BlobScope`]/[`ResolvedScope`], [`CacheFill`],
 //! [`BlobTransitionObserver`]) are the vocabulary both halves and the host speak.
 //! Which rows carry blobs is not a runtime callback but a per-table declaration
 //! ([`crate::sync::session::BlobDecl`]) coven resolves into a [`decl::BlobDecls`]
@@ -168,13 +168,13 @@ impl BlobScope {
 /// blob, can only read the blob's declared class — it cannot see what device A
 /// chose locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlobSync {
+pub enum CacheFill {
     /// Synced to every device: downloaded on pull and kept local. Part of "having
     /// the library" — e.g. cover art.
-    Mirrored,
+    CacheEager,
     /// Uploaded on push but not downloaded on pull: a pulling device skips it and
     /// fetches it on first read — e.g. audio, which streams on demand.
-    OnDemand,
+    CacheLazy,
 }
 
 /// A blob a row references: its cloud identity and encryption scope. coven derives
@@ -198,9 +198,9 @@ pub struct BlobRef {
     /// home with no `cloud_path` is a surfaced error, never a silent fallback.
     pub cloud_path: Option<String>,
     /// The blob's retention class. Decides whether a pulling device downloads it
-    /// ([`BlobSync::Mirrored`]) or skips it for later on-demand fetch
-    /// ([`BlobSync::OnDemand`]).
-    pub sync: BlobSync,
+    /// ([`CacheFill::CacheEager`]) or skips it for later on-demand fetch
+    /// ([`CacheFill::CacheLazy`]).
+    pub sync: CacheFill,
 }
 
 /// Notified about coven's blob transitions, for host-specific bookkeeping and UI:

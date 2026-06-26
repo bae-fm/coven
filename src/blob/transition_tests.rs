@@ -21,7 +21,7 @@ use tokio::sync::watch;
 
 use crate::blob::transition::{cancel_manage_blobs, manage_blobs, unmanage_blobs};
 use crate::blob::upload::drain_uploads;
-use crate::blob::{cache, BlobRef, BlobScope, BlobSync, BlobTransitionObserver, ResolvedScope};
+use crate::blob::{cache, BlobRef, BlobScope, BlobTransitionObserver, CacheFill, ResolvedScope};
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::keys::UserKeypair;
@@ -39,7 +39,7 @@ use crate::sync::test_helpers::{
 /// The blob declaration for `note_photos`: a release file, keyed by the readable
 /// cloud path (browsable home), fetched on demand, master-scoped.
 fn photo_decl() -> BlobDecl {
-    BlobDecl::new("photos", BlobSync::OnDemand).with_cloud_path_column("cloud_path")
+    BlobDecl::new("photos", CacheFill::CacheLazy).with_cloud_path_column("cloud_path")
 }
 
 fn plaintext() -> RwLock<CloudCipher> {
@@ -53,7 +53,7 @@ fn photo_ref(id: &str, cloud_path: &str) -> BlobRef {
         id: id.to_string(),
         scope: BlobScope::Master,
         cloud_path: Some(cloud_path.to_string()),
-        sync: BlobSync::OnDemand,
+        sync: CacheFill::CacheLazy,
     }
 }
 
@@ -259,7 +259,7 @@ async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
 
 /// A imports an Unmanaged release and manages it. Device B receives the subtree
 /// ONLY after the blob is up (the gate stays off until the flip), A keeps the blob
-/// pinned and the external source deleted, and B fetches the OnDemand blob on read.
+/// pinned and the external source deleted, and B fetches the CacheLazy blob on read.
 #[tokio::test]
 async fn multi_device_manage_publishes_only_after_blobs_are_up() {
     let storage = MockSyncStorage::new();
@@ -340,7 +340,7 @@ async fn multi_device_manage_publishes_only_after_blobs_are_up() {
         "on_root_managed fires for the completed manage",
     );
 
-    // B pulls and now gets the subtree, and fetches the OnDemand blob on read.
+    // B pulls and now gets the subtree, and fetches the CacheLazy blob on read.
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
@@ -353,7 +353,7 @@ async fn multi_device_manage_publishes_only_after_blobs_are_up() {
         &photo_ref("photoaaa", "cv/photoaaa.flac"),
     )
     .await
-    .expect("B fetches the OnDemand blob");
+    .expect("B fetches the CacheLazy blob");
     assert_eq!(fetched, bytes, "B reads the original audio from the cloud");
 }
 
