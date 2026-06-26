@@ -223,17 +223,22 @@ impl CloudSyncStorage {
 /// The cache namespace a blob's `cloud_key` belongs to: the key's first
 /// `/`-component.
 ///
-/// Every blob `cloud_key` is `{namespace}/…` in BOTH [`BlobPathScheme`] variants
-/// ([`CloudSyncStorage::blob_key`]: `Hashed` = `{namespace}/{ab}/{cd}/{id}`,
-/// `Plain` = `{namespace}/{cloud_path}`), and a namespace is a single slash-free
-/// path token (validated by [`crate::library_dir::validate_path_token`]). So the
-/// namespace is always recoverable from the key with no second stored copy — the
-/// durable `cloud_outbox` row carries only the key, and the upload drain recovers
-/// the namespace here for the cache copy it places (`storage/cache/<namespace>/…`).
-/// A key with no `/` (only a degenerate test fixture; a real key always has the
-/// namespace prefix) yields the whole string.
+/// The namespace prefix of a blob `cloud_key` — the segment before the first `/`.
+///
+/// Every blob `cloud_key` [`CloudSyncStorage::blob_key`] produces is `{namespace}/…`
+/// in BOTH [`BlobPathScheme`] variants (`Hashed` = `{namespace}/{ab}/{cd}/{id}`,
+/// `Plain` = `{namespace}/{cloud_path}`), and a namespace is a single slash-free path
+/// token (validated by [`crate::library_dir::validate_path_token`]). So the namespace
+/// is always recoverable from the key with no second stored copy — the durable
+/// `cloud_outbox` row carries only the key, and the upload drain recovers the
+/// namespace here for the cache copy it places (`storage/cache/<namespace>/…`).
+/// `split_once` returns the prefix for a real key; a slashless key (never produced by
+/// `blob_key`, only by a unit-test fixture that does not exercise namespaced cache
+/// placement) has no prefix and is returned whole.
 pub(crate) fn namespace_from_cloud_key(cloud_key: &str) -> &str {
-    cloud_key.split('/').next().unwrap_or(cloud_key)
+    cloud_key
+        .split_once('/')
+        .map_or(cloud_key, |(namespace, _)| namespace)
 }
 
 /// The `EncryptionService` a blob's resolved `scope` selects, against `master`:

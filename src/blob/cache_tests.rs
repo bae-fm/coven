@@ -838,7 +838,10 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
 /// ignores `pinned/` and every other namespace), so the test measures the cache the
 /// same way eviction does. An absent subtree walks to nothing (0).
 async fn cache_total_bytes(ld: &crate::library_dir::LibraryDir, namespace: &str) -> u64 {
-    crate::local_blob::walk_files(&ld.cache_dir().join(namespace))
+    let dir = ld
+        .cache_namespace_dir(namespace)
+        .expect("valid namespace token");
+    crate::local_blob::walk_files(&dir)
         .await
         .expect("walk the namespace cache subtree")
         .iter()
