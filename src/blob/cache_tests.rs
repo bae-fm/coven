@@ -833,32 +833,17 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
 
 /// Sum the sizes of every file under `storage/cache/<namespace>/` — the same total
 /// `evict_to_budget` measures for that namespace, recomputed from the test side to
-/// assert the budget is respected. Walks that namespace's shard tree
-/// (`cache/<namespace>/{ab}/{cd}/<id>`) and ignores `pinned/` (a sibling root the
-/// cache budget never sees) and every other namespace's subtree.
-fn cache_total_bytes(ld: &crate::library_dir::LibraryDir, namespace: &str) -> u64 {
-    fn sum(dir: &std::path::Path) -> u64 {
-        let mut total = 0;
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            // Only an absent cache dir reads as empty; any other read failure is a
-            // real fault that must not under-count into a spuriously-passing budget
-            // assertion, so it panics rather than returning 0.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
-            Err(e) => panic!("read cache dir {}: {e}", dir.display()),
-        };
-        for entry in entries {
-            let entry = entry.expect("read cache dir entry");
-            let meta = entry.metadata().expect("stat cache entry");
-            if meta.is_dir() {
-                total += sum(&entry.path());
-            } else {
-                total += meta.len();
-            }
-        }
-        total
-    }
-    sum(&ld.cache_dir().join(namespace))
+/// assert the budget is respected. Reuses the production tree walker
+/// ([`crate::local_blob::walk_files`]) over that namespace's cache subtree (which
+/// ignores `pinned/` and every other namespace), so the test measures the cache the
+/// same way eviction does. An absent subtree walks to nothing (0).
+async fn cache_total_bytes(ld: &crate::library_dir::LibraryDir, namespace: &str) -> u64 {
+    crate::local_blob::walk_files(&ld.cache_dir().join(namespace))
+        .await
+        .expect("walk the namespace cache subtree")
+        .iter()
+        .map(|(_, _, size)| *size)
+        .sum()
 }
 
 /// Pin a cache file's modification time to a fixed instant so eviction order is
@@ -909,7 +894,7 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
     stage_with_mtime(&db, &ld, "release_files", "new3cccc", &[3u8; 100], 3000).await;
     stage_with_mtime(&db, &ld, "release_files", "new4dddd", &[4u8; 100], 4000).await;
     assert_eq!(
-        cache_total_bytes(&ld, "release_files"),
+        cache_total_bytes(&ld, "release_files").await,
         400,
         "all four files are cached"
     );
@@ -949,7 +934,7 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
         "the newest file survives",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files") <= 250,
+        cache_total_bytes(&ld, "release_files").await <= 250,
         "the cache is back within budget after eviction",
     );
 }
@@ -991,7 +976,7 @@ async fn release_files_eviction_leaves_covers_intact() {
         "the newest audio file survives within release_files' budget",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files") <= 250,
+        cache_total_bytes(&ld, "release_files").await <= 250,
         "release_files is back within its budget",
     );
     assert!(
@@ -999,7 +984,7 @@ async fn release_files_eviction_leaves_covers_intact() {
         "the cover in another namespace is untouched by release_files eviction",
     );
     assert_eq!(
-        cache_total_bytes(&ld, "covers"),
+        cache_total_bytes(&ld, "covers").await,
         500,
         "covers' cache is whole — its namespace was never walked",
     );
@@ -1133,11 +1118,11 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         "a user-pinned CacheLazy blob survives its namespace's eviction (it is in pinned/)",
     );
     assert!(
-        cache_total_bytes(&ld, "photos") <= 10,
+        cache_total_bytes(&ld, "photos").await <= 10,
         "the photos evictable cache is trimmed to budget, ignoring pinned/",
     );
     assert!(
-        cache_total_bytes(&ld, "audio") <= 10,
+        cache_total_bytes(&ld, "audio").await <= 10,
         "the audio evictable cache is trimmed to budget, ignoring pinned/",
     );
 }
@@ -1153,14 +1138,14 @@ async fn unset_namespace_budget_never_evicts() {
     stage_with_mtime(&db, &ld, "release_files", "keep1aaa", &[1u8; 5000], 1000).await;
     stage_with_mtime(&db, &ld, "release_files", "keep2bbb", &[2u8; 5000], 2000).await;
     stage_with_mtime(&db, &ld, "release_files", "keep3ccc", &[3u8; 5000], 3000).await;
-    assert_eq!(cache_total_bytes(&ld, "release_files"), 15000);
+    assert_eq!(cache_total_bytes(&ld, "release_files").await, 15000);
 
     // No budget set for this namespace — an explicit sweep is a no-op.
     evict_to_budget(&db, &ld, "release_files", None)
         .await
         .expect("evict is a no-op with no budget");
     assert_eq!(
-        cache_total_bytes(&ld, "release_files"),
+        cache_total_bytes(&ld, "release_files").await,
         15000,
         "a big cache stays whole when no budget is set",
     );
@@ -1213,7 +1198,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         "the older blob is the one evicted",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files") <= 150,
+        cache_total_bytes(&ld, "release_files").await <= 150,
         "the cache is back within budget after the read-triggered eviction",
     );
 }
@@ -1247,7 +1232,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         // The cache is within budget after every populate, never drifting over as
         // new blobs arrive.
         assert!(
-            cache_total_bytes(&ld, "release_files") <= 250,
+            cache_total_bytes(&ld, "release_files").await <= 250,
             "after populate {i} the cache is within the 250-byte budget",
         );
     }
@@ -1256,7 +1241,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
     // budget and 100-byte blobs, at most two fit, so after six reads the earliest
     // blobs must have been evicted and the just-read last blob must still be present.
     assert!(
-        cache_total_bytes(&ld, "release_files") <= 200,
+        cache_total_bytes(&ld, "release_files").await <= 200,
         "at most two 100-byte blobs remain under the 250-byte budget",
     );
     assert!(
@@ -1312,7 +1297,7 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
         "the newer, unprotected file is the one evicted instead",
     );
     assert!(
-        cache_total_bytes(&ld, "release_files") <= 100,
+        cache_total_bytes(&ld, "release_files").await <= 100,
         "the cache is within budget after the protected eviction",
     );
 }
@@ -1353,7 +1338,7 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
         "every other candidate is still evicted",
     );
     assert_eq!(
-        cache_total_bytes(&ld, "release_files"),
+        cache_total_bytes(&ld, "release_files").await,
         100,
         "the cache is left over budget, holding exactly the in-use file",
     );

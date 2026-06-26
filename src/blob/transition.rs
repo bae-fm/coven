@@ -209,7 +209,7 @@ pub async fn make_remote(
     // Verify each external source and derive its cloud key up front: any miss aborts
     // before a single upload is enqueued, so a make_remote either queues whole or not
     // at all.
-    let mut uploads: Vec<(String, String, String, String, crate::blob::BlobScope)> = Vec::new();
+    let mut uploads: Vec<(String, String, String, crate::blob::BlobScope)> = Vec::new();
     for blob in &user_provided {
         let ext = db
             .external_blob(&blob.id)
@@ -241,7 +241,6 @@ pub async fn make_remote(
         })?;
         uploads.push((
             blob.id.clone(),
-            blob.namespace.clone(),
             cloud_key,
             source.to_string(),
             blob.scope.clone(),
@@ -253,12 +252,11 @@ pub async fn make_remote(
     db.call(move |conn| {
         let tx = conn.unchecked_transaction()?;
         Database::insert_make_remote_intent_on(&tx, &root_table, &root_id)?;
-        for (id, namespace, cloud_key, source, scope) in &uploads {
+        for (id, cloud_key, source, scope) in &uploads {
             Database::enqueue_upload_on(
                 &tx,
                 id,
                 cloud_key,
-                namespace,
                 Some(source),
                 scope.clone(),
                 pin,
@@ -350,7 +348,9 @@ pub async fn cancel_make_remote(
 
     for (id, namespace) in dropped {
         if let Err(e) = cache::drop_cached_blob(library_dir, &namespace, &id).await {
-            tracing::warn!("cancel_make_remote: failed to drop cache copy of {id}: {e}");
+            tracing::warn!(
+                "cancel_make_remote: failed to drop cache copy of {namespace}/{id}: {e}"
+            );
         }
     }
     Ok(())
@@ -400,23 +400,25 @@ enum Materialized {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Materialized {
-    /// The blob id, for the post-commit cache drop (both variants).
-    fn blob_id(&self) -> &str {
+    /// The materialized blob, carried by both variants. The single match the other
+    /// accessors read through.
+    fn blob(&self) -> &BlobRef {
         match self {
             Materialized::UserProvided { blob, .. } | Materialized::HostProvided { blob, .. } => {
-                &blob.id
+                blob
             }
         }
     }
 
-    /// The blob's cache namespace, for the post-commit cache drop (both variants):
-    /// the cache copy lives under the segmented `storage/cache/<namespace>/<id>`.
+    /// The blob id, for the post-commit cache drop.
+    fn blob_id(&self) -> &str {
+        &self.blob().id
+    }
+
+    /// The blob's cache namespace, for the post-commit cache drop: the cache copy
+    /// lives under the segmented `storage/cache/<namespace>/<id>`.
     fn namespace(&self) -> &str {
-        match self {
-            Materialized::UserProvided { blob, .. } | Materialized::HostProvided { blob, .. } => {
-                &blob.namespace
-            }
-        }
+        &self.blob().namespace
     }
 }
 
@@ -604,7 +606,8 @@ pub async fn make_local(
     for m in &materialized {
         if let Err(e) = cache::drop_cached_blob(library_dir, m.namespace(), m.blob_id()).await {
             tracing::warn!(
-                "make_local: failed to drop cache copy of {}: {e}",
+                "make_local: failed to drop cache copy of {}/{}: {e}",
+                m.namespace(),
                 m.blob_id()
             );
         }

@@ -213,20 +213,14 @@ impl LibraryDir {
     }
 
     /// A kept (budget-exempt) cache copy of a **Remote** blob:
-    /// `storage/pinned/<namespace>/{ab}/{cd}/<id>`. The cache's truth is the folder a
-    /// blob's file lives in, not a table — a file here is a Remote blob's cache copy
-    /// the user pinned for offline (kept from eviction). Segmented by `namespace` so
-    /// it mirrors the evictable cache's per-namespace layout. Both `namespace` and
-    /// `id` are validated as single path tokens; `Err` if either is unsafe or `id` is
+    /// `storage/pinned/<namespace>/{ab}/{cd}/<id>`. The kept sibling of
+    /// [`Self::cache_blob_path`] — same per-namespace shard layout, in the `pinned`
+    /// folder instead of `cache`. The cache's truth is the folder a blob's file lives
+    /// in, not a table; a file here is a Remote blob's cache copy the user pinned for
+    /// offline (kept from eviction). `Err` if `namespace`/`id` is unsafe or `id` is
     /// not indexable (see [`Self::id_shard`]).
     pub fn pinned_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
-        validate_path_token(namespace)?;
-        Ok(self
-            .path
-            .join("storage")
-            .join("pinned")
-            .join(namespace)
-            .join(Self::id_shard(id)?))
+        self.cache_folder_blob_path("pinned", namespace, id)
     }
 
     /// An opportunistic (evictable) cache copy of a **Remote** blob:
@@ -234,17 +228,40 @@ impl LibraryDir {
     /// blob — fetched on read or eagerly on pull, droppable by `clear_cache` or the
     /// budget sweep. The folder it lives in, not a table, is what makes it evictable
     /// rather than kept. Segmented by `namespace` so each namespace's budget evicts
-    /// only its own subtree (see [`Self::cache_namespace_dir`]). Both `namespace` and
-    /// `id` are validated as single path tokens; `Err` if either is unsafe or `id` is
-    /// not indexable (see [`Self::id_shard`]).
+    /// only its own subtree (see [`Self::cache_namespace_dir`]). `Err` if
+    /// `namespace`/`id` is unsafe or `id` is not indexable (see [`Self::id_shard`]).
     pub fn cache_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
-        validate_path_token(namespace)?;
+        self.cache_folder_blob_path("cache", namespace, id)
+    }
+
+    /// `storage/<folder>/<namespace>/{ab}/{cd}/<id>` — the single blob-path builder
+    /// behind [`Self::cache_blob_path`] (`folder` = `cache`) and
+    /// [`Self::pinned_blob_path`] (`folder` = `pinned`), which differ only by the
+    /// folder token. Composes the per-namespace dir
+    /// ([`Self::cache_folder_namespace_dir`]) with the id shard, so the layout lives
+    /// in one place. `namespace`/`id` validated.
+    fn cache_folder_blob_path(
+        &self,
+        folder: &str,
+        namespace: &str,
+        id: &str,
+    ) -> Result<PathBuf, PathTokenError> {
         Ok(self
-            .path
-            .join("storage")
-            .join("cache")
-            .join(namespace)
+            .cache_folder_namespace_dir(folder, namespace)?
             .join(Self::id_shard(id)?))
+    }
+
+    /// `storage/<folder>/<namespace>` for a cache folder (`cache` evictable / `pinned`
+    /// kept), `namespace` validated as a single path token. The per-namespace dir both
+    /// cache folders compose onto; [`Self::cache_namespace_dir`] is the evictable case
+    /// the budget sweep walks.
+    fn cache_folder_namespace_dir(
+        &self,
+        folder: &str,
+        namespace: &str,
+    ) -> Result<PathBuf, PathTokenError> {
+        validate_path_token(namespace)?;
+        Ok(self.storage_dir().join(folder).join(namespace))
     }
 
     /// coven's own copy of a **host-provided Local** blob:
@@ -271,7 +288,7 @@ impl LibraryDir {
     /// untouched). The per-namespace budget sweep walks only one namespace's subtree
     /// under it — see [`Self::cache_namespace_dir`].
     pub fn cache_dir(&self) -> PathBuf {
-        self.path.join("storage").join("cache")
+        self.storage_dir().join("cache")
     }
 
     /// One namespace's evictable-cache subtree, `storage/cache/<namespace>`. The
@@ -279,8 +296,7 @@ impl LibraryDir {
     /// a namespace evicts against its own budget without touching another namespace's
     /// files. `namespace` is validated as a single path token; `Err` if it is unsafe.
     pub fn cache_namespace_dir(&self, namespace: &str) -> Result<PathBuf, PathTokenError> {
-        validate_path_token(namespace)?;
-        Ok(self.path.join("storage").join("cache").join(namespace))
+        self.cache_folder_namespace_dir("cache", namespace)
     }
 
     pub fn pending_deletions_path(&self) -> PathBuf {

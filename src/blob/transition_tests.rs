@@ -755,7 +755,6 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     db.enqueue_upload(
         "photoaaa",
         "photos/cv/photoaaa.flac",
-        "photos",
         Some(src.to_str().unwrap()),
         BlobScope::Master,
         true,

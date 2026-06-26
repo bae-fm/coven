@@ -75,9 +75,9 @@ async fn insert_upload(
         conn.execute(
             &format!(
                 "INSERT INTO cloud_outbox \
-                 (id, operation, file_id, cloud_key, namespace, source_path, scope, created_at, \
+                 (id, operation, file_id, cloud_key, source_path, scope, created_at, \
                   attempt_count, last_attempt_at) \
-                 VALUES (?1, 'upload', ?2, ?3, 'release_files', ?4, '{scope}', '2024-01-01T00:00:00Z', ?5, ?6)"
+                 VALUES (?1, 'upload', ?2, ?3, ?4, '{scope}', '2024-01-01T00:00:00Z', ?5, ?6)"
             ),
             rusqlite::params![
                 id,
@@ -639,7 +639,6 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     db.enqueue_upload(
         "file-1",
         cloud_key,
-        "release_files",
         Some(source.as_str()),
         crate::blob::BlobScope::Item("release-1".to_string()),
         false,
@@ -727,7 +726,6 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             &tx,
             "f-rollback",
             "k-rollback",
-            "release_files",
             None,
             crate::blob::BlobScope::Master,
             false,
@@ -745,7 +743,6 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             &tx,
             "f-commit",
             "k-commit",
-            "release_files",
             Some("/tmp/source.flac"),
             crate::blob::BlobScope::Item("rel-1".to_string()),
             false,
@@ -780,11 +777,12 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
     let db = open_outbox_db();
     let file_id = "pinaaaa1";
     let namespace = "release_files";
-    let cloud_key = "storage/pi/na/pinaaaa1";
+    // The cache namespace is derived from the cloud key's first component, so it must
+    // be the namespace the assertions below check.
+    let cloud_key = "release_files/pi/na/pinaaaa1";
     db.enqueue_upload(
         file_id,
         cloud_key,
-        namespace,
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         true, // retain_pinned
@@ -837,11 +835,11 @@ async fn unpinned_upload_populates_nothing_on_write() {
     let db = open_outbox_db();
     let file_id = "unpaaaa1";
     let namespace = "release_files";
-    let cloud_key = "storage/un/pa/unpaaaa1";
+    // The cache namespace is derived from the cloud key's first component.
+    let cloud_key = "release_files/un/pa/unpaaaa1";
     db.enqueue_upload(
         file_id,
         cloud_key,
-        namespace,
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         false, // retain_pinned
@@ -885,7 +883,8 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     let db = open_outbox_db();
     let file_id = "pinfail1";
     let namespace = "release_files";
-    let cloud_key = "storage/pi/nf/pinfail1";
+    // The cache namespace is derived from the cloud key's first component.
+    let cloud_key = "release_files/pi/nf/pinfail1";
 
     // Block the populate: the pinned blob path is
     // storage/pinned/<namespace>/{ab}/{cd}/<id>; plant a regular FILE at the {ab}
@@ -899,7 +898,6 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     db.enqueue_upload(
         file_id,
         cloud_key,
-        namespace,
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         true, // retain_pinned — but the populate will fail

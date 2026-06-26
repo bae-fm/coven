@@ -661,16 +661,14 @@ impl Database {
         &self,
         file_id: &str,
         cloud_key: &str,
-        namespace: &str,
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
         retain_pinned: bool,
         created_at: &str,
     ) -> Result<(), DbError> {
-        let (file_id, cloud_key, namespace, source_path, created_at) = (
+        let (file_id, cloud_key, source_path, created_at) = (
             file_id.to_string(),
             cloud_key.to_string(),
-            namespace.to_string(),
             source_path.map(str::to_string),
             created_at.to_string(),
         );
@@ -679,7 +677,6 @@ impl Database {
                 conn,
                 &file_id,
                 &cloud_key,
-                &namespace,
                 source_path.as_deref(),
                 scope,
                 retain_pinned,
@@ -698,7 +695,6 @@ impl Database {
         conn: &Connection,
         file_id: &str,
         cloud_key: &str,
-        namespace: &str,
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
         retain_pinned: bool,
@@ -716,12 +712,11 @@ impl Database {
         .map_err(DbError::from)?;
         conn.execute(
             "INSERT OR IGNORE INTO cloud_outbox \
-             (operation, file_id, cloud_key, namespace, source_path, scope, retain_pinned, created_at) \
-             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (operation, file_id, cloud_key, source_path, scope, retain_pinned, created_at) \
+             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6)",
             (
                 file_id,
                 cloud_key,
-                namespace,
                 source_path,
                 scope.to_outbox_str(),
                 retain_pinned,
@@ -800,8 +795,7 @@ impl Database {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, operation, file_id, cloud_key, source_path, scope, \
-                            retain_pinned, created_at, attempt_count, last_error, last_attempt_at, \
-                            namespace \
+                            retain_pinned, created_at, attempt_count, last_error, last_attempt_at \
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
                 .map_err(DbError::from)?;
@@ -1083,10 +1077,6 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
                 .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {scope_str:?}"));
             OutboxOperation::Upload {
                 file_id: r.get(2)?,
-                // An upload always wrote a namespace (the column is non-NULL for an
-                // upload row), so its absence is corruption — read it as a String and
-                // let a NULL error loudly, the same posture as scope above.
-                namespace: r.get(11)?,
                 source_path: r.get(4)?,
                 scope,
                 retain_pinned: r.get(6)?,

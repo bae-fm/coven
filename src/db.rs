@@ -44,11 +44,6 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     -- delete or cancel entry, which carry no file id.
     file_id TEXT,
     cloud_key TEXT NOT NULL,
-    -- The blob's cache namespace (release_files / covers / artist_images), which the
-    -- drain needs to place a pinned upload's local cache copy under the segmented
-    -- `storage/pinned/<namespace>/<id>` (and to drop a cancelled make_remote's
-    -- orphaned copy). NULL for a delete or cancel entry, which touch no cache copy.
-    namespace TEXT,
     source_path TEXT,
     -- The blob's encryption scope (master / derived / item), serialized so the
     -- async drain resolves it to a key long after the enqueue site is gone.
@@ -152,11 +147,6 @@ pub enum OutboxOperation {
     /// under, and whether to keep the uploaded blob pinned in the local cache.
     Upload {
         file_id: String,
-        /// The blob's cache namespace (`release_files` / `covers` / `artist_images`).
-        /// The drain places a pinned upload's local cache copy under the segmented
-        /// `storage/pinned/<namespace>/<id>` and drops a cancelled make_remote's
-        /// orphaned copy from `storage/cache/<namespace>/<id>`; both need it.
-        namespace: String,
         /// Local plaintext source. `None` means the blob lives at coven's
         /// default storage path for `file_id`.
         source_path: Option<String>,

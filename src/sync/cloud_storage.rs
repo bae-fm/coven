@@ -220,6 +220,22 @@ impl CloudSyncStorage {
     }
 }
 
+/// The cache namespace a blob's `cloud_key` belongs to: the key's first
+/// `/`-component.
+///
+/// Every blob `cloud_key` is `{namespace}/…` in BOTH [`BlobPathScheme`] variants
+/// ([`CloudSyncStorage::blob_key`]: `Hashed` = `{namespace}/{ab}/{cd}/{id}`,
+/// `Plain` = `{namespace}/{cloud_path}`), and a namespace is a single slash-free
+/// path token (validated by [`crate::library_dir::validate_path_token`]). So the
+/// namespace is always recoverable from the key with no second stored copy — the
+/// durable `cloud_outbox` row carries only the key, and the upload drain recovers
+/// the namespace here for the cache copy it places (`storage/cache/<namespace>/…`).
+/// A key with no `/` (only a degenerate test fixture; a real key always has the
+/// namespace prefix) yields the whole string.
+pub(crate) fn namespace_from_cloud_key(cloud_key: &str) -> &str {
+    cloud_key.split('/').next().unwrap_or(cloud_key)
+}
+
 /// The `EncryptionService` a blob's resolved `scope` selects, against `master`:
 /// the library master itself, a per-scope key derived from it, or an explicit
 /// key (a resolved item key). The blob storage methods and the outbox drain both

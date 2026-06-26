@@ -277,7 +277,6 @@ pub async fn drain_uploads(
         // `Delete` here would be a broken query invariant, not a skippable row.
         let OutboxOperation::Upload {
             file_id,
-            namespace,
             source_path,
             scope,
             retain_pinned,
@@ -285,6 +284,12 @@ pub async fn drain_uploads(
         else {
             unreachable!("get_pending_cloud_uploads returns only Upload rows");
         };
+
+        // The cache namespace this blob's copy lives under is the first component of
+        // its durable cloud key (see [`namespace_from_cloud_key`]); the outbox stores
+        // the key, not a second copy of the namespace. Used by the pinned-cache
+        // populate and the cancelled-make_remote orphan drop below.
+        let namespace = crate::sync::cloud_storage::namespace_from_cloud_key(&entry.cloud_key);
 
         if let Some(obs) = observer {
             obs.on_blob_upload_started(file_id).await;
@@ -350,7 +355,7 @@ pub async fn drain_uploads(
                     .await
                     {
                         warn!(
-                            "Upload of {} succeeded but pinning it into the local cache failed (a later read will re-fetch): {e}",
+                            "Upload of {} succeeded but pinning it into the local cache (namespace {namespace}) failed (a later read will re-fetch): {e}",
                             entry.cloud_key
                         );
                     }
@@ -414,7 +419,7 @@ pub async fn drain_uploads(
                             crate::blob::cache::drop_cached_blob(library_dir, namespace, file_id)
                                 .await
                         {
-                            warn!("failed to drop the cache copy of orphaned blob {file_id}: {e}");
+                            warn!("failed to drop the cache copy of orphaned blob {namespace}/{file_id}: {e}");
                         }
                     }
                     Ok(PostUpload::MadeRemote {
