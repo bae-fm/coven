@@ -86,7 +86,9 @@ async fn second_read_is_a_local_hit() {
         .expect("first read fetches from cloud");
     assert_eq!(first, bytes);
     assert!(
-        ld.cache_blob_path(&blob.id).unwrap().exists(),
+        ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "the first read populates storage/cache/<id>",
     );
 
@@ -135,12 +137,12 @@ async fn cache_eager_lands_in_cache_on_pull() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert!(
-        ld.cache_blob_path("ph01abcd").unwrap().exists(),
-        "a CacheEager blob lands in the evictable cache on pull: storage/cache/<id>",
+        ld.cache_blob_path("photos", "ph01abcd").unwrap().exists(),
+        "a CacheEager blob lands in the evictable cache on pull: storage/cache/<namespace>/<id>",
     );
     assert!(
-        !ld.pinned_blob_path("ph01abcd").unwrap().exists(),
-        "a CacheEager blob does NOT land system-pinned in storage/pinned/<id>",
+        !ld.pinned_blob_path("photos", "ph01abcd").unwrap().exists(),
+        "a CacheEager blob does NOT land system-pinned in storage/pinned/<namespace>/<id>",
     );
 }
 
@@ -162,26 +164,38 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     read_blob(&db, &ld, &storage, &blob)
         .await
         .expect("read populates the cache");
-    assert!(ld.cache_blob_path(&blob.id).unwrap().exists());
-    assert!(!ld.pinned_blob_path(&blob.id).unwrap().exists());
+    assert!(ld
+        .cache_blob_path(&blob.namespace, &blob.id)
+        .unwrap()
+        .exists());
+    assert!(!ld
+        .pinned_blob_path(&blob.namespace, &blob.id)
+        .unwrap()
+        .exists());
 
     // Pin it → moves cache/ → pinned/.
     pin(&db, &ld, &storage, std::slice::from_ref(&blob))
         .await
         .expect("pin promotes the cached blob");
     assert!(
-        ld.pinned_blob_path(&blob.id).unwrap().exists(),
+        ld.pinned_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "pin moves the blob into storage/pinned/<id>",
     );
     assert!(
-        !ld.cache_blob_path(&blob.id).unwrap().exists(),
+        !ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "pin leaves nothing behind in storage/cache/<id>",
     );
 
     // Clear the cache → the pinned blob is untouched.
     clear_cache(&ld).await.expect("clear cache");
     assert!(
-        ld.pinned_blob_path(&blob.id).unwrap().exists(),
+        ld.pinned_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "a pinned blob survives a cache sweep",
     );
 
@@ -190,18 +204,24 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
         .await
         .expect("unpin demotes the blob");
     assert!(
-        ld.cache_blob_path(&blob.id).unwrap().exists(),
+        ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "unpin moves the blob back into storage/cache/<id>",
     );
     assert!(
-        !ld.pinned_blob_path(&blob.id).unwrap().exists(),
+        !ld.pinned_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "unpin leaves nothing behind in storage/pinned/<id>",
     );
 
     // Clear the cache again → the now-unpinned blob is gone.
     clear_cache(&ld).await.expect("clear cache");
     assert!(
-        !ld.cache_blob_path(&blob.id).unwrap().exists(),
+        !ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "an unpinned blob is dropped by a cache sweep",
     );
 
@@ -213,8 +233,13 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
         .await
         .expect("unpinning a never-pinned CacheEager blob is a no-op");
     assert!(
-        !ld.pinned_blob_path(&eager.id).unwrap().exists()
-            && !ld.cache_blob_path(&eager.id).unwrap().exists(),
+        !ld.pinned_blob_path(&eager.namespace, &eager.id)
+            .unwrap()
+            .exists()
+            && !ld
+                .cache_blob_path(&eager.namespace, &eager.id)
+                .unwrap()
+                .exists(),
         "the never-pinned blob is in neither folder",
     );
 }
@@ -251,8 +276,8 @@ async fn cache_lazy_fetches_on_first_read() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert!(
-        !ld.pinned_blob_path("aud01234").unwrap().exists()
-            && !ld.cache_blob_path("aud01234").unwrap().exists(),
+        !ld.pinned_blob_path("audio", "aud01234").unwrap().exists()
+            && !ld.cache_blob_path("audio", "aud01234").unwrap().exists(),
         "a CacheLazy blob is not fetched on pull — neither folder holds it",
     );
 
@@ -265,8 +290,8 @@ async fn cache_lazy_fetches_on_first_read() {
         .expect("first read fetches the CacheLazy blob");
     assert_eq!(got, bytes);
     assert!(
-        ld.cache_blob_path("aud01234").unwrap().exists(),
-        "the on-demand fetch populates storage/cache/<id>",
+        ld.cache_blob_path("audio", "aud01234").unwrap().exists(),
+        "the on-demand fetch populates storage/cache/<namespace>/<id>",
     );
 }
 
@@ -287,11 +312,15 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         .await
         .expect("write_blob writes into the cache");
     assert!(
-        ld.cache_blob_path(&blob.id).unwrap().exists(),
+        ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "write_blob writes to storage/cache/<id>",
     );
     assert!(
-        !ld.pinned_blob_path(&blob.id).unwrap().exists(),
+        !ld.pinned_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "write_blob does not pin — nothing in storage/pinned/<id>",
     );
 
@@ -301,11 +330,15 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         .await
         .expect("pin promotes the staged file without a cloud fetch");
     assert!(
-        ld.pinned_blob_path(&blob.id).unwrap().exists(),
+        ld.pinned_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "pin renames the staged blob into storage/pinned/<id>",
     );
     assert!(
-        !ld.cache_blob_path(&blob.id).unwrap().exists(),
+        !ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "pin moves the staged blob out of storage/cache/<id>",
     );
     // Read it back to confirm the bytes survived the staging + rename intact.
@@ -353,7 +386,10 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     read_blob(&db, &ld, &storage, &blob)
         .await
         .expect("whole-file read populates the cache");
-    assert!(ld.cache_blob_path(&blob.id).unwrap().exists());
+    assert!(ld
+        .cache_blob_path(&blob.namespace, &blob.id)
+        .unwrap()
+        .exists());
     storage.delete_blob_object("audio", &blob.id).await;
 
     // A window from the middle of the file.
@@ -403,8 +439,14 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &full).await;
 
     // The blob is in neither folder before the read.
-    assert!(!ld.pinned_blob_path(&blob.id).unwrap().exists());
-    assert!(!ld.cache_blob_path(&blob.id).unwrap().exists());
+    assert!(!ld
+        .pinned_blob_path(&blob.namespace, &blob.id)
+        .unwrap()
+        .exists());
+    assert!(!ld
+        .cache_blob_path(&blob.namespace, &blob.id)
+        .unwrap()
+        .exists());
 
     let (offset, len) = (2000u64, 1500u64);
     let got = open_blob_stream(&db, &ld, &storage, &blob, full.len() as u64, offset, len)
@@ -420,11 +462,15 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
     // read would have to fetch fresh, and `read_blob`'s presence check is never
     // fooled by a truncated file.
     assert!(
-        !ld.pinned_blob_path(&blob.id).unwrap().exists(),
+        !ld.pinned_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "a ranged miss must not write storage/pinned/<id>",
     );
     assert!(
-        !ld.cache_blob_path(&blob.id).unwrap().exists(),
+        !ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "a ranged miss must not write storage/cache/<id> (no truncated cache file)",
     );
 }
@@ -447,7 +493,9 @@ async fn full_read_blob_still_populates_the_cache() {
         .expect("first whole-file read fetches from the cloud");
     assert_eq!(first, bytes);
     assert!(
-        ld.cache_blob_path(&blob.id).unwrap().exists(),
+        ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "a whole-file read populates storage/cache/<id>",
     );
 
@@ -550,8 +598,13 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     );
 
     assert!(
-        !ld.pinned_blob_path(&blob.id).unwrap().exists()
-            && !ld.cache_blob_path(&blob.id).unwrap().exists(),
+        !ld.pinned_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists()
+            && !ld
+                .cache_blob_path(&blob.namespace, &blob.id)
+                .unwrap()
+                .exists(),
         "an external read populates neither cache folder",
     );
 }
@@ -646,7 +699,9 @@ async fn clear_external_blob_restores_the_cache_cloud_path() {
         "with the external ref cleared the blob resolves through cache/cloud again",
     );
     assert!(
-        ld.cache_blob_path(&blob.id).unwrap().exists(),
+        ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
         "the cloud fetch populated the evictable cache",
     );
 }
@@ -669,7 +724,10 @@ async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
     write_blob(&db, &ld, &blob, &cache_bytes)
         .await
         .expect("write a same-id cache file");
-    assert!(ld.cache_blob_path(&blob.id).unwrap().exists());
+    assert!(ld
+        .cache_blob_path(&blob.namespace, &blob.id)
+        .unwrap()
+        .exists());
 
     // Register an external ref with its own distinct payload.
     let ext_bytes = ramp(2048);
@@ -771,13 +829,14 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
     );
 }
 
-// ---- Eviction (max_cache_size, folder-model) ----
+// ---- Eviction (per-namespace budgets, folder-model) ----
 
-/// Sum the sizes of every file under `storage/cache/` — the same total
-/// `evict_to_budget` measures, recomputed from the test side to assert the budget
-/// is respected. Walks the shard tree (`cache/{ab}/{cd}/<id>`) and ignores
-/// `pinned/` (a sibling root the cache budget never sees).
-fn cache_total_bytes(ld: &crate::library_dir::LibraryDir) -> u64 {
+/// Sum the sizes of every file under `storage/cache/<namespace>/` — the same total
+/// `evict_to_budget` measures for that namespace, recomputed from the test side to
+/// assert the budget is respected. Walks that namespace's shard tree
+/// (`cache/<namespace>/{ab}/{cd}/<id>`) and ignores `pinned/` (a sibling root the
+/// cache budget never sees) and every other namespace's subtree.
+fn cache_total_bytes(ld: &crate::library_dir::LibraryDir, namespace: &str) -> u64 {
     fn sum(dir: &std::path::Path) -> u64 {
         let mut total = 0;
         let entries = match std::fs::read_dir(dir) {
@@ -799,14 +858,14 @@ fn cache_total_bytes(ld: &crate::library_dir::LibraryDir) -> u64 {
         }
         total
     }
-    sum(&ld.cache_dir())
+    sum(&ld.cache_dir().join(namespace))
 }
 
 /// Pin a cache file's modification time to a fixed instant so eviction order is
 /// deterministic (the cache evicts oldest-mtime first). `secs` is an offset from
 /// the unix epoch — smaller is older.
-fn set_cache_mtime(ld: &crate::library_dir::LibraryDir, id: &str, secs: u64) {
-    let path = ld.cache_blob_path(id).expect("cache path");
+fn set_cache_mtime(ld: &crate::library_dir::LibraryDir, namespace: &str, id: &str, secs: u64) {
+    let path = ld.cache_blob_path(namespace, id).expect("cache path");
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(&path)
@@ -815,27 +874,29 @@ fn set_cache_mtime(ld: &crate::library_dir::LibraryDir, id: &str, secs: u64) {
         .expect("set cache file mtime");
 }
 
-/// Stage `bytes` into `cache/<id>` with a fixed modification time, with NO budget
-/// set so the stage itself never evicts. Builds the over-budget cache a later
-/// eviction test then trims.
+/// Stage `bytes` into `cache/<namespace>/<id>` with a fixed modification time, with
+/// NO budget set so the stage itself never evicts. Builds the over-budget cache a
+/// later eviction test then trims.
 async fn stage_with_mtime(
     db: &Database,
     ld: &crate::library_dir::LibraryDir,
+    namespace: &str,
     id: &str,
     bytes: &[u8],
     mtime_secs: u64,
 ) {
-    let blob = blob_ref(id, "audio", CacheFill::CacheLazy);
+    let blob = blob_ref(id, namespace, CacheFill::CacheLazy);
     write_blob(db, ld, &blob, bytes)
         .await
         .expect("stage blob into cache");
-    set_cache_mtime(ld, id, mtime_secs);
+    set_cache_mtime(ld, namespace, id, mtime_secs);
 }
 
-/// Over budget, eviction deletes the OLDEST `cache/` files (by mtime) first and
-/// stops once the total is back under the budget: the oldest go, the newest stay,
-/// and the summed `cache/` size ends `<= max_cache_size`. Driven by staging files
-/// with distinct mtimes (no budget), then setting the budget and running a sweep.
+/// Over budget, eviction deletes the OLDEST files (by mtime) in that namespace first
+/// and stops once the total is back under the namespace's budget: the oldest go, the
+/// newest stay, and the summed `cache/<namespace>/` size ends `<=` the budget. Driven
+/// by staging files with distinct mtimes (no budget), then setting the budget and
+/// running a sweep.
 #[tokio::test]
 async fn eviction_drops_oldest_cache_files_until_under_budget() {
     let db = open_test_db();
@@ -843,46 +904,164 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
 
     // Four 100-byte files, oldest → newest by mtime. No budget yet, so staging does
     // not evict; the cache holds all 400 bytes.
-    stage_with_mtime(&db, &ld, "old1aaaa", &[1u8; 100], 1000).await;
-    stage_with_mtime(&db, &ld, "old2bbbb", &[2u8; 100], 2000).await;
-    stage_with_mtime(&db, &ld, "new3cccc", &[3u8; 100], 3000).await;
-    stage_with_mtime(&db, &ld, "new4dddd", &[4u8; 100], 4000).await;
-    assert_eq!(cache_total_bytes(&ld), 400, "all four files are cached");
+    stage_with_mtime(&db, &ld, "release_files", "old1aaaa", &[1u8; 100], 1000).await;
+    stage_with_mtime(&db, &ld, "release_files", "old2bbbb", &[2u8; 100], 2000).await;
+    stage_with_mtime(&db, &ld, "release_files", "new3cccc", &[3u8; 100], 3000).await;
+    stage_with_mtime(&db, &ld, "release_files", "new4dddd", &[4u8; 100], 4000).await;
+    assert_eq!(
+        cache_total_bytes(&ld, "release_files"),
+        400,
+        "all four files are cached"
+    );
 
     // Budget of 250 bytes: the two oldest (200 bytes) must go to bring the total
     // (then 200) under budget; the two newest stay. A bare sweep (`None`) — no file
     // is being protected as just-written here.
-    db.set_max_cache_size(250).await.expect("set budget");
-    evict_to_budget(&db, &ld, None)
+    db.set_cache_budget("release_files", 250)
+        .await
+        .expect("set budget");
+    evict_to_budget(&db, &ld, "release_files", None)
         .await
         .expect("evict to budget");
 
     assert!(
-        !ld.cache_blob_path("old1aaaa").unwrap().exists(),
+        !ld.cache_blob_path("release_files", "old1aaaa")
+            .unwrap()
+            .exists(),
         "the oldest file is evicted first",
     );
     assert!(
-        !ld.cache_blob_path("old2bbbb").unwrap().exists(),
+        !ld.cache_blob_path("release_files", "old2bbbb")
+            .unwrap()
+            .exists(),
         "the second-oldest file is evicted next",
     );
     assert!(
-        ld.cache_blob_path("new3cccc").unwrap().exists(),
+        ld.cache_blob_path("release_files", "new3cccc")
+            .unwrap()
+            .exists(),
         "a newer file survives once the total is back under budget",
     );
     assert!(
-        ld.cache_blob_path("new4dddd").unwrap().exists(),
+        ld.cache_blob_path("release_files", "new4dddd")
+            .unwrap()
+            .exists(),
         "the newest file survives",
     );
     assert!(
-        cache_total_bytes(&ld) <= 250,
+        cache_total_bytes(&ld, "release_files") <= 250,
         "the cache is back within budget after eviction",
     );
 }
 
-/// A pinned blob is structurally exempt: it lives in `pinned/`, which the budget
-/// never walks, so it is never evicted no matter how far over budget the cache is.
-/// Here a `CacheEager` blob pulled into the evictable cache and then pinned, plus a
-/// user-pinned `CacheLazy` blob, both survive a tiny budget with the cache flooded.
+/// Per-namespace isolation: filling `release_files` past its budget evicts that
+/// namespace's oldest audio files but leaves a `covers` blob in another namespace
+/// untouched — the sweep walks only `cache/release_files/`, never `cache/covers/`.
+#[tokio::test]
+async fn release_files_eviction_leaves_covers_intact() {
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+
+    // A cover in the small `covers` namespace, plus four audio files in the big
+    // `release_files` namespace. No budgets yet.
+    stage_with_mtime(&db, &ld, "covers", "cov00aaa", &[9u8; 500], 1000).await;
+    stage_with_mtime(&db, &ld, "release_files", "aud01aaa", &[1u8; 100], 1000).await;
+    stage_with_mtime(&db, &ld, "release_files", "aud02bbb", &[2u8; 100], 2000).await;
+    stage_with_mtime(&db, &ld, "release_files", "aud03ccc", &[3u8; 100], 3000).await;
+    stage_with_mtime(&db, &ld, "release_files", "aud04ddd", &[4u8; 100], 4000).await;
+
+    // Only `release_files` is budgeted and swept. `covers` is never touched.
+    db.set_cache_budget("release_files", 250)
+        .await
+        .expect("set release_files budget");
+    evict_to_budget(&db, &ld, "release_files", None)
+        .await
+        .expect("evict release_files to budget");
+
+    assert!(
+        !ld.cache_blob_path("release_files", "aud01aaa")
+            .unwrap()
+            .exists(),
+        "the oldest audio file is evicted under release_files pressure",
+    );
+    assert!(
+        ld.cache_blob_path("release_files", "aud04ddd")
+            .unwrap()
+            .exists(),
+        "the newest audio file survives within release_files' budget",
+    );
+    assert!(
+        cache_total_bytes(&ld, "release_files") <= 250,
+        "release_files is back within its budget",
+    );
+    assert!(
+        ld.cache_blob_path("covers", "cov00aaa").unwrap().exists(),
+        "the cover in another namespace is untouched by release_files eviction",
+    );
+    assert_eq!(
+        cache_total_bytes(&ld, "covers"),
+        500,
+        "covers' cache is whole — its namespace was never walked",
+    );
+}
+
+/// A `covers` namespace with a small budget evicts its own oldest cover when over
+/// budget, and a later read of the evicted cover re-fetches it from the cloud back
+/// into `cache/covers/` (covers are not pinned — an evicted one re-materializes on
+/// the next read).
+#[tokio::test]
+async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
+    let db = open_test_db();
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    // Two 200-byte covers in the cloud, both `CacheEager`. The `covers` budget holds
+    // one at a time (250 bytes).
+    let cov1 = blob_ref("cov01aaa", "covers", CacheFill::CacheEager);
+    let cov2 = blob_ref("cov02bbb", "covers", CacheFill::CacheEager);
+    put_cloud_blob(&storage, &cov1.id, &cov1.namespace, &[1u8; 200]).await;
+    put_cloud_blob(&storage, &cov2.id, &cov2.namespace, &[2u8; 200]).await;
+    db.set_cache_budget("covers", 250)
+        .await
+        .expect("set covers budget");
+
+    // Read the first cover into the cache, then age it so it is the oldest.
+    read_blob(&db, &ld, &storage, &cov1)
+        .await
+        .expect("first cover read populates the cache");
+    set_cache_mtime(&ld, "covers", &cov1.id, 1000);
+
+    // Read the second cover: populating it pushes `covers` to 400 (> 250), so the
+    // read's own sweep evicts the oldest (the first cover), leaving only the second.
+    read_blob(&db, &ld, &storage, &cov2)
+        .await
+        .expect("second cover read populates and evicts to budget");
+    assert!(
+        !ld.cache_blob_path("covers", &cov1.id).unwrap().exists(),
+        "the oldest cover is evicted when covers goes over its small budget",
+    );
+    assert!(
+        ld.cache_blob_path("covers", &cov2.id).unwrap().exists(),
+        "the just-read cover stays",
+    );
+
+    // A read of the evicted cover re-fetches it from the cloud back into the cache.
+    let refetched = read_blob(&db, &ld, &storage, &cov1)
+        .await
+        .expect("a read of the evicted cover re-fetches it");
+    assert_eq!(refetched, vec![1u8; 200], "the re-fetch returns the bytes");
+    assert!(
+        ld.cache_blob_path("covers", &cov1.id).unwrap().exists(),
+        "the re-fetched cover is back in cache/covers/",
+    );
+}
+
+/// A pinned blob is structurally exempt regardless of its namespace's budget: it
+/// lives in `pinned/<namespace>/`, which the budget never walks, so it is never
+/// evicted no matter how far over budget that namespace's cache is. Here a
+/// `CacheEager` blob (namespace `photos`) pulled and pinned, plus a user-pinned
+/// `CacheLazy` blob (namespace `audio`), both survive a tiny budget on their OWN
+/// namespace with that namespace's cache flooded.
 #[tokio::test]
 async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let storage = MockSyncStorage::new();
@@ -908,16 +1087,16 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        ld.cache_blob_path("mir0aaaa").unwrap().exists(),
+        ld.cache_blob_path("photos", "mir0aaaa").unwrap().exists(),
         "the CacheEager blob lands in the evictable cache on pull",
     );
     let eager = blob_ref("mir0aaaa", "photos", CacheFill::CacheEager);
     pin(&db2, &ld, &storage, std::slice::from_ref(&eager))
         .await
         .expect("pin the eager blob into pinned/");
-    assert!(ld.pinned_blob_path("mir0aaaa").unwrap().exists());
+    assert!(ld.pinned_blob_path("photos", "mir0aaaa").unwrap().exists());
 
-    // Also user-pin a CacheLazy blob into pinned/ (via write_blob → pin).
+    // Also user-pin a CacheLazy blob (a different namespace) into pinned/.
     let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
     write_blob(&db2, &ld, &lazy, &[7u8; 500])
         .await
@@ -925,56 +1104,69 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     pin(&db2, &ld, &storage, std::slice::from_ref(&lazy))
         .await
         .expect("user-pin the lazy blob");
-    assert!(ld.pinned_blob_path("usr0bbbb").unwrap().exists());
+    assert!(ld.pinned_blob_path("audio", "usr0bbbb").unwrap().exists());
 
-    // Flood the evictable cache, then evict to a tiny budget. The pinned files live
-    // in pinned/ — the sweep never touches them.
-    stage_with_mtime(&db2, &ld, "junk1ccc", &[1u8; 1000], 1000).await;
-    stage_with_mtime(&db2, &ld, "junk2ddd", &[2u8; 1000], 2000).await;
-    db2.set_max_cache_size(10).await.expect("set tiny budget");
-    evict_to_budget(&db2, &ld, None)
+    // Flood BOTH namespaces' evictable caches, set a tiny budget on EACH, and sweep
+    // each. The pinned files live in pinned/ — the per-namespace sweep never touches
+    // them, whichever namespace's budget runs.
+    stage_with_mtime(&db2, &ld, "photos", "junkp1cc", &[1u8; 1000], 1000).await;
+    stage_with_mtime(&db2, &ld, "audio", "junka1cc", &[2u8; 1000], 2000).await;
+    db2.set_cache_budget("photos", 10)
         .await
-        .expect("evict to budget");
+        .expect("set tiny photos budget");
+    db2.set_cache_budget("audio", 10)
+        .await
+        .expect("set tiny audio budget");
+    evict_to_budget(&db2, &ld, "photos", None)
+        .await
+        .expect("evict photos to budget");
+    evict_to_budget(&db2, &ld, "audio", None)
+        .await
+        .expect("evict audio to budget");
 
     assert!(
-        ld.pinned_blob_path("mir0aaaa").unwrap().exists(),
-        "a pinned CacheEager blob survives eviction (it is in pinned/)",
+        ld.pinned_blob_path("photos", "mir0aaaa").unwrap().exists(),
+        "a pinned CacheEager blob survives its namespace's eviction (it is in pinned/)",
     );
     assert!(
-        ld.pinned_blob_path("usr0bbbb").unwrap().exists(),
-        "a user-pinned CacheLazy blob survives eviction (it is in pinned/)",
+        ld.pinned_blob_path("audio", "usr0bbbb").unwrap().exists(),
+        "a user-pinned CacheLazy blob survives its namespace's eviction (it is in pinned/)",
     );
     assert!(
-        cache_total_bytes(&ld) <= 10,
-        "the evictable cache is trimmed to budget, ignoring pinned/",
+        cache_total_bytes(&ld, "photos") <= 10,
+        "the photos evictable cache is trimmed to budget, ignoring pinned/",
+    );
+    assert!(
+        cache_total_bytes(&ld, "audio") <= 10,
+        "the audio evictable cache is trimmed to budget, ignoring pinned/",
     );
 }
 
-/// With no `max_cache_size` set the cache is unlimited: even a large cache and an
-/// explicit eviction sweep leave every file in place. The host opts into a budget;
-/// until then nothing is evicted.
+/// With no budget set for a namespace its cache is unlimited: even a large cache and
+/// an explicit eviction sweep leave every file in place. The host opts a namespace
+/// into a budget; until then nothing in it is evicted.
 #[tokio::test]
-async fn unset_max_cache_size_never_evicts() {
+async fn unset_namespace_budget_never_evicts() {
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
 
-    stage_with_mtime(&db, &ld, "keep1aaa", &[1u8; 5000], 1000).await;
-    stage_with_mtime(&db, &ld, "keep2bbb", &[2u8; 5000], 2000).await;
-    stage_with_mtime(&db, &ld, "keep3ccc", &[3u8; 5000], 3000).await;
-    assert_eq!(cache_total_bytes(&ld), 15000);
+    stage_with_mtime(&db, &ld, "release_files", "keep1aaa", &[1u8; 5000], 1000).await;
+    stage_with_mtime(&db, &ld, "release_files", "keep2bbb", &[2u8; 5000], 2000).await;
+    stage_with_mtime(&db, &ld, "release_files", "keep3ccc", &[3u8; 5000], 3000).await;
+    assert_eq!(cache_total_bytes(&ld, "release_files"), 15000);
 
-    // No budget set anywhere — an explicit sweep is a no-op.
-    evict_to_budget(&db, &ld, None)
+    // No budget set for this namespace — an explicit sweep is a no-op.
+    evict_to_budget(&db, &ld, "release_files", None)
         .await
         .expect("evict is a no-op with no budget");
     assert_eq!(
-        cache_total_bytes(&ld),
+        cache_total_bytes(&ld, "release_files"),
         15000,
         "a big cache stays whole when no budget is set",
     );
     for id in ["keep1aaa", "keep2bbb", "keep3ccc"] {
         assert!(
-            ld.cache_blob_path(id).unwrap().exists(),
+            ld.cache_blob_path("release_files", id).unwrap().exists(),
             "{id} survives with no budget",
         );
     }
@@ -991,14 +1183,16 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
     let (_tmp, ld) = temp_library_dir();
 
     // An older cached file (100 bytes, old mtime), no budget yet.
-    stage_with_mtime(&db, &ld, "older1aa", &[1u8; 100], 1000).await;
+    stage_with_mtime(&db, &ld, "release_files", "older1aa", &[1u8; 100], 1000).await;
 
     // Budget of 150 bytes: holds either file alone, not both. Now a read fetches a
     // second 100-byte blob; populating it pushes the total to 200 (> 150), so the
     // read's own eviction must drop the older file (the newest — the one just
     // read — survives).
-    db.set_max_cache_size(150).await.expect("set budget");
-    let blob = blob_ref("newer2bb", "audio", CacheFill::CacheLazy);
+    db.set_cache_budget("release_files", 150)
+        .await
+        .expect("set budget");
+    let blob = blob_ref("newer2bb", "release_files", CacheFill::CacheLazy);
     let bytes = vec![2u8; 100];
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -1007,22 +1201,27 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         .expect("read fetches and populates, then evicts to budget");
     assert_eq!(got, bytes, "the triggering read still returns its bytes");
     assert!(
-        ld.cache_blob_path("newer2bb").unwrap().exists(),
+        ld.cache_blob_path("release_files", "newer2bb")
+            .unwrap()
+            .exists(),
         "the just-populated (newest) blob survives its own over-budget eviction",
     );
     assert!(
-        !ld.cache_blob_path("older1aa").unwrap().exists(),
+        !ld.cache_blob_path("release_files", "older1aa")
+            .unwrap()
+            .exists(),
         "the older blob is the one evicted",
     );
     assert!(
-        cache_total_bytes(&ld) <= 150,
+        cache_total_bytes(&ld, "release_files") <= 150,
         "the cache is back within budget after the read-triggered eviction",
     );
 }
 
 /// The budget never drifts over: after a sequence of over-budget populates (each a
-/// `read_blob` miss that fetches a new blob), the summed `cache/` size is `<=
-/// max_cache_size` every time, because each populate's own sweep trims back to it.
+/// `read_blob` miss that fetches a new blob), the summed `cache/<namespace>/` size is
+/// `<=` the namespace budget every time, because each populate's own sweep trims back
+/// to it.
 #[tokio::test]
 async fn budget_never_drifts_over_across_repeated_populates() {
     let db = open_test_db();
@@ -1030,13 +1229,15 @@ async fn budget_never_drifts_over_across_repeated_populates() {
     let (_tmp, ld) = temp_library_dir();
 
     // Budget of 250 bytes; each blob is 100 bytes, so at most two fit.
-    db.set_max_cache_size(250).await.expect("set budget");
+    db.set_cache_budget("release_files", 250)
+        .await
+        .expect("set budget");
 
     for i in 0..6u8 {
         let id = format!("seqr{i:04}"); // ≥4 chars, distinct per i, for the shard
         let bytes = vec![i; 100];
-        put_cloud_blob(&storage, &id, "audio", &bytes).await;
-        let blob = blob_ref(&id, "audio", CacheFill::CacheLazy);
+        put_cloud_blob(&storage, &id, "release_files", &bytes).await;
+        let blob = blob_ref(&id, "release_files", CacheFill::CacheLazy);
 
         let got = read_blob(&db, &ld, &storage, &blob)
             .await
@@ -1046,7 +1247,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         // The cache is within budget after every populate, never drifting over as
         // new blobs arrive.
         assert!(
-            cache_total_bytes(&ld) <= 250,
+            cache_total_bytes(&ld, "release_files") <= 250,
             "after populate {i} the cache is within the 250-byte budget",
         );
     }
@@ -1055,15 +1256,19 @@ async fn budget_never_drifts_over_across_repeated_populates() {
     // budget and 100-byte blobs, at most two fit, so after six reads the earliest
     // blobs must have been evicted and the just-read last blob must still be present.
     assert!(
-        cache_total_bytes(&ld) <= 200,
+        cache_total_bytes(&ld, "release_files") <= 200,
         "at most two 100-byte blobs remain under the 250-byte budget",
     );
     assert!(
-        !ld.cache_blob_path("seqr0000").unwrap().exists(),
+        !ld.cache_blob_path("release_files", "seqr0000")
+            .unwrap()
+            .exists(),
         "the first blob read was evicted by later populates",
     );
     assert!(
-        ld.cache_blob_path("seqr0005").unwrap().exists(),
+        ld.cache_blob_path("release_files", "seqr0005")
+            .unwrap()
+            .exists(),
         "the most-recently read blob is still cached",
     );
 }
@@ -1082,26 +1287,32 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
 
     // Two 100-byte files. The protected one is OLDER (mtime 1000); the other is
     // NEWER (mtime 2000). A naive oldest-first sweep would evict the protected one.
-    stage_with_mtime(&db, &ld, "prot0aaa", &[1u8; 100], 1000).await;
-    stage_with_mtime(&db, &ld, "othr0bbb", &[2u8; 100], 2000).await;
+    stage_with_mtime(&db, &ld, "release_files", "prot0aaa", &[1u8; 100], 1000).await;
+    stage_with_mtime(&db, &ld, "release_files", "othr0bbb", &[2u8; 100], 2000).await;
 
     // Budget of 100 bytes: exactly one file fits, so one must be evicted.
-    db.set_max_cache_size(100).await.expect("set budget");
-    let protected = ld.cache_blob_path("prot0aaa").unwrap();
-    evict_to_budget(&db, &ld, Some(&protected))
+    db.set_cache_budget("release_files", 100)
+        .await
+        .expect("set budget");
+    let protected = ld.cache_blob_path("release_files", "prot0aaa").unwrap();
+    evict_to_budget(&db, &ld, "release_files", Some(&protected))
         .await
         .expect("evict to budget, protecting the older file");
 
     assert!(
-        ld.cache_blob_path("prot0aaa").unwrap().exists(),
+        ld.cache_blob_path("release_files", "prot0aaa")
+            .unwrap()
+            .exists(),
         "the protected file survives even though it is the older by mtime",
     );
     assert!(
-        !ld.cache_blob_path("othr0bbb").unwrap().exists(),
+        !ld.cache_blob_path("release_files", "othr0bbb")
+            .unwrap()
+            .exists(),
         "the newer, unprotected file is the one evicted instead",
     );
     assert!(
-        cache_total_bytes(&ld) <= 100,
+        cache_total_bytes(&ld, "release_files") <= 100,
         "the cache is within budget after the protected eviction",
     );
 }
@@ -1118,25 +1329,31 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
 
     // A 100-byte protected file plus a 100-byte evictable one. The protected file
     // alone (100 bytes) is larger than the 50-byte budget.
-    stage_with_mtime(&db, &ld, "biginuse", &[1u8; 100], 1000).await;
-    stage_with_mtime(&db, &ld, "othr0bbb", &[2u8; 100], 2000).await;
+    stage_with_mtime(&db, &ld, "release_files", "biginuse", &[1u8; 100], 1000).await;
+    stage_with_mtime(&db, &ld, "release_files", "othr0bbb", &[2u8; 100], 2000).await;
 
-    db.set_max_cache_size(50).await.expect("set budget");
-    let protected = ld.cache_blob_path("biginuse").unwrap();
-    evict_to_budget(&db, &ld, Some(&protected))
+    db.set_cache_budget("release_files", 50)
+        .await
+        .expect("set budget");
+    let protected = ld.cache_blob_path("release_files", "biginuse").unwrap();
+    evict_to_budget(&db, &ld, "release_files", Some(&protected))
         .await
         .expect("eviction returns Ok even when the in-use file alone exceeds budget");
 
     assert!(
-        ld.cache_blob_path("biginuse").unwrap().exists(),
+        ld.cache_blob_path("release_files", "biginuse")
+            .unwrap()
+            .exists(),
         "the protected in-use file is kept even though it alone exceeds the budget",
     );
     assert!(
-        !ld.cache_blob_path("othr0bbb").unwrap().exists(),
+        !ld.cache_blob_path("release_files", "othr0bbb")
+            .unwrap()
+            .exists(),
         "every other candidate is still evicted",
     );
     assert_eq!(
-        cache_total_bytes(&ld),
+        cache_total_bytes(&ld, "release_files"),
         100,
         "the cache is left over budget, holding exactly the in-use file",
     );

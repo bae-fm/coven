@@ -87,8 +87,12 @@ async fn local_store_blob_survives_an_evict_to_budget_sweep() {
     write_blob(&db, &ld, &cache_blob, &vec![1u8; 4000])
         .await
         .expect("write a cache file");
-    db.set_max_cache_size(10).await.expect("set a tiny budget");
-    evict_to_budget(&db, &ld, None).await.expect("evict");
+    db.set_cache_budget("audio", 10)
+        .await
+        .expect("set a tiny budget");
+    evict_to_budget(&db, &ld, "audio", None)
+        .await
+        .expect("evict");
 
     assert!(
         ld.local_blob_path("covers", "keep0aaa").unwrap().exists(),

@@ -195,7 +195,9 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     run_cycle(&storage_a, &db_a, "device-a", &lib_a).await;
 
     // B has not pulled, so the blob is not in B's cache yet.
-    let b_cache = lib_b.cache_blob_path("photo-1").expect("cache blob path");
+    let b_cache = lib_b
+        .cache_blob_path("photos", "photo-1")
+        .expect("cache blob path");
     assert_eq!(
         crate::local_blob::exists(&b_cache).await,
         Ok(false),

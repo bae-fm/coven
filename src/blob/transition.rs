@@ -209,7 +209,7 @@ pub async fn make_remote(
     // Verify each external source and derive its cloud key up front: any miss aborts
     // before a single upload is enqueued, so a make_remote either queues whole or not
     // at all.
-    let mut uploads: Vec<(String, String, String, crate::blob::BlobScope)> = Vec::new();
+    let mut uploads: Vec<(String, String, String, String, crate::blob::BlobScope)> = Vec::new();
     for blob in &user_provided {
         let ext = db
             .external_blob(&blob.id)
@@ -241,6 +241,7 @@ pub async fn make_remote(
         })?;
         uploads.push((
             blob.id.clone(),
+            blob.namespace.clone(),
             cloud_key,
             source.to_string(),
             blob.scope.clone(),
@@ -252,11 +253,12 @@ pub async fn make_remote(
     db.call(move |conn| {
         let tx = conn.unchecked_transaction()?;
         Database::insert_make_remote_intent_on(&tx, &root_table, &root_id)?;
-        for (id, cloud_key, source, scope) in &uploads {
+        for (id, namespace, cloud_key, source, scope) in &uploads {
             Database::enqueue_upload_on(
                 &tx,
                 id,
                 cloud_key,
+                namespace,
                 Some(source),
                 scope.clone(),
                 pin,
@@ -299,24 +301,25 @@ pub async fn cancel_make_remote(
     root_id: &str,
 ) -> Result<(), MakeRemoteError> {
     let user_provided = user_provided_root_refs(db, root_table, root_id).await?;
-    // The cloud key per blob (derived outside the closure, which can't reach the
-    // home's path scheme).
-    let mut keyed: Vec<(String, String)> = Vec::new();
+    // The cloud key + cache namespace per blob (derived outside the closure, which
+    // can't reach the home's path scheme; the namespace places the post-commit cache
+    // drop under the segmented `storage/cache/<namespace>/<id>`).
+    let mut keyed: Vec<(String, String, String)> = Vec::new();
     for blob in &user_provided {
         let cloud_key = cloud_key_for(scheme, blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
-        keyed.push((blob.id.clone(), cloud_key));
+        keyed.push((blob.id.clone(), blob.namespace.clone(), cloud_key));
     }
 
     let now = hlc.now().to_string();
     let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
-    // Returns the ids of blobs that were already uploaded (so their cache copies are
-    // dropped post-commit).
-    let dropped: Vec<String> = db
+    // Returns the (id, namespace) of blobs that were already uploaded (so their cache
+    // copies are dropped post-commit).
+    let dropped: Vec<(String, String)> = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let mut dropped = Vec::new();
-            for (id, cloud_key) in &keyed {
+            for (id, namespace, cloud_key) in &keyed {
                 let still_pending: bool = tx
                     .query_row(
                         "SELECT 1 FROM cloud_outbox WHERE operation = 'upload' AND file_id = ?1",
@@ -336,7 +339,7 @@ pub async fn cancel_make_remote(
                 } else {
                     // Already uploaded: tombstone the cloud blob and drop its cache.
                     Database::enqueue_delete_on(&tx, cloud_key, &now)?;
-                    dropped.push(id.clone());
+                    dropped.push((id.clone(), namespace.clone()));
                 }
             }
             Database::delete_make_remote_intent_on(&tx, &root_table_owned, &root_id_owned)?;
@@ -345,8 +348,8 @@ pub async fn cancel_make_remote(
         })
         .await?;
 
-    for id in dropped {
-        if let Err(e) = cache::drop_cached_blob(library_dir, &id).await {
+    for (id, namespace) in dropped {
+        if let Err(e) = cache::drop_cached_blob(library_dir, &namespace, &id).await {
             tracing::warn!("cancel_make_remote: failed to drop cache copy of {id}: {e}");
         }
     }
@@ -402,6 +405,16 @@ impl Materialized {
         match self {
             Materialized::UserProvided { blob, .. } | Materialized::HostProvided { blob, .. } => {
                 &blob.id
+            }
+        }
+    }
+
+    /// The blob's cache namespace, for the post-commit cache drop (both variants):
+    /// the cache copy lives under the segmented `storage/cache/<namespace>/<id>`.
+    fn namespace(&self) -> &str {
+        match self {
+            Materialized::UserProvided { blob, .. } | Materialized::HostProvided { blob, .. } => {
+                &blob.namespace
             }
         }
     }
@@ -589,7 +602,7 @@ pub async fn make_local(
     // pure redundancy — drop them. A failure leaves only stray cache space; a read
     // serves the local file. Log and go on.
     for m in &materialized {
-        if let Err(e) = cache::drop_cached_blob(library_dir, m.blob_id()).await {
+        if let Err(e) = cache::drop_cached_blob(library_dir, m.namespace(), m.blob_id()).await {
             tracing::warn!(
                 "make_local: failed to drop cache copy of {}: {e}",
                 m.blob_id()

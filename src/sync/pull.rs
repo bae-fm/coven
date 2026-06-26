@@ -1028,7 +1028,7 @@ async fn drop_deleted_blob_local(
         let Some(blob) = blob_decls.ref_from_change(change) else {
             continue;
         };
-        crate::blob::cache::drop_cached_blob(library_dir, &blob.id).await?;
+        crate::blob::cache::drop_cached_blob(library_dir, &blob.namespace, &blob.id).await?;
         crate::blob::local_files::drop_blob(library_dir, &blob.namespace, &blob.id)
             .await
             .map_err(crate::blob::cache::BlobCacheError::from)?;
@@ -1057,17 +1057,19 @@ async fn resolve_pull_scope(
     }
 }
 
-/// Download each blob in `blobs` into the evictable cache `storage/cache/<id>` under
-/// `library_dir`, decrypting via storage (which returns plaintext) and writing the
-/// bytes atomically. Returns true if every blob succeeded. Skips blobs already
-/// present in either cache folder (`pinned/` or `cache/`).
+/// Download each blob in `blobs` into the evictable cache
+/// `storage/cache/<namespace>/<id>` under `library_dir`, decrypting via storage
+/// (which returns plaintext) and writing the bytes atomically. Returns true if every
+/// blob succeeded. Skips blobs already present in either cache folder (`pinned/` or
+/// `cache/`).
 ///
 /// Only `CacheEager` blobs reach here (callers filter). On a peer the release is
 /// Remote, so a `CacheEager` blob's bytes are a cache copy — evictable +
-/// re-fetchable, not pinned: it lands in `storage/cache/<id>`. (A cover that later
-/// falls out of the cache budget shows a placeholder until the next read re-fetches
-/// it; covers are not pinned.) The destination is coven-built from the validated
-/// blob id.
+/// re-fetchable, not pinned: it lands in `storage/cache/<namespace>/<id>`, where it
+/// evicts against its own namespace's budget (a cover never wiped by audio pressure).
+/// (A cover that later falls out of that budget shows a placeholder until the next
+/// read re-fetches it; covers are not pinned.) The destination is coven-built from
+/// the validated namespace + blob id.
 ///
 /// Each blob's public scope is resolved to the internal key scope here — the blob
 /// declaration carries no key — via [`resolve_pull_scope`], which consults
@@ -1116,12 +1118,13 @@ pub(crate) async fn download_blobs(
             }
         }
 
-        // The coven-built destination: the evictable cache `storage/cache/<id>`.
-        // Building it validates the id again (and that it can form the `{ab}/{cd}`
-        // shard); a failure is the same bad-data refusal as the token check above. A
-        // pinned copy (in `pinned/`) is checked for presence below but never written
-        // here — a pull populates the evictable cache, never the kept folder.
-        let dest = match library_dir.cache_blob_path(&blob.id) {
+        // The coven-built destination: the evictable cache
+        // `storage/cache/<namespace>/<id>`. Building it validates the namespace and id
+        // again (and that the id can form the `{ab}/{cd}` shard); a failure is the
+        // same bad-data refusal as the token check above. A pinned copy (in
+        // `pinned/`) is checked for presence below but never written here — a pull
+        // populates the evictable cache, never the kept folder.
+        let dest = match library_dir.cache_blob_path(&blob.namespace, &blob.id) {
             Ok(p) => p,
             Err(e) => {
                 error!(id = %blob.id, "cannot build cache blob path ({e}); refusing");
@@ -1129,7 +1132,7 @@ pub(crate) async fn download_blobs(
                 continue;
             }
         };
-        let pinned = match library_dir.pinned_blob_path(&blob.id) {
+        let pinned = match library_dir.pinned_blob_path(&blob.namespace, &blob.id) {
             Ok(p) => p,
             Err(e) => {
                 error!(id = %blob.id, "cannot build pinned blob path ({e}); refusing");

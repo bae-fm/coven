@@ -146,7 +146,13 @@ impl SyncService {
                 let was_in_local_store = local.is_some();
                 let bytes = match local {
                     Some(bytes) => bytes,
-                    None => match crate::blob::cache::read_staged(library_dir, &blob.id).await {
+                    None => match crate::blob::cache::read_staged(
+                        library_dir,
+                        &blob.namespace,
+                        &blob.id,
+                    )
+                    .await
+                    {
                         Ok(Some(bytes)) => bytes,
                         Ok(None) => {
                             error!(

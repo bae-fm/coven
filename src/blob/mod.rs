@@ -43,8 +43,8 @@
 //!    ├─ Local → Remote   upload the bytes; now cache-distributed to every device per cache fill
 //!    └─ Remote → Local   bring the bytes back to a local file — path required iff user-provided
 //!
-//! cache budget   a single device-local size limit over `storage/cache`; when the
-//!                total exceeds it the oldest cache copies are evicted
+//! cache budget   per-NAMESPACE size limit; each namespace evicts independently, so
+//!                evicting release_files (big) never touches covers (small reserved slice)
 //! pin            keep one specific Remote blob's cache copy from eviction (e.g. a
 //!                release the user pinned for offline)
 //! ```
@@ -52,11 +52,16 @@
 //! ## The cache vs local files
 //!
 //! The cache holds local copies of **Remote** blobs (filled per `cache fill`,
-//! evicted per budget unless pinned). A **Local** blob is not in the cache: a
-//! user-provided Local blob is the user's file at its path (an external ref); a
-//! host-provided Local blob is in coven's local store (see [`local_files`]). The
-//! cache is the mechanism for *remoteness* — so `CacheEager`/`CacheLazy`/pin/budget
-//! describe a blob only while it is Remote, never while it is Local.
+//! evicted per budget unless pinned). It is **segmented by namespace**: each
+//! namespace has its own configurable cache budget and evicts independently, so
+//! evicting `release_files` (big) never touches `covers` (a small reserved slice). A
+//! `CacheEager` cover that falls out of its namespace budget shows a placeholder
+//! until the next read re-fetches it — covers are not pinned. A **Local** blob is not
+//! in the cache: a user-provided Local blob is the user's file at its path (an
+//! external ref); a host-provided Local blob is in coven's local store (see
+//! [`local_files`]). The cache is the mechanism for *remoteness* — so
+//! `CacheEager`/`CacheLazy`/pin/budget describe a blob only while it is Remote, never
+//! while it is Local.
 //!
 //! # The engine's halves
 //!

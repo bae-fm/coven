@@ -60,6 +60,7 @@ async fn seed_pending_upload(db: &Database) {
     db.enqueue_upload(
         "f1",
         "storage/aa/bb/f1",
+        "release_files",
         Some("/nonexistent/f1"),
         BlobScope::Master,
         false,

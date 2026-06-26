@@ -9,12 +9,14 @@
 //! describe a blob only while it is Remote.
 //!
 //! There is no cache table. A cached Remote blob is in **exactly one** of two
-//! folders under the library dir, or in neither:
+//! folders under the library dir, or in neither. Both are segmented by the blob's
+//! namespace, so each namespace's cache evicts against its own budget without
+//! touching another's:
 //!
-//! - `storage/pinned/{ab}/{cd}/<id>` — kept, budget-exempt. A Remote blob's cache
-//!   copy the user pinned for offline (kept from eviction).
-//! - `storage/cache/{ab}/{cd}/<id>` — opportunistic, evictable. A blob fetched on
-//!   read (`CacheLazy`) or eagerly on pull (`CacheEager`).
+//! - `storage/pinned/<namespace>/{ab}/{cd}/<id>` — kept, budget-exempt. A Remote
+//!   blob's cache copy the user pinned for offline (kept from eviction).
+//! - `storage/cache/<namespace>/{ab}/{cd}/<id>` — opportunistic, evictable. A blob
+//!   fetched on read (`CacheLazy`) or eagerly on pull (`CacheEager`).
 //! - neither — not cached. No file; fetched from the cloud on the next read.
 //!
 //! Presence is the file on disk; kept-ness is which folder. Nothing the two
@@ -36,29 +38,40 @@
 //! decrypts but populates nothing — a partial file would be read as the whole blob,
 //! since presence is the only truth).
 //!
-//! The cache has a size budget, `max_cache_size`, the host sets per device (see
-//! [`Database::set_max_cache_size`]). It counts **only** the files under `cache/`
-//! — `pinned/` is structurally exempt, and `storage/local` (the local store) is
-//! never walked at all. After every populate ([`read_blob`]'s miss-write and
-//! [`write_blob`]), [`evict_to_budget`] sums the `cache/` files and, if their total
-//! exceeds the budget, deletes the oldest by modification time until the total is
-//! back under it. Modification time is the recency proxy — there is no
-//! `last_accessed` column, the same folder-truth trade-off the whole cache makes;
-//! pinning retains the Remote blobs the user chose to keep local. With the budget
-//! unset eviction is off and the cache grows without bound. [`clear_cache`] drops
-//! all of `cache/` in one sweep regardless of the budget; a pinned blob (in
-//! `pinned/`) survives either way because it lives in the other folder.
+//! The cache has a **per-namespace** size budget the host sets per device (see
+//! [`Database::set_cache_budget`]), so a small namespace (`covers`) is never wiped by
+//! pressure from a big one (`release_files`). A namespace's budget counts **only**
+//! the files under `cache/<namespace>/` — `pinned/` is structurally exempt, and
+//! `storage/local` (the local store) is never walked at all. After every populate
+//! into a namespace ([`read_blob`]'s miss-write and [`write_blob`]),
+//! [`evict_to_budget`] sums that namespace's `cache/<namespace>/` files and, if their
+//! total exceeds its budget, deletes the oldest by modification time until the total
+//! is back under it — touching only that namespace's subtree. Modification time is
+//! the recency proxy — there is no `last_accessed` column, the same folder-truth
+//! trade-off the whole cache makes; pinning retains the Remote blobs the user chose
+//! to keep local. With a namespace's budget unset eviction is off for it and its
+//! cache grows without bound. [`clear_cache`] drops all of `cache/` (every namespace)
+//! in one sweep regardless of any budget; a pinned blob (in `pinned/`) survives
+//! either way because it lives in the other folder.
 
 use crate::blob::BlobRef;
 use crate::database::Database;
 use crate::library_dir::{LibraryDir, PathTokenError};
 use crate::sync::storage::{StorageError, SyncStorage};
 
-/// `sync_state` key holding the device-local cache-size budget in bytes (a single
-/// decimal value, not per-blob accounting). Absent ⇒ no budget ⇒ eviction off.
-/// Read/written through [`Database::get_max_cache_size`] /
-/// [`Database::set_max_cache_size`].
-pub const MAX_CACHE_SIZE_STATE_KEY: &str = "max_cache_size";
+/// Prefix for the `sync_state` keys holding each namespace's device-local cache-size
+/// budget in bytes (a single decimal value per namespace, not per-blob accounting).
+/// The key for one namespace is [`cache_budget_state_key`]. A namespace with no such
+/// key has no budget ⇒ eviction off for it ⇒ that namespace's cache grows unbounded.
+/// Read/written through [`Database::get_cache_budget`] /
+/// [`Database::set_cache_budget`].
+pub const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
+
+/// The `sync_state` key holding `namespace`'s cache-size budget. Namespaces are safe
+/// path tokens (no `:`), so the `cache_budget:` prefix never collides with one.
+pub fn cache_budget_state_key(namespace: &str) -> String {
+    format!("{CACHE_BUDGET_STATE_KEY_PREFIX}{namespace}")
+}
 
 /// Why a blob-cache operation failed.
 #[derive(Debug)]
@@ -148,9 +161,10 @@ impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
 /// the inline push moving a just-uploaded host-provided blob's local-store copy
 /// into the cache — so the cache is populated on write rather than fetch-on-read.
 ///
-/// After the bytes land, [`evict_to_budget`] runs so a write that pushes `cache/`
-/// over `max_cache_size` evicts its oldest files back under budget (a no-op when
-/// no budget is set). The just-written file is passed as `protect`, so it is
+/// After the bytes land, [`evict_to_budget`] runs so a write that pushes the blob's
+/// namespace cache over that namespace's budget evicts its oldest files back under
+/// budget (a no-op when the namespace has no budget set). The just-written file is
+/// passed as `protect`, so it is
 /// excluded from eviction — this write can never drop the very bytes it produced.
 /// Eviction is best-effort: the write has already succeeded, so an eviction failure
 /// is logged and swallowed, not returned (see below).
@@ -160,20 +174,20 @@ pub async fn write_blob(
     blob: &BlobRef,
     bytes: &[u8],
 ) -> Result<(), BlobCacheError> {
-    let dest = library_dir.cache_blob_path(&blob.id)?;
+    let dest = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
     crate::local_blob::write_atomic(&dest, bytes)
         .await
         .map_err(BlobCacheError::Io)?;
-    // The write into `cache/` may have pushed it over budget; evict the oldest
-    // files back under it, never the file just written (passed as `protect`). A
-    // no-op when no budget is set.
+    // The write into `cache/<namespace>/` may have pushed that namespace over its
+    // budget; evict its oldest files back under it, never the file just written
+    // (passed as `protect`). A no-op when the namespace has no budget set.
     //
     // Eviction is best-effort and must not fail the write: the write above already
     // succeeded, so the bytes are durably in `cache/`. The cache being briefly over
     // its budget is not wrong state — it self-corrects on the next populate's sweep —
     // so failing a successful write because cleanup failed would be wrong. Log and
     // continue.
-    if let Err(e) = evict_to_budget(db, library_dir, Some(&dest)).await {
+    if let Err(e) = evict_to_budget(db, library_dir, &blob.namespace, Some(&dest)).await {
         tracing::warn!(
             "write_blob: wrote {} but eviction failed (cache may be over budget until the next populate): {e}",
             dest.display()
@@ -200,10 +214,11 @@ pub async fn write_blob(
 /// relies on.
 pub(crate) async fn populate_pinned(
     library_dir: &LibraryDir,
+    namespace: &str,
     id: &str,
     plaintext: &[u8],
 ) -> Result<(), BlobCacheError> {
-    let dest = library_dir.pinned_blob_path(id)?;
+    let dest = library_dir.pinned_blob_path(namespace, id)?;
     crate::local_blob::write_atomic(&dest, plaintext)
         .await
         .map_err(BlobCacheError::Io)
@@ -219,10 +234,11 @@ pub(crate) async fn populate_pinned(
 /// publishing a row whose blob never reached the cloud.
 pub async fn read_staged(
     library_dir: &LibraryDir,
+    namespace: &str,
     id: &str,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
-    let pinned = library_dir.pinned_blob_path(id)?;
-    let cache = library_dir.cache_blob_path(id)?;
+    let pinned = library_dir.pinned_blob_path(namespace, id)?;
+    let cache = library_dir.cache_blob_path(namespace, id)?;
     for path in [&pinned, &cache] {
         match crate::local_blob::exists(path).await {
             Ok(true) => {
@@ -249,10 +265,14 @@ pub async fn read_staged(
 ///
 /// An absent file in either folder is the expected case (a blob is in at most one
 /// folder, or neither), not an error. Every other I/O failure is surfaced.
-pub async fn drop_cached_blob(library_dir: &LibraryDir, id: &str) -> Result<(), BlobCacheError> {
+pub async fn drop_cached_blob(
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+) -> Result<(), BlobCacheError> {
     for path in [
-        library_dir.pinned_blob_path(id)?,
-        library_dir.cache_blob_path(id)?,
+        library_dir.pinned_blob_path(namespace, id)?,
+        library_dir.cache_blob_path(namespace, id)?,
     ] {
         // An absent file in either folder is the expected case (`remove_file`
         // reports it as `Ok(false)`, not an error); every real I/O failure surfaces.
@@ -309,8 +329,8 @@ pub async fn read_blob(
         return Ok(bytes);
     }
 
-    let pinned = library_dir.pinned_blob_path(&blob.id)?;
-    let cache = library_dir.cache_blob_path(&blob.id)?;
+    let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+    let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
     // A hit in either folder serves the file. Check pinned first only because that
     // is where a kept-local blob is the common case; either location is equally a
@@ -344,7 +364,7 @@ pub async fn read_blob(
     // briefly over its budget is not wrong state — it self-corrects on the next
     // populate's sweep — so failing a successful read because cleanup failed would be
     // wrong. Log and return the bytes anyway.
-    if let Err(e) = evict_to_budget(db, library_dir, Some(&cache)).await {
+    if let Err(e) = evict_to_budget(db, library_dir, &blob.namespace, Some(&cache)).await {
         tracing::warn!(
             "read_blob: populated {} but eviction failed (cache may be over budget until the next populate): {e}",
             cache.display()
@@ -435,8 +455,8 @@ pub async fn open_blob_stream(
         return Ok(bytes);
     }
 
-    let pinned = library_dir.pinned_blob_path(&blob.id)?;
-    let cache = library_dir.cache_blob_path(&blob.id)?;
+    let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+    let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
     // A hit in either folder serves the slice from the local plaintext file. The
     // file is the whole blob (cache writes are whole-file), so the validated range
@@ -495,7 +515,7 @@ pub async fn move_local_into_cache(
     id: &str,
 ) -> Result<(), BlobCacheError> {
     let from = library_dir.local_blob_path(namespace, id)?;
-    let to = library_dir.cache_blob_path(id)?;
+    let to = library_dir.cache_blob_path(namespace, id)?;
     rename_within_storage(&from, &to).await
 }
 
@@ -515,8 +535,8 @@ pub async fn pin(
     blobs: &[BlobRef],
 ) -> Result<(), BlobCacheError> {
     for blob in blobs {
-        let pinned = library_dir.pinned_blob_path(&blob.id)?;
-        let cache = library_dir.cache_blob_path(&blob.id)?;
+        let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+        let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
         // Already protected — idempotent no-op. A failure to even check existence
         // (broken filesystem) is surfaced, not collapsed into "absent": fetching and
@@ -560,8 +580,8 @@ pub async fn pin(
 /// pinned is simply a no-op (it is already as-evictable-as-it-gets).
 pub async fn unpin(library_dir: &LibraryDir, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
     for blob in blobs {
-        let pinned = library_dir.pinned_blob_path(&blob.id)?;
-        let cache = library_dir.cache_blob_path(&blob.id)?;
+        let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+        let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
         // Move it into the evictable cache if it is currently pinned. If it isn't in
         // `pinned/` (already in `cache/`, or remote), there is nothing to demote —
@@ -602,14 +622,19 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
     }
 }
 
-/// Evict the oldest files from `storage/cache/` until its total size is back within
-/// the device's `max_cache_size` budget. The cache layer's size enforcement, run
-/// synchronously after every populate ([`read_blob`]'s miss-write, [`write_blob`]).
+/// Evict the oldest files from `namespace`'s cache subtree
+/// (`storage/cache/<namespace>/`) until its total size is back within that
+/// namespace's [`Database::get_cache_budget`] budget. The cache layer's per-namespace
+/// size enforcement, run synchronously after every populate into that namespace
+/// ([`read_blob`]'s miss-write, [`write_blob`]).
 ///
-/// The budget counts **only** the files under `cache/` — `pinned/` is never walked
-/// (nor is the local store under `storage/local/`), so a pinned blob is structurally
-/// exempt and can never be evicted. With no budget set this is a no-op: the cache is
-/// unlimited until the host opts into one.
+/// Each namespace evicts independently against its own budget, walking **only** its
+/// own subtree: evicting `release_files` (big) never touches `covers` (a small
+/// reserved slice). The budget counts **only** the files under
+/// `cache/<namespace>/` — `pinned/` is never walked (nor is the local store under
+/// `storage/local/`), so a pinned blob is structurally exempt and can never be
+/// evicted. With no budget set for this namespace this is a no-op: that namespace's
+/// cache is unlimited until the host opts it into a budget.
 ///
 /// Recency is the file's modification time. There is no `last_accessed` column —
 /// the same folder-truth trade-off the whole cache makes — so the oldest-written
@@ -626,10 +651,10 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
 /// filesystem mtime tick would otherwise be unordered).
 ///
 /// If every evictable candidate is deleted and the total is still over budget — the
-/// protected in-use file alone exceeds `max_cache_size` — this returns `Ok(())` (the
-/// file being served can't be evicted), but logs that the cache stays over budget
-/// because a single in-use blob is larger than the whole budget. It is surfaced, not
-/// silently reported as if the budget were met.
+/// protected in-use file alone exceeds this namespace's budget — this returns
+/// `Ok(())` (the file being served can't be evicted), but logs that the cache stays
+/// over budget because a single in-use blob is larger than the whole budget. It is
+/// surfaced, not silently reported as if the budget were met.
 ///
 /// A file that has vanished by the time it is deleted (a concurrent `clear_cache`
 /// or sweep already removed it) is the one legitimate skip — logged at debug, its
@@ -639,19 +664,21 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
 pub async fn evict_to_budget(
     db: &Database,
     library_dir: &LibraryDir,
+    namespace: &str,
     protect: Option<&std::path::Path>,
 ) -> Result<(), BlobCacheError> {
     let budget = match db
-        .get_max_cache_size()
+        .get_cache_budget(namespace)
         .await
-        .map_err(|e| BlobCacheError::Io(format!("read max_cache_size: {e}")))?
+        .map_err(|e| BlobCacheError::Io(format!("read cache budget for {namespace:?}: {e}")))?
     {
         Some(budget) => budget,
-        // No budget set — the cache is unlimited, so there is nothing to enforce.
+        // This namespace has no budget set — its cache is unlimited, so there is
+        // nothing to enforce. Another namespace's budget never reaches here.
         None => return Ok(()),
     };
 
-    let mut entries = crate::local_blob::walk_files(&library_dir.cache_dir())
+    let mut entries = crate::local_blob::walk_files(&library_dir.cache_namespace_dir(namespace)?)
         .await
         .map_err(BlobCacheError::Io)?;
     // The protected file's bytes count toward the total it must fit under, but it is
@@ -703,9 +730,9 @@ pub async fn evict_to_budget(
     }
 
     // Every evictable candidate is gone and the cache is still over budget: the
-    // protected in-use file alone exceeds `max_cache_size`. We can't evict the file
-    // being served, so return Ok — but surface that the budget is unmet rather than
-    // reporting success silently.
+    // protected in-use file alone exceeds this namespace's budget. We can't evict the
+    // file being served, so return Ok — but surface that the budget is unmet rather
+    // than reporting success silently.
     if total > budget {
         tracing::warn!(
             "evict: cache stays {} bytes over budget ({total} > {budget}) — a single in-use blob exceeds the whole cache budget",

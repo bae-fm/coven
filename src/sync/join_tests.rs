@@ -348,7 +348,9 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     // lands in B's evictable cache folder (`storage/cache/<id>`) on reconciliation,
     // which coven builds from the validated id.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let expected_blob = lib_b.cache_blob_path("photo1").expect("cache blob path");
+    let expected_blob = lib_b
+        .cache_blob_path("photos", "photo1")
+        .expect("cache blob path");
 
     let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
         .await
@@ -445,7 +447,9 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     // download attempt fails.
     let (_tmp_b, lib_b) = temp_library_dir();
     // A reconciled `CacheEager` blob lands in B's evictable cache folder.
-    let expected_blob = lib_b.cache_blob_path("photo1").expect("cache blob path");
+    let expected_blob = lib_b
+        .cache_blob_path("photos", "photo1")
+        .expect("cache blob path");
 
     let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
         .await

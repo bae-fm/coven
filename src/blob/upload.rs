@@ -277,6 +277,7 @@ pub async fn drain_uploads(
         // `Delete` here would be a broken query invariant, not a skippable row.
         let OutboxOperation::Upload {
             file_id,
+            namespace,
             source_path,
             scope,
             retain_pinned,
@@ -340,8 +341,13 @@ pub async fn drain_uploads(
                 // logged and swallowed (a later read re-fetches into the cache)
                 // rather than failing a completed upload.
                 if let Some(plaintext) = plaintext_for_pin {
-                    if let Err(e) =
-                        crate::blob::cache::populate_pinned(library_dir, file_id, &plaintext).await
+                    if let Err(e) = crate::blob::cache::populate_pinned(
+                        library_dir,
+                        namespace,
+                        file_id,
+                        &plaintext,
+                    )
+                    .await
                     {
                         warn!(
                             "Upload of {} succeeded but pinning it into the local cache failed (a later read will re-fetch): {e}",
@@ -405,7 +411,8 @@ pub async fn drain_uploads(
                         // copy too (a `retain_pinned` upload populated `pinned/`,
                         // which is budget-exempt and would otherwise leak).
                         if let Err(e) =
-                            crate::blob::cache::drop_cached_blob(library_dir, file_id).await
+                            crate::blob::cache::drop_cached_blob(library_dir, namespace, file_id)
+                                .await
                         {
                             warn!("failed to drop the cache copy of orphaned blob {file_id}: {e}");
                         }

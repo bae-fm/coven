@@ -285,8 +285,8 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    let downloaded =
-        std::fs::read(ld.cache_blob_path("p1ab").expect("cache path")).expect("downloaded photo");
+    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
+        .expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
 }
 
@@ -402,8 +402,8 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     // ...but the blob was NOT downloaded to the puller's cache: CacheLazy is fetched
     // on first read, not eagerly on pull.
     assert!(
-        !ld.pinned_blob_path("audio1").unwrap().exists()
-            && !ld.cache_blob_path("audio1").unwrap().exists(),
+        !ld.pinned_blob_path("audio", "audio1").unwrap().exists()
+            && !ld.cache_blob_path("audio", "audio1").unwrap().exists(),
         "a CacheLazy blob must NOT be downloaded on pull — it stays in the cloud for on-demand fetch",
     );
 }
@@ -563,7 +563,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     // A `CacheEager` cover lands in B's evictable cache on pull.
-    let downloaded = std::fs::read(ld.cache_blob_path("p1cover").expect("cache path"))
+    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1cover").expect("cache path"))
         .expect("device B downloaded cover");
     assert_eq!(
         downloaded, plaintext,
@@ -666,7 +666,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         "WithPhoto"
     );
     // A `CacheEager` cover lands in B's evictable cache on pull.
-    let downloaded = std::fs::read(ld.cache_blob_path("p1cover").expect("cache path"))
+    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1cover").expect("cache path"))
         .expect("device B downloaded photo");
     assert_eq!(
         downloaded, plaintext,
@@ -711,7 +711,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let (_t, ld) = temp_library_dir();
     let (cursors, _) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
     assert!(
-        ld.cache_blob_path("pdel1234").unwrap().exists(),
+        ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
         "the cover lands in the evictable cache after the first pull",
     );
 
@@ -722,8 +722,8 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
 
     assert_eq!(result.changesets_applied, 1, "the DELETE changeset applied");
     assert!(
-        !ld.pinned_blob_path("pdel1234").unwrap().exists()
-            && !ld.cache_blob_path("pdel1234").unwrap().exists(),
+        !ld.pinned_blob_path("photos", "pdel1234").unwrap().exists()
+            && !ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
         "applying the blob-bearing DELETE drops the cache copies",
     );
 }
@@ -1726,8 +1726,8 @@ mod blob_path_traversal {
         assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
         assert!(!result.asset_downloads_failed);
         assert_eq!(updated.get("dev1"), Some(&1));
-        let written =
-            std::fs::read(ld.cache_blob_path("p1ab").expect("cache path")).expect("blob written");
+        let written = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
+            .expect("blob written");
         assert_eq!(
             written, b"PHOTOBYTES",
             "the blob lands in the evictable cache"

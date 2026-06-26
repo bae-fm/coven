@@ -75,9 +75,9 @@ async fn insert_upload(
         conn.execute(
             &format!(
                 "INSERT INTO cloud_outbox \
-                 (id, operation, file_id, cloud_key, source_path, scope, created_at, \
+                 (id, operation, file_id, cloud_key, namespace, source_path, scope, created_at, \
                   attempt_count, last_attempt_at) \
-                 VALUES (?1, 'upload', ?2, ?3, ?4, '{scope}', '2024-01-01T00:00:00Z', ?5, ?6)"
+                 VALUES (?1, 'upload', ?2, ?3, 'release_files', ?4, '{scope}', '2024-01-01T00:00:00Z', ?5, ?6)"
             ),
             rusqlite::params![
                 id,
@@ -639,6 +639,7 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     db.enqueue_upload(
         "file-1",
         cloud_key,
+        "release_files",
         Some(source.as_str()),
         crate::blob::BlobScope::Item("release-1".to_string()),
         false,
@@ -726,6 +727,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             &tx,
             "f-rollback",
             "k-rollback",
+            "release_files",
             None,
             crate::blob::BlobScope::Master,
             false,
@@ -743,6 +745,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             &tx,
             "f-commit",
             "k-commit",
+            "release_files",
             Some("/tmp/source.flac"),
             crate::blob::BlobScope::Item("rel-1".to_string()),
             false,
@@ -776,10 +779,12 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
 
     let db = open_outbox_db();
     let file_id = "pinaaaa1";
+    let namespace = "release_files";
     let cloud_key = "storage/pi/na/pinaaaa1";
     db.enqueue_upload(
         file_id,
         cloud_key,
+        namespace,
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         true, // retain_pinned
@@ -801,10 +806,10 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
 
     // The protected folder holds the PLAINTEXT (what the cache serves), written
     // straight from the drain's read — no cloud round-trip.
-    let pinned_path = ld.pinned_blob_path(file_id).unwrap();
+    let pinned_path = ld.pinned_blob_path(namespace, file_id).unwrap();
     assert!(
         pinned_path.exists(),
-        "a pinned upload writes storage/pinned/<id>",
+        "a pinned upload writes storage/pinned/<namespace>/<id>",
     );
     assert_eq!(
         std::fs::read(&pinned_path).unwrap(),
@@ -814,8 +819,8 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
 
     // The evictable cache is untouched: a pin populates pinned/, never cache/.
     assert!(
-        !ld.cache_blob_path(file_id).unwrap().exists(),
-        "a pinned upload does not populate the evictable storage/cache/<id>",
+        !ld.cache_blob_path(namespace, file_id).unwrap().exists(),
+        "a pinned upload does not populate the evictable storage/cache/<namespace>/<id>",
     );
 }
 
@@ -831,10 +836,12 @@ async fn unpinned_upload_populates_nothing_on_write() {
 
     let db = open_outbox_db();
     let file_id = "unpaaaa1";
+    let namespace = "release_files";
     let cloud_key = "storage/un/pa/unpaaaa1";
     db.enqueue_upload(
         file_id,
         cloud_key,
+        namespace,
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         false, // retain_pinned
@@ -853,12 +860,12 @@ async fn unpinned_upload_populates_nothing_on_write() {
 
     // Neither folder holds it: an unpinned upload writes no local cache copy.
     assert!(
-        !ld.pinned_blob_path(file_id).unwrap().exists(),
-        "an unpinned upload does not populate storage/pinned/<id>",
+        !ld.pinned_blob_path(namespace, file_id).unwrap().exists(),
+        "an unpinned upload does not populate storage/pinned/<namespace>/<id>",
     );
     assert!(
-        !ld.cache_blob_path(file_id).unwrap().exists(),
-        "an unpinned upload does not populate storage/cache/<id>",
+        !ld.cache_blob_path(namespace, file_id).unwrap().exists(),
+        "an unpinned upload does not populate storage/cache/<namespace>/<id>",
     );
 }
 
@@ -877,19 +884,22 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
 
     let db = open_outbox_db();
     let file_id = "pinfail1";
+    let namespace = "release_files";
     let cloud_key = "storage/pi/nf/pinfail1";
 
-    // Block the populate: the pinned blob path is storage/pinned/{ab}/{cd}/<id>;
-    // plant a regular FILE at the {ab} level so creating the {ab}/{cd} shard
-    // directory fails, and with it the atomic write into pinned/.
-    let pinned_path = ld.pinned_blob_path(file_id).unwrap();
-    let ab_dir = pinned_path.parent().unwrap().parent().unwrap(); // .../pinned/{ab}
-    std::fs::create_dir_all(ab_dir.parent().unwrap()).unwrap(); // .../pinned
+    // Block the populate: the pinned blob path is
+    // storage/pinned/<namespace>/{ab}/{cd}/<id>; plant a regular FILE at the {ab}
+    // level so creating the {ab}/{cd} shard directory fails, and with it the atomic
+    // write into pinned/.
+    let pinned_path = ld.pinned_blob_path(namespace, file_id).unwrap();
+    let ab_dir = pinned_path.parent().unwrap().parent().unwrap(); // .../pinned/<namespace>/{ab}
+    std::fs::create_dir_all(ab_dir.parent().unwrap()).unwrap(); // .../pinned/<namespace>
     std::fs::write(ab_dir, b"blocker").unwrap(); // {ab} is now a file, not a dir
 
     db.enqueue_upload(
         file_id,
         cloud_key,
+        namespace,
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         true, // retain_pinned — but the populate will fail

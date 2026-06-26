@@ -295,9 +295,17 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
     use crate::db::OutboxOperation;
 
     let db = open_outbox_db();
-    db.enqueue_upload("f1", "k-up", None, BlobScope::Master, false, T0)
-        .await
-        .expect("enqueue upload");
+    db.enqueue_upload(
+        "f1",
+        "k-up",
+        "release_files",
+        None,
+        BlobScope::Master,
+        false,
+        T0,
+    )
+    .await
+    .expect("enqueue upload");
     db.enqueue_delete("k-del", T0)
         .await
         .expect("enqueue delete");
@@ -308,6 +316,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         uploads[0].operation,
         OutboxOperation::Upload {
             file_id: "f1".to_string(),
+            namespace: "release_files".to_string(),
             source_path: None,
             scope: BlobScope::Master,
             retain_pinned: false,
@@ -712,9 +721,17 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
     // delete then upload → no delete row remains, the upload stands.
     let db = open_outbox_db();
     db.enqueue_delete("k", T0).await.expect("enqueue delete");
-    db.enqueue_upload("f", "k", None, BlobScope::Master, false, T0)
-        .await
-        .expect("enqueue upload");
+    db.enqueue_upload(
+        "f",
+        "k",
+        "release_files",
+        None,
+        BlobScope::Master,
+        false,
+        T0,
+    )
+    .await
+    .expect("enqueue upload");
     assert!(
         db.get_pending_cloud_deletes().await.unwrap().is_empty(),
         "queuing an upload cancels a pending delete for the same key",
@@ -727,9 +744,17 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
 
     // upload then delete → no upload row remains, the delete stands.
     let db = open_outbox_db();
-    db.enqueue_upload("f", "k", None, BlobScope::Master, false, T0)
-        .await
-        .expect("enqueue upload");
+    db.enqueue_upload(
+        "f",
+        "k",
+        "release_files",
+        None,
+        BlobScope::Master,
+        false,
+        T0,
+    )
+    .await
+    .expect("enqueue upload");
     db.enqueue_delete("k", T0).await.expect("enqueue delete");
     assert!(
         db.get_pending_cloud_uploads().await.unwrap().is_empty(),
@@ -744,9 +769,17 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
     // The cancel is key-scoped: a delete for one key doesn't touch an upload for
     // another.
     let db = open_outbox_db();
-    db.enqueue_upload("f", "keep", None, BlobScope::Master, false, T0)
-        .await
-        .expect("enqueue upload");
+    db.enqueue_upload(
+        "f",
+        "keep",
+        "release_files",
+        None,
+        BlobScope::Master,
+        false,
+        T0,
+    )
+    .await
+    .expect("enqueue upload");
     db.enqueue_delete("other", T0)
         .await
         .expect("enqueue delete");
@@ -790,6 +823,7 @@ async fn reupload_through_the_drain_cancels_a_prior_cycle_tombstone() {
     db.enqueue_upload(
         "blob-file",
         "blob-key",
+        "release_files",
         Some(&src.to_string_lossy()),
         BlobScope::Master,
         false,
@@ -931,6 +965,7 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
     db.enqueue_upload(
         "blob-file",
         "blob-key",
+        "release_files",
         Some(&src.to_string_lossy()),
         BlobScope::Master,
         false,
@@ -1073,6 +1108,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     db.enqueue_upload(
         "blob-file",
         "blob-key",
+        "release_files",
         Some(&src.to_string_lossy()),
         BlobScope::Master,
         false,

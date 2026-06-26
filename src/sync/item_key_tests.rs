@@ -312,7 +312,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         Some(item_key),
         "the item key replayed to device B via the changeset"
     );
-    let landed = std::fs::read(ld.cache_blob_path("blob-1").expect("cache path"))
+    let landed = std::fs::read(ld.cache_blob_path("audio", "blob-1").expect("cache path"))
         .expect("the pull wrote the blob to B's disk");
     assert_eq!(
         landed, plaintext,

@@ -492,36 +492,35 @@ impl Database {
         .await
     }
 
-    /// The device-local cache-size budget in bytes, or `None` if the host has not
-    /// set one. `None` means unlimited — eviction is off and the cache grows
-    /// without bound; the host opts into a budget by calling
-    /// [`Self::set_max_cache_size`]. Stored as a single decimal value under
-    /// [`crate::blob::cache::MAX_CACHE_SIZE_STATE_KEY`] in `sync_state` (config, not
-    /// per-blob accounting — the cache's truth is still the folder on disk).
-    pub async fn get_max_cache_size(&self) -> Result<Option<u64>, DbError> {
-        match self
-            .get_sync_state(crate::blob::cache::MAX_CACHE_SIZE_STATE_KEY)
-            .await?
-        {
+    /// `namespace`'s device-local cache-size budget in bytes, or `None` if the host
+    /// has not set one for it. `None` means unlimited — eviction is off for that
+    /// namespace and its cache grows without bound; the host opts a namespace into a
+    /// budget by calling [`Self::set_cache_budget`]. Budgets are per namespace so a
+    /// small namespace (`covers`) is never wiped by pressure from a big one
+    /// (`release_files`): each evicts against its own budget. Stored as a single
+    /// decimal value under [`crate::blob::cache::cache_budget_state_key`] in
+    /// `sync_state` (config, not per-blob accounting — the cache's truth is still the
+    /// folder on disk).
+    pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
+        let key = crate::blob::cache::cache_budget_state_key(namespace);
+        match self.get_sync_state(&key).await? {
             Some(raw) => raw.parse::<u64>().map(Some).map_err(|e| {
                 DbError(format!(
-                    "max_cache_size in sync_state is not a byte count: {e}"
+                    "cache budget for {namespace:?} in sync_state is not a byte count: {e}"
                 ))
             }),
             None => Ok(None),
         }
     }
 
-    /// Set the device-local cache-size budget in bytes. Once set, a populate that
-    /// pushes `storage/cache/` over this total evicts its oldest files (by mtime)
-    /// back under it; `pinned/` is never counted or touched. Stored under
-    /// [`crate::blob::cache::MAX_CACHE_SIZE_STATE_KEY`] in `sync_state`.
-    pub async fn set_max_cache_size(&self, max_bytes: u64) -> Result<(), DbError> {
-        self.set_sync_state(
-            crate::blob::cache::MAX_CACHE_SIZE_STATE_KEY,
-            &max_bytes.to_string(),
-        )
-        .await
+    /// Set `namespace`'s device-local cache-size budget in bytes. Once set, a populate
+    /// into that namespace's cache that pushes `storage/cache/<namespace>/` over this
+    /// total evicts its oldest files (by mtime) back under it; `pinned/` is never
+    /// counted or touched, and another namespace's files are never walked. Stored
+    /// under [`crate::blob::cache::cache_budget_state_key`] in `sync_state`.
+    pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
+        let key = crate::blob::cache::cache_budget_state_key(namespace);
+        self.set_sync_state(&key, &max_bytes.to_string()).await
     }
 
     // ---- Bookkeeping: sync_cursors ----
@@ -662,14 +661,16 @@ impl Database {
         &self,
         file_id: &str,
         cloud_key: &str,
+        namespace: &str,
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
         retain_pinned: bool,
         created_at: &str,
     ) -> Result<(), DbError> {
-        let (file_id, cloud_key, source_path, created_at) = (
+        let (file_id, cloud_key, namespace, source_path, created_at) = (
             file_id.to_string(),
             cloud_key.to_string(),
+            namespace.to_string(),
             source_path.map(str::to_string),
             created_at.to_string(),
         );
@@ -678,6 +679,7 @@ impl Database {
                 conn,
                 &file_id,
                 &cloud_key,
+                &namespace,
                 source_path.as_deref(),
                 scope,
                 retain_pinned,
@@ -696,6 +698,7 @@ impl Database {
         conn: &Connection,
         file_id: &str,
         cloud_key: &str,
+        namespace: &str,
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
         retain_pinned: bool,
@@ -713,11 +716,12 @@ impl Database {
         .map_err(DbError::from)?;
         conn.execute(
             "INSERT OR IGNORE INTO cloud_outbox \
-             (operation, file_id, cloud_key, source_path, scope, retain_pinned, created_at) \
-             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6)",
+             (operation, file_id, cloud_key, namespace, source_path, scope, retain_pinned, created_at) \
+             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             (
                 file_id,
                 cloud_key,
+                namespace,
                 source_path,
                 scope.to_outbox_str(),
                 retain_pinned,
@@ -796,7 +800,8 @@ impl Database {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, operation, file_id, cloud_key, source_path, scope, \
-                            retain_pinned, created_at, attempt_count, last_error, last_attempt_at \
+                            retain_pinned, created_at, attempt_count, last_error, last_attempt_at, \
+                            namespace \
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
                 .map_err(DbError::from)?;
@@ -1078,6 +1083,10 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
                 .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {scope_str:?}"));
             OutboxOperation::Upload {
                 file_id: r.get(2)?,
+                // An upload always wrote a namespace (the column is non-NULL for an
+                // upload row), so its absence is corruption — read it as a String and
+                // let a NULL error loudly, the same posture as scope above.
+                namespace: r.get(11)?,
                 source_path: r.get(4)?,
                 scope,
                 retain_pinned: r.get(6)?,

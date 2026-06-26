@@ -350,7 +350,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         !src.exists(),
         "the external source file is deleted post-commit"
     );
-    let pinned = lib_a.pinned_blob_path("photoaaa").unwrap();
+    let pinned = lib_a.pinned_blob_path("photos", "photoaaa").unwrap();
     assert_eq!(
         std::fs::read(&pinned).unwrap(),
         bytes,
@@ -552,7 +552,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "the host-provided cover is uploaded to the cloud",
     );
     assert!(
-        lib_a.cache_blob_path("coveraaa").unwrap().exists(),
+        lib_a
+            .cache_blob_path("covers", "coveraaa")
+            .unwrap()
+            .exists(),
         "the cover's local-store copy moved into the evictable cache",
     );
     assert!(
@@ -568,12 +571,21 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let (_tmp_b, lib_b) = temp_library_dir();
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
     assert!(
-        lib_b.cache_blob_path("coveraaa").unwrap().exists(),
+        lib_b
+            .cache_blob_path("covers", "coveraaa")
+            .unwrap()
+            .exists(),
         "B fetches the CacheEager cover eagerly into its cache",
     );
     assert!(
-        !lib_b.cache_blob_path("photoaaa").unwrap().exists()
-            && !lib_b.pinned_blob_path("photoaaa").unwrap().exists(),
+        !lib_b
+            .cache_blob_path("photos", "photoaaa")
+            .unwrap()
+            .exists()
+            && !lib_b
+                .pinned_blob_path("photos", "photoaaa")
+                .unwrap()
+                .exists(),
         "B does not fetch the CacheLazy audio on pull",
     );
     assert_eq!(
@@ -713,7 +725,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
         "the already-uploaded orphan is tombstoned",
     );
     assert!(
-        !lib.pinned_blob_path("photoaaa").unwrap().exists(),
+        !lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
         "the orphan's pinned cache copy is dropped",
     );
 }
@@ -743,6 +755,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     db.enqueue_upload(
         "photoaaa",
         "photos/cv/photoaaa.flac",
+        "photos",
         Some(src.to_str().unwrap()),
         BlobScope::Master,
         true,
@@ -762,7 +775,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
         "the orphan blob is tombstoned",
     );
     assert!(
-        !lib.pinned_blob_path("photoaaa").unwrap().exists(),
+        !lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
         "the orphan's cache copy is dropped",
     );
 }
