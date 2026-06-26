@@ -15,7 +15,10 @@
 //! gated-by-descendants ancestor is shared iff some inferred child table still
 //! holds a kept row referencing it; the keep composes recursively up the FK chain
 //! to the gated roots at the bottom. The keep-children are inferred from the live
-//! FK graph, never declared.
+//! FK graph, never declared — except a child the host marks an *asset*
+//! ([`SyncedTable::asset`](super::session::SyncedTable::asset)), a decoration
+//! (cover, artist image) that rides its subject's gate but never grants keep, so
+//! it is excluded from the subject's keep-children.
 //!
 //! [`gate_outbound`] is the one entry point. Given the changeset a cycle
 //! captured, it returns a new changeset with gated-false rows cut, plus — when a
@@ -302,6 +305,13 @@ impl Gates {
             .filter(|t| t.is_gated_by_descendants())
             .map(|t| t.name())
             .collect();
+        // Asset tables ride their FK subject's gate as inherited children but are
+        // never keep-reasons: excluded from every ancestor's keep-children below.
+        let assets: HashSet<&str> = tables
+            .iter()
+            .filter(|t| t.is_asset())
+            .map(|t| t.name())
+            .collect();
         let mut gate_map = HashMap::new();
 
         // Classify each table's downward gate-parent. Roots and ancestors are
@@ -340,7 +350,9 @@ impl Gates {
         }
 
         // Children are filled once all downward parents are known. A keep-child
-        // of ancestor P is any synced table with an FK referencing P, MINUS any
+        // of ancestor P is any synced table with an FK referencing P, MINUS two
+        // kinds: an *asset* (a host-declared decoration that rides P's gate but
+        // never keeps it alive — e.g. an artist image keeping its artist), and a
         // table whose chosen downward gate-parent IS P (the join-table back-edge:
         // a child cannot keep its own parent alive — that is the circular fixpoint
         // that would keep an empty album alive forever). An ancestor that infers
@@ -350,6 +362,12 @@ impl Gates {
             let mut children = Vec::new();
             for t in tables {
                 if t.name() == ancestor {
+                    continue;
+                }
+                // Skip an asset: it inherits the gate downward as a child but is
+                // never a keep-reason. Excluding it also keeps the asset-rides-gate
+                // vs. ancestor-kept-by-children relation acyclic.
+                if assets.contains(t.name()) {
                     continue;
                 }
                 // Skip the back-edge: a table whose downward gate-parent is this
@@ -3764,6 +3782,329 @@ mod tests {
         assert!(
             row_exists(&a, "SELECT 1 FROM albums WHERE id = 'AL'"),
             "A keeps the album"
+        );
+    }
+
+    // ---- assets ride the gate, never grant keep ------------------------------
+
+    /// The album set plus two assets: a cover (child of the `releases` root) and
+    /// an artist image (child of the `artists` ancestor). Each is host-provided
+    /// decoration that rides its subject's gate but never keeps the subject alive.
+    fn album_asset_tables() -> Vec<SyncedTable> {
+        vec![
+            SyncedTable::new("releases").gated_by("managed"),
+            SyncedTable::new("albums").gated_by_descendants(),
+            SyncedTable::new("artists").gated_by_descendants(),
+            SyncedTable::new("album_artists"),
+            SyncedTable::new("tracks"),
+            SyncedTable::new("covers").asset(),
+            SyncedTable::new("artist_images").asset(),
+        ]
+    }
+
+    fn create_album_asset_schema(c: &Connection) {
+        create_album_schema(c);
+        exec(
+            c,
+            "CREATE TABLE covers (id TEXT PRIMARY KEY, release_id TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE)",
+        );
+        exec(
+            c,
+            "CREATE TABLE artist_images (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE)",
+        );
+    }
+
+    fn apply_album_asset(c: &Connection, bytes: &[u8]) {
+        apply_changeset_lww(
+            c,
+            bytes,
+            &album_asset_tables(),
+            crate::sync::hlc::now_wall_ms(),
+        )
+        .expect("apply album-asset changeset");
+    }
+
+    /// A `managed` release keeps its artist alive, and the artist image rides the
+    /// kept artist's gate to peers — same for the cover under the release.
+    #[test]
+    fn remote_release_keeps_artist_and_its_image() {
+        let c = conn();
+        create_album_asset_schema(&c);
+        let tables = album_asset_tables();
+
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+                "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')",
+                "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
+            ],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(
+            has_row(&changes, "artists", "AR"),
+            "the artist is kept by its remote release"
+        );
+        assert!(
+            has_row(&changes, "artist_images", "AI"),
+            "the artist image rides the kept artist's gate"
+        );
+        assert!(
+            has_row(&changes, "releases", "R1"),
+            "the remote release syncs"
+        );
+        assert!(
+            has_row(&changes, "covers", "CV"),
+            "the cover rides the kept release's gate"
+        );
+
+        // The image and cover rows land on a fresh peer.
+        let peer = conn();
+        create_album_asset_schema(&peer);
+        apply_album_asset(&peer, &out);
+        assert!(row_exists(
+            &peer,
+            "SELECT 1 FROM artist_images WHERE id = 'AI'"
+        ));
+        assert!(row_exists(&peer, "SELECT 1 FROM covers WHERE id = 'CV'"));
+    }
+
+    /// An artist whose only release is local (gated-false) is NOT kept — its image
+    /// does not keep it alive — so nothing about it leaks to peers.
+    #[test]
+    fn image_alone_without_a_remote_release_is_not_kept() {
+        let c = conn();
+        create_album_asset_schema(&c);
+        let tables = album_asset_tables();
+
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+                "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
+                "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
+            ],
+        );
+        assert!(
+            walk(&out).expect("walk").is_empty(),
+            "an artist with only an image and a local release leaks nothing — the image is not a keep-reason"
+        );
+    }
+
+    /// make-Remote (gate false→true) re-emits the artist and its image as INSERTs;
+    /// make-Local (true→false) retracts both as DELETEs. The asset tracks its
+    /// subject in both directions.
+    #[test]
+    fn make_remote_reemits_image_then_make_local_retracts_it() {
+        let c = conn();
+        create_album_asset_schema(&c);
+        let tables = album_asset_tables();
+
+        // A local release shares nothing.
+        let out1 = capture_and_gate(
+            &c,
+            &tables,
+            &[
+                "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+                "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')",
+                "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 0, '0000000001000-0000-dev1')",
+                "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')",
+            ],
+        );
+        assert!(
+            walk(&out1).expect("walk").is_empty(),
+            "a local release shares nothing"
+        );
+
+        let peer = conn();
+        create_album_asset_schema(&peer);
+
+        // make-Remote: the artist + its image re-emit as INSERTs.
+        let out2 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+        );
+        let c2 = walk(&out2).expect("walk");
+        assert!(has_row(&c2, "artists", "AR"), "the artist is promoted");
+        assert!(
+            has_row(&c2, "artist_images", "AI"),
+            "the image re-emits with its now-remote artist"
+        );
+        assert!(
+            has_row(&c2, "covers", "CV"),
+            "the cover re-emits with its now-remote release"
+        );
+        apply_album_asset(&peer, &out2);
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM artist_images WHERE id = 'AI'"),
+            "peer has the image"
+        );
+        assert!(
+            row_exists(&peer, "SELECT 1 FROM covers WHERE id = 'CV'"),
+            "peer has the cover"
+        );
+
+        // make-Local: the artist + image retract as DELETEs.
+        let out3 = capture_and_gate(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R1'"],
+        );
+        let c3 = walk(&out3).expect("walk");
+        assert!(
+            has_op(&c3, "artists", "AR", ChangeOp::Delete),
+            "the now-childless artist retracts"
+        );
+        assert!(
+            has_op(&c3, "artist_images", "AI", ChangeOp::Delete),
+            "the image retracts with its artist"
+        );
+        assert!(
+            has_op(&c3, "covers", "CV", ChangeOp::Delete),
+            "the cover retracts with its release"
+        );
+        apply_album_asset(&peer, &out3);
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM artist_images WHERE id = 'AI'"),
+            "peer drops the image"
+        );
+        assert!(
+            !row_exists(&peer, "SELECT 1 FROM covers WHERE id = 'CV'"),
+            "peer drops the cover"
+        );
+    }
+
+    /// Keep resolution terminates with an asset child present: building the gate
+    /// model and evaluating every keep-clause completes, because excluding the
+    /// asset from its subject's keep-children breaks the otherwise-circular
+    /// artist-kept-by-children vs. image-rides-artist relation.
+    #[test]
+    fn keep_resolution_terminates_with_an_asset_child() {
+        let c = conn();
+        create_album_asset_schema(&c);
+        let tables = album_asset_tables();
+
+        let gates =
+            Gates::from_tables(&c, &tables).expect("gate model builds with an asset child present");
+        assert!(
+            !inferred_children(&c, &gates, "artists")
+                .iter()
+                .any(|(child, _)| child == "artist_images"),
+            "the artist image is never a keep-reason for its artist"
+        );
+
+        // A kept artist (one remote release + image) and an unkept one (image
+        // only). `delete_gated_false` builds and evaluates every gated table's
+        // keep-clause; that it returns proves keep resolution terminates.
+        exec(
+            &c,
+            "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist Name', '0000000001000-0000-dev1')",
+        );
+        exec(&c, "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI', 'AR', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO album_artists (id, album_id, artist_id, _updated_at) VALUES ('AA', 'AL', 'AR', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R1', 'AL', 1, '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO covers (id, release_id, _updated_at) VALUES ('CV', 'R1', '0000000001000-0000-dev1')");
+        // A second artist kept by nothing but an image.
+        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR2', 'Other Artist', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO artist_images (id, artist_id, _updated_at) VALUES ('AI2', 'AR2', '0000000001000-0000-dev1')");
+
+        gates
+            .delete_gated_false(&c)
+            .expect("keep resolution terminates with an asset child");
+
+        assert!(
+            row_exists(&c, "SELECT 1 FROM artists WHERE id = 'AR'"),
+            "the artist with a remote release survives the prune"
+        );
+        assert!(
+            row_exists(&c, "SELECT 1 FROM artist_images WHERE id = 'AI'"),
+            "its image survives with it"
+        );
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM artists WHERE id = 'AR2'"),
+            "the image-only artist is pruned — the image did not keep it"
+        );
+        assert!(
+            !row_exists(&c, "SELECT 1 FROM artist_images WHERE id = 'AI2'"),
+            "the image-only artist's image is pruned with it"
+        );
+    }
+
+    /// `.asset()` is load-bearing: in a topology where the join-table back-edge
+    /// does NOT exclude the asset (the asset's chosen downward parent is a deeper
+    /// ancestor, not the one under test), the marker is what keeps it out of the
+    /// ancestor's keep-children.
+    #[test]
+    fn asset_marker_excludes_a_child_the_back_edge_would_keep() {
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE artists (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
+        );
+        exec(
+            &c,
+            "CREATE TABLE albums (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (artist_id) REFERENCES artists (id))",
+        );
+        exec(
+            &c,
+            "CREATE TABLE releases (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
+             managed INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (album_id) REFERENCES albums (id))",
+        );
+        // An asset that references BOTH ancestors; its chosen downward parent is
+        // the deeper one (albums), so the back-edge only excludes it from albums,
+        // never from artists.
+        exec(
+            &c,
+            "CREATE TABLE artist_images (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
+             album_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
+             FOREIGN KEY (artist_id) REFERENCES artists (id), \
+             FOREIGN KEY (album_id) REFERENCES albums (id))",
+        );
+
+        let base = |asset: bool| {
+            let image = SyncedTable::new("artist_images");
+            let image = if asset { image.asset() } else { image };
+            vec![
+                SyncedTable::new("releases").gated_by("managed"),
+                SyncedTable::new("albums").gated_by_descendants(),
+                SyncedTable::new("artists").gated_by_descendants(),
+                image,
+            ]
+        };
+
+        let without = Gates::from_tables(&c, &base(false)).expect("gates without asset marker");
+        assert!(
+            inferred_children(&c, &without, "artists")
+                .iter()
+                .any(|(child, _)| child == "artist_images"),
+            "without .asset(), the image is a keep-child of artists (the back-edge does not exclude it)"
+        );
+
+        let with = Gates::from_tables(&c, &base(true)).expect("gates with asset marker");
+        assert!(
+            !inferred_children(&c, &with, "artists")
+                .iter()
+                .any(|(child, _)| child == "artist_images"),
+            ".asset() excludes the image from artists' keep-children"
         );
     }
 }

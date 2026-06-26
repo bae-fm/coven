@@ -31,6 +31,9 @@
 /// plain — never two of these. See [`super::gate`] for the gating mechanics.
 /// Orthogonally, any table may *carry a blob* ([`SyncedTable::carries_blob`]):
 /// blob-bearing-ness is a property of the row's columns, not of its gate role.
+/// A table may also be marked an *asset* ([`SyncedTable::asset`]): a decoration
+/// (a cover, an artist image) that rides its foreign-key subject's gate but never
+/// keeps that subject alive. Asset-ness is likewise independent of the gate role.
 ///
 /// Each table must have an `id` text primary key at column 0 and an
 /// `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). Tables not in the
@@ -43,6 +46,11 @@ pub struct SyncedTable {
     name: String,
     role: GateRole,
     blob: Option<BlobDecl>,
+    /// Whether this table is an asset of its FK subject: it rides the subject's
+    /// gate as an inherited child but is excluded from the subject's
+    /// `gated_by_descendants` keep computation, so an asset row never keeps an
+    /// otherwise-empty ancestor alive. Orthogonal to [`GateRole`] and the blob.
+    asset: bool,
 }
 
 /// How a synced table relates to the gate. Orthogonal to whether it carries a
@@ -68,6 +76,7 @@ impl SyncedTable {
             name: name.into(),
             role: GateRole::Plain,
             blob: None,
+            asset: false,
         }
     }
 
@@ -97,6 +106,19 @@ impl SyncedTable {
         self
     }
 
+    /// Mark this table an *asset* of its FK subject: a host-provided decoration
+    /// (a cover, an artist image) that rides its subject's gate but never grants
+    /// keep. The asset still inherits the gate as a child of its subject — it
+    /// syncs exactly when the subject is kept — but the gate excludes it from the
+    /// subject's `gated_by_descendants` keep computation, so an asset row alone
+    /// never keeps an otherwise-empty ancestor alive (and the asset-rides-subject
+    /// vs. subject-kept-by-children relation can never form a cycle). Independent
+    /// of the gate role; declare it on an FK child of the subject.
+    pub fn asset(mut self) -> Self {
+        self.asset = true;
+        self
+    }
+
     /// The table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -119,6 +141,12 @@ impl SyncedTable {
     /// This table's blob declaration, if it carries one.
     pub fn blob(&self) -> Option<&BlobDecl> {
         self.blob.as_ref()
+    }
+
+    /// Whether this table is an asset of its FK subject (rides the subject's gate
+    /// but never grants keep). See [`SyncedTable::asset`].
+    pub fn is_asset(&self) -> bool {
+        self.asset
     }
 }
 
