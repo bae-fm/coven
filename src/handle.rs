@@ -35,7 +35,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::blob::cache::BlobCacheError;
 use crate::blob::local_files::LocalBlobError;
@@ -166,8 +166,9 @@ impl CovenHandle {
     /// Start (or restart) the sync loop of the installed [`SyncManager`]. A no-op
     /// when no provider is connected — a home-less library has nothing to start.
     pub async fn start_sync(&self) {
-        if let Some(manager) = self.sync_manager() {
-            manager.start_sync().await;
+        match self.sync_manager() {
+            Some(manager) => manager.start_sync().await,
+            None => debug!("start_sync: no provider connected; nothing to start"),
         }
     }
 
@@ -175,8 +176,9 @@ impl CovenHandle {
     /// manager so [`start_sync`](Self::start_sync) can resume it. A no-op when no
     /// provider is connected.
     pub fn stop_sync(&self) {
-        if let Some(manager) = self.sync_manager() {
-            manager.stop_sync();
+        match self.sync_manager() {
+            Some(manager) => manager.stop_sync(),
+            None => debug!("stop_sync: no provider connected; nothing to stop"),
         }
     }
 
@@ -194,8 +196,9 @@ impl CovenHandle {
     /// Wake the sync loop to run a cycle now rather than at the next idle tick. A
     /// no-op when no provider is connected.
     pub fn sync_now(&self) {
-        if let Some(manager) = self.sync_manager() {
-            manager.trigger_sync();
+        match self.sync_manager() {
+            Some(manager) => manager.trigger_sync(),
+            None => debug!("sync_now: no provider connected; sync wake ignored"),
         }
     }
 
