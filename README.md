@@ -13,8 +13,8 @@ symmetric key is wrapped to each member's X25519 key. Blobs referenced by rows
 sync as encrypted opaque files through a cloud outbox.
 
 The host owns its schema and domain; coven owns the data — the SQLite connection
-and the blob store. Rows and blobs live on the device and reach the cloud only
-when you connect a provider. A host talks to coven
+and the blob store. A library is local-first: rows and blobs live on the device
+and reach the cloud only when you connect a provider. A host talks to coven
 through one handle — `CovenHandle` natively, or the `CovenLibrary` facade in the
 browser — and never reaches into coven's storage or sync internals directly.
 
