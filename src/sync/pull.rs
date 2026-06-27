@@ -1028,10 +1028,7 @@ async fn drop_deleted_blob_local(
         let Some(blob) = blob_decls.ref_from_change(change) else {
             continue;
         };
-        crate::blob::cache::drop_cached_blob(library_dir, &blob.namespace, &blob.id).await?;
-        crate::blob::local_files::drop_blob(library_dir, &blob.namespace, &blob.id)
-            .await
-            .map_err(crate::blob::cache::BlobCacheError::from)?;
+        crate::blob::cache::drop_all_local_copies(library_dir, &blob.namespace, &blob.id).await?;
     }
     Ok(())
 }

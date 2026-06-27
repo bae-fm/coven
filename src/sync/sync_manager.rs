@@ -184,7 +184,11 @@ impl SyncManager {
 
         // Initialize sync loop. The synced-table set is owned by the Database, so
         // init_sync reads it from there rather than from a separately-held copy.
-        let sync_loop = crate::sync::cycle::init_sync(
+        // Sync is enabled here, so `None` means a real startup failure (no synced
+        // tables, storage/keypair/auth/membership bootstrap) that init_sync already
+        // logged — surface it so the caller never installs a manager whose loop
+        // never started.
+        let components = crate::sync::cycle::init_sync(
             &config,
             &self.key_service,
             &self.db,
@@ -192,22 +196,21 @@ impl SyncManager {
             &cipher,
             self.hlc.clone(),
         )
-        .await;
+        .await
+        .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
 
-        if let Some(components) = sync_loop {
-            let library_dir = config.library_dir.clone();
-            let handle = Arc::new(SyncLoopHandle::new(
-                components,
-                self.db.clone(),
-                self.clock.clone(),
-                library_dir,
-                self.observer.clone(),
-            ));
-            handle.start();
+        let library_dir = config.library_dir.clone();
+        let handle = Arc::new(SyncLoopHandle::new(
+            components,
+            self.db.clone(),
+            self.clock.clone(),
+            library_dir,
+            self.observer.clone(),
+        ));
+        handle.start();
 
-            info!("Sync loop started");
-            *self.sync_loop_handle.write().unwrap() = Some(handle);
-        }
+        info!("Sync loop started");
+        *self.sync_loop_handle.write().unwrap() = Some(handle);
 
         Ok(())
     }

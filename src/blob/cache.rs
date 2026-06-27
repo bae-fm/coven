@@ -294,6 +294,23 @@ pub async fn drop_cached_blob(
     Ok(())
 }
 
+/// Drop every on-device copy of a blob: its cache copies (pinned + evictable) via
+/// [`drop_cached_blob`] and its host-provided local-store copy via
+/// [`local_files::drop_blob`](crate::blob::local_files::drop_blob). The single
+/// "delete the bytes wherever they live" step shared by the apply-side delete
+/// cleanup and the host's `CovenHandle::evict_blob`.
+pub(crate) async fn drop_all_local_copies(
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+) -> Result<(), BlobCacheError> {
+    drop_cached_blob(library_dir, namespace, id).await?;
+    crate::blob::local_files::drop_blob(library_dir, namespace, id)
+        .await
+        .map_err(BlobCacheError::from)?;
+    Ok(())
+}
+
 /// Whether a Remote blob's cache copy is currently pinned — present in
 /// `storage/pinned/<namespace>/<id>`. The pin truth is the folder a blob's file
 /// lives in, not a table (see the module docs), so this is a single existence
