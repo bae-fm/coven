@@ -746,18 +746,6 @@ pub async fn init_sync(
     cipher: &CloudCipher,
     hlc: std::sync::Arc<Hlc>,
 ) -> Option<SyncComponents> {
-    // Integration guard. The host declared its synced tables to `Database::open`;
-    // an empty set means a synced library would attach nothing, every changeset
-    // would come out empty, and sync would silently become snapshot-only. Refuse
-    // loudly instead of pretending to sync.
-    if db.synced_tables().is_empty() {
-        error!(
-            "sync init aborted: no synced tables — the host must pass a non-empty \
-             synced-table set to coven::database::Database::open before sync starts"
-        );
-        return None;
-    }
-
     let storage = match crate::storage::cloud::setup::create_sync_storage(
         config,
         key_service,
@@ -772,6 +760,41 @@ pub async fn init_sync(
             return None;
         }
     };
+    init_sync_over_storage(config, key_service, db, cipher, hlc, storage).await
+}
+
+/// Bootstrap sync over an already-built [`CloudSyncStorage`], returning the
+/// components the sync loop needs (or `None` on a startup failure already logged).
+///
+/// The half of [`init_sync`] that does not build the storage: the synced-table
+/// guard, the auth-key / membership-chain bootstrap, and assembling
+/// [`SyncComponents`]. [`init_sync`] builds the storage from config via
+/// [`create_sync_storage`](crate::storage::cloud::setup::create_sync_storage) and
+/// delegates here; the test seam
+/// [`SyncManager::start_sync_with_home`](crate::sync::sync_manager::SyncManager::start_sync_with_home)
+/// builds the storage over an injected [`CloudHome`] and delegates here too, so
+/// both stand the loop over the identical bootstrap path.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn init_sync_over_storage(
+    config: &Config,
+    key_service: &KeyService,
+    db: &Database,
+    cipher: &CloudCipher,
+    hlc: std::sync::Arc<Hlc>,
+    storage: CloudSyncStorage,
+) -> Option<SyncComponents> {
+    // Integration guard. The host declared its synced tables to `Database::open`;
+    // an empty set means a synced library would attach nothing, every changeset
+    // would come out empty, and sync would silently become snapshot-only. Refuse
+    // loudly instead of pretending to sync.
+    if db.synced_tables().is_empty() {
+        error!(
+            "sync init aborted: no synced tables — the host must pass a non-empty \
+             synced-table set to coven::database::Database::open before sync starts"
+        );
+        return None;
+    }
+
     let cipher_lock = storage.shared_cipher();
 
     let user_keypair = match key_service.get_or_create_user_keypair() {
