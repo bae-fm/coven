@@ -19,10 +19,12 @@ use crate::config::Config;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
+use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
+use crate::sync::cycle::SyncComponents;
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
@@ -201,7 +203,17 @@ impl SyncManager {
         .await
         .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
 
-        let library_dir = config.library_dir.clone();
+        self.install_sync_loop(components, config.library_dir.clone());
+
+        Ok(())
+    }
+
+    /// Build the sync-loop handle off `components`, start it, and install it. The
+    /// shared install tail of [`start_sync`](Self::start_sync) and the test-only
+    /// [`start_sync_with_home`](Self::start_sync_with_home): both reach it only
+    /// after the bootstrap has produced [`SyncComponents`], so the loop handle is
+    /// installed whole, never on a half-built bootstrap.
+    fn install_sync_loop(&self, components: SyncComponents, library_dir: LibraryDir) {
         let handle = Arc::new(SyncLoopHandle::new(
             components,
             self.db.clone(),
@@ -213,8 +225,6 @@ impl SyncManager {
 
         info!("Sync loop started");
         *self.sync_loop_handle.write().unwrap() = Some(handle);
-
-        Ok(())
     }
 
     /// Test-only: stand the sync loop over an injected `home`/`cipher` instead of
@@ -228,8 +238,12 @@ impl SyncManager {
     /// (and the config's blob-path scheme), runs the same bootstrap
     /// [`init_sync`](crate::sync::cycle::init_sync) does via
     /// [`init_sync_over_storage`](crate::sync::cycle::init_sync_over_storage), and
-    /// starts the loop. A bootstrap failure is an `Err` (no loop installed), the
-    /// same fail-loud discipline `start_sync` keeps.
+    /// starts the loop. A bootstrap failure is an `Err`, the same fail-loud
+    /// discipline `start_sync` keeps — and commit-whole: the home and loop handle
+    /// are installed only after the keypair load and bootstrap both succeed, so a
+    /// failure leaves nothing installed (unlike production `start_sync`, which sets
+    /// `cloud_home` before its `sync_enabled` gate for the not-enabled case; the
+    /// test path has no such gate, so it commits both at the end together).
     ///
     /// After this returns, the connected loop's storage is reachable via
     /// [`sync_loop_handle`](Self::sync_loop_handle)`().storage()`, so the handle's
@@ -242,14 +256,12 @@ impl SyncManager {
     ) -> Result<(), String> {
         let config = (self.config_provider)();
 
-        *self.cloud_home.write().unwrap() = Some(home.clone());
-
         let keypair = self
             .key_service
             .get_or_create_user_keypair()
             .map_err(|e| format!("failed to load user keypair for test sync: {e}"))?;
         let storage = CloudSyncStorage::new(
-            home,
+            home.clone(),
             cipher.clone(),
             BlobPathScheme::for_storage(config.cloud_home.storage),
             keypair,
@@ -266,17 +278,10 @@ impl SyncManager {
         .await
         .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
 
-        let handle = Arc::new(SyncLoopHandle::new(
-            components,
-            self.db.clone(),
-            self.clock.clone(),
-            config.library_dir.clone(),
-            self.observer.clone(),
-        ));
-        handle.start();
-
-        info!("Sync loop started over an injected test cloud home");
-        *self.sync_loop_handle.write().unwrap() = Some(handle);
+        // Commit-whole: everything above succeeded, so install the home and the
+        // loop together — a failure earlier left nothing installed.
+        *self.cloud_home.write().unwrap() = Some(home);
+        self.install_sync_loop(components, config.library_dir.clone());
 
         Ok(())
     }
