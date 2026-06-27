@@ -12,7 +12,11 @@ column. Membership is an append-only Ed25519-signed chain; the per-library
 symmetric key is wrapped to each member's X25519 key. Blobs referenced by rows
 sync as encrypted opaque files through a cloud outbox.
 
-The host owns its schema and domain; coven owns the sync layer.
+The host owns its schema and domain; coven owns the data — the SQLite connection
+and the blob store. A library is local-first: rows and blobs live on the device,
+and reach the cloud only when you connect a provider. A host talks to coven
+through one handle — `CovenHandle` natively, or the `CovenLibrary` facade in the
+browser — and never reaches into coven's storage or sync internals directly.
 
 ## Integration
 
@@ -33,8 +37,32 @@ The host owns its schema and domain; coven owns the sync layer.
   `blob::BlobTransitionObserver` to the `SyncManager`.
 - Register identity/OAuth at startup: `keys::set_keyring_service`,
   `oauth::set_oauth_client_creds`.
-- Construct a `sync::sync_manager::SyncManager` and drive it; subscribe to its
-  `SyncLoopStatus { row_changes, .. }` to react to pulled changes.
+- Hold a `CovenHandle`, built once over the open `Database`. Run app SQL through
+  `handle.database()`, read and write blobs through `handle.read_blob` /
+  `store_blob` / `pin`, and — when a provider is connected — drive sync through
+  `handle.connect_sync` / `sync_now`. The handle owns the `SyncManager`, so you
+  never build or thread it (or the storage) yourself; reach the connected
+  manager's `SyncLoopStatus { row_changes, .. }` through `handle.sync_manager()`
+  to react to pulled changes.
+
+```rust
+// Build the handle once over the open Database; then only call methods on it.
+let handle = CovenHandle::new(
+    db, library_dir, config_provider, key_service, clock, observer,
+);
+
+// Rows: your app SQL on the connection coven owns.
+handle.database().call(|conn| { /* INSERT/SELECT ... */ Ok(()) }).await?;
+
+// Blobs: read/store by descriptor. coven resolves locality (the user's file,
+// its local store, the cache, or a cloud fetch) and at-rest encryption.
+let bytes = handle.read_blob(&cover).await?;
+handle.store_blob("images", "release-1", &bytes).await?;
+
+// Sync is optional. A library with no cloud home never calls these.
+handle.connect_sync(encryption_service).await;
+handle.sync_now();
+```
 
 ## Blobs
 

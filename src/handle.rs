@@ -58,6 +58,41 @@ use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 /// [`clone`](Clone) — every field is shared (an `Arc`, a `Clone` handle, or a
 /// reference-counted lock), so a clone drives the same database, sync manager,
 /// and storage as the original.
+///
+/// # Using the handle
+///
+/// The host builds the handle once at startup and then only calls methods on it
+/// — it never assembles coven's internals by hand or hands them back to coven on
+/// every call. Rows go through the connection coven owns; blobs go through the
+/// handle's read/store methods; sync is optional.
+///
+/// ```no_run
+/// # use coven::{blob::BlobRef, CovenHandle};
+/// # async fn use_library(handle: &CovenHandle, cover: &BlobRef)
+/// #     -> Result<(), Box<dyn std::error::Error>> {
+/// // Rows: run app SQL on the connection coven owns.
+/// let note_count: i64 = handle
+///     .database()
+///     .call(|conn| {
+///         conn.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
+///             .map_err(coven::database::DbError::from)
+///     })
+///     .await?;
+///
+/// // Blobs: read by descriptor. coven resolves locality — the user's own file,
+/// // its local store, the cache, or a cloud fetch — and hands back plaintext.
+/// let bytes: Vec<u8> = handle.read_blob(cover).await?;
+/// // Store host-provided bytes that coven then owns.
+/// handle.store_blob("images", "release-1", &bytes).await?;
+///
+/// // Sync is optional. Connect a provider, then drive it; a library with no
+/// // cloud home never calls these and stays fully usable on-device.
+/// handle.connect_sync(None).await;
+/// handle.sync_now();
+/// # let _ = note_count;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct CovenHandle {
     db: Database,
