@@ -190,6 +190,35 @@ impl CovenHandle {
         &self,
         encryption_service: Option<EncryptionService>,
     ) -> Result<Arc<SyncManager>, String> {
+        let manager = self
+            .build_and_install_sync(encryption_service, |manager| async move {
+                manager.start_sync().await
+            })
+            .await?;
+        info!("coven handle: sync manager connected");
+        Ok(manager)
+    }
+
+    /// Build a [`SyncManager`], start its loop via `start`, and install it — the
+    /// shared construct-and-install both [`connect_sync`](Self::connect_sync) and
+    /// the test-only
+    /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) run,
+    /// parameterized by the `encryption_service` the manager reports and which
+    /// start method `start` invokes.
+    ///
+    /// Start before installing: a failed start (the cloud home fails to build, or a
+    /// test home's bootstrap fails) returns its error with nothing installed, so the
+    /// handle is left home-less rather than holding a manager whose loop never
+    /// started.
+    async fn build_and_install_sync<F, Fut>(
+        &self,
+        encryption_service: Option<EncryptionService>,
+        start: F,
+    ) -> Result<Arc<SyncManager>, String>
+    where
+        F: FnOnce(Arc<SyncManager>) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
         let manager = Arc::new(SyncManager::new(
             self.config_provider.clone(),
             self.key_service.clone(),
@@ -198,26 +227,24 @@ impl CovenHandle {
             self.clock.clone(),
             self.observer.clone(),
         ));
-        // Start before installing: a cloud-home build failure must leave the handle
-        // home-less, not holding a dead manager.
-        manager.start_sync().await?;
+        start(manager.clone()).await?;
         *self.sync.write().unwrap() = Some(manager.clone());
-        info!("coven handle: sync manager connected");
         Ok(manager)
     }
 
-    /// Test-only: connect a fully-working [`SyncManager`] over an injected
-    /// [`CloudHome`] instead of one built from [`Config`] via `create_cloud_home`,
-    /// so a host's integration tests drive the real make-Remote / make-Local /
-    /// upload-drain and read paths over a mock cloud with no live provider.
+    /// Test-only: connect a started [`SyncManager`] over an injected [`CloudHome`]
+    /// instead of one built from [`Config`] via `create_cloud_home`, so a host's
+    /// integration tests drive the real make-Remote / make-Local / upload-drain and
+    /// read paths over a mock cloud with no live provider.
     ///
     /// The test counterpart of [`connect_sync`](Self::connect_sync): it stands the
     /// manager over `home`/`cipher` through
     /// [`SyncManager::start_sync_with_home`], starts the loop, and installs it with
     /// the same start-before-install discipline — a failed connect leaves the
-    /// handle home-less rather than holding a dead manager. The encryption service
-    /// the manager reports (for `blob_cipher` / membership) is taken from the
-    /// injected `cipher`, the single source of at-rest protection on the test path.
+    /// handle home-less rather than holding a manager whose loop never started. The
+    /// encryption service the manager reports (for `blob_cipher` / membership) is
+    /// taken from the injected `cipher`, the single source of at-rest protection on
+    /// the test path.
     ///
     /// The read path needs no separate hook: [`blob_storage`](Self::blob_storage)
     /// serves reads from the connected loop's own [`CloudSyncStorage`], which here
@@ -237,18 +264,11 @@ impl CovenHandle {
             CloudCipher::Encrypted(service) => Some(service.clone()),
             CloudCipher::Plaintext => None,
         };
-        let manager = Arc::new(SyncManager::new(
-            self.config_provider.clone(),
-            self.key_service.clone(),
-            encryption_service,
-            self.db.clone(),
-            self.clock.clone(),
-            self.observer.clone(),
-        ));
-        // Start before installing: a failed test-home connect must leave the handle
-        // home-less, not holding a manager whose loop never started.
-        manager.start_sync_with_home(home, cipher).await?;
-        *self.sync.write().unwrap() = Some(manager.clone());
+        let manager = self
+            .build_and_install_sync(encryption_service, move |manager| async move {
+                manager.start_sync_with_home(home, cipher).await
+            })
+            .await?;
         info!("coven handle: sync manager connected over an injected test cloud home");
         Ok(manager)
     }
@@ -547,39 +567,11 @@ mod tests {
     use crate::blob::{BlobScope, CacheFill, Provenance};
     use crate::clock::SystemClock;
     use crate::config::{Config, HomeStorage};
-    use crate::database::DbError;
     use crate::keys::{test_keyring, KeyService};
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::sync_manager::ConfigProvider;
     use crate::sync::test_helpers::{open_test_db, temp_library_dir};
-
-    /// Insert one `cloud_outbox` upload row whose bytes are read from `source_path`
-    /// and replayed verbatim to `cloud_key`, the durable shape a make_remote
-    /// enqueues — minus a backing row, so the drain's completion check finds no
-    /// gated root and just clears the row (a plain upload).
-    async fn enqueue_upload(db: &Database, file_id: &str, cloud_key: &str, source_path: &str) {
-        let scope = BlobScope::Master.to_outbox_str();
-        let (file_id, cloud_key, source_path) = (
-            file_id.to_string(),
-            cloud_key.to_string(),
-            source_path.to_string(),
-        );
-        db.call(move |conn| {
-            conn.execute(
-                &format!(
-                    "INSERT INTO cloud_outbox \
-                     (operation, file_id, cloud_key, source_path, scope, created_at, attempt_count) \
-                     VALUES ('upload', ?1, ?2, ?3, '{scope}', '2024-01-01T00:00:00Z', 0)"
-                ),
-                rusqlite::params![file_id, cloud_key, source_path],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-        .expect("insert outbox upload");
-    }
 
     /// `connect_sync_with_test_home` stands a real `SyncManager` over an injected
     /// `InMemoryCloudHome` and routes BOTH the upload drain and the read path
@@ -629,12 +621,24 @@ mod tests {
             .await
             .expect("connect over the injected test home");
 
-        // A blob's plaintext on disk, enqueued for upload to its readable cloud key.
+        // A blob's plaintext on disk, enqueued for upload through coven's real
+        // queue API (drives the same enqueue path production make_remote uses; no
+        // backing row, so the drain's completion check finds no gated root and just
+        // clears the row — a plain upload).
         let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
         let source = tmp.path().join("cover-source.jpg");
         std::fs::write(&source, &plaintext).expect("write source file");
         let cloud_key = "images/cover.jpg"; // {namespace}/{cloud_path} under the plain scheme.
-        enqueue_upload(&db, "cover-1", cloud_key, &source.to_string_lossy()).await;
+        db.enqueue_upload(
+            "cover-1",
+            cloud_key,
+            Some(source.to_str().expect("temp source path is valid UTF-8")),
+            BlobScope::Master,
+            false,
+            "2024-01-01T00:00:00Z",
+        )
+        .await
+        .expect("enqueue the upload");
 
         // Drain through the handle: the upload lands in the injected home verbatim.
         let outcome = handle
