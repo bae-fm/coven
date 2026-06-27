@@ -81,7 +81,7 @@ async fn second_read_is_a_local_hit() {
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
     // First read misses, fetches from the cloud, and populates the evictable cache.
-    let first = read_blob(&db, &ld, &storage, &blob)
+    let first = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("first read fetches from cloud");
     assert_eq!(first, bytes);
@@ -95,7 +95,7 @@ async fn second_read_is_a_local_hit() {
     // Delete the cloud copy so a second fetch would fail: the read must be served
     // from the local file, proving the cache hit, not a re-download.
     storage.delete_blob_object("audio", &blob.id).await;
-    let second = read_blob(&db, &ld, &storage, &blob)
+    let second = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("second read is served from the local cache");
     assert_eq!(
@@ -161,7 +161,7 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
     // Read it on demand → it lands in the evictable cache.
-    read_blob(&db, &ld, &storage, &blob)
+    read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("read populates the cache");
     assert!(ld
@@ -174,7 +174,7 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
         .exists());
 
     // Pin it → moves cache/ → pinned/.
-    pin(&db, &ld, &storage, std::slice::from_ref(&blob))
+    pin(&db, &ld, Some(&storage), std::slice::from_ref(&blob))
         .await
         .expect("pin promotes the cached blob");
     assert!(
@@ -285,7 +285,7 @@ async fn cache_lazy_fetches_on_first_read() {
     let bytes = b"AUDIO-PAYLOAD".to_vec();
     put_cloud_blob(&storage, "aud01234", "audio", &bytes).await;
     let blob = blob_ref("aud01234", "audio", CacheFill::CacheLazy);
-    let got = read_blob(&db2, &ld, &storage, &blob)
+    let got = read_blob(&db2, &ld, Some(&storage), &blob)
         .await
         .expect("first read fetches the CacheLazy blob");
     assert_eq!(got, bytes);
@@ -326,7 +326,7 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
 
     // The blob is NOT in the cloud (nothing was ever put there). A pin that fetched
     // would fail; instead it must promote the staged file by renaming it.
-    pin(&db, &ld, &storage, std::slice::from_ref(&blob))
+    pin(&db, &ld, Some(&storage), std::slice::from_ref(&blob))
         .await
         .expect("pin promotes the staged file without a cloud fetch");
     assert!(
@@ -342,7 +342,7 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         "pin moves the staged blob out of storage/cache/<id>",
     );
     // Read it back to confirm the bytes survived the staging + rename intact.
-    let got = read_blob(&db, &ld, &storage, &blob)
+    let got = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("the pinned staged blob reads back");
     assert_eq!(got, bytes, "the staged bytes survive write_blob → pin");
@@ -383,7 +383,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 
     // Populate the cache with the whole file, then remove the cloud copy so a
     // ranged read that tried to fetch would fail.
-    read_blob(&db, &ld, &storage, &blob)
+    read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("whole-file read populates the cache");
     assert!(ld
@@ -394,9 +394,17 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 
     // A window from the middle of the file.
     let (offset, len) = (1234u64, 1000u64);
-    let mid = open_blob_stream(&db, &ld, &storage, &blob, full.len() as u64, offset, len)
-        .await
-        .expect("mid-file ranged read served from the local file");
+    let mid = open_blob_stream(
+        &db,
+        &ld,
+        Some(&storage),
+        &blob,
+        full.len() as u64,
+        offset,
+        len,
+    )
+    .await
+    .expect("mid-file ranged read served from the local file");
     assert_eq!(
         mid,
         &full[offset as usize..(offset + len) as usize],
@@ -409,7 +417,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     let tail = open_blob_stream(
         &db,
         &ld,
-        &storage,
+        Some(&storage),
         &blob,
         full.len() as u64,
         tail_off,
@@ -449,9 +457,17 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
         .exists());
 
     let (offset, len) = (2000u64, 1500u64);
-    let got = open_blob_stream(&db, &ld, &storage, &blob, full.len() as u64, offset, len)
-        .await
-        .expect("ranged read fetches the range from the cloud");
+    let got = open_blob_stream(
+        &db,
+        &ld,
+        Some(&storage),
+        &blob,
+        full.len() as u64,
+        offset,
+        len,
+    )
+    .await
+    .expect("ranged read fetches the range from the cloud");
     assert_eq!(
         got,
         &full[offset as usize..(offset + len) as usize],
@@ -488,7 +504,7 @@ async fn full_read_blob_still_populates_the_cache() {
     let bytes = b"WHOLE-FILE-PAYLOAD".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
-    let first = read_blob(&db, &ld, &storage, &blob)
+    let first = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("first whole-file read fetches from the cloud");
     assert_eq!(first, bytes);
@@ -501,7 +517,7 @@ async fn full_read_blob_still_populates_the_cache() {
 
     // Cloud copy gone → the second whole-file read must be a local hit.
     storage.delete_blob_object("audio", &blob.id).await;
-    let second = read_blob(&db, &ld, &storage, &blob)
+    let second = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("second whole-file read is served from the cache");
     assert_eq!(second, bytes);
@@ -523,13 +539,21 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     let remote = blob_ref("blob-dddd", "audio", CacheFill::CacheLazy);
     put_cloud_blob(&storage, &remote.id, &remote.namespace, &full).await;
     assert!(
-        open_blob_stream(&db, &ld, &storage, &remote, full.len() as u64, 900, 200)
-            .await
-            .is_err(),
+        open_blob_stream(
+            &db,
+            &ld,
+            Some(&storage),
+            &remote,
+            full.len() as u64,
+            900,
+            200
+        )
+        .await
+        .is_err(),
         "a range past the blob size must error on the cloud path",
     );
     assert!(
-        open_blob_stream(&db, &ld, &storage, &remote, full.len() as u64, 500, 0)
+        open_blob_stream(&db, &ld, Some(&storage), &remote, full.len() as u64, 500, 0)
             .await
             .expect("zero-length read is not an error")
             .is_empty(),
@@ -540,18 +564,26 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     // the cloud copy so only the local path can serve.
     let cached = blob_ref("blob-eeee", "audio", CacheFill::CacheLazy);
     put_cloud_blob(&storage, &cached.id, &cached.namespace, &full).await;
-    read_blob(&db, &ld, &storage, &cached)
+    read_blob(&db, &ld, Some(&storage), &cached)
         .await
         .expect("populate the cache");
     storage.delete_blob_object("audio", &cached.id).await;
     assert!(
-        open_blob_stream(&db, &ld, &storage, &cached, full.len() as u64, 900, 200)
-            .await
-            .is_err(),
+        open_blob_stream(
+            &db,
+            &ld,
+            Some(&storage),
+            &cached,
+            full.len() as u64,
+            900,
+            200
+        )
+        .await
+        .is_err(),
         "a range past the blob size must error on the local-file path too",
     );
     assert!(
-        open_blob_stream(&db, &ld, &storage, &cached, full.len() as u64, 500, 0)
+        open_blob_stream(&db, &ld, Some(&storage), &cached, full.len() as u64, 500, 0)
             .await
             .expect("zero-length read is not an error")
             .is_empty(),
@@ -579,7 +611,7 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
         .await
         .expect("register external ref");
 
-    let whole = read_blob(&db, &ld, &storage, &blob)
+    let whole = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("read serves the external file (no cloud copy exists)");
     assert_eq!(
@@ -588,9 +620,17 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     );
 
     let (offset, len) = (1234u64, 1000u64);
-    let mid = open_blob_stream(&db, &ld, &storage, &blob, full.len() as u64, offset, len)
-        .await
-        .expect("ranged read off the external file");
+    let mid = open_blob_stream(
+        &db,
+        &ld,
+        Some(&storage),
+        &blob,
+        full.len() as u64,
+        offset,
+        len,
+    )
+    .await
+    .expect("ranged read off the external file");
     assert_eq!(
         mid,
         &full[offset as usize..(offset + len) as usize],
@@ -629,7 +669,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     db.register_external_blob(&missing.id, &missing.namespace, &missing_path, 1234)
         .await
         .expect("register missing external ref");
-    let err = read_blob(&db, &ld, &storage, &missing)
+    let err = read_blob(&db, &ld, Some(&storage), &missing)
         .await
         .expect_err("a missing external file is terminal, never a cloud fetch");
     assert!(
@@ -650,7 +690,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     )
     .await
     .expect("register size-mismatched external ref");
-    let err = read_blob(&db, &ld, &storage, &mism)
+    let err = read_blob(&db, &ld, Some(&storage), &mism)
         .await
         .expect_err("a size-mismatched external file is terminal, never a cloud fetch");
     assert!(
@@ -676,7 +716,7 @@ async fn clear_external_blob_restores_the_cache_cloud_path() {
         .await
         .expect("register external ref");
 
-    let got = read_blob(&db, &ld, &storage, &blob)
+    let got = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("external read while the ref is registered");
     assert_eq!(
@@ -691,7 +731,7 @@ async fn clear_external_blob_restores_the_cache_cloud_path() {
         .expect("clear external ref");
     let cloud_bytes = b"NOW-FROM-THE-CLOUD".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &cloud_bytes).await;
-    let got = read_blob(&db, &ld, &storage, &blob)
+    let got = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("after clearing, the read fetches from the cloud");
     assert_eq!(
@@ -736,7 +776,7 @@ async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
         .await
         .expect("register external ref");
 
-    let got = read_blob(&db, &ld, &storage, &blob)
+    let got = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("read with both an external ref and a cache file");
     assert_eq!(
@@ -748,7 +788,7 @@ async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
     let mid = open_blob_stream(
         &db,
         &ld,
-        &storage,
+        Some(&storage),
         &blob,
         ext_bytes.len() as u64,
         offset,
@@ -797,7 +837,7 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
 
     // 1. External ref wins.
     assert_eq!(
-        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
         ext_bytes,
         "the external ref is checked first",
     );
@@ -805,7 +845,7 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
     // 2. Clear the ref → the local store wins (no cloud touched).
     db.clear_external_blob(&blob.id).await.unwrap();
     assert_eq!(
-        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
         store_bytes,
         "with no external ref the host-provided local store wins",
     );
@@ -815,7 +855,7 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
         .await
         .unwrap();
     assert_eq!(
-        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
         cache_bytes,
         "with no local store the cache wins",
     );
@@ -823,7 +863,7 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
     // 4. Clear the cache → the cloud is the last resort.
     clear_cache(&ld).await.unwrap();
     assert_eq!(
-        read_blob(&db, &ld, &storage, &blob).await.unwrap(),
+        read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
         cloud_bytes,
         "with no local copy at all the cloud is fetched",
     );
@@ -1014,14 +1054,14 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
         .expect("set covers budget");
 
     // Read the first cover into the cache, then age it so it is the oldest.
-    read_blob(&db, &ld, &storage, &cov1)
+    read_blob(&db, &ld, Some(&storage), &cov1)
         .await
         .expect("first cover read populates the cache");
     set_cache_mtime(&ld, "covers", &cov1.id, 1000);
 
     // Read the second cover: populating it pushes `covers` to 400 (> 250), so the
     // read's own sweep evicts the oldest (the first cover), leaving only the second.
-    read_blob(&db, &ld, &storage, &cov2)
+    read_blob(&db, &ld, Some(&storage), &cov2)
         .await
         .expect("second cover read populates and evicts to budget");
     assert!(
@@ -1034,7 +1074,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     );
 
     // A read of the evicted cover re-fetches it from the cloud back into the cache.
-    let refetched = read_blob(&db, &ld, &storage, &cov1)
+    let refetched = read_blob(&db, &ld, Some(&storage), &cov1)
         .await
         .expect("a read of the evicted cover re-fetches it");
     assert_eq!(refetched, vec![1u8; 200], "the re-fetch returns the bytes");
@@ -1079,7 +1119,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         "the CacheEager blob lands in the evictable cache on pull",
     );
     let eager = blob_ref("mir0aaaa", "photos", CacheFill::CacheEager);
-    pin(&db2, &ld, &storage, std::slice::from_ref(&eager))
+    pin(&db2, &ld, Some(&storage), std::slice::from_ref(&eager))
         .await
         .expect("pin the eager blob into pinned/");
     assert!(ld.pinned_blob_path("photos", "mir0aaaa").unwrap().exists());
@@ -1089,7 +1129,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     write_blob(&db2, &ld, &lazy, &[7u8; 500])
         .await
         .expect("write the lazy blob into the cache");
-    pin(&db2, &ld, &storage, std::slice::from_ref(&lazy))
+    pin(&db2, &ld, Some(&storage), std::slice::from_ref(&lazy))
         .await
         .expect("user-pin the lazy blob");
     assert!(ld.pinned_blob_path("audio", "usr0bbbb").unwrap().exists());
@@ -1184,7 +1224,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
     let bytes = vec![2u8; 100];
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
-    let got = read_blob(&db, &ld, &storage, &blob)
+    let got = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("read fetches and populates, then evicts to budget");
     assert_eq!(got, bytes, "the triggering read still returns its bytes");
@@ -1227,7 +1267,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         put_cloud_blob(&storage, &id, "release_files", &bytes).await;
         let blob = blob_ref(&id, "release_files", CacheFill::CacheLazy);
 
-        let got = read_blob(&db, &ld, &storage, &blob)
+        let got = read_blob(&db, &ld, Some(&storage), &blob)
             .await
             .expect("each read populates then evicts to budget");
         assert_eq!(got, bytes, "each read returns its freshly-fetched bytes");

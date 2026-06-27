@@ -651,7 +651,7 @@ async fn materialize_blobs(
             return Err(MakeLocalError::Cancelled);
         }
 
-        let bytes = cache::read_blob(db, library_dir, storage, blob)
+        let bytes = cache::read_blob(db, library_dir, Some(storage), blob)
             .await
             .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
         let cloud_key = cloud_key_for(scheme, blob)
