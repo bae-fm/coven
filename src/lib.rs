@@ -83,6 +83,13 @@ pub mod config;
 pub mod database;
 pub mod db;
 pub mod encryption;
+// The native data handle: one object a host constructs that owns coven's pieces
+// (the `Database`, the `LibraryDir`, the keys, and — once a provider is connected
+// — the `SyncManager`) and exposes the whole data interface as methods. The
+// native counterpart of the browser-only `wasm_facade::CovenLibrary`. Documented
+// at the module.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod handle;
 pub mod id_provider;
 pub mod join_code;
 pub mod keys;
@@ -158,6 +165,8 @@ mod wasm_blob_opfs_test;
 mod wasm_keystore_test;
 
 pub use database::Database;
+#[cfg(not(target_arch = "wasm32"))]
+pub use handle::CovenHandle;
 pub use sync::hlc::UpdatedAtStamper;
 
 /// The exact `rusqlite` coven owns the connection through. The host runs its app
