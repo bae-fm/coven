@@ -20,6 +20,8 @@ use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
 use crate::storage::cloud::CloudHome;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::MemberRole;
@@ -210,6 +212,70 @@ impl SyncManager {
         handle.start();
 
         info!("Sync loop started");
+        *self.sync_loop_handle.write().unwrap() = Some(handle);
+
+        Ok(())
+    }
+
+    /// Test-only: stand the sync loop over an injected `home`/`cipher` instead of
+    /// building the cloud home from config via `create_cloud_home`.
+    ///
+    /// The counterpart of [`start_sync`](Self::start_sync) for a host's
+    /// integration tests, which drive coven over a mock [`CloudHome`] no provider
+    /// match would ever produce. It skips the config-provider gate — the injected
+    /// home IS the enablement, there are no real credentials to check — installs
+    /// the home, builds a [`CloudSyncStorage`] over it under the supplied `cipher`
+    /// (and the config's blob-path scheme), runs the same bootstrap
+    /// [`init_sync`](crate::sync::cycle::init_sync) does via
+    /// [`init_sync_over_storage`](crate::sync::cycle::init_sync_over_storage), and
+    /// starts the loop. A bootstrap failure is an `Err` (no loop installed), the
+    /// same fail-loud discipline `start_sync` keeps.
+    ///
+    /// After this returns, the connected loop's storage is reachable via
+    /// [`sync_loop_handle`](Self::sync_loop_handle)`().storage()`, so the handle's
+    /// read path serves blobs over the same injected home with no separate hook.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn start_sync_with_home(
+        &self,
+        home: std::sync::Arc<dyn CloudHome>,
+        cipher: CloudCipher,
+    ) -> Result<(), String> {
+        let config = (self.config_provider)();
+
+        *self.cloud_home.write().unwrap() = Some(home.clone());
+
+        let keypair = self
+            .key_service
+            .get_or_create_user_keypair()
+            .map_err(|e| format!("failed to load user keypair for test sync: {e}"))?;
+        let storage = CloudSyncStorage::new(
+            home,
+            cipher.clone(),
+            BlobPathScheme::for_storage(config.cloud_home.storage),
+            keypair,
+        );
+
+        let components = crate::sync::cycle::init_sync_over_storage(
+            &config,
+            &self.key_service,
+            &self.db,
+            &cipher,
+            self.hlc.clone(),
+            storage,
+        )
+        .await
+        .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
+
+        let handle = Arc::new(SyncLoopHandle::new(
+            components,
+            self.db.clone(),
+            self.clock.clone(),
+            config.library_dir.clone(),
+            self.observer.clone(),
+        ));
+        handle.start();
+
+        info!("Sync loop started over an injected test cloud home");
         *self.sync_loop_handle.write().unwrap() = Some(handle);
 
         Ok(())
