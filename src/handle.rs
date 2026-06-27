@@ -86,7 +86,7 @@ use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 /// handle.store_blob("images", "release-1", &bytes).await?;
 ///
 /// // Sync is optional. Connect a provider, then drive it; a library with no
-/// // cloud home never calls these and stays fully usable on-device.
+/// // cloud home never calls these and keeps working on-device.
 /// handle.connect_sync(None).await;
 /// handle.sync_now();
 /// # let _ = note_count;
