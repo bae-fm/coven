@@ -48,6 +48,10 @@ use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::setup::create_sync_storage;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::storage::cloud::CloudHome;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use crate::sync::storage::{StorageError, SyncStorage};
 use crate::sync::sync_manager::{ConfigProvider, SyncManager};
@@ -114,14 +118,6 @@ pub struct CovenHandle {
     /// connected; `None` for a home-less, all-Local library. Shared behind a lock
     /// so a connect/disconnect mutates it in place without rebuilding the handle.
     sync: Arc<RwLock<Option<Arc<SyncManager>>>>,
-
-    /// A test-only read [`SyncStorage`] a host injects via
-    /// [`set_test_storage`](Self::set_test_storage), so a host's tests route their
-    /// blob reads through the handle against a storage backed by an injected mock
-    /// cloud home instead of one built from [`Config`]. When set it takes
-    /// precedence in [`blob_storage`](Self::blob_storage); production never has it.
-    #[cfg(any(test, feature = "test-utils"))]
-    test_storage: Arc<RwLock<Option<Arc<dyn SyncStorage>>>>,
 }
 
 impl CovenHandle {
@@ -150,8 +146,6 @@ impl CovenHandle {
             clock,
             observer,
             sync: Arc::new(RwLock::new(None)),
-            #[cfg(any(test, feature = "test-utils"))]
-            test_storage: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -209,6 +203,53 @@ impl CovenHandle {
         manager.start_sync().await?;
         *self.sync.write().unwrap() = Some(manager.clone());
         info!("coven handle: sync manager connected");
+        Ok(manager)
+    }
+
+    /// Test-only: connect a fully-working [`SyncManager`] over an injected
+    /// [`CloudHome`] instead of one built from [`Config`] via `create_cloud_home`,
+    /// so a host's integration tests drive the real make-Remote / make-Local /
+    /// upload-drain and read paths over a mock cloud with no live provider.
+    ///
+    /// The test counterpart of [`connect_sync`](Self::connect_sync): it stands the
+    /// manager over `home`/`cipher` through
+    /// [`SyncManager::start_sync_with_home`], starts the loop, and installs it with
+    /// the same start-before-install discipline — a failed connect leaves the
+    /// handle home-less rather than holding a dead manager. The encryption service
+    /// the manager reports (for `blob_cipher` / membership) is taken from the
+    /// injected `cipher`, the single source of at-rest protection on the test path.
+    ///
+    /// The read path needs no separate hook: [`blob_storage`](Self::blob_storage)
+    /// serves reads from the connected loop's own [`CloudSyncStorage`], which here
+    /// wraps the injected `home`, so [`read_blob`](Self::read_blob) /
+    /// [`pin`](Self::pin) resolve a Remote miss against the same test home the
+    /// drain writes to.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn connect_sync_with_test_home(
+        &self,
+        home: Arc<dyn CloudHome>,
+        cipher: CloudCipher,
+    ) -> Result<Arc<SyncManager>, String> {
+        // The test supplies encryption through the cipher, not a separate service;
+        // derive the manager's service from it so `blob_cipher` and the membership
+        // path agree with the at-rest protection the loop and storage seal under.
+        let encryption_service = match &cipher {
+            CloudCipher::Encrypted(service) => Some(service.clone()),
+            CloudCipher::Plaintext => None,
+        };
+        let manager = Arc::new(SyncManager::new(
+            self.config_provider.clone(),
+            self.key_service.clone(),
+            encryption_service,
+            self.db.clone(),
+            self.clock.clone(),
+            self.observer.clone(),
+        ));
+        // Start before installing: a failed test-home connect must leave the handle
+        // home-less, not holding a manager whose loop never started.
+        manager.start_sync_with_home(home, cipher).await?;
+        *self.sync.write().unwrap() = Some(manager.clone());
+        info!("coven handle: sync manager connected over an injected test cloud home");
         Ok(manager)
     }
 
@@ -276,12 +317,23 @@ impl CovenHandle {
     ///
     /// A provider that IS configured but whose storage fails to build (missing
     /// credentials, a bad cipher) surfaces that error rather than reporting
-    /// home-less. A test storage injected via
-    /// [`set_test_storage`](Self::set_test_storage) takes precedence.
+    /// home-less.
+    ///
+    /// When a [`SyncManager`] is connected and its loop is running, the read
+    /// reuses that loop's own [`CloudSyncStorage`] rather than rebuilding one from
+    /// config — so a read and the loop's writes share the exact home + cipher (and
+    /// a key rotation the loop applies in place is seen here on the next read), and
+    /// a test home injected via
+    /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) is served
+    /// from with no separate hook. A manager connected but not yet running its loop
+    /// (sync configured but not enabled) falls back to building from config, as
+    /// does a home-less library (provider `None` ⇒ `None`).
     async fn blob_storage(&self) -> Result<Option<Arc<dyn SyncStorage>>, String> {
-        #[cfg(any(test, feature = "test-utils"))]
-        if let Some(storage) = self.test_storage.read().unwrap().clone() {
-            return Ok(Some(storage));
+        if let Some(manager) = self.sync_manager() {
+            if let Some(loop_handle) = manager.sync_loop_handle() {
+                let storage: Arc<dyn SyncStorage> = loop_handle.storage().clone();
+                return Ok(Some(storage));
+            }
         }
         let config = self.config();
         if config.cloud_home.provider.is_none() {
@@ -290,16 +342,6 @@ impl CovenHandle {
         let storage =
             create_sync_storage(&config, &self.key_service, None, self.clock.clone()).await?;
         Ok(Some(Arc::new(storage)))
-    }
-
-    /// Inject a read [`SyncStorage`] a host's tests route blob reads through,
-    /// bypassing the [`Config`]-built cloud home so a test can supply storage
-    /// backed by a mock cloud home the handle could not otherwise see. Takes
-    /// precedence in [`blob_storage`](Self::blob_storage). Test-only seam;
-    /// production never sets it.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn set_test_storage(&self, storage: Arc<dyn SyncStorage>) {
-        *self.test_storage.write().unwrap() = Some(storage);
     }
 
     /// Read a blob's whole plaintext through coven's locality-aware read: served
@@ -495,5 +537,133 @@ impl CovenHandle {
             self.observer.as_deref(),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::blob::{BlobScope, CacheFill, Provenance};
+    use crate::clock::SystemClock;
+    use crate::config::{Config, HomeStorage};
+    use crate::database::DbError;
+    use crate::keys::{test_keyring, KeyService};
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::sync::cloud_storage::CloudCipher;
+    use crate::sync::sync_manager::ConfigProvider;
+    use crate::sync::test_helpers::{open_test_db, temp_library_dir};
+
+    /// Insert one `cloud_outbox` upload row whose bytes are read from `source_path`
+    /// and replayed verbatim to `cloud_key`, the durable shape a make_remote
+    /// enqueues — minus a backing row, so the drain's completion check finds no
+    /// gated root and just clears the row (a plain upload).
+    async fn enqueue_upload(db: &Database, file_id: &str, cloud_key: &str, source_path: &str) {
+        let scope = BlobScope::Master.to_outbox_str();
+        let (file_id, cloud_key, source_path) = (
+            file_id.to_string(),
+            cloud_key.to_string(),
+            source_path.to_string(),
+        );
+        db.call(move |conn| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO cloud_outbox \
+                     (operation, file_id, cloud_key, source_path, scope, created_at, attempt_count) \
+                     VALUES ('upload', ?1, ?2, ?3, '{scope}', '2024-01-01T00:00:00Z', 0)"
+                ),
+                rusqlite::params![file_id, cloud_key, source_path],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("insert outbox upload");
+    }
+
+    /// `connect_sync_with_test_home` stands a real `SyncManager` over an injected
+    /// `InMemoryCloudHome` and routes BOTH the upload drain and the read path
+    /// through it: a blob enqueued for upload drains to the home through the
+    /// handle, and a subsequent `read_blob` resolves the Remote miss back out of
+    /// the same home — end to end, with the host supplying only the home + cipher.
+    // The user keypair is one process-wide keyring account, so the guard is held
+    // across this test's awaits to keep a parallel test from deleting it mid-run
+    // (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so
+    // the blocking `std` lock never deadlocks against another task on this runtime).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_home_drives_drain_and_read_through_the_handle() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (tmp, library_dir) = temp_library_dir();
+        let db = open_test_db();
+
+        // A browsable home: plaintext at rest, readable `{namespace}/{cloud_path}`
+        // blob keys. The cipher passed below is the matching `Plaintext`.
+        let mut config = Config::with_defaults(
+            "lib-test".to_string(),
+            "test-device".to_string(),
+            library_dir.clone(),
+            "Test Library".to_string(),
+        );
+        config.cloud_home.storage = HomeStorage::Browsable;
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+
+        let handle = CovenHandle::new(
+            db.clone(),
+            library_dir,
+            config_provider,
+            KeyService::new("lib-test".to_string()),
+            Arc::new(SystemClock),
+            None,
+        );
+
+        // Inject the mock home; the host hands over only the home + cipher.
+        let home = Arc::new(InMemoryCloudHome::new());
+        handle
+            .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
+            .await
+            .expect("connect over the injected test home");
+
+        // A blob's plaintext on disk, enqueued for upload to its readable cloud key.
+        let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
+        let source = tmp.path().join("cover-source.jpg");
+        std::fs::write(&source, &plaintext).expect("write source file");
+        let cloud_key = "images/cover.jpg"; // {namespace}/{cloud_path} under the plain scheme.
+        enqueue_upload(&db, "cover-1", cloud_key, &source.to_string_lossy()).await;
+
+        // Drain through the handle: the upload lands in the injected home verbatim.
+        let outcome = handle
+            .drain_uploads()
+            .await
+            .expect("drain through the handle");
+        assert_eq!(outcome.uploaded, 1, "the one queued blob uploaded");
+        assert_eq!(
+            home.get(cloud_key).as_deref(),
+            Some(plaintext.as_slice()),
+            "the blob landed in the injected home at its readable key, plaintext at rest",
+        );
+
+        // Read through the handle: a Remote miss resolves back out of the same home.
+        let blob = BlobRef {
+            namespace: "images".to_string(),
+            id: "cover-1".to_string(),
+            scope: BlobScope::Master,
+            cloud_path: Some("cover.jpg".to_string()),
+            provenance: Provenance::UserProvided,
+            fill: CacheFill::CacheLazy,
+        };
+        let read = handle
+            .read_blob(&blob)
+            .await
+            .expect("read through the handle");
+        assert_eq!(
+            read, plaintext,
+            "read_blob fetched the blob's plaintext from the injected test home",
+        );
     }
 }
