@@ -13,8 +13,8 @@ symmetric key is wrapped to each member's X25519 key. Blobs referenced by rows
 sync as encrypted opaque files through a cloud outbox.
 
 The host owns its schema and domain; coven owns the data — the SQLite connection
-and the blob store. A library is local-first: rows and blobs live on the device,
-and reach the cloud only when you connect a provider. A host talks to coven
+and the blob store. Rows and blobs live on the device and reach the cloud only
+when you connect a provider. A host talks to coven
 through one handle — `CovenHandle` natively, or the `CovenLibrary` facade in the
 browser — and never reaches into coven's storage or sync internals directly.
 
@@ -34,7 +34,7 @@ browser — and never reaches into coven's storage or sync internals directly.
 - Declare which rows carry blobs per table with
   `sync::session::SyncedTable::carries_blob` (a `BlobDecl`: namespace, provenance,
   cache fill, encryption scope), and optionally pass a
-  `blob::BlobTransitionObserver` to the `SyncManager`.
+  `blob::BlobTransitionObserver` to `CovenHandle::new`.
 - Register identity/OAuth at startup: `keys::set_keyring_service`,
   `oauth::set_oauth_client_creds`.
 - Hold a `CovenHandle`, built once over the open `Database`. Run app SQL through
