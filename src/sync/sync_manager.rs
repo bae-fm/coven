@@ -145,28 +145,33 @@ impl SyncManager {
 
     /// Initialize cloud home and sync loop from current config.
     /// Called at startup (if already configured) and after connecting a provider.
-    pub async fn start_sync(&self) {
+    ///
+    /// Two outcomes are success: a configured provider whose home builds and whose
+    /// loop starts, and a not-yet-enabled library (no keys / sync off) that
+    /// legitimately starts no loop — the latter is a logged `Ok(())` no-op. A
+    /// cloud-home build that *fails* (missing credentials, a bad provider config)
+    /// is an `Err`, not "no provider connected": the caller must not install a
+    /// manager that reports success with nothing started.
+    pub async fn start_sync(&self) -> Result<(), String> {
         let config = (self.config_provider)();
 
-        // Create cloud home
-        let cloud_home: Option<Arc<dyn CloudHome>> = match crate::storage::cloud::create_cloud_home(
+        // Build the cloud home. A failure here is a real fault — surface it so the
+        // caller never installs a manager that started nothing.
+        let cloud_home = crate::storage::cloud::create_cloud_home(
             &config,
             &self.key_service,
             self.clock.clone(),
         )
         .await
-        {
-            Ok(ch) => Some(Arc::from(ch)),
-            Err(e) => {
-                info!("Cloud home not available: {e}");
-                return;
-            }
-        };
+        .map_err(|e| format!("failed to build cloud home: {e}"))?;
 
-        *self.cloud_home.write().unwrap() = cloud_home;
+        *self.cloud_home.write().unwrap() = Some(Arc::from(cloud_home));
 
         if !config.sync_enabled(&self.key_service) {
-            return;
+            // Not a failure: a configured-but-not-yet-enabled library (e.g. no
+            // keys) legitimately starts no loop. Logged so the no-op is visible.
+            info!("start_sync: sync not enabled; cloud home built but loop not started");
+            return Ok(());
         }
 
         // The home's at-rest cipher: an opaque home seals under the manager's
@@ -203,6 +208,8 @@ impl SyncManager {
             info!("Sync loop started");
             *self.sync_loop_handle.write().unwrap() = Some(handle);
         }
+
+        Ok(())
     }
 
     /// Tear down the sync loop and cloud home.

@@ -375,7 +375,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let fetched = cache::read_blob(
         &db_b,
         &lib_b,
-        &storage,
+        Some(&storage),
         &photo_ref("photoaaa", "cv/photoaaa.flac"),
     )
     .await
@@ -485,7 +485,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     let read = cache::read_blob(
         &db_a,
         &lib_a,
-        &storage,
+        Some(&storage),
         &photo_ref("photoaaa", "cv/photoaaa.flac"),
     )
     .await
@@ -592,7 +592,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         cache::read_blob(
             &db_b,
             &lib_b,
-            &storage,
+            Some(&storage),
             &cover_ref("coveraaa", "cv/cover.jpg")
         )
         .await

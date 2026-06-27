@@ -84,6 +84,13 @@ pub enum BlobCacheError {
     /// A cloud read failed: the blob isn't in the cloud, or the backend errored
     /// (surfaced from [`SyncStorage::get_blob`]).
     Storage(StorageError),
+    /// A Remote blob's bytes were needed from the cloud but no cloud home is
+    /// connected, so there is no storage to fetch them from. A home-less library
+    /// holds only Local blobs (external refs + the local store), which serve
+    /// straight off disk and never reach the cloud-miss path; reaching here means
+    /// a Remote blob was read with no provider connected — a real fault, surfaced
+    /// rather than masked.
+    NoCloudHome,
     /// A local-disk failure (a cache write, a folder move, the `clear_cache`
     /// sweep), or a scope that couldn't be resolved to an encryption key. Carries a
     /// human-readable cause.
@@ -115,6 +122,9 @@ impl std::fmt::Display for BlobCacheError {
         match self {
             BlobCacheError::Path(e) => write!(f, "blob path error: {e}"),
             BlobCacheError::Storage(e) => write!(f, "blob cache storage error: {e}"),
+            BlobCacheError::NoCloudHome => {
+                write!(f, "no cloud home connected to read a Remote blob")
+            }
             BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
             BlobCacheError::ExternalMissing { id, path, source } => write!(
                 f,
@@ -284,6 +294,23 @@ pub async fn drop_cached_blob(
     Ok(())
 }
 
+/// Whether a Remote blob's cache copy is currently pinned — present in
+/// `storage/pinned/<namespace>/<id>`. The pin truth is the folder a blob's file
+/// lives in, not a table (see the module docs), so this is a single existence
+/// check on the kept folder: a blob in `cache/` or in neither folder is not
+/// pinned. A failure to even check existence (broken filesystem) is surfaced,
+/// never collapsed into "not pinned".
+pub async fn is_pinned(
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+) -> Result<bool, BlobCacheError> {
+    let pinned = library_dir.pinned_blob_path(namespace, id)?;
+    crate::local_blob::exists(&pinned)
+        .await
+        .map_err(BlobCacheError::Io)
+}
+
 /// Read a blob's whole contents, resolving — *by where the bytes are* —
 /// external-ref → local store → cache → cloud.
 ///
@@ -311,7 +338,7 @@ pub async fn drop_cached_blob(
 pub async fn read_blob(
     db: &Database,
     library_dir: &LibraryDir,
-    storage: &dyn SyncStorage,
+    storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     // External ref first: a user-provided Local blob plays the user's own file,
@@ -350,7 +377,10 @@ pub async fn read_blob(
         }
     }
 
-    // Miss: fetch from the cloud and populate the evictable cache.
+    // Miss: fetch from the cloud and populate the evictable cache. A home-less
+    // library reaches here only when a Remote blob is read with no provider
+    // connected — there is no storage to fetch it from, so surface that fault.
+    let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     let bytes = fetch_from_cloud(db, storage, blob).await?;
     crate::local_blob::write_atomic(&cache, &bytes)
         .await
@@ -414,7 +444,7 @@ pub async fn read_blob(
 pub async fn open_blob_stream(
     db: &Database,
     library_dir: &LibraryDir,
-    storage: &dyn SyncStorage,
+    storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
     source_size: u64,
     offset: u64,
@@ -477,7 +507,9 @@ pub async fn open_blob_stream(
 
     // Miss: serve the range from the cloud (range read + decrypt over the resolved
     // scope) WITHOUT writing a cache file — a partial file would be mistaken for
-    // the whole blob by `read_blob`. Only `read_blob` populates the cache.
+    // the whole blob by `read_blob`. Only `read_blob` populates the cache. A
+    // home-less library has no storage to range-read a Remote blob from; surface it.
+    let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     crate::library_dir::validate_path_token(&blob.namespace)?;
     crate::library_dir::validate_path_token(&blob.id)?;
     if let Some(cloud_path) = blob.cloud_path.as_deref() {
@@ -532,7 +564,7 @@ pub async fn move_local_into_cache(
 pub async fn pin(
     db: &Database,
     library_dir: &LibraryDir,
-    storage: &dyn SyncStorage,
+    storage: Option<&dyn SyncStorage>,
     blobs: &[BlobRef],
 ) -> Result<(), BlobCacheError> {
     for blob in blobs {
@@ -563,7 +595,9 @@ pub async fn pin(
             Err(e) => return Err(BlobCacheError::Io(e)),
         }
 
-        // In neither folder — fetch from the cloud straight into `pinned/`.
+        // In neither folder — fetch from the cloud straight into `pinned/`. A
+        // home-less library has no storage to fetch a Remote blob from; surface it.
+        let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
         let bytes = fetch_from_cloud(db, storage, blob).await?;
         crate::local_blob::write_atomic(&pinned, &bytes)
             .await
