@@ -218,7 +218,7 @@ pub(crate) trait SyncStorage: crate::MaybeThreadSafe {
     /// Delete a single changeset from storage.
     /// Removes `changes/{device_id}/{seq}{suffix}`.
     /// Test-only: the changeset-GC machinery that uses it has no production caller
-    /// yet (see `snapshot::garbage_collect`).
+    /// (see `snapshot::garbage_collect`).
     #[cfg(test)]
     async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError>;
 
@@ -241,7 +241,7 @@ pub(crate) trait SyncStorage: crate::MaybeThreadSafe {
     ///
     /// Writes to `min_schema_version.json{suffix}`. Used when a breaking migration
     /// bumps the schema and all devices must upgrade before syncing.
-    /// Test-only: the write side of the schema floor has no production caller yet
+    /// Test-only: the write side of the schema floor has no production caller
     /// (the read side, [`Self::get_min_schema_version`], is live).
     #[cfg(test)]
     async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError>;

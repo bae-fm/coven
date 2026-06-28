@@ -164,7 +164,7 @@ mod wasm_blob_opfs_test;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_keystore_test;
 
-// coven's public API is exactly this curated set of crate-root re-exports. Every
+// coven's public API is exactly this set of crate-root re-exports. Every
 // implementation module is `pub(crate)`; a host reaches coven only through these
 // names, never through `coven::blob::…` or `coven::sync::…`.
 
@@ -236,9 +236,9 @@ pub use sync::restore_code::decode_restore_code_info;
 // Cloud at-rest cipher (host configures / tests inject).
 pub use sync::cloud_storage::CloudCipher;
 
-// --- Host-facing surface beyond the plan's curated set. The seal exposed these
-//     as public-API-only items (no internal coven caller); each is reached by the
-//     host, cross-checked against bae's usage and coven's own module docs. ---
+// --- Host-facing surface with no internal coven caller: each is a public-API-only
+//     item the host reaches (named by a public signature, or constructed/read by
+//     the host), cross-checked against the host's usage and coven's module docs. ---
 
 // Clock + id abstractions the host injects: real impls plus the deterministic
 // test fakes coven shares so the host tests against the same ones.
@@ -253,7 +253,7 @@ pub use id_provider::{IdProvider, IdRef, UuidProvider};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::local::BlobStore;
 
-// The host's pluggable cloud backend: the `CloudHome` trait (whose `upload` names
+// The cloud backend the host provides: the `CloudHome` trait (whose `upload` names
 // `UploadProgress`), plus the two concrete backends the host constructs/implements
 // — `S3CloudHome` and the `CloudKitOps` glue (both native-only). (coven's own
 // `SyncStorage` contract over `CloudHome` stays `pub(crate)` — the host implements
