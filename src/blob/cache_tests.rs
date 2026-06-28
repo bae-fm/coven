@@ -58,6 +58,42 @@ fn photo_decl() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
 }
 
+/// A read-test [`Database`] whose `note_photos` child carries a blob, so a planted
+/// row resolves up to the gated `notes` root — the gate [`read_blob`]'s locality
+/// dispatch reads. The decl's namespace/provenance don't affect that resolution (it
+/// reads the row → root → gate, never the [`BlobRef`]), so these tests vary their
+/// BlobRef namespaces freely; only the blob *id* must match a planted `note_photos.id`.
+fn read_test_db() -> Database {
+    open_test_db_with_blob(photo_decl())
+}
+
+/// Plant the backing row [`read_blob`] resolves a blob's locality from: a gated
+/// `notes` root with `shared = remote` and a `note_photos` child whose id is
+/// `blob_id`. `remote = true` ⇒ the blob resolves **Remote** (cache/cloud);
+/// `remote = false` ⇒ **Local** (the host-provided local store). Requires a db opened
+/// with [`read_test_db`] (note_photos must carry a blob for the row lookup to see it).
+async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool) {
+    let note = format!("note-{blob_id}");
+    let blob_id = blob_id.to_string();
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES (?1, 'read-test', ?2, '0000000001000-0000-dev1', '2026-01-01')",
+            (note.as_str(), remote as i64),
+        )
+        .map_err(crate::database::DbError::from)?;
+        conn.execute(
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+             VALUES (?1, ?2, 'attach', '0000000001000-0000-dev1', '2026-01-01')",
+            (blob_id.as_str(), note.as_str()),
+        )
+        .map_err(crate::database::DbError::from)?;
+        Ok(())
+    })
+    .await
+    .expect("plant blob row");
+}
+
 /// Put `bytes` into the mock cloud under the flat `{namespace}/{id}` key the mock's
 /// `get_blob` reads back (master scope, no cloud_path), so a cache miss can fetch it.
 async fn put_cloud_blob(storage: &MockSyncStorage, id: &str, namespace: &str, bytes: &[u8]) {
@@ -72,11 +108,12 @@ async fn put_cloud_blob(storage: &MockSyncStorage, id: &str, namespace: &str, by
 /// bytes — served from disk, no fetch.
 #[tokio::test]
 async fn second_read_is_a_local_hit() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
     let bytes = b"THE-BLOB-BYTES".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -152,11 +189,12 @@ async fn cache_eager_lands_in_cache_on_pull() {
 /// CacheEager blob lands evictable in the cache on pull).
 #[tokio::test]
 async fn pin_survives_clear_cache_and_unpin_demotes() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("ond-aaaa", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
     let bytes = b"ON-DEMAND-AUDIO".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -255,8 +293,10 @@ async fn cache_lazy_fetches_on_first_read() {
     let cs = capture_bytes(
         &db1,
         &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'WithAudio', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            // shared = 1: the note is Remote, so its blob resolves Remote (cache/cloud)
+            // on the peer that pulls it.
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
              VALUES ('aud01234', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
         ],
@@ -300,11 +340,12 @@ async fn cache_lazy_fetches_on_first_read() {
 /// deleted first, so a pin that tried to fetch would fail: it must not.
 #[tokio::test]
 async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("stg-aaaa", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
     let bytes = b"CACHED-BYTES".to_vec();
 
     // Write the bytes into the cache.
@@ -373,11 +414,12 @@ fn write_external_file(base: &std::path::Path, name: &str, bytes: &[u8]) -> std:
 /// re-fetch.
 #[tokio::test]
 async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
     let full = ramp(5000);
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &full).await;
 
@@ -438,11 +480,12 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 /// file — only the whole-file `read_blob` populates.
 #[tokio::test]
 async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("blob-bbbb", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
     let full = ramp(5000);
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &full).await;
 
@@ -496,11 +539,12 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
 /// exists and a second read is served from it even with the cloud copy gone.
 #[tokio::test]
 async fn full_read_blob_still_populates_the_cache() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("blob-cccc", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
     let bytes = b"WHOLE-FILE-PAYLOAD".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -529,7 +573,7 @@ async fn full_read_blob_still_populates_the_cache() {
 /// cached blob (served from disk) and a non-cached one (served from the cloud).
 #[tokio::test]
 async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
@@ -537,6 +581,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
 
     // Non-cached blob: contract enforced before/within the cloud path.
     let remote = blob_ref("blob-dddd", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &remote.id, true).await;
     put_cloud_blob(&storage, &remote.id, &remote.namespace, &full).await;
     assert!(
         open_blob_stream(
@@ -563,6 +608,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     // Cached blob: same contract on the local-file path. Populate the cache, drop
     // the cloud copy so only the local path can serve.
     let cached = blob_ref("blob-eeee", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &cached.id, true).await;
     put_cloud_blob(&storage, &cached.id, &cached.namespace, &full).await;
     read_blob(&db, &ld, Some(&storage), &cached)
         .await
@@ -705,11 +751,14 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
 /// read returns and the fetch populates the cache.
 #[tokio::test]
 async fn clear_external_blob_restores_the_cache_cloud_path() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (tmp, ld) = temp_library_dir();
 
     let blob = blob_ref("extc-aaaa", "audio", CacheFill::CacheLazy);
+    // With the external ref cleared the blob resolves through its gate: plant it Remote
+    // so the post-clear read falls to the cache/cloud path.
+    plant_blob_row(&db, &blob.id, true).await;
     let ext_bytes = ramp(1500);
     let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
     db.register_external_blob(&blob.id, &blob.namespace, &path, ext_bytes.len() as u64)
@@ -803,28 +852,29 @@ async fn external_ref_takes_precedence_over_a_same_id_cache_file() {
     );
 }
 
-/// Read resolution walks external ref → local store → cache → cloud in order, each
-/// step winning when present. Stacking distinct payloads at each step and removing
-/// them top-down proves the order: the external ref wins first; with it cleared the
-/// host-provided local store wins (no cloud touched); with the local store dropped
-/// the cache wins; with the cache cleared the cloud is the last resort.
+/// A **Local** blob (gate off) dispatches to exactly one source: the external ref if
+/// one is registered, else the host-provided local store. It never probes the cache
+/// or cloud. Stacking an external ref, a local-store copy, AND a stray same-id cache
+/// file proves it: the external ref wins; with it cleared the local store wins — and
+/// the cache file (and an untouched cloud copy) are never consulted for a Local blob.
 #[tokio::test]
-async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
-    let db = open_test_db();
+async fn local_blob_dispatches_to_external_ref_then_local_store_never_the_cache() {
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (tmp, ld) = temp_library_dir();
 
-    // A host-provided blob so the local-store step is in play (its Local home is the
-    // local store, not a user path).
+    // A host-provided blob, gated Local: its bytes live on-device, never the cloud.
     let blob = host_blob_ref("res0aaaa", "photos", CacheFill::CacheEager);
+    plant_blob_row(&db, &blob.id, false).await;
 
-    // Stack a distinct payload at each layer.
+    // Stack a distinct payload at each on-device layer plus the cloud. The cloud and
+    // cache payloads must NEVER be returned for a Local blob — they are decoys.
     let cloud_bytes = b"FROM-CLOUD".to_vec();
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &cloud_bytes).await;
     let cache_bytes = b"FROM-CACHE".to_vec();
     write_blob(&db, &ld, &blob, &cache_bytes)
         .await
-        .expect("write a cache copy");
+        .expect("write a same-id cache file (a decoy that must be ignored)");
     let store_bytes = b"FROM-LOCAL-STORE".to_vec();
     crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, &store_bytes)
         .await
@@ -835,37 +885,57 @@ async fn read_resolution_external_then_local_store_then_cache_then_cloud() {
         .await
         .expect("register external ref");
 
-    // 1. External ref wins.
+    // 1. External ref wins — checked before the locality dispatch.
     assert_eq!(
         read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
         ext_bytes,
         "the external ref is checked first",
     );
 
-    // 2. Clear the ref → the local store wins (no cloud touched).
+    // 2. Clear the ref → the Local gate dispatches straight to the local store. The
+    //    same-id cache file is NOT consulted (no fall-through), and the cloud is not
+    //    touched.
     db.clear_external_blob(&blob.id).await.unwrap();
     assert_eq!(
         read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
         store_bytes,
-        "with no external ref the host-provided local store wins",
+        "a Local blob with no external ref serves the local store, not the cache file",
     );
+}
 
-    // 3. Drop the local store → the cache wins.
-    crate::blob::local_files::drop_blob(&ld, &blob.namespace, &blob.id)
+/// A **Local** blob (gate off) whose local store is empty is fail-loud corruption:
+/// [`read_blob`] (and [`open_blob_stream`]) return [`BlobCacheError::NoLocalCopy`]
+/// rather than falling through to the cloud. A cloud copy exists under the same id —
+/// the old blind fall-through would have served it — so this proves the dispatch
+/// refuses to: a Local blob has no cloud copy, and a missing local file is broken
+/// state to surface, not a cache miss to refetch.
+#[tokio::test]
+async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud() {
+    let db = read_test_db();
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    let blob = host_blob_ref("res1bbbb", "photos", CacheFill::CacheEager);
+    plant_blob_row(&db, &blob.id, false).await;
+
+    // A cloud copy under the same id: a blind fall-through would have served these
+    // bytes. No external ref, no local-store file, no cache file.
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, b"CLOUD-DECOY").await;
+
+    let err = read_blob(&db, &ld, Some(&storage), &blob)
         .await
-        .unwrap();
-    assert_eq!(
-        read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
-        cache_bytes,
-        "with no local store the cache wins",
+        .expect_err("a Local blob missing from the local store is terminal, never a cloud fetch");
+    assert!(
+        matches!(err, BlobCacheError::NoLocalCopy { .. }),
+        "a missing Local copy maps to NoLocalCopy: {err:?}",
     );
 
-    // 4. Clear the cache → the cloud is the last resort.
-    clear_cache(&ld).await.unwrap();
-    assert_eq!(
-        read_blob(&db, &ld, Some(&storage), &blob).await.unwrap(),
-        cloud_bytes,
-        "with no local copy at all the cloud is fetched",
+    let range_err = open_blob_stream(&db, &ld, Some(&storage), &blob, 11, 0, 5)
+        .await
+        .expect_err("the ranged read is fail-loud on a missing Local copy too");
+    assert!(
+        matches!(range_err, BlobCacheError::NoLocalCopy { .. }),
+        "the ranged read also maps to NoLocalCopy: {range_err:?}",
     );
 }
 
@@ -1039,7 +1109,7 @@ async fn release_files_eviction_leaves_covers_intact() {
 /// the next read).
 #[tokio::test]
 async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
@@ -1047,6 +1117,8 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     // one at a time (250 bytes).
     let cov1 = blob_ref("cov01aaa", "covers", CacheFill::CacheEager);
     let cov2 = blob_ref("cov02bbb", "covers", CacheFill::CacheEager);
+    plant_blob_row(&db, &cov1.id, true).await;
+    plant_blob_row(&db, &cov2.id, true).await;
     put_cloud_blob(&storage, &cov1.id, &cov1.namespace, &[1u8; 200]).await;
     put_cloud_blob(&storage, &cov2.id, &cov2.namespace, &[2u8; 200]).await;
     db.set_cache_budget("covers", 250)
@@ -1206,7 +1278,7 @@ async fn unset_namespace_budget_never_evicts() {
 /// returns the fetched bytes, and the new file stays on disk.
 #[tokio::test]
 async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
@@ -1221,6 +1293,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         .await
         .expect("set budget");
     let blob = blob_ref("newer2bb", "release_files", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
     let bytes = vec![2u8; 100];
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
 
@@ -1252,7 +1325,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
 /// to it.
 #[tokio::test]
 async fn budget_never_drifts_over_across_repeated_populates() {
-    let db = open_test_db();
+    let db = read_test_db();
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
@@ -1263,6 +1336,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
 
     for i in 0..6u8 {
         let id = format!("seqr{i:04}"); // ≥4 chars, distinct per i, for the shard
+        plant_blob_row(&db, &id, true).await;
         let bytes = vec![i; 100];
         put_cloud_blob(&storage, &id, "release_files", &bytes).await;
         let blob = blob_ref(&id, "release_files", CacheFill::CacheLazy);

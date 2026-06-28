@@ -27,13 +27,21 @@
 //! (one filesystem, atomic) so a blob never appears in both folders or neither
 //! mid-move.
 //!
-//! Both reads resolve, *by where the bytes are*, in order: **external ref**
-//! (a `local_blob_refs` row — a user-provided Local blob's user-owned file coven
-//! reads but does not own) → **local store** (a host-provided Local blob, see
-//! [`local_files`](super::local_files)) → **cache** (a Remote blob's local copy) →
-//! **cloud** (a Remote blob not yet cached). The first two are the Local forms,
-//! read straight from disk with no cloud fallback; the cloud is reached only for a
-//! Remote blob not yet cached. [`read_blob`] returns the entire blob (a cloud miss
+//! Both reads **dispatch on coven's own authoritative state** — they never probe
+//! every store and take the first hit. First the **external ref**: if a
+//! `local_blob_refs` row is registered for the id, the blob is a user-provided Local
+//! file coven reads but does not own — served straight from the user's path,
+//! validated by presence + size, with no fallback (a miss is terminal, not a
+//! fall-through). Otherwise the blob's **locality** picks the single source: coven
+//! resolves the blob's backing row up to its gated root and reads that root's gate
+//! (see [`Gates::root_kept_of`](crate::sync::gate::Gates::root_kept_of)).
+//! **Local** (gate off) ⇒ the bytes are host-provided in the **local store**
+//! ([`local_files`](super::local_files)), the only copy — a miss there is fail-loud
+//! corruption ([`BlobCacheError::NoLocalCopy`]), never a cloud fetch (a Local blob has
+//! no cloud copy). **Remote** (gate on) ⇒ the bytes live in the cloud fronted by the
+//! device cache, and the one legitimate probe runs: per-device cache materialization
+//! — which no shared state records — checks `pinned/` then `cache/` and serves a hit,
+//! else fetches from the cloud. [`read_blob`] returns the entire blob (a cloud miss
 //! fetches + decrypts it and populates `cache/`); [`open_blob_stream`] serves a
 //! plaintext byte range for a host streaming or seeking (a cloud miss range-reads +
 //! decrypts but populates nothing — a partial file would be read as the whole blob,
@@ -55,9 +63,11 @@
 //! in one sweep regardless of any budget; a pinned blob (in `pinned/`) survives
 //! either way because it lives in the other folder.
 
+use crate::blob::decl::BlobDecls;
 use crate::blob::BlobRef;
-use crate::database::Database;
+use crate::database::{Database, DbError};
 use crate::library_dir::{LibraryDir, PathTokenError};
+use crate::sync::gate::Gates;
 use crate::sync::storage::{StorageError, SyncStorage};
 
 /// Prefix for the `sync_state` keys holding each namespace's device-local cache-size
@@ -115,6 +125,19 @@ pub enum BlobCacheError {
         id: String,
         path: std::path::PathBuf,
     },
+    /// A **Local** blob (its gated root's gate is off) has no copy in the local store.
+    /// A Local blob has no cloud copy, so there is nothing to fall back to: the state
+    /// is broken, not a cache miss. Surfaced loud rather than silently fetching from
+    /// the cloud — a make_local rollback leftover, an interrupted materialize, or a
+    /// lost local file would otherwise be papered over. The host re-materializes or
+    /// repairs.
+    NoLocalCopy { namespace: String, id: String },
+    /// A blob with no external ref could not be resolved to a locality: it has no
+    /// backing blob-bearing row, or its row reaches no gated root, so the gate that
+    /// owns Local-vs-Remote can't be read. In a consistent library every readable blob
+    /// has a gated row, so this is a real fault — surfaced rather than guessing a
+    /// source by probing.
+    LocalityUnresolved { id: String },
 }
 
 impl std::fmt::Display for BlobCacheError {
@@ -135,6 +158,14 @@ impl std::fmt::Display for BlobCacheError {
                 f,
                 "external blob {id} at {} no longer matches its registered size",
                 path.display()
+            ),
+            BlobCacheError::NoLocalCopy { namespace, id } => write!(
+                f,
+                "local blob {namespace}/{id} is gated Local but absent from the local store"
+            ),
+            BlobCacheError::LocalityUnresolved { id } => write!(
+                f,
+                "cannot resolve locality for blob {id}: no gated row determines where it lives"
             ),
         }
     }
@@ -328,52 +359,71 @@ pub async fn is_pinned(
         .map_err(BlobCacheError::Io)
 }
 
-/// Read a blob's whole contents, resolving — *by where the bytes are* —
-/// external-ref → local store → cache → cloud.
+/// Read a blob's whole contents, dispatching on coven's authoritative state — an
+/// external ref, then the blob's locality — rather than probing every store.
 ///
 /// An **external ref** (a `local_blob_refs` row — a user-provided Local blob's
 /// user-owned file) is checked first: if one is registered for this id, the bytes
-/// are read straight from the user's path and validated by presence + size, with
-/// NO cloud fallback (a Local blob has no cloud copy). A vanished file is
+/// are read straight from the user's path and validated by presence + size, with NO
+/// fallback (a Local blob has no cloud copy). A vanished file is
 /// [`BlobCacheError::ExternalMissing`]; a length that no longer matches the
 /// registered size is [`BlobCacheError::ExternalSizeMismatch`] — both terminal.
 ///
-/// The **local store** is next: a host-provided Local blob lives at
-/// `storage/local/<namespace>/<id>` (see [`local_files`](super::local_files)), read
-/// straight from disk with no cloud fallback. The external ref and the local store
-/// are the two Local forms — mutually exclusive by provenance — so a hit in either
-/// is the whole read.
-///
-/// Otherwise the **cache** (a Remote blob's local copy): a hit is the file existing
-/// in `pinned/<id>` OR `cache/<id>` — its existence is the entire test, no table
-/// consulted. A **cloud** miss resolves the blob's scope to its encryption key,
-/// downloads + decrypts it via [`SyncStorage::get_blob`], writes it atomically to
-/// `cache/<id>` (evictable — a fetch-on-read populates the evictable cache, never
-/// the kept folder), and returns the bytes it just fetched. The post-populate
-/// [`evict_to_budget`] sweep is best-effort: a fetch that succeeded returns its
-/// bytes even if eviction then fails (logged, not returned).
+/// With no external ref, the blob's **locality** ([`resolve_locality`]) decides the
+/// single source. **Local** (the gated root's gate is off): the host-provided copy
+/// in the **local store** (`storage/local/<namespace>/<id>`, see
+/// [`local_files`](super::local_files)) is the only copy — a miss is
+/// [`BlobCacheError::NoLocalCopy`], fail-loud corruption, never a cloud fetch.
+/// **Remote** (gate on): the one legitimate probe checks `pinned/<id>` then
+/// `cache/<id>` for a per-device cache copy and serves a hit; a miss resolves the
+/// blob's scope to its encryption key, downloads + decrypts it via
+/// [`SyncStorage::get_blob`], writes it atomically to `cache/<id>` (evictable — a
+/// fetch-on-read populates the evictable cache, never the kept folder), and returns
+/// the bytes it just fetched. The post-populate [`evict_to_budget`] sweep is
+/// best-effort: a fetch that succeeded returns its bytes even if eviction then fails
+/// (logged, not returned).
 pub async fn read_blob(
     db: &Database,
     library_dir: &LibraryDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    // External ref first: a user-provided Local blob plays the user's own file,
-    // read straight from its path. Validate-on-read by presence + size; no cloud
-    // fallback, because these bytes only ever lived at the user's path.
+    // External ref first: a user-provided Local blob is the user's own file, read
+    // straight from its path and validated by presence + size. A registered ref is
+    // the whole answer — no fallback, because these bytes only ever lived there.
     if let Some(bytes) = read_external(db, &blob.id, ExternalRead::Whole).await? {
         return Ok(bytes);
     }
 
-    // Local store next: a host-provided Local blob is coven's own copy, read
-    // straight from `storage/local/<namespace>/<id>`. No cloud fallback — a Local
-    // blob has no cloud copy.
-    if let Some(bytes) =
-        crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id).await?
-    {
-        return Ok(bytes);
+    // No external ref: dispatch on the blob's locality — the gate coven owns, read
+    // off the blob's gated root — never a probe of every store in turn.
+    match resolve_locality(db, &blob.id).await? {
+        // Local: the host-provided copy in the local store is the ONLY copy (a Local
+        // blob has no cloud copy). A miss is fail-loud corruption, not a cache miss —
+        // the state is broken, and falling through to the cloud would serve nothing or
+        // paper over the fault.
+        Locality::Local => crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id)
+            .await?
+            .ok_or_else(|| BlobCacheError::NoLocalCopy {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+            }),
+        // Remote: the bytes live in the cloud fronted by the device cache.
+        Locality::Remote => read_remote_whole(db, library_dir, storage, blob).await,
     }
+}
 
+/// Serve a Remote blob whole. The one legitimate probe — per-device cache
+/// materialization, a filesystem fact no shared state holds — checks `pinned/<id>`
+/// then `cache/<id>` and serves a hit; a miss fetches from the cloud, decrypts, and
+/// populates the evictable cache. Split from [`read_blob`] so the whole-blob Remote
+/// path reads as one branch of the locality dispatch.
+async fn read_remote_whole(
+    db: &Database,
+    library_dir: &LibraryDir,
+    storage: Option<&dyn SyncStorage>,
+    blob: &BlobRef,
+) -> Result<Vec<u8>, BlobCacheError> {
     let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
     let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
@@ -437,23 +487,21 @@ pub async fn read_blob(
 ///
 /// **External ref** (a `local_blob_refs` row — a user-provided Local blob's
 /// user-owned file): the validated range is read straight from the user's path via
-/// [`crate::local_blob::read_range`], with NO cloud fallback. A vanished or short
-/// file is [`BlobCacheError::ExternalMissing`] (a short file already fails loud in
+/// [`crate::local_blob::read_range`], with NO fallback. A vanished or short file is
+/// [`BlobCacheError::ExternalMissing`] (a short file already fails loud in
 /// `read_range`). Checked first.
 ///
-/// **Local store** (`storage/local/<namespace>/<id>` exists): a host-provided Local
-/// blob, the range read straight off disk via
-/// [`local_files::read_range`](super::local_files::read_range), no cloud fallback.
-/// The external ref and the local store are the two Local forms, mutually exclusive
-/// by provenance.
-///
-/// **Cache hit** (`pinned/<id>` OR `cache/<id>` exists): the local file is the
-/// whole plaintext, so the slice is read straight off disk at `offset` — no
-/// decryption, no cloud. **Cache miss**: the range is fetched and decrypted from
-/// the cloud via [`SyncStorage::read_blob_range`]. A miss **never writes a cache
-/// file** — a ranged read populates nothing, because a truncated/partial file
-/// under `cache/<id>` would be read as the whole blob by [`read_blob`] (presence
-/// is the only truth). Only the whole-file [`read_blob`] populates the cache.
+/// With no external ref, the blob's **locality** ([`resolve_locality`]) decides the
+/// source. **Local** (gate off): the range is read off the host-provided **local
+/// store** via [`local_files::read_range`](super::local_files::read_range); a missing
+/// local copy is [`BlobCacheError::NoLocalCopy`], never a cloud fetch. **Remote**
+/// (gate on): a **cache hit** (`pinned/<id>` OR `cache/<id>` exists) reads the slice
+/// off the whole-plaintext local file at `offset` — no decryption, no cloud; a
+/// **cache miss** fetches and decrypts just the range from the cloud via
+/// [`SyncStorage::read_blob_range`] and **never writes a cache file** — a
+/// truncated/partial file under `cache/<id>` would be read as the whole blob by
+/// [`read_blob`] (presence is the only truth). Only the whole-file [`read_blob`]
+/// populates the cache.
 ///
 /// As in [`read_blob`], a failure to even check a file's existence is surfaced,
 /// never collapsed into a miss (which would re-fetch over a present file and could
@@ -486,23 +534,53 @@ pub async fn open_blob_stream(
         )));
     }
 
-    // External ref first: serve the range straight from the user's file. The
-    // window was validated against `source_size` above, and `read_range` reads
-    // exactly `len` (failing loud on a short file). No cloud fallback (a Local
-    // blob has no cloud copy); a missing or short file is terminal.
+    // External ref first: serve the range straight from the user's file. The window
+    // was validated against `source_size` above, and `read_range` reads exactly `len`
+    // (failing loud on a short file). A registered ref is the whole answer — no
+    // fallback (a Local blob has no cloud copy); a missing or short file is terminal.
     if let Some(bytes) = read_external(db, &blob.id, ExternalRead::Range { offset, len }).await? {
         return Ok(bytes);
     }
 
-    // Local store next: a host-provided Local blob, range-read from coven's own
-    // copy. No cloud fallback — a Local blob has no cloud copy.
-    if let Some(bytes) =
-        crate::blob::local_files::read_range(library_dir, &blob.namespace, &blob.id, offset, len)
-            .await?
-    {
-        return Ok(bytes);
+    // No external ref: dispatch on the blob's locality, the same gate the whole-blob
+    // read resolves.
+    match resolve_locality(db, &blob.id).await? {
+        // Local: range-read the host-provided local store, coven's only copy. A miss
+        // is fail-loud corruption, never a cloud fetch.
+        Locality::Local => crate::blob::local_files::read_range(
+            library_dir,
+            &blob.namespace,
+            &blob.id,
+            offset,
+            len,
+        )
+        .await?
+        .ok_or_else(|| BlobCacheError::NoLocalCopy {
+            namespace: blob.namespace.clone(),
+            id: blob.id.clone(),
+        }),
+        // Remote: the cache copy, else a ranged cloud read (populating nothing).
+        Locality::Remote => {
+            read_remote_range(db, library_dir, storage, blob, source_size, offset, len).await
+        }
     }
+}
 
+/// Serve a Remote blob's plaintext range. A cache hit (`pinned/<id>` OR `cache/<id>`)
+/// reads the slice off the whole-plaintext local file; a miss range-reads + decrypts
+/// from the cloud and writes NO cache file (a partial file would be mistaken for the
+/// whole blob by [`read_blob`]). Split from [`open_blob_stream`] so the Remote path
+/// reads as one branch of the locality dispatch; the range was already validated by
+/// the caller against `source_size`.
+async fn read_remote_range(
+    db: &Database,
+    library_dir: &LibraryDir,
+    storage: Option<&dyn SyncStorage>,
+    blob: &BlobRef,
+    source_size: u64,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, BlobCacheError> {
     let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
     let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
@@ -794,10 +872,65 @@ pub async fn evict_to_budget(
     Ok(())
 }
 
+/// Where a blob with no external ref currently lives, resolved from coven's gate —
+/// the [`read_blob`] / [`open_blob_stream`] dispatch key. Never stored on the
+/// [`BlobRef`]: locality is mutable shared state (a make_remote/make_local flips it),
+/// not part of a blob's stable address.
+enum Locality {
+    /// The gated root's gate is off: the blob's only copy is on-device (host-provided
+    /// in the local store). No cloud copy exists, so a local-store miss is fail-loud.
+    Local,
+    /// The gated root's gate is on: the blob lives in the cloud, fronted by the
+    /// device's evictable cache (`pinned/` or `cache/`, else fetched).
+    Remote,
+}
+
+/// Resolve a blob's locality from coven's own authoritative state — the gate on the
+/// blob's gated root — rather than probing the stores. Maps the blob id to its
+/// backing row ([`BlobDecls::row_for_blob`]) and walks that row up to its gated
+/// root's gate truth ([`Gates::root_kept_of`]): the same row→root→gate resolution the
+/// make_remote drain runs ([`crate::blob::upload`]), built once here from the declared
+/// synced set + the live schema. A blob with no backing row, or whose row reaches no
+/// gated root, has no determinable source — [`BlobCacheError::LocalityUnresolved`],
+/// surfaced rather than guessed (the read path never blind-searches).
+///
+/// Only blobs with no external ref reach here ([`read_blob`] checks the ref first), so
+/// this answers the host-stored cases: a host-provided blob (Local store vs cache) and
+/// a user-provided blob whose make_remote already cleared its external ref (Remote).
+async fn resolve_locality(db: &Database, blob_id: &str) -> Result<Locality, BlobCacheError> {
+    let tables = db.synced_tables().to_vec();
+    let id = blob_id.to_string();
+    let kept: Option<bool> = db
+        .call(move |conn| {
+            let gates = Gates::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
+            let decls =
+                BlobDecls::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
+            match decls
+                .row_for_blob(conn, &id)
+                .map_err(|e| DbError(e.to_string()))?
+            {
+                Some((table, pk)) => gates
+                    .root_kept_of(conn, &table, &pk)
+                    .map_err(|e| DbError(e.to_string())),
+                // No blob-bearing row carries this id — no gate to read.
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| BlobCacheError::Io(format!("resolve locality for {blob_id}: {e}")))?;
+    match kept {
+        Some(true) => Ok(Locality::Remote),
+        Some(false) => Ok(Locality::Local),
+        None => Err(BlobCacheError::LocalityUnresolved {
+            id: blob_id.to_string(),
+        }),
+    }
+}
+
 /// Look up the external file ref for `id`, mapping the DB error into the cache's
 /// error type. Shared by [`read_blob`] and [`open_blob_stream`], which both check
-/// for an external ref (a user-provided Local blob's user-owned file) before the
-/// local-store / cache / cloud resolution.
+/// for an external ref (a user-provided Local blob's user-owned file) before
+/// dispatching on the blob's locality.
 async fn lookup_external_ref(
     db: &Database,
     id: &str,
@@ -815,8 +948,8 @@ enum ExternalRead {
 }
 
 /// Serve a read from the blob's external file when one is registered, else `None`
-/// so the caller falls through to the cache/cloud path. The external file is the
-/// only copy — no cloud fallback. A failed read surfaces its underlying cause as
+/// so the caller dispatches on the blob's locality. The external file is the only
+/// copy — no fallback. A failed read surfaces its underlying cause as
 /// [`BlobCacheError::ExternalMissing`] (the error is preserved, not collapsed); for
 /// a whole read, a length that no longer matches the registered `size` is
 /// [`BlobCacheError::ExternalSizeMismatch`].

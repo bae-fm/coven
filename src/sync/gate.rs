@@ -599,6 +599,24 @@ impl Gates {
         }
     }
 
+    /// Whether the blob-bearing row `(table, id)` resolves to a gated root whose gate
+    /// is currently **on** — the row's locality: `Some(true)` is Remote (shared, bytes
+    /// in the cloud), `Some(false)` is Local (bytes on-device). The same FK up-walk as
+    /// [`resolve_root_of`](Self::resolve_root_of), returning the gate truth that walk
+    /// already reads (a gated root's own column, or a `gated_by_descendants` ancestor's
+    /// keep), so the read path dispatches on this rather than probing every store.
+    /// `None` when the chain reaches no gate terminus (the row is ungated/unrooted) or
+    /// a row along it is missing — an unresolvable locality the read path fails loud on
+    /// rather than guessing a source.
+    pub(crate) fn root_kept_of(
+        &self,
+        conn: &Connection,
+        table: &str,
+        id: &str,
+    ) -> Result<Option<bool>, GateError> {
+        unsafe { Ok(resolve_root(conn.handle(), self, table, id)?.map(|r| r.kept)) }
+    }
+
     /// Every row in the gated subtree rooted at `(root_table, root_id)`: the root
     /// itself plus the transitive closure of its gated FK-*descendants*, as
     /// `(table, primary key)` pairs. A pure down-walk over the gated FK edges — it

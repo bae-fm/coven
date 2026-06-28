@@ -74,9 +74,10 @@ pub async fn store(
         .map_err(LocalBlobError::Io)
 }
 
-/// Read a host-provided blob from the local store, or `None` when none is
-/// stored (so a caller can fall through to the cache/cloud path). No cloud
-/// fallback — the local store is the blob's home while Local.
+/// Read a host-provided blob from the local store, or `None` when no file is stored
+/// there. No cloud fallback — the local store is the blob's home while Local; a
+/// `None` for a blob the gate says is Local is fail-loud corruption to its caller
+/// ([`cache::read_blob`](super::cache::read_blob)), not a cache miss to refetch.
 pub async fn read(
     library_dir: &LibraryDir,
     namespace: &str,
@@ -93,9 +94,9 @@ pub async fn read(
     }
 }
 
-/// Serve `len` plaintext bytes at `offset` from the local store, or `None`
-/// when none is stored (so the caller falls through). The local store holds the
-/// whole blob, so a request the caller has bounded against the blob's length reads
+/// Serve `len` plaintext bytes at `offset` from the local store, or `None` when no
+/// file is stored there. The local store holds the whole blob, so a request the
+/// caller has bounded against the blob's length reads
 /// exactly `len`; a short file is torn and fails loud in
 /// [`crate::local_blob::read_range`].
 pub async fn read_range(
