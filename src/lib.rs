@@ -76,32 +76,32 @@
 // The blob engine: the vocabulary types plus the two lifecycle halves —
 // `blob::cache` (bytes on disk, folder-truth retention) and `blob::upload` (drain
 // the durable upload queue to the cloud). Documented at the module.
-pub mod blob;
-pub mod changeset;
-pub mod clock;
-pub mod config;
-pub mod database;
-pub mod db;
-pub mod encryption;
+pub(crate) mod blob;
+pub(crate) mod changeset;
+pub(crate) mod clock;
+pub(crate) mod config;
+pub(crate) mod database;
+pub(crate) mod db;
+pub(crate) mod encryption;
 // The native data handle: one object a host constructs that owns coven's pieces
 // (the `Database`, the `LibraryDir`, the keys, and — once a provider is connected
 // — the `SyncManager`) and exposes the whole data interface as methods. The
 // native counterpart of the browser-only `wasm_facade::CovenLibrary`. Documented
 // at the module.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod handle;
-pub mod id_provider;
-pub mod join_code;
-pub mod keys;
-pub mod library_dir;
+pub(crate) mod handle;
+pub(crate) mod id_provider;
+pub(crate) mod join_code;
+pub(crate) mod keys;
+pub(crate) mod library_dir;
 // The device-local plaintext file behind each `BlobRef`: read on push, written on
 // pull. Native uses the filesystem; wasm uses OPFS. Documented at the module.
-pub mod local_blob;
-pub mod oauth;
+pub(crate) mod local_blob;
+pub(crate) mod oauth;
 #[cfg(feature = "share-proxy")]
-pub mod share;
-pub mod storage;
-pub mod sync;
+pub(crate) mod share;
+pub(crate) mod storage;
+pub(crate) mod sync;
 // Browser-only storage setup: installing the OPFS-backed SQLite VFS that makes
 // the wasm `Database` durable across page loads. Documented at the module.
 #[cfg(target_arch = "wasm32")]
@@ -164,10 +164,14 @@ mod wasm_blob_opfs_test;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_keystore_test;
 
-pub use database::Database;
+// coven's public API is exactly this curated set of crate-root re-exports. Every
+// implementation module is `pub(crate)`; a host reaches coven only through these
+// names, never through `coven::blob::…` or `coven::sync::…`.
+
+// Top-level handle + database.
+pub use database::{Database, DbError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use handle::CovenHandle;
-pub use sync::hlc::UpdatedAtStamper;
 
 /// The exact `rusqlite` coven owns the connection through. The host runs its app
 /// SQL via [`Database::call`]`(|conn| …)` against this same crate — use
@@ -175,6 +179,99 @@ pub use sync::hlc::UpdatedAtStamper;
 /// directly, so the host can never drift onto a `libsqlite3-sys` version that
 /// conflicts with coven's.
 pub use rusqlite;
+
+// Blob descriptors, errors, the host-implemented observer.
+pub use blob::cache::BlobCacheError;
+// The Remote→Local transition (and its error) is native-only.
+#[cfg(not(target_arch = "wasm32"))]
+pub use blob::transition::MakeLocalError;
+pub use blob::{BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance, ResolvedScope};
+// The logical `(namespace, id)` cloud reference — only exists with share-proxy,
+// which is the only thing that puts a blob id into a cloud manifest.
+#[cfg(feature = "share-proxy")]
+pub use blob::BlobId;
+
+// Applied-sync change notification (the host reacts to these).
+pub use changeset::{ChangeOp, RowChange};
+
+// Host schema declaration.
+pub use sync::session::{BlobDecl, SyncedTable};
+
+// Config.
+pub use config::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};
+
+// Keys / oauth / keyring bootstrap.
+pub use keys::{set_keyring_service, CloudHomeCredentials, KeyService};
+pub use oauth::set_oauth_client_creds;
+
+// Sync: the manager the host holds, membership, the row clock + HLC stamp.
+// `SyncManager` and the cloud setup/restore/join bootstrap are native-only; the
+// browser drives sync through `wasm_facade` instead.
+pub use sync::hlc::{Timestamp, UpdatedAtStamper};
+pub use sync::membership::MemberRole;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sync::sync_manager::{ConfigProvider, MemberInfo, SyncManager};
+
+// Sync setup / restore / join bootstrap.
+pub use join_code::{
+    decode_invite_code_info, decode_join_request, generate_join_request, JoinCodeError,
+};
+pub use storage::cloud::setup::generate_restore_code;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sync::join::join_from_invite_code;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};
+pub use sync::restore_code::decode_restore_code_info;
+
+// Cloud at-rest cipher (host configures / tests inject).
+pub use sync::cloud_storage::CloudCipher;
+
+// --- Host-facing surface beyond the plan's curated set. The seal exposed these
+//     as public-API-only items (no internal coven caller); each is reached by the
+//     host, cross-checked against bae's usage and coven's own module docs. ---
+
+// Clock + id abstractions the host injects: real impls plus the deterministic
+// test fakes coven shares so the host tests against the same ones.
+pub use clock::{Clock, ClockRef, SystemClock};
+#[cfg(any(test, feature = "test-utils"))]
+pub use clock::{FixedClock, SteppingClock};
+#[cfg(any(test, feature = "test-utils"))]
+pub use id_provider::SequentialIdProvider;
+pub use id_provider::{IdProvider, IdRef, UuidProvider};
+
+// Managed local blob store: the host constructs it, coven never does (native-only).
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::local::BlobStore;
+
+// The async storage traits that carry the `MaybeThreadSafe` floor: `CloudHome`
+// is the host's pluggable cloud backend; `SyncStorage` is coven's storage
+// contract over it. Re-exported as the public storage surface.
+pub use storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+pub use sync::storage::SyncStorage;
+
+// Mobile OAuth: hosts whose OS captures the redirect drive the flow through
+// these instead of the desktop browser-callback `sign_in_*` above.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+pub use oauth::{
+    authorize_provider, build_authorize_request_for_provider, exchange_code_for_provider,
+};
+
+// Pull-result rejection reports the host surfaces to the user.
+pub use sync::pull::{InvalidSignature, RejectedUnauthorized};
+
+// Cloud account display + per-provider sign-in entry points.
+pub use storage::cloud::setup::cloud_account_display_for;
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+pub use storage::cloud::setup::{sign_in_dropbox, sign_in_google_drive, sign_in_onedrive};
+
+// In-memory cloud home for host integration tests.
+#[cfg(any(test, feature = "test-utils"))]
+pub use storage::cloud::test_utils::InMemoryCloudHome;
+
+// Item sharing (share-proxy feature). `ShareManifest::allows` is the gate a
+// share server calls to authorize a blob request.
+#[cfg(feature = "share-proxy")]
+pub use share::{open_share, ShareError, ShareManifest, ShareProxy, ShareToken};
 
 /// Thread-safety floor for coven's async storage traits ([`storage::cloud::CloudHome`],
 /// [`sync::storage::SyncStorage`], [`blob::BlobTransitionObserver`]).

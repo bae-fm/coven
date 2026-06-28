@@ -6,10 +6,14 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 use sha2::{Digest, Sha256};
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 use thiserror::Error;
 // `info`/`warn` are used only by the native-only localhost-callback `authorize`,
 // which is gated on `oauth-providers` too.
@@ -17,6 +21,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 /// OAuth provider configuration.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 #[derive(Clone, Debug)]
 pub struct OAuthConfig {
     pub client_id: String,
@@ -52,6 +57,7 @@ pub fn set_oauth_client_creds(creds: HashMap<String, OAuthClientCreds>) {
 }
 
 /// The credentials registered for a provider, or empty if none were registered.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub fn oauth_client_creds(provider: &str) -> OAuthClientCreds {
     OAUTH_CLIENT_CREDS
         .get()
@@ -68,16 +74,21 @@ pub struct OAuthTokens {
     pub expires_at: Option<i64>,
 }
 
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 #[derive(Error, Debug)]
 pub enum OAuthError {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
     #[error("failed to open browser: {0}")]
     BrowserOpen(String),
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
     #[error("callback server error: {0}")]
     Server(String),
     #[error("token exchange error: {0}")]
     TokenExchange(String),
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
     #[error("authorization denied: {0}")]
     Denied(String),
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
     #[error("timeout waiting for authorization callback")]
     Timeout,
     /// The refresh token is no longer accepted (revoked, expired, password
@@ -122,6 +133,7 @@ impl Drop for AbortOnDrop {
 /// omit it — making it required forces parsing to fail before the typed
 /// error branch can classify the failure, surfacing every provider error as
 /// "parse response: missing field `access_token`".
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 #[derive(Deserialize)]
 struct TokenResponse {
     #[serde(default)]
@@ -134,6 +146,7 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 impl TokenResponse {
     /// Convert a parsed response into typed `OAuthTokens`, classifying the
     /// failure modes both exchange and refresh share: `invalid_grant` /
@@ -177,6 +190,7 @@ impl TokenResponse {
 }
 
 /// Generate a random PKCE code verifier (43-128 URL-safe characters).
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 pub fn generate_code_verifier() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -184,6 +198,7 @@ pub fn generate_code_verifier() -> String {
 }
 
 /// Compute the S256 PKCE code challenge from a verifier.
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 pub fn code_challenge(verifier: &str) -> String {
     let hash = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(hash)
@@ -194,6 +209,7 @@ pub fn code_challenge(verifier: &str) -> String {
 /// redirect outside coven's localhost callback server — e.g. a mobile OS auth
 /// session (ASWebAuthenticationSession / Custom Tabs) redirecting to a custom
 /// URI scheme, where binding a localhost port and `open::that` don't apply.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 #[derive(Clone, Debug)]
 pub struct AuthorizeRequest {
     pub auth_url: String,
@@ -205,6 +221,7 @@ pub struct AuthorizeRequest {
 /// redirect itself, then calls [`exchange_code`] with the same `redirect_uri`
 /// and the returned verifier. [`authorize`] is this plus coven's localhost
 /// callback server for desktop.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub fn build_authorize_url(
     config: &OAuthConfig,
     redirect_uri: &str,
@@ -382,6 +399,7 @@ pub async fn authorize(
 }
 
 /// Exchange an authorization code for tokens.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn exchange_code(
     config: &OAuthConfig,
     code: &str,
@@ -424,6 +442,7 @@ pub async fn exchange_code(
 }
 
 /// Refresh an expired access token using a refresh token.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn refresh(
     config: &OAuthConfig,
     refresh_token: &str,

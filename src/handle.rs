@@ -71,7 +71,7 @@ use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 /// handle's read/store methods; sync is optional.
 ///
 /// ```no_run
-/// # use coven::{blob::BlobRef, CovenHandle};
+/// # use coven::{BlobRef, CovenHandle};
 /// # async fn use_library(handle: &CovenHandle, cover: &BlobRef)
 /// #     -> Result<(), Box<dyn std::error::Error>> {
 /// // Rows: run app SQL on the connection coven owns.
@@ -79,7 +79,7 @@ use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 ///     .database()
 ///     .call(|conn| {
 ///         conn.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
-///             .map_err(coven::database::DbError::from)
+///             .map_err(coven::DbError::from)
 ///     })
 ///     .await?;
 ///

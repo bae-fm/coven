@@ -274,6 +274,7 @@ impl UpdatedAtStamper {
 /// captured changeset against a raw connection with no injected clock (snapshot
 /// round-trips, gate/FK mechanics tests), where the honest receiver-now is real
 /// wall time and the future-skew bound is incidental, not under test.
+#[cfg(test)]
 pub fn now_wall_ms() -> u64 {
     wall_clock_ms()
 }

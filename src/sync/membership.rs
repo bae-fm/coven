@@ -181,6 +181,7 @@ pub struct MembershipChain {
 
 impl MembershipChain {
     /// Create an empty chain.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }

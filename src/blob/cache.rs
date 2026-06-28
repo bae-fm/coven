@@ -224,6 +224,7 @@ impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
 /// excluded from eviction — this write can never drop the very bytes it produced.
 /// Eviction is best-effort: the write has already succeeded, so an eviction failure
 /// is logged and swallowed, not returned (see below).
+#[cfg(test)]
 pub async fn write_blob(
     db: &Database,
     library_dir: &LibraryDir,
@@ -743,6 +744,7 @@ pub async fn unpin(library_dir: &LibraryDir, blobs: &[BlobRef]) -> Result<(), Bl
 /// been cached yet, so there is nothing to clear. Every other I/O failure is
 /// returned — a swept directory must actually be gone, never reported clear over a
 /// failed delete.
+#[cfg(test)]
 pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError> {
     let cache_dir = library_dir.cache_dir();
     match crate::local_blob::remove_dir_all(&cache_dir).await {
