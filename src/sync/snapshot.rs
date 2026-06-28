@@ -637,8 +637,7 @@ async fn resolve_current_meta(
     Ok((pointer.author_pubkey, pointer.seq, meta))
 }
 
-/// Delete changesets and snapshot generations that are superseded by the live
-/// snapshot.
+/// Reclaim changesets and snapshot generations superseded by the live snapshot.
 ///
 /// Resolves the snapshot pointer to the live generation and reads its
 /// per-device cursors ([`resolve_current_meta`] — the pointer, the meta, and
@@ -651,11 +650,12 @@ async fn resolve_current_meta(
 /// (they appeared after the snapshot was created).
 ///
 /// Finally, reclaims superseded snapshot generations through the own-keyspace sweep
-/// ([`delete_superseded_generations`]) using `keypair`'s public key: it lists only
-/// this device's own `snapshot/{own_author}/` prefix, so it only ever reclaims the
-/// old generations it published itself and structurally never touches a peer's. The
-/// live generation (the pointer is re-resolved) and the just-resolved generation are
-/// kept.
+/// ([`delete_superseded_generations`]) using `keypair`'s public key.
+///
+/// Test-only: this changeset GC has no production caller (the live tombstone GC
+/// runs inline in [`crate::sync::cycle`]); it exists with its test suite as a
+/// built-but-unwired capability.
+#[cfg(test)]
 pub async fn garbage_collect(
     storage: &dyn SyncStorage,
     library_id: &str,
@@ -740,6 +740,7 @@ pub async fn garbage_collect(
 }
 
 /// Result of a garbage collection run.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct GcResult {
     /// Number of changesets successfully deleted.

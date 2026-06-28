@@ -230,22 +230,6 @@ pub struct ConfigYaml {
     pub cloud_home: CloudHomeConfig,
 }
 
-impl ConfigYaml {
-    /// Build a runtime [`Config`] from the on-disk form, supplying the resolved
-    /// device id and library directory.
-    pub fn into_config(self, device_id: String, library_dir: LibraryDir) -> Config {
-        Config {
-            library_id: self.library_id,
-            device_id,
-            library_dir,
-            library_name: self.library_name,
-            encryption_key_stored: self.encryption_key_stored,
-            encryption_key_fingerprint: self.encryption_key_fingerprint,
-            cloud_home: self.cloud_home,
-        }
-    }
-}
-
 impl From<&Config> for ConfigYaml {
     fn from(config: &Config) -> Self {
         Self {

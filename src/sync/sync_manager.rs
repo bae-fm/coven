@@ -77,16 +77,6 @@ pub struct MemberInfo {
     pub is_self: bool,
 }
 
-/// Sync status snapshot.
-#[derive(Debug, Clone)]
-pub struct SyncStatus {
-    pub configured: bool,
-    pub syncing: bool,
-    pub last_sync_time: Option<String>,
-    pub error: Option<String>,
-    pub device_count: u32,
-}
-
 impl SyncManager {
     /// Build the manager off the owned [`Database`]. The database already seeded
     /// its register clock past every value on disk at `open`; the manager shares

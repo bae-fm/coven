@@ -149,10 +149,6 @@ impl LibraryDir {
         self.path.join("config.yaml")
     }
 
-    pub fn images_dir(&self) -> PathBuf {
-        self.path.join("images")
-    }
-
     /// The two-level partition shard for `id`: `{ab}/{cd}/{id}`, where `{ab}`/`{cd}`
     /// are the first two byte-pairs of the dash-stripped id. The single home for the
     /// partition scheme — every blob path (cloud key and on-disk file, hashed or
@@ -186,30 +182,8 @@ impl LibraryDir {
         Ok(format!("{prefix}/{}", Self::id_shard(id)?))
     }
 
-    /// Hash-based image path: `images/{ab}/{cd}/{id}`. `Err` if `id` is not a safe,
-    /// indexable blob token (see [`Self::hashed_path`]).
-    pub fn image_path(&self, id: &str) -> Result<PathBuf, PathTokenError> {
-        Ok(self.path.join(Self::hashed_path("images", id)?))
-    }
-
-    pub fn torrents_dir(&self) -> PathBuf {
-        self.path.join("torrents")
-    }
-
-    /// Hash-based torrent file path: `torrents/{ab}/{cd}/{id}`. `Err` if
-    /// `torrent_id` is not a safe, indexable blob token (see [`Self::hashed_path`]).
-    pub fn torrent_file_path(&self, torrent_id: &str) -> Result<PathBuf, PathTokenError> {
-        Ok(self.path.join(Self::hashed_path("torrents", torrent_id)?))
-    }
-
     pub fn storage_dir(&self) -> PathBuf {
         self.path.join("storage")
-    }
-
-    /// Hash-based storage path: `storage/{ab}/{cd}/{file_id}`. `Err` if `file_id`
-    /// is not a safe, indexable blob token (see [`Self::hashed_path`]).
-    pub fn storage_file_path(&self, file_id: &str) -> Result<PathBuf, PathTokenError> {
-        Ok(self.path.join(Self::hashed_path("storage", file_id)?))
     }
 
     /// A kept (budget-exempt) cache copy of a **Remote** blob:
@@ -297,19 +271,6 @@ impl LibraryDir {
     /// files. `namespace` is validated as a single path token; `Err` if it is unsafe.
     pub fn cache_namespace_dir(&self, namespace: &str) -> Result<PathBuf, PathTokenError> {
         self.cache_folder_namespace_dir("cache", namespace)
-    }
-
-    pub fn pending_deletions_path(&self) -> PathBuf {
-        self.path.join("pending_deletions.json")
-    }
-
-    pub fn playback_state_path(&self) -> PathBuf {
-        self.path.join("playback_state.json")
-    }
-
-    /// All asset directories that should be synced/created.
-    pub fn asset_dirs(&self) -> Vec<PathBuf> {
-        vec![self.images_dir(), self.storage_dir(), self.torrents_dir()]
     }
 
     /// Create a library directory, generate a device_id, and save config.yaml.

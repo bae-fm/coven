@@ -42,6 +42,9 @@ pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, S
 
 /// Write `bytes` to `path`, creating any missing parent directories. Overwrites an
 /// existing file exactly — no stale tail survives from a longer previous version.
+/// Test-only, wasm: production cache writes go through [`write_atomic`]; only the
+/// OPFS round-trip test exercises the in-place write directly.
+#[cfg(all(test, target_arch = "wasm32"))]
 pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     imp::write(path, bytes).await
 }
@@ -107,6 +110,9 @@ pub async fn remove_file(path: &Path) -> Result<bool, String> {
 /// `clear_cache` is asked to drop). `Err` is a real backend failure — a tree the
 /// caller asked to clear must actually be gone, never reported clear over a failed
 /// delete.
+/// Test-only: the production cache sweeps individual files via [`remove_file`];
+/// only the test-only `clear_cache` and the OPFS round-trip test drop whole trees.
+#[cfg(test)]
 pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
     imp::remove_dir_all(path).await
 }
@@ -166,51 +172,6 @@ mod imp {
             )
         })?;
         Ok(buf)
-    }
-
-    pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-        use tokio::io::AsyncWriteExt;
-
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-        }
-        // Write THEN fsync the file before returning: a blob does not count as
-        // "downloaded" until its bytes are durable on disk, because the pull
-        // applies the row that references it only after this returns (the
-        // blob-before-row invariant, issue #111). A plain `fs::write` leaves the
-        // bytes in the page cache, so a crash could surface a row whose blob is
-        // empty or absent.
-        let mut file = tokio::fs::File::create(path)
-            .await
-            .map_err(|e| format!("create local blob {}: {e}", path.display()))?;
-        file.write_all(bytes)
-            .await
-            .map_err(|e| format!("write local blob {}: {e}", path.display()))?;
-        file.sync_all()
-            .await
-            .map_err(|e| format!("fsync local blob {}: {e}", path.display()))?;
-        // Also fsync the parent directory so the new file's directory entry
-        // survives a crash, not just its data. Best-effort: directory fsync is
-        // not portable (Windows has no handle-based dir flush), so a failure here
-        // is logged rather than failing the already-durable file write.
-        if let Some(parent) = path.parent() {
-            match tokio::fs::File::open(parent).await {
-                Ok(dir) => {
-                    if let Err(e) = dir.sync_all().await {
-                        tracing::warn!("could not fsync parent dir {}: {e}", parent.display());
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "could not open parent dir {} to fsync: {e}",
-                        parent.display()
-                    );
-                }
-            }
-        }
-        Ok(())
     }
 
     pub async fn exists(path: &Path) -> Result<bool, String> {
@@ -300,6 +261,7 @@ mod imp {
         }
     }
 
+    #[cfg(test)]
     pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
         match tokio::fs::remove_dir_all(path).await {
             Ok(()) => Ok(true),
@@ -703,6 +665,7 @@ mod imp {
         remove_entry(path, false).await
     }
 
+    #[cfg(test)]
     pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
         remove_entry(path, true).await
     }

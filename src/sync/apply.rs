@@ -16,6 +16,7 @@ use rusqlite::session::{ConflictAction, ConflictType};
 use rusqlite::Connection;
 
 use super::conflict::{lww_conflict_handler, TableSchema};
+#[cfg(test)]
 use super::session::SyncedTable;
 use crate::database::DbError;
 
@@ -34,6 +35,7 @@ pub struct ApplyResult {
 ///
 /// `receiver_wall_ms` is the receiver's current wall-clock millis, against which
 /// a grossly-future incoming `_updated_at` is refused (see [`lww_conflict_handler`]).
+#[cfg(test)]
 pub fn apply_changeset_lww(
     conn: &Connection,
     bytes: &[u8],
