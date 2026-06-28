@@ -7,7 +7,6 @@
 // `oauth-providers`); `warn` by the always-present account-display path.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 use tracing::info;
-use tracing::warn;
 
 use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, KeyService};
@@ -264,28 +263,6 @@ pub async fn sign_in_onedrive(
 
     info!("Authorized OneDrive; folder ready");
     Ok((drive_id, folder_id))
-}
-
-/// Get a display string for the current cloud account (bucket name, username, etc.)
-pub fn cloud_account_display_for(config: &Config, key_service: &KeyService) -> Option<String> {
-    match config.cloud_home.provider.as_ref()? {
-        CloudProvider::S3 => config
-            .cloud_home
-            .s3_bucket
-            .as_ref()
-            .map(|b| format!("s3://{b}")),
-        CloudProvider::CloudKit => Some("iCloud".to_string()),
-        CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive => {
-            match key_service.get_cloud_home_credentials() {
-                Ok(Some(CloudHomeCredentials::OAuth { .. })) => Some("Connected".to_string()),
-                Ok(_) => None,
-                Err(e) => {
-                    warn!("reading cloud home credentials for account display: {e}");
-                    None
-                }
-            }
-        }
-    }
 }
 
 /// Build a RestoreCode from config and keyring, then encode it.

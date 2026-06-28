@@ -122,6 +122,10 @@ pub struct MinSchemaVersionJson {
 
 impl MinSchemaVersionJson {
     /// Build a `min_schema_version` signed by `keypair`.
+    /// Test-only: the only writer of the schema floor is
+    /// [`crate::sync::storage::SyncStorage::set_min_schema_version`], which has no
+    /// production caller yet (the read/`verify` side is live).
+    #[cfg(test)]
     pub fn signed(min_schema_version: u32, keypair: &UserKeypair) -> Self {
         let sig = keypair.sign(&min_schema_signing_payload(min_schema_version));
         MinSchemaVersionJson {

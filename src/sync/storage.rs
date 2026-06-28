@@ -112,7 +112,7 @@ impl From<crate::library_dir::PathTokenError> for StorageError {
 /// every sync future on one thread.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait SyncStorage: crate::MaybeThreadSafe {
+pub(crate) trait SyncStorage: crate::MaybeThreadSafe {
     /// List all device heads (one LIST call to `heads/`).
     async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError>;
 
@@ -217,10 +217,15 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
 
     /// Delete a single changeset from storage.
     /// Removes `changes/{device_id}/{seq}{suffix}`.
+    /// Test-only: the changeset-GC machinery that uses it has no production caller
+    /// yet (see `snapshot::garbage_collect`).
+    #[cfg(test)]
     async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError>;
 
     /// List all changeset keys for a device.
     /// Returns the sequence numbers that exist in `changes/{device_id}/`.
+    /// Test-only: see [`Self::delete_changeset`].
+    #[cfg(test)]
     async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError>;
 
     /// Get the minimum schema version required to sync with this storage, with
@@ -236,6 +241,9 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     ///
     /// Writes to `min_schema_version.json{suffix}`. Used when a breaking migration
     /// bumps the schema and all devices must upgrade before syncing.
+    /// Test-only: the write side of the schema floor has no production caller yet
+    /// (the read side, [`Self::get_min_schema_version`], is live).
+    #[cfg(test)]
     async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError>;
 
     /// Upload a membership entry.
@@ -266,6 +274,9 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
 
     /// Download a wrapped library key for a member.
     /// Reads from `keys/{user_pubkey_hex}{suffix}`.
+    /// Test-only: production reads a member's wrapped key off the membership/snapshot
+    /// bundle, not through this per-member storage fetch.
+    #[cfg(test)]
     async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError>;
 
     /// Delete a wrapped library key.

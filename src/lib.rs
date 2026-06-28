@@ -201,8 +201,13 @@ pub use sync::session::{BlobDecl, SyncedTable};
 pub use config::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};
 
 // Keys / oauth / keyring bootstrap.
-pub use keys::{set_keyring_service, CloudHomeCredentials, KeyService};
+pub use keys::{set_keyring_service, CloudHomeCredentials, KeyError, KeyService};
 pub use oauth::set_oauth_client_creds;
+
+// At-rest crypto the host configures, and the library directory the host points
+// coven at (it is in `CovenHandle::new`'s signature).
+pub use encryption::{EncryptionError, EncryptionService};
+pub use library_dir::LibraryDir;
 
 // Sync: the manager the host holds, membership, the row clock + HLC stamp.
 // `SyncManager` and the cloud setup/restore/join bootstrap are native-only; the
@@ -243,11 +248,9 @@ pub use id_provider::{IdProvider, IdRef, UuidProvider};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::local::BlobStore;
 
-// The async storage traits that carry the `MaybeThreadSafe` floor: `CloudHome`
-// is the host's pluggable cloud backend; `SyncStorage` is coven's storage
-// contract over it. Re-exported as the public storage surface.
+// The host's pluggable cloud backend. (coven's own `SyncStorage` contract over it
+// stays `pub(crate)` — the host implements `CloudHome`, never `SyncStorage`.)
 pub use storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
-pub use sync::storage::SyncStorage;
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through
 // these instead of the desktop browser-callback `sign_in_*` above.
@@ -259,8 +262,7 @@ pub use oauth::{
 // Pull-result rejection reports the host surfaces to the user.
 pub use sync::pull::{InvalidSignature, RejectedUnauthorized};
 
-// Cloud account display + per-provider sign-in entry points.
-pub use storage::cloud::setup::cloud_account_display_for;
+// Per-provider sign-in entry points.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub use storage::cloud::setup::{sign_in_dropbox, sign_in_google_drive, sign_in_onedrive};
 
