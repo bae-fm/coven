@@ -1013,8 +1013,9 @@ impl Database {
 
     /// The external user-owned file `blob_id` resolves to, or `None` when no ref is
     /// registered (the blob is host-provided local-store, cache, or cloud — not a
-    /// user-provided external file). The locality-aware read consults this before the
-    /// local-store / cache / cloud resolution.
+    /// user-provided external file). The locality-aware read
+    /// ([`crate::blob::cache::read_blob`]) consults this before dispatching on the
+    /// blob's locality.
     pub async fn external_blob(&self, blob_id: &str) -> Result<Option<ExternalBlob>, DbError> {
         let blob_id = blob_id.to_string();
         self.call(move |conn| {
