@@ -200,13 +200,18 @@ pub use sync::session::{BlobDecl, SyncedTable};
 // Config.
 pub use config::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};
 
-// Keys / oauth / keyring bootstrap.
-pub use keys::{set_keyring_service, CloudHomeCredentials, KeyError, KeyService};
-pub use oauth::set_oauth_client_creds;
+// Keys / oauth / keyring bootstrap. The keyring service name has a setter and the
+// two getters that pair with it; the OAuth registration takes/returns its creds
+// and tokens.
+pub use keys::{
+    keyring_service, read_keyring, set_keyring_service, CloudHomeCredentials, KeyError, KeyService,
+};
+pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthTokens};
 
-// At-rest crypto the host configures, and the library directory the host points
-// coven at (it is in `CovenHandle::new`'s signature).
-pub use encryption::{EncryptionError, EncryptionService};
+// At-rest crypto the host configures (the host sizes cloud stream reads from
+// `CHUNK_SIZE`), and the library directory the host points coven at (it is in
+// `CovenHandle::new`'s signature).
+pub use encryption::{EncryptionError, EncryptionService, CHUNK_SIZE};
 pub use library_dir::LibraryDir;
 
 // Sync: the manager the host holds, membership, the row clock + HLC stamp.
@@ -248,9 +253,14 @@ pub use id_provider::{IdProvider, IdRef, UuidProvider};
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::local::BlobStore;
 
-// The host's pluggable cloud backend. (coven's own `SyncStorage` contract over it
-// stays `pub(crate)` — the host implements `CloudHome`, never `SyncStorage`.)
-pub use storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+// The host's pluggable cloud backend: the `CloudHome` trait (whose `upload` names
+// `UploadProgress`), plus the two concrete backends the host constructs/implements
+// — `S3CloudHome` and the `CloudKitOps` glue (both native-only). (coven's own
+// `SyncStorage` contract over `CloudHome` stays `pub(crate)` — the host implements
+// `CloudHome`, never `SyncStorage`.)
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::cloud::{cloudkit::CloudKitOps, s3::S3CloudHome};
+pub use storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo, UploadProgress};
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through
 // these instead of the desktop browser-callback `sign_in_*` above.
@@ -269,6 +279,11 @@ pub use storage::cloud::setup::{sign_in_dropbox, sign_in_google_drive, sign_in_o
 // In-memory cloud home for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]
 pub use storage::cloud::test_utils::InMemoryCloudHome;
+
+// Durable upload-queue rows the host's integration tests inspect (not production
+// surface).
+#[cfg(any(test, feature = "test-utils"))]
+pub use db::{OutboxEntry, OutboxOperation};
 
 // Item sharing (share-proxy feature). `ShareManifest::allows` is the gate a
 // share server calls to authorize a blob request.
