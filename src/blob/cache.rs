@@ -280,14 +280,19 @@ pub(crate) async fn populate_pinned(
         .map_err(BlobCacheError::Io)
 }
 
-/// Read a Remote blob's plaintext from the cache only — `pinned/<id>` or
-/// `cache/<id>` — returning `None` when it is in neither folder. No cloud fetch and
-/// no local-store check: this is the inline push's crash-recovery read of a
-/// host-provided blob whose local-store copy was already moved into the cache by a
-/// prior cycle. The primary read is from the local store
-/// ([`local_files::read`](super::local_files::read)); this is the fallback. A `None`
-/// from both tells the push the blob is not ready, so it aborts rather than
-/// publishing a row whose blob never reached the cloud.
+/// Read a Remote blob's plaintext from the cache only — `pinned/<id>` then
+/// `cache/<id>`, in order — returning `None` when it is in neither folder. No cloud
+/// fetch and no local-store check: just the two cache folders. A failure to even
+/// check existence (broken filesystem) is surfaced, never collapsed into `None`. Two
+/// callers share this probe:
+///
+/// - [`read_remote_whole`]: the Remote read's cache-hit check — a hit serves the file,
+///   a `None` means fetch from the cloud and populate the cache.
+/// - the inline push's crash-recovery read of a host-provided blob whose local-store
+///   copy a prior cycle already moved into the cache. The push's primary read is from
+///   the local store ([`local_files::read`](super::local_files::read)); this is the
+///   fallback, and a `None` from both tells the push the blob is not ready, so it
+///   aborts rather than publishing a row whose blob never reached the cloud.
 pub async fn read_staged(
     library_dir: &LibraryDir,
     namespace: &str,
@@ -429,38 +434,27 @@ pub async fn read_blob(
 
 /// Serve a Remote blob whole. The one legitimate probe — per-device cache
 /// materialization, a filesystem fact no shared state holds — checks `pinned/<id>`
-/// then `cache/<id>` and serves a hit; a miss fetches from the cloud, decrypts, and
-/// populates the evictable cache. Split from [`read_blob`] so the whole-blob Remote
-/// path reads as one branch of the locality dispatch.
+/// then `cache/<id>` (via [`read_staged`]) and serves a hit; a miss fetches from the
+/// cloud, decrypts, and populates the evictable cache. Split from [`read_blob`] so the
+/// whole-blob Remote path reads as one branch of the locality dispatch.
 async fn read_remote_whole(
     db: &Database,
     library_dir: &LibraryDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-    let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
-
-    // A hit in either folder serves the file. Check pinned first only because that
-    // is where a kept-local blob is the common case; either location is equally a
-    // hit. A failure to even check existence (broken filesystem) is surfaced, not
-    // collapsed into "miss" — re-downloading over a present file would be wasteful
-    // and could mask a real fault.
-    for path in [&pinned, &cache] {
-        match crate::local_blob::exists(path).await {
-            Ok(true) => {
-                return crate::local_blob::read(path)
-                    .await
-                    .map_err(BlobCacheError::Io);
-            }
-            Ok(false) => {}
-            Err(e) => return Err(BlobCacheError::Io(e)),
-        }
+    // A cache hit (`pinned/` or `cache/`) serves the file straight off disk — the same
+    // pinned→cache probe [`read_staged`] runs. An existence-check failure there is
+    // surfaced, not collapsed into a miss: re-downloading over a present file would be
+    // wasteful and could mask a real fault.
+    if let Some(bytes) = read_staged(library_dir, &blob.namespace, &blob.id).await? {
+        return Ok(bytes);
     }
 
     // Miss: fetch from the cloud and populate the evictable cache. A home-less
     // library reaches here only when a Remote blob is read with no provider
     // connected — there is no storage to fetch it from, so surface that fault.
+    let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     let bytes = fetch_from_cloud(db, storage, blob).await?;
     crate::local_blob::write_atomic(&cache, &bytes)

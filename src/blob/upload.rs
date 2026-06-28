@@ -537,11 +537,15 @@ async fn commit_after_upload(
     now_rfc: String,
 ) -> Result<PostUpload, DbError> {
     db.call(move |conn| {
-        // Map the uploaded blob to its row, then up to its gated root. A blob with
-        // no backing row, or whose row resolves to no gated root, is a plain upload
-        // (e.g. a drain test): just remove the row.
+        // Map the uploaded blob to its row, then up to its gated root. The blob's
+        // namespace is the first component of its durable cloud key, so the row is
+        // looked up in exactly that namespace's table (never a scan-all that could
+        // first-match a colliding id in another table). A blob with no backing row, or
+        // whose row resolves to no gated root, is a plain upload (e.g. a drain test):
+        // just remove the row.
+        let namespace = crate::sync::cloud_storage::namespace_from_cloud_key(&cloud_key);
         let root = match decls
-            .row_for_blob(conn, &blob_id)
+            .row_for_blob_in_namespace(conn, namespace, &blob_id)
             .map_err(|e| DbError(e.to_string()))?
         {
             Some((table, pk)) => gates

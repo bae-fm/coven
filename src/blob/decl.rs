@@ -15,8 +15,8 @@
 //! download / apply-side local-copy drop), [`BlobDecls::refs_in_db`] over the whole
 //! DB (snapshot-bootstrap backfill), [`BlobDecls::refs_for_root`] over a gated
 //! root's subtree (the make-Remote / make-Local transitions), and
-//! [`BlobDecls::row_for_blob`] to map an uploaded blob back to its row (the
-//! make-Remote completion check).
+//! [`BlobDecls::row_for_blob_in_namespace`] to map a blob back to its row by namespace
+//! (the read-path locality dispatch and the make-Remote completion check).
 //!
 //! A declaration's two blob properties — [`Provenance`] (the Local story) and
 //! [`CacheFill`] (the Remote story) — are described by the [blob concept
@@ -74,8 +74,8 @@ struct TableBlob {
     /// Index of the blob-id column.
     id_col: usize,
     /// Name of the blob-id column. The index reads a row top-to-bottom; the name
-    /// keys a lookup the other way ([`BlobDecls::row_for_blob`]: which row carries
-    /// a given blob id), so both directions resolve off the same declaration.
+    /// keys a lookup the other way ([`BlobDecls::row_for_blob_in_namespace`]: which row
+    /// carries a given blob id), so both directions resolve off the same declaration.
     id_col_name: String,
     /// Index of the readable cloud-path column, if declared.
     cloud_path_col: Option<usize>,
@@ -263,31 +263,13 @@ impl BlobDecls {
         Ok(out)
     }
 
-    /// The `(table, primary key)` of the row carrying the blob with id `blob_id`, or
-    /// `None` if no blob-bearing row does (a plain upload with no backing row, e.g.
-    /// in a drain test). Searches each blob-bearing table for a row whose declared
-    /// blob-id column equals `blob_id`. The make-Remote completion check uses this
-    /// to map a just-uploaded blob back to its row, then resolves that row's gated
-    /// root.
-    pub fn row_for_blob(
-        &self,
-        conn: &Connection,
-        blob_id: &str,
-    ) -> Result<Option<(String, String)>, BlobDeclError> {
-        for (table, tb) in &self.tables {
-            if let Some(pk) = pk_carrying_blob(conn, table, tb, blob_id)? {
-                return Ok(Some((table.clone(), pk)));
-            }
-        }
-        Ok(None)
-    }
-
     /// The `(table, primary key)` of the row carrying `blob_id` in the table declared
     /// for `namespace` — the carrying table resolved from the blob's own namespace
     /// (part of its address), not by scanning every blob-bearing table. `None` when no
-    /// declared table owns `namespace`, or that table has no row with the id. The read
-    /// path uses this so a blob id that collides across namespaces reads the right
-    /// table's gate, never the first id match.
+    /// declared table owns `namespace`, or that table has no row with the id. Both the
+    /// read path (locality dispatch) and the make-Remote completion check use this, so
+    /// a blob id that collides across namespaces always reads the right table's gate,
+    /// never the first id match.
     pub fn row_for_blob_in_namespace(
         &self,
         conn: &Connection,
@@ -302,9 +284,8 @@ impl BlobDecls {
 }
 
 /// The primary key (`id`) of the row in `table` whose declared blob-id column equals
-/// `blob_id`, or `None`. The single per-table lookup both [`BlobDecls::row_for_blob`]
-/// (looped over every table) and [`BlobDecls::row_for_blob_in_namespace`] (called for
-/// the one namespace-resolved table) share.
+/// `blob_id`, or `None`. The per-table lookup [`BlobDecls::row_for_blob_in_namespace`]
+/// runs against the one namespace-resolved table.
 fn pk_carrying_blob(
     conn: &Connection,
     table: &str,

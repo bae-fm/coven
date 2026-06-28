@@ -19,8 +19,8 @@ use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    capture_bytes, open_test_db, open_test_db_with_blob, plant_blob_row, pull_into, read_test_db,
-    set_blob_remote, temp_library_dir, MockSyncStorage,
+    capture_bytes, open_test_db, open_test_db_with_blob, open_test_db_with_user_and_host_blobs,
+    plant_blob_row, pull_into, read_test_db, set_blob_remote, temp_library_dir, MockSyncStorage,
 };
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
@@ -998,6 +998,128 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
     assert!(
         matches!(range_err, BlobCacheError::NoLocalCopy { .. }),
         "the ranged read also maps to NoLocalCopy: {range_err:?}",
+    );
+}
+
+// ---- Drift receipts: gate-first beats external-first, namespace-scoped gate ----
+
+/// A Remote user-provided blob that STILL carries a registered external ref reads the
+/// cache/cloud, never the stale ref. Manufactured drift: the gate is Remote yet a
+/// `local_blob_refs` row points at a (distinct-bytes) file, plus a cloud copy. The old
+/// external-first read would have served the stale ref; gate-first serves the cloud
+/// (whole and ranged).
+#[tokio::test]
+async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
+    let db = read_test_db("audio");
+    let storage = MockSyncStorage::new();
+    let (tmp, ld) = temp_library_dir();
+
+    // Remote + user-provided, with a stale external ref still registered.
+    let blob = blob_ref("drft0aaa", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &blob.id, true).await;
+    let stale_ext = ramp(1500);
+    let path = write_external_file(tmp.path(), "stale.flac", &stale_ext);
+    db.register_external_blob(&blob.id, &blob.namespace, &path, stale_ext.len() as u64)
+        .await
+        .expect("register the stale external ref");
+    let cloud_bytes = ramp(2048);
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &cloud_bytes).await;
+
+    let whole = read_blob(&db, &ld, Some(&storage), &blob)
+        .await
+        .expect("a Remote blob reads the cloud");
+    assert_eq!(
+        whole, cloud_bytes,
+        "a Remote blob serves the cloud, ignoring the stale external ref",
+    );
+
+    let (offset, len) = (100u64, 500u64);
+    let mid = open_blob_stream(
+        &db,
+        &ld,
+        Some(&storage),
+        &blob,
+        cloud_bytes.len() as u64,
+        offset,
+        len,
+    )
+    .await
+    .expect("ranged Remote read");
+    assert_eq!(
+        mid,
+        &cloud_bytes[offset as usize..(offset + len) as usize],
+        "the ranged read also ignores the stale external ref",
+    );
+}
+
+/// The same blob id carried by a row in two different namespaces' tables, under
+/// different gates, resolves the gate of the blob's OWN namespace — not whichever
+/// table a scan-all would have matched first. `note_photos` (namespace `ns_local`)
+/// sits under a Local note; `note_covers` (namespace `ns_remote`) under a Remote note;
+/// both rows share one id. Reading the `ns_remote` blob serves its cloud copy (Remote
+/// gate) and the `ns_local` blob serves its local store (Local gate) — distinct bytes
+/// proving each read its own namespace's gate.
+#[tokio::test]
+async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
+    let db = open_test_db_with_user_and_host_blobs(
+        BlobDecl::new("ns_local", Provenance::HostProvided, CacheFill::CacheEager),
+        BlobDecl::new("ns_remote", Provenance::HostProvided, CacheFill::CacheEager),
+    );
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    // One id carried by a row in each table, under different gates: note_photos
+    // (ns_local) below a Local note, note_covers (ns_remote) below a Remote note.
+    let id = "dup0aaaa";
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('note-local', 'x', 0, '0000000001000-0000-dev1', '2026-01-01'), \
+                    ('note-remote', 'x', 1, '0000000001000-0000-dev1', '2026-01-01')",
+            [],
+        )
+        .map_err(crate::database::DbError::from)?;
+        conn.execute(
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+             VALUES (?1, 'note-local', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
+            [id],
+        )
+        .map_err(crate::database::DbError::from)?;
+        conn.execute(
+            "INSERT INTO note_covers (id, note_id, _updated_at, created_at) \
+             VALUES (?1, 'note-remote', '0000000001000-0000-dev1', '2026-01-01')",
+            [id],
+        )
+        .map_err(crate::database::DbError::from)?;
+        Ok(())
+    })
+    .await
+    .expect("plant the colliding-id rows");
+
+    // Distinct bytes per source so the result reveals which gate was read.
+    crate::blob::local_files::store(&ld, "ns_local", id, b"LOCAL-STORE-BYTES")
+        .await
+        .expect("store the Local blob's local copy");
+    put_cloud_blob(&storage, id, "ns_remote", b"REMOTE-CLOUD-BYTES").await;
+
+    // The ns_remote blob resolves note_covers' gate (Remote) → its cloud copy.
+    let remote_blob = host_blob_ref(id, "ns_remote", CacheFill::CacheEager);
+    assert_eq!(
+        read_blob(&db, &ld, Some(&storage), &remote_blob)
+            .await
+            .unwrap(),
+        b"REMOTE-CLOUD-BYTES",
+        "the ns_remote blob resolves its own table's Remote gate, not the colliding Local row",
+    );
+
+    // The ns_local blob resolves note_photos' gate (Local) → its local store.
+    let local_blob = host_blob_ref(id, "ns_local", CacheFill::CacheEager);
+    assert_eq!(
+        read_blob(&db, &ld, Some(&storage), &local_blob)
+            .await
+            .unwrap(),
+        b"LOCAL-STORE-BYTES",
+        "the ns_local blob resolves its own table's Local gate",
     );
 }
 
