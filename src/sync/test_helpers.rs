@@ -533,6 +533,19 @@ impl MockSyncStorage {
             .unwrap()
             .insert(device_id.to_string(), bytes);
     }
+
+    /// Publish a head for `device_id` signed by `keypair` — so the head's author is
+    /// that device's own key rather than the mock's default identity. Lets a
+    /// changeset-GC test give each device a head attributed to its own membership
+    /// key (the author changeset reclamation matches each device's ack against).
+    pub fn publish_head_as(&self, device_id: &str, seq: u64, keypair: &UserKeypair) {
+        let head = HeadJson::signed(device_id, seq, None, None, keypair);
+        let bytes = serde_json::to_vec(&head).expect("serialize head");
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), bytes);
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -676,12 +689,36 @@ impl SyncStorage for MockSyncStorage {
             .ok_or(StorageError::NotFound(key))
     }
 
-    async fn delete_changeset(&self, _device_id: &str, _seq: u64) -> Result<(), StorageError> {
+    async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
+        let key = format!("changes/{device_id}/{seq}");
+        self.objects.lock().unwrap().remove(&key);
         Ok(())
     }
 
-    async fn list_changesets(&self, _device_id: &str) -> Result<Vec<u64>, StorageError> {
-        Ok(vec![])
+    async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
+        let prefix = format!("changes/{device_id}/");
+        let objects = self.objects.lock().unwrap();
+        let mut seqs: Vec<u64> = objects
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix).and_then(|s| s.parse().ok()))
+            .collect();
+        seqs.sort_unstable();
+        Ok(seqs)
+    }
+
+    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
+        let key = format!("acks/{device_id}.json");
+        self.objects.lock().unwrap().insert(key, data);
+        Ok(())
+    }
+
+    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
+        let key = format!("acks/{device_id}.json");
+        let objects = self.objects.lock().unwrap();
+        objects
+            .get(&key)
+            .cloned()
+            .ok_or(StorageError::NotFound(key))
     }
 
     async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {

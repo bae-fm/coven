@@ -389,6 +389,26 @@ pub async fn run_single_sync_cycle(
             .map_err(|e| format!("Failed to persist sync cursor for {cursor_device_id}: {e}"))?;
     }
 
+    // Publish this device's signed pull-ack: how far it has pulled every other
+    // device, the same cursor vector just persisted. Changeset reclamation reads it
+    // to compute a floor that strands no member; nothing else consumes it. A stale
+    // or failed ack only narrows the next reclamation — it never blocks a pull or a
+    // push — so a failure here is logged, not fatal. Runs every cycle so the acked
+    // cursors track pull progress whether or not a snapshot is published.
+    let ack = super::signed_control::AckJson::signed(
+        device_id,
+        sync_result.updated_cursors.clone().into_iter().collect(),
+        user_keypair,
+    );
+    match serde_json::to_vec(&ack) {
+        Ok(bytes) => {
+            if let Err(e) = storage.put_ack(device_id, bytes).await {
+                warn!("Failed to publish pull-ack: {e}");
+            }
+        }
+        Err(e) => warn!("Failed to serialize pull-ack: {e}"),
+    }
+
     // Republish our head every cycle, even when we pushed no changeset of our
     // own. push_changeset writes the head only when this device produces a
     // changeset — so a device that only pulls would otherwise never refresh
@@ -431,9 +451,8 @@ pub async fn run_single_sync_cycle(
     // durable record), then GC tombstones whose convergence grace has passed
     // (the actual blob deletion). Holding the blob for the grace
     // keeps a peer that still references the row from being stranded; the
-    // signature stops a non-member forging a deletion. (The snapshot
-    // `garbage_collect` has no production caller, so the tombstone GC must run
-    // here, not there.)
+    // signature stops a non-member forging a deletion. (This is blob-tombstone
+    // GC; changeset reclamation runs separately, after a snapshot is published.)
     if let Some(ch) = cloud_home {
         match crate::blob::delete::drain_tombstones(db, ch, cipher, library_id, user_keypair, clock)
             .await
@@ -584,6 +603,41 @@ pub async fn run_single_sync_cycle(
                             .map_err(|e| format!("Failed to persist last_snapshot_time: {e}"))?;
 
                         info!(local_seq, "Snapshot created and pushed");
+
+                        // Reclaim changeset logs the fresh snapshot now covers and
+                        // every current device has acked. A fresh snapshot most
+                        // relaxes the snapshot-cursor floor term, so this runs at
+                        // snapshot cadence to maximize reclaim. Anchor authorization
+                        // to the device's pinned owner (the same pin the tombstone GC
+                        // reads); a read failure skips reclaim this cycle rather than
+                        // falling back to trust-on-first-use. Logged-not-fatal: a
+                        // leftover changeset is unreferenced storage the next snapshot's
+                        // reclaim sweeps, never a wrong state a reader observes.
+                        match db
+                            .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+                            .await
+                        {
+                            Ok(pinned_owner) => {
+                                match super::snapshot::reclaim_superseded_changesets(
+                                    storage,
+                                    library_id,
+                                    pinned_owner.as_deref(),
+                                )
+                                .await
+                                {
+                                    Ok(r) if r.deleted > 0 || r.errors > 0 => info!(
+                                        deleted = r.deleted,
+                                        errors = r.errors,
+                                        "Reclaimed superseded changesets"
+                                    ),
+                                    Ok(_) => {}
+                                    Err(e) => warn!("Changeset reclamation error: {e}"),
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Changeset reclamation skipped: failed to read pinned owner: {e}")
+                            }
+                        }
                     }
                     Err(e) => warn!("Failed to push snapshot: {e}"),
                 }

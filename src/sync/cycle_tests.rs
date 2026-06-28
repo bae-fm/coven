@@ -10,7 +10,7 @@
 //! withheld until its gate flips. The completion flip + its mid-batch publish
 //! (`resume_drain_promptly`) are covered in `blob::transition_tests`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use crate::blob::BlobScope;
@@ -22,6 +22,8 @@ use crate::library_dir::LibraryDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
+use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::signed_control::AckJson;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
@@ -86,6 +88,18 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 
     // A slow/stuck upload for some OTHER unit is pending the whole time.
     seed_pending_upload(&db).await;
+
+    // The cycle below pushes a changeset and then snapshots it, and changeset
+    // reclamation runs after the snapshot. Seed a peer that has not acked so the
+    // library is multi-device with an un-acked member: its missing ack pins the
+    // reclaim floor at 0, so the freshly pushed changeset is kept (a peer might
+    // still need it), exactly as a real fleet behaves until everyone acks. Without
+    // this peer M would be the only device and the snapshot-covered changeset would
+    // be reclaimed, which is correct but not what this gate-focused test asserts.
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
 
     // One shareable note (its blobs are up → gate on) and one still-private note
     // (its blobs aren't up yet → gate off; the host hasn't flipped it).
@@ -327,7 +341,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 
-use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError};
 
 /// A [`SyncStorage`] that injects a host write at a cycle `await` point — the
@@ -445,6 +458,12 @@ impl SyncStorage for HostWriteInjector {
     }
     async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
         self.inner.list_changesets(device_id).await
+    }
+    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
+        self.inner.put_ack(device_id, data).await
+    }
+    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_ack(device_id).await
     }
     async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
         self.inner.get_min_schema_version().await
@@ -660,4 +679,120 @@ async fn run_cycle_m_storage(
     )
     .await
     .expect("cycle");
+}
+
+// ---- changeset reclamation through a real cycle ----
+
+/// A changeset that becomes both snapshot-covered and acked by every current
+/// device is reclaimed by the cycle that publishes the snapshot. Peer A has pushed
+/// `changes/A/1`; M runs one cycle that pulls it (so M acks A->1), snapshots
+/// (covering A->1), and then reclaims — so `changes/A/1` is gone afterward.
+///
+/// The mock is built with M's keypair so the head it signs for M and the ack M
+/// publishes share an author, the same identity a real device's storage and ack
+/// share — which is what lets reclamation honor M's ack against M's head.
+#[tokio::test]
+async fn cycle_reclaims_a_fully_acked_changeset() {
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
+    let db_m = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[11u8; 32],
+    )));
+    let hlc = Hlc::new("M".to_string());
+
+    // Peer A's changeset 1 (a shareable note).
+    let a_src = open_test_db();
+    let a_cs = capture_bytes(
+        &a_src,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+           VALUES ('a1', 'FromA', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("A", 1, &a_cs, SCHEMA_VERSION);
+
+    // M's cycle pulls A->1, acks A->1, snapshots covering A->1, then reclaims.
+    run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+
+    assert!(
+        storage.get_changeset("A", 1).await.is_err(),
+        "a snapshot-covered, fully-acked changeset is reclaimed by the cycle",
+    );
+}
+
+/// A changeset a behind peer still needs is NOT reclaimed, even after a snapshot
+/// covers it. Peer A has pushed `changes/A/1` and `changes/A/2`; a peer B is parked
+/// at A->1 (its ack reports only A->1). M pulls both, snapshots covering A->2, and
+/// reclaims — but B's ack pins the floor at 1, so `changes/A/2` survives and B pulls
+/// it forward.
+#[tokio::test]
+async fn cycle_keeps_a_behind_peers_changeset() {
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
+    let db_m = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[12u8; 32],
+    )));
+    let hlc = Hlc::new("M".to_string());
+
+    // Peer A's two changesets (two independent shareable notes).
+    let a_src = open_test_db();
+    let cs1 = capture_bytes(
+        &a_src,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+           VALUES ('a1', 'One', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("A", 1, &cs1, SCHEMA_VERSION);
+    let cs2 = capture_bytes(
+        &a_src,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+           VALUES ('a2', 'Two', NULL, 1, '0000000002000-0000-A', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("A", 2, &cs2, SCHEMA_VERSION);
+
+    // A behind peer B: a head (so it counts as a current device) and an ack that
+    // reports it has pulled A only through seq 1. Both are signed by the mock's
+    // keypair so B's ack author matches B's head author.
+    storage
+        .put_head("B", 0, None, T0)
+        .await
+        .expect("seed behind peer head");
+    let b_ack = AckJson::signed("B", BTreeMap::from([("A".to_string(), 1u64)]), &keypair);
+    storage
+        .put_ack("B", serde_json::to_vec(&b_ack).expect("serialize ack"))
+        .await
+        .expect("seed behind peer ack");
+
+    // M's cycle pulls A->2, acks A->2, snapshots covering A->2, then reclaims. The
+    // floor is min(snapshot A->2, min(M ack A->2, B ack A->1)) = 1.
+    run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+
+    assert!(
+        storage.get_changeset("A", 1).await.is_err(),
+        "the changeset below the floor (everyone has it) is reclaimed",
+    );
+    assert!(
+        storage.get_changeset("A", 2).await.is_ok(),
+        "the changeset the behind peer still needs is kept",
+    );
+
+    // And the behind peer pulls the kept changeset forward.
+    let db_b = open_test_db();
+    let mut b_cursors = HashMap::new();
+    b_cursors.insert("A".to_string(), 1);
+    pull_into(&db_b, &storage, "B", &b_cursors, &ld).await;
+    assert!(
+        row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'a2'").await,
+        "the behind peer pulls the kept changeset forward",
+    );
 }

@@ -555,14 +555,12 @@ impl SyncStorage for CloudSyncStorage {
         self.home.read(&key).await.map_err(StorageError::from)
     }
 
-    #[cfg(test)]
     async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
         let key = format!("changes/{device_id}/{seq}{}", self.suffix());
         self.home.delete(&key).await?;
         Ok(())
     }
 
-    #[cfg(test)]
     async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
         let suffix = self.suffix();
         let prefix = format!("changes/{device_id}/");
@@ -584,6 +582,23 @@ impl SyncStorage for CloudSyncStorage {
         }
         seqs.sort();
         Ok(seqs)
+    }
+
+    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
+        let stored = self.cipher().seal(&data);
+        let key = format!("acks/{device_id}.json{}", self.suffix());
+        self.home
+            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .await?;
+        Ok(())
+    }
+
+    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
+        let key = format!("acks/{device_id}.json{}", self.suffix());
+        let stored = self.home.read(&key).await?;
+        self.cipher()
+            .open(&stored)
+            .map_err(|e| StorageError::Decryption(format!("ack {device_id}: {e}")))
     }
 
     async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {

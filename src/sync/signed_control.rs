@@ -107,6 +107,78 @@ fn head_signing_payload(
     serde_json::to_vec(&fields).expect("head fields serialization cannot fail")
 }
 
+/// Serialized form of a device's pull-ack stored in `acks/{device_id}.json{suffix}`.
+///
+/// An ack reports how far this device has pulled every *other* device's log:
+/// `cursors` is `peer_device_id -> last_seq pulled`. Changeset GC reads the acks
+/// of the current devices to find a floor below which no member still needs a
+/// changeset, so it reclaims only what everyone has already pulled. Nothing else
+/// consumes an ack — a missing, stale, or low ack only narrows reclamation, it
+/// never holds back a pull or a push.
+///
+/// Because an ack drives fleet-wide deletion, it is signed exactly like
+/// [`HeadJson`]: `author_pubkey`/`signature` cover the [`AckFields`] canonical
+/// payload — including the `device_id` slot the ack lives under — so an ack
+/// re-stamped with forged cursors, or copied verbatim into another device's slot,
+/// no longer verifies. The slot is not stored in the JSON (it is the object key);
+/// the reader passes the key's device_id to [`Self::verify`].
+#[derive(Serialize, Deserialize)]
+pub struct AckJson {
+    /// This device's pull cursor on every other device: `peer_device_id -> seq`.
+    /// A `BTreeMap` so its serialization is order-deterministic — a canonical
+    /// payload.
+    pub cursors: std::collections::BTreeMap<String, u64>,
+    /// Hex-encoded Ed25519 public key of the device that wrote this ack.
+    pub author_pubkey: String,
+    /// Hex-encoded detached signature over [`AckFields`].
+    pub signature: String,
+}
+
+/// The ack fields the signature covers, in declaration order. Excludes
+/// `author_pubkey`/`signature` (the signature's own outputs). Includes
+/// `device_id` — the slot the ack is stored under — so a valid ack cannot be
+/// relocated to another device's slot (mirrors `HeadFields`' device_id binding).
+#[derive(Serialize)]
+struct AckFields<'a> {
+    device_id: &'a str,
+    cursors: &'a std::collections::BTreeMap<String, u64>,
+}
+
+impl AckJson {
+    /// Build an ack for slot `device_id` signed by `keypair`: fills
+    /// `author_pubkey` with the device's public key and `signature` with the
+    /// detached signature over the canonical payload (which binds `device_id`).
+    pub fn signed(
+        device_id: &str,
+        cursors: std::collections::BTreeMap<String, u64>,
+        keypair: &UserKeypair,
+    ) -> Self {
+        let payload = ack_signing_payload(device_id, &cursors);
+        let sig = keypair.sign(&payload);
+        AckJson {
+            cursors,
+            author_pubkey: hex::encode(keypair.public_key),
+            signature: hex::encode(sig),
+        }
+    }
+
+    /// Verify the embedded signature against the embedded `author_pubkey`, bound
+    /// to the slot `device_id` the ack was read from. An ack that fails this is
+    /// forged, corrupt, or relocated to a foreign slot, and must be ignored.
+    pub fn verify(&self, device_id: &str) -> bool {
+        let payload = ack_signing_payload(device_id, &self.cursors);
+        keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
+    }
+}
+
+fn ack_signing_payload(
+    device_id: &str,
+    cursors: &std::collections::BTreeMap<String, u64>,
+) -> Vec<u8> {
+    let fields = AckFields { device_id, cursors };
+    serde_json::to_vec(&fields).expect("ack fields serialization cannot fail")
+}
+
 /// Serialized form of `min_schema_version.json{suffix}`.
 ///
 /// `author_pubkey`/`signature` cover the version, so only a value the caller can
@@ -547,6 +619,54 @@ mod tests {
         // pubkey).
         head.author_pubkey = hex::encode(other.public_key);
         assert!(!head.verify("devA"));
+    }
+
+    #[test]
+    fn ack_round_trips_and_binds_its_slot_and_cursors() {
+        use std::collections::BTreeMap;
+        let kp = UserKeypair::generate();
+        let cursors = BTreeMap::from([("devB".to_string(), 4u64), ("devC".to_string(), 9)]);
+        let ack = AckJson::signed("devA", cursors.clone(), &kp);
+
+        assert_eq!(ack.author_pubkey, hex::encode(kp.public_key));
+        assert!(ack.verify("devA"), "a freshly signed ack verifies");
+
+        // Round-trips through JSON unchanged.
+        let json = serde_json::to_vec(&ack).expect("serialize ack");
+        let parsed: AckJson = serde_json::from_slice(&json).expect("parse ack");
+        assert!(
+            parsed.verify("devA"),
+            "ack verifies after a JSON round-trip"
+        );
+
+        // The signature binds the slot: an ack for devA copied into devB's slot
+        // does not verify, so it cannot be relocated to forge another device's
+        // pulled-cursor claim.
+        assert!(
+            !ack.verify("devB"),
+            "an ack must be bound to its slot, not relocatable",
+        );
+
+        // It binds the cursors: editing a pulled-cursor after signing (the
+        // forge-a-high-ack-to-trigger-deletion primitive) invalidates it.
+        let mut tampered = AckJson::signed("devA", cursors, &kp);
+        tampered.cursors.insert("devB".to_string(), u64::MAX);
+        assert!(
+            !tampered.verify("devA"),
+            "tampered cursors fail verification"
+        );
+    }
+
+    #[test]
+    fn ack_signed_by_one_key_does_not_verify_under_another() {
+        use std::collections::BTreeMap;
+        let kp = UserKeypair::generate();
+        let other = UserKeypair::generate();
+        let mut ack = AckJson::signed("devA", BTreeMap::from([("devB".to_string(), 1u64)]), &kp);
+        // Swap the claimed author: the signature no longer matches, so the ack is
+        // rejected (a forger can't claim a member's pubkey).
+        ack.author_pubkey = hex::encode(other.public_key);
+        assert!(!ack.verify("devA"));
     }
 
     #[test]
