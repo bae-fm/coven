@@ -408,6 +408,16 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         &bytes,
     )
     .await;
+    // B is a known peer (it has a head) that has not acked yet, so A's snapshot
+    // cycle keeps A's release changeset for B to pull — reclamation is paused until
+    // every current device acks. Without a peer head A would be single-device and
+    // the snapshot-covered changeset would be reclaimed, leaving nothing for B's
+    // incremental pull.
+    storage
+        .put_head("B", 0, None, "2024-01-01T00:00:00Z")
+        .await
+        .expect("seed peer head");
+
     // A pushes the Remote release; B pulls it.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;

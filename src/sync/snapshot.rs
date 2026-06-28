@@ -25,7 +25,7 @@
 ///
 /// Snapshot creation policy: after every N changesets (default 100) or
 /// T hours (default 24) since the last snapshot.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 use super::cloud_storage::CloudCipher;
 use super::membership_ops::load_anchored_chain;
 use super::session::SyncedTable;
-use super::signed_control::{SnapshotMetaJson, SnapshotPointerJson};
+use super::signed_control::{AckJson, SnapshotMetaJson, SnapshotPointerJson};
 use super::storage::{StorageError, SyncStorage};
 use crate::keys::UserKeypair;
 
@@ -637,110 +637,188 @@ async fn resolve_current_meta(
     Ok((pointer.author_pubkey, pointer.seq, meta))
 }
 
-/// Reclaim changesets and snapshot generations superseded by the live snapshot.
+/// One current device's contribution to the reclaim floor: its head slot
+/// (`device_id`) and its pull cursors on every other device (`ack`), or `None` if
+/// it has not published a verifiable ack.
+struct AckedDevice {
+    device_id: String,
+    ack: Option<BTreeMap<String, u64>>,
+}
+
+/// Reclaim changeset objects superseded by the live snapshot and already pulled by
+/// every current device.
 ///
-/// Resolves the snapshot pointer to the live generation and reads its
-/// per-device cursors ([`resolve_current_meta`] — the pointer, the meta, and
-/// their agreement are all authenticated first, because the cursors are control
-/// input that decides what is deleted fleet-wide; an unsigned or non-member
-/// pointer/meta is refused, never consumed). Then, for each device, deletes only
-/// changesets with seq <= that device's cursor in the snapshot, so changesets
-/// pushed AFTER the snapshot are preserved even if their seq is below another
-/// device's snapshot seq. Devices absent from the metadata are skipped entirely
-/// (they appeared after the snapshot was created).
+/// `push_snapshot` already reclaims superseded snapshot *generations* through its
+/// own-keyspace sweep; this reclaims only per-device *changeset* logs, which
+/// nothing else reclaims and which otherwise grow without bound.
 ///
-/// Finally, reclaims superseded snapshot generations through the own-keyspace sweep
-/// ([`delete_superseded_generations`]) using `keypair`'s public key.
+/// The reclaim floor for a device `D` strands no current member — running or
+/// about-to-bootstrap:
 ///
-/// Test-only: this changeset GC has no production caller — the live tombstone GC
-/// runs inline in [`crate::sync::cycle`]. It and its test suite cover a changeset
-/// GC path that nothing in production drives.
-#[cfg(test)]
-pub async fn garbage_collect(
+/// ```text
+/// floor_D = min(
+///     snapshot.cursors[D],                              // 0 if D absent from the meta
+///     min over OTHER current devices D' of ack_{D'}[D], // 0 if D' has no ack / no entry for D
+/// )
+/// ```
+///
+/// with the ack term unbounded (so `floor_D = snapshot.cursors[D]`) when there is
+/// no other current device. Changesets `seq <= floor_D` are reclaimed; `floor_D ==
+/// 0` reclaims nothing for `D`. The snapshot-cursor term protects a fresh device
+/// that bootstraps from the live snapshot and pulls each device *above* its cursor;
+/// the min-ack term protects a member that is behind (its present-but-stale ack
+/// pins the floor at or below what it still needs). `D` itself is excluded from the
+/// min — it holds its whole log, so its missing self-entry must not force its own
+/// floor to 0.
+///
+/// All control inputs are authenticated, because they decide what is deleted
+/// fleet-wide: the pointer/meta and their agreement ([`resolve_current_meta`], the
+/// cursors are control input); the membership chain (anchored to `owner_pubkey`
+/// when pinned); each head's signature (via [`SyncStorage::list_heads`]); and each
+/// ack's signature against its slot plus its author matching the head's author. An
+/// ack signed by a non-member, relocated to another slot, or with forged cursors is
+/// ignored — it contributes cursor 0, which only narrows reclamation.
+pub async fn reclaim_superseded_changesets(
     storage: &dyn SyncStorage,
     library_id: &str,
-    keypair: &UserKeypair,
+    owner_pubkey: Option<&str>,
 ) -> Result<GcResult, SnapshotError> {
-    // Resolve the live generation through the pointer. Its absence means no
-    // snapshot has been published yet -- nothing to GC. The live generation's seq
-    // (whoever authored it) bounds the sweep's just-resolved protection.
-    let (_live_author, current_seq, meta) =
-        match resolve_current_meta(storage, library_id, None).await {
-            Ok(resolved) => resolved,
-            Err(SnapshotError::Bucket(StorageError::NotFound(_))) => {
-                info!("no snapshot pointer found, skipping GC");
-                return Ok(GcResult {
-                    deleted: 0,
-                    errors: 0,
-                });
-            }
-            Err(e) => return Err(e),
-        };
+    // Resolve the live generation's authenticated per-device cursors. No pointer
+    // means no snapshot has been published yet -- a joiner replays from 0, so there
+    // is nothing to reclaim.
+    let meta = match resolve_current_meta(storage, library_id, owner_pubkey).await {
+        Ok((_author, _seq, meta)) => meta,
+        Err(SnapshotError::Bucket(StorageError::NotFound(_))) => {
+            info!("no snapshot pointer found, skipping changeset reclamation");
+            return Ok(GcResult {
+                deleted: 0,
+                errors: 0,
+            });
+        }
+        Err(e) => return Err(e),
+    };
 
+    // The set of current member pubkeys, or `None` for a chain-less (browsable)
+    // library, where there is no membership to authorize against and every verified
+    // head is a participant -- the same open-by-design path the pull and snapshot
+    // authorization take when no chain exists.
+    let entries = storage.list_membership_entries().await?;
+    let members: Option<HashSet<String>> = if entries.is_empty() {
+        None
+    } else {
+        let chain = load_anchored_chain(storage, &entries, owner_pubkey)
+            .await
+            .map_err(|e| SnapshotError::UnauthorizedAuthor(e.to_string()))?;
+        Some(
+            chain
+                .current_members()
+                .into_iter()
+                .map(|(pk, _)| pk)
+                .collect(),
+        )
+    };
+
+    // The current devices: verified heads whose author is a current member (every
+    // head when chain-less). For each, its verified ack supplies the pull cursors
+    // that feed the floor; a missing/invalid ack contributes cursor 0 everywhere.
     let heads = storage.list_heads().await?;
-    let mut deleted = 0u64;
+    let mut devices: Vec<AckedDevice> = Vec::new();
     let mut errors = 0u64;
-
-    for head in &heads {
-        // Only GC changesets up to what the snapshot covers for THIS device.
-        let safe_seq = match meta.cursors.get(&head.device_id) {
-            Some(&seq) => seq,
-            None => continue, // Device appeared after snapshot -- don't touch.
-        };
-
-        let seqs = match storage.list_changesets(&head.device_id).await {
-            Ok(s) => s,
+    for head in heads {
+        let is_current = members
+            .as_ref()
+            .map(|m| m.contains(&head.author_pubkey))
+            .unwrap_or(true);
+        if !is_current {
+            continue;
+        }
+        let ack = match storage.get_ack(&head.device_id).await {
+            Ok(bytes) => match serde_json::from_slice::<AckJson>(&bytes) {
+                // Honor the ack only when its signature verifies against its slot
+                // AND its author is the same key the head verified against -- so a
+                // non-member-signed ack planted in a member's slot is ignored.
+                Ok(ack)
+                    if ack.verify(&head.device_id) && ack.author_pubkey == head.author_pubkey =>
+                {
+                    Some(ack.cursors)
+                }
+                Ok(_) => {
+                    warn!(device_id = %head.device_id, "ignoring ack that fails its signature/author check");
+                    None
+                }
+                Err(e) => {
+                    warn!(device_id = %head.device_id, error = %e, "ignoring ack that fails to parse");
+                    None
+                }
+            },
+            Err(StorageError::NotFound(_)) => None,
             Err(e) => {
-                warn!(
-                    device_id = %head.device_id,
-                    error = %e,
-                    "failed to list changesets for GC, skipping device"
-                );
+                warn!(device_id = %head.device_id, error = %e, "failed to read ack; treating the device as un-acked");
+                errors += 1;
+                None
+            }
+        };
+        devices.push(AckedDevice {
+            device_id: head.device_id,
+            ack,
+        });
+    }
+
+    let mut deleted = 0u64;
+    for device in &devices {
+        let snapshot_cursor = meta.cursors.get(&device.device_id).copied().unwrap_or(0);
+
+        // The min over the OTHER current devices' acked cursor on this device. A
+        // device with no verified ack, or whose ack has no entry for this device,
+        // contributes 0. No other current device leaves the term unbounded.
+        let mut ack_floor: Option<u64> = None;
+        for other in &devices {
+            if other.device_id == device.device_id {
+                continue;
+            }
+            let term = other
+                .ack
+                .as_ref()
+                .and_then(|cursors| cursors.get(&device.device_id).copied())
+                .unwrap_or(0);
+            ack_floor = Some(ack_floor.map_or(term, |current| current.min(term)));
+        }
+
+        let floor = match ack_floor {
+            Some(acked) => snapshot_cursor.min(acked),
+            None => snapshot_cursor,
+        };
+        if floor == 0 {
+            continue;
+        }
+
+        let seqs = match storage.list_changesets(&device.device_id).await {
+            Ok(seqs) => seqs,
+            Err(e) => {
+                warn!(device_id = %device.device_id, error = %e, "failed to list changesets for reclamation, skipping device");
                 errors += 1;
                 continue;
             }
         };
-
         for seq in seqs {
-            if seq > safe_seq {
+            if seq > floor {
                 continue;
             }
-
-            match storage.delete_changeset(&head.device_id, seq).await {
+            match storage.delete_changeset(&device.device_id, seq).await {
                 Ok(()) => deleted += 1,
                 Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        error = %e,
-                        "failed to delete changeset during GC"
-                    );
+                    warn!(device_id = %device.device_id, seq, error = %e, "failed to delete changeset during reclamation");
                     errors += 1;
                 }
             }
         }
     }
 
-    // Reclaim superseded snapshot generations this device authored. The sweep lists
-    // only this device's own `snapshot/{own_author}/` keyspace, so it structurally
-    // never touches a peer's generation; it re-resolves the pointer so it never
-    // deletes the live generation, and it sweeps up an orphan generation this
-    // device's own crashed publish left.
-    let own_author = hex::encode(keypair.public_key);
-    if let Err(e) =
-        delete_superseded_generations(storage, library_id, current_seq, &own_author).await
-    {
-        warn!(error = %e, "failed to delete superseded snapshot generations during GC");
-        errors += 1;
-    }
-
-    info!(deleted, errors, "garbage collection complete");
-
+    info!(deleted, errors, "changeset reclamation complete");
     Ok(GcResult { deleted, errors })
 }
 
-/// Result of a garbage collection run.
-#[cfg(test)]
+/// Result of a changeset reclamation run.
 #[derive(Debug, PartialEq, Eq)]
 pub struct GcResult {
     /// Number of changesets successfully deleted.
@@ -917,9 +995,9 @@ pub(crate) async fn reconcile_snapshot_blobs(
 }
 
 /// The library id the snapshot tests sign their meta/pointer under. The same id is
-/// passed to `push_snapshot`/`bootstrap_from_snapshot`/`garbage_collect`, so the
-/// signatures verify; a cross-library binding mismatch is exercised by its own
-/// test. Shared by both the `tests` and `authorization_tests` modules.
+/// passed to `push_snapshot`/`bootstrap_from_snapshot`/`reclaim_superseded_changesets`,
+/// so the signatures verify; a cross-library binding mismatch is exercised by its own
+/// test. Shared by the `tests`, `authorization_tests`, and `reclaim_tests` modules.
 #[cfg(test)]
 fn test_library_id() -> &'static str {
     "test-library"
@@ -1039,6 +1117,8 @@ mod tests {
         /// The pointer naming the live generation (None until the first publish).
         snapshot_pointer: Mutex<Option<Vec<u8>>>,
         min_schema_version: Mutex<Option<u32>>,
+        /// Per-device signed pull-acks, keyed by device_id (`acks/{device_id}.json`).
+        acks: Mutex<HashMap<String, Vec<u8>>>,
     }
 
     impl MockSyncStorage {
@@ -1050,6 +1130,7 @@ mod tests {
                 snapshot_metas: Mutex::new(HashMap::new()),
                 snapshot_pointer: Mutex::new(None),
                 min_schema_version: Mutex::new(None),
+                acks: Mutex::new(HashMap::new()),
             }
         }
 
@@ -1063,11 +1144,6 @@ mod tests {
             if seq > entry.0 {
                 entry.0 = seq;
             }
-        }
-
-        /// Count remaining changesets.
-        fn changeset_count(&self) -> usize {
-            self.changesets.lock().unwrap().len()
         }
 
         /// The live generation's `{author, seq}`, or None if nothing is published.
@@ -1220,6 +1296,23 @@ mod tests {
                 .collect();
             seqs.sort();
             Ok(seqs)
+        }
+
+        async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
+            self.acks
+                .lock()
+                .unwrap()
+                .insert(device_id.to_string(), data);
+            Ok(())
+        }
+
+        async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
+            self.acks
+                .lock()
+                .unwrap()
+                .get(device_id)
+                .cloned()
+                .ok_or_else(|| StorageError::NotFound(format!("acks/{device_id}.json")))
         }
 
         async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
@@ -1801,88 +1894,6 @@ mod tests {
         assert_eq!(meta.cursors.len(), 2);
     }
 
-    // ---- garbage_collect tests ----
-
-    #[tokio::test]
-    async fn gc_deletes_changesets_per_device_cursors() {
-        let storage = MockSyncStorage::new();
-        let kp = test_keypair();
-
-        // Device A: changesets 1-5.
-        for seq in 1..=5 {
-            storage.add_changeset("dev-a", seq, vec![seq as u8]);
-        }
-        // Device B: changesets 1-3.
-        for seq in 1..=3 {
-            storage.add_changeset("dev-b", seq, vec![seq as u8]);
-        }
-
-        assert_eq!(storage.changeset_count(), 8);
-
-        // Snapshot metadata: dev-a was at seq 3, dev-b was at seq 2.
-        publish_signed_generation(
-            &storage,
-            3,
-            HashMap::from([("dev-a".to_string(), 3), ("dev-b".to_string(), 2)]),
-            vec![0u8],
-            &kp,
-        )
-        .await;
-
-        let result = garbage_collect(&storage, test_library_id(), &kp)
-            .await
-            .expect("gc");
-
-        // dev-a: 1,2,3 deleted (<=3), dev-b: 1,2 deleted (<=2)
-        assert_eq!(result.deleted, 5);
-        assert_eq!(result.errors, 0);
-        assert_eq!(storage.changeset_count(), 3); // dev-a: 4,5 + dev-b: 3
-
-        // Verify remaining changesets.
-        let remaining_a = storage.list_changesets("dev-a").await.unwrap();
-        assert_eq!(remaining_a, vec![4, 5]);
-
-        let remaining_b = storage.list_changesets("dev-b").await.unwrap();
-        assert_eq!(remaining_b, vec![3]);
-    }
-
-    #[tokio::test]
-    async fn gc_with_no_changesets_to_delete() {
-        let storage = MockSyncStorage::new();
-        let kp = test_keypair();
-        storage.add_changeset("dev-a", 10, vec![10]);
-
-        // Snapshot metadata says dev-a was at seq 5 -- changeset 10 is newer.
-        publish_signed_generation(
-            &storage,
-            5,
-            HashMap::from([("dev-a".to_string(), 5)]),
-            vec![0u8],
-            &kp,
-        )
-        .await;
-
-        let result = garbage_collect(&storage, test_library_id(), &kp)
-            .await
-            .expect("gc");
-
-        assert_eq!(result.deleted, 0);
-        assert_eq!(storage.changeset_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn gc_with_empty_bucket() {
-        let storage = MockSyncStorage::new();
-        // No snapshot metadata -- GC should be a no-op.
-
-        let result = garbage_collect(&storage, test_library_id(), &test_keypair())
-            .await
-            .expect("gc");
-
-        assert_eq!(result.deleted, 0);
-        assert_eq!(result.errors, 0);
-    }
-
     // ---- bootstrap_from_snapshot tests ----
 
     #[tokio::test]
@@ -2079,90 +2090,6 @@ mod tests {
         );
     }
 
-    // ---- new safety tests ----
-
-    /// Device A creates snapshot when Device B is at seq 30. Device B later
-    /// pushes seq 31-35. GC must NOT delete Device B's 31-35.
-    #[tokio::test]
-    async fn gc_does_not_delete_post_snapshot_changesets() {
-        let storage = MockSyncStorage::new();
-        let kp = test_keypair();
-
-        // Device A: changesets 1-50. Device B: changesets 1-35.
-        for seq in 1..=50 {
-            storage.add_changeset("dev-a", seq, vec![seq as u8]);
-        }
-        for seq in 1..=35 {
-            storage.add_changeset("dev-b", seq, vec![seq as u8]);
-        }
-
-        // Snapshot taken when dev-a was at 50, dev-b was at 30.
-        // (Dev-b pushed 31-35 after the snapshot.)
-        publish_signed_generation(
-            &storage,
-            50,
-            HashMap::from([("dev-a".to_string(), 50), ("dev-b".to_string(), 30)]),
-            vec![0u8],
-            &kp,
-        )
-        .await;
-
-        let result = garbage_collect(&storage, test_library_id(), &kp)
-            .await
-            .expect("gc");
-
-        // dev-a: all 50 deleted (<=50), dev-b: 1-30 deleted (<=30)
-        assert_eq!(result.deleted, 80);
-        assert_eq!(result.errors, 0);
-
-        // dev-b's 31-35 must survive.
-        let remaining_b = storage.list_changesets("dev-b").await.unwrap();
-        assert_eq!(remaining_b, vec![31, 32, 33, 34, 35]);
-
-        // dev-a has nothing remaining.
-        let remaining_a = storage.list_changesets("dev-a").await.unwrap();
-        assert!(remaining_a.is_empty());
-    }
-
-    /// Device C appears after snapshot was created. GC should not touch
-    /// any of Device C's changesets.
-    #[tokio::test]
-    async fn gc_ignores_device_not_in_snapshot_meta() {
-        let storage = MockSyncStorage::new();
-        let kp = test_keypair();
-
-        // Device A: changesets 1-5 (present in snapshot).
-        for seq in 1..=5 {
-            storage.add_changeset("dev-a", seq, vec![seq as u8]);
-        }
-        // Device C: changesets 1-3 (NOT in snapshot metadata).
-        for seq in 1..=3 {
-            storage.add_changeset("dev-c", seq, vec![seq as u8]);
-        }
-
-        // Snapshot only knows about dev-a.
-        publish_signed_generation(
-            &storage,
-            5,
-            HashMap::from([("dev-a".to_string(), 5)]),
-            vec![0u8],
-            &kp,
-        )
-        .await;
-
-        let result = garbage_collect(&storage, test_library_id(), &kp)
-            .await
-            .expect("gc");
-
-        // Only dev-a's changesets should be deleted.
-        assert_eq!(result.deleted, 5);
-        assert_eq!(result.errors, 0);
-
-        // dev-c's changesets are untouched.
-        let remaining_c = storage.list_changesets("dev-c").await.unwrap();
-        assert_eq!(remaining_c, vec![1, 2, 3]);
-    }
-
     /// A generation's db image written but no pointer is a crashed publish: the
     /// process died after the db/meta uploads but before the pointer flip. The
     /// pointer is the commit, so bootstrap finds none and refuses — it never seeds
@@ -2274,60 +2201,6 @@ mod tests {
         assert!(
             !row_exists(&restored, "SELECT 1 FROM notes WHERE id = 'n2'"),
             "the orphan generation's db is never served (no torn read)",
-        );
-    }
-
-    /// GC reclaims superseded snapshot generations but never the live one. A device
-    /// published generation 1 then generation 2 (the second flips the pointer to
-    /// name 2, leaving 1 superseded). GC, run with that device's keypair, deletes the
-    /// prior generation's objects (its db + meta) — both were authored by this device
-    /// — leaving only the generation the pointer names, so storage doesn't grow
-    /// without bound while bootstrap can always still resolve the current generation.
-    #[tokio::test]
-    async fn gc_deletes_superseded_generations_keeping_the_current() {
-        let storage = MockSyncStorage::new();
-        // Both generations are this one device's, so its GC sweep owns and reclaims
-        // the superseded one; staging them under one keypair is what models that.
-        let kp = test_keypair();
-        let author = hex::encode(kp.public_key);
-
-        // Stage generation 1, then generation 2; the second staging flips the
-        // pointer to name 2, leaving 1 superseded. (This helper stages a generation
-        // without the post-publish sweep `push_snapshot` does, so both generations
-        // are present going into GC — exactly the state GC must reclaim.)
-        publish_signed_generation(&storage, 1, HashMap::new(), vec![1u8], &kp).await;
-        publish_signed_generation(&storage, 2, HashMap::new(), vec![2u8], &kp).await;
-
-        // Both generations are present before GC reclaims the superseded one.
-        let mut before = storage
-            .list_own_snapshot_generations(&author)
-            .await
-            .unwrap();
-        before.sort_unstable();
-        assert_eq!(before, vec![1, 2], "both generations staged");
-
-        garbage_collect(&storage, test_library_id(), &kp)
-            .await
-            .expect("gc");
-
-        // Only generation 2 (the one the pointer names) remains; generation 1's
-        // objects are gone.
-        assert_eq!(
-            storage
-                .list_own_snapshot_generations(&author)
-                .await
-                .unwrap(),
-            vec![2],
-            "the superseded generation is reclaimed, the current one kept",
-        );
-        assert!(
-            storage.get_snapshot_meta(&author, 1).await.is_err(),
-            "the superseded generation's meta is deleted too",
-        );
-        assert!(
-            storage.get_snapshot(&author, 2).await.is_ok()
-                && storage.get_snapshot_meta(&author, 2).await.is_ok(),
-            "the current generation's db and meta survive GC",
         );
     }
 
@@ -2667,8 +2540,9 @@ mod tests {
     /// The core regression: a device that snapshots a DB it has NOT fully
     /// caught up to must record cursors describing what the snapshot DB
     /// actually contains — never another device's published head. If it
-    /// overclaims, GC deletes the un-snapshotted changeset and no future
-    /// restore can ever recover it.
+    /// overclaims, changeset reclamation deletes the un-snapshotted changeset and
+    /// no future restore can recover it. With honest cursors, a restoring device
+    /// bootstraps at the snapshot's seq and replays the post-snapshot edit forward.
     #[tokio::test]
     async fn snapshot_meta_reflects_applied_not_published() {
         let enc = test_encryption();
@@ -2731,13 +2605,12 @@ mod tests {
             "snapshot meta must reflect applied seq K, not published head K+1"
         );
 
-        garbage_collect(&storage, test_library_id(), &kp)
-            .await
-            .expect("gc");
+        // The post-snapshot edit (seq K+1) is above the snapshot's honest cursor, so
+        // it is preserved for a restoring device to replay.
         storage
             .get_changeset("M", k + 1)
             .await
-            .expect("K+1 must survive GC");
+            .expect("K+1 is above the snapshot cursor and must be preserved");
 
         let target = temp.path().join("device_c.db");
         let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
@@ -2873,10 +2746,11 @@ mod tests {
         );
     }
 
-    /// GC deletes only seqs <= the snapshot's accurate cursor; a changeset
-    /// pushed after the snapshot (absent from the snapshot DB) survives.
+    /// A single-device library reclaims only seqs <= the snapshot's accurate cursor
+    /// (no other current device, so the floor is just the snapshot cursor); a
+    /// changeset pushed after the snapshot (absent from the snapshot DB) survives.
     #[tokio::test]
-    async fn gc_never_deletes_changeset_absent_from_snapshot() {
+    async fn reclaim_never_deletes_changeset_absent_from_snapshot() {
         let storage = MockSyncStorage::new();
         let kp = test_keypair();
         for seq in 1..=3 {
@@ -2898,9 +2772,9 @@ mod tests {
         .await
         .expect("push");
 
-        garbage_collect(&storage, test_library_id(), &kp)
+        reclaim_superseded_changesets(&storage, test_library_id(), None)
             .await
-            .expect("gc");
+            .expect("reclaim");
 
         assert_eq!(storage.list_changesets("M").await.unwrap(), vec![3]);
     }
@@ -3501,12 +3375,12 @@ mod authorization_tests {
         assert!(!target2.exists());
     }
 
-    /// GC trusts the metadata's cursors to decide what to delete fleet-wide, so it
-    /// authenticates the meta first. A meta signed by a non-member is refused
-    /// rather than consumed — closing the forged-cursor mass-delete primitive on
-    /// the GC path too.
+    /// Changeset reclamation trusts the metadata's cursors to decide what to delete
+    /// fleet-wide, so it authenticates the meta first. A meta signed by a non-member
+    /// is refused rather than consumed — closing the forged-cursor mass-delete
+    /// primitive on the reclamation path too.
     #[tokio::test]
-    async fn gc_refuses_non_member_signed_meta() {
+    async fn reclaim_refuses_non_member_signed_meta() {
         let owner = UserKeypair::generate();
         let outsider = UserKeypair::generate();
         let storage = MockSyncStorage::new();
@@ -3525,9 +3399,10 @@ mod authorization_tests {
         .await
         .expect("outsider writes a forged meta");
 
-        let err = garbage_collect(&storage, test_library_id(), &outsider)
-            .await
-            .expect_err("GC must refuse a non-member-signed meta before deleting");
+        let err =
+            reclaim_superseded_changesets(&storage, test_library_id(), Some(&pubkey_hex(&owner)))
+                .await
+                .expect_err("reclamation must refuse a non-member-signed meta before deleting");
         assert!(
             matches!(err, SnapshotError::UnauthorizedAuthor(_)),
             "expected UnauthorizedAuthor, got {err:?}",
@@ -3683,5 +3558,307 @@ mod authorization_tests {
             "expected a parse failure (Io), got {err:?}",
         );
         assert!(!target.exists());
+    }
+}
+
+/// Changeset reclamation's ack-floor: for each current device `D`, reclaim
+/// `changes/D/{seq}` for `seq <= min(snapshot.cursors[D], min over OTHER current
+/// devices of their acked cursor on D)`. These drive the production-faithful
+/// [`crate::sync::test_helpers::MockSyncStorage`], which models a real membership
+/// chain, per-device heads, signed acks, and the changeset/snapshot keyspaces.
+#[cfg(test)]
+mod reclaim_tests {
+    use super::*;
+    use crate::keys::UserKeypair;
+    use crate::sync::membership::{founder_entry, MemberRole, MembershipAction};
+    use crate::sync::test_helpers::{make_entry, pubkey_hex, MockSyncStorage};
+
+    /// A device: its head slot (`id`) plus the membership keypair its head and ack
+    /// are authored by. Changeset reclamation matches each device's ack author
+    /// against its head author, so the two must share a key — as a real device's do.
+    struct Device {
+        id: String,
+        kp: UserKeypair,
+    }
+
+    impl Device {
+        fn new(id: &str) -> Self {
+            Device {
+                id: id.to_string(),
+                kp: UserKeypair::generate(),
+            }
+        }
+    }
+
+    /// Found a one-owner chain and return the owner keypair. The owner authors the
+    /// snapshot (a write-capable member); it has no head, so it is not itself a
+    /// current device.
+    async fn found_chain(storage: &MockSyncStorage) -> UserKeypair {
+        let owner = UserKeypair::generate();
+        let entry = founder_entry(&owner, "0000000001000-0000-owner");
+        storage
+            .put_membership_entry(&pubkey_hex(&owner), 1, serde_json::to_vec(&entry).unwrap())
+            .await
+            .unwrap();
+        owner
+    }
+
+    /// Append a membership entry authored by `owner` at chain seq `seq` (2..=9). A
+    /// timestamp derived from `seq` keeps the entries lexically ordered, the order
+    /// `MembershipChain::from_entries` sorts by.
+    async fn append_entry(
+        storage: &MockSyncStorage,
+        owner: &UserKeypair,
+        action: MembershipAction,
+        subject: &Device,
+        seq: u64,
+    ) {
+        let ts = format!("000000000{seq}000-0000-owner");
+        let entry = make_entry(owner, action, &subject.kp, MemberRole::Member, &ts);
+        storage
+            .put_membership_entry(&pubkey_hex(owner), seq, serde_json::to_vec(&entry).unwrap())
+            .await
+            .unwrap();
+    }
+
+    /// Publish the live snapshot generation (meta + db + pointer) signed by `owner`,
+    /// carrying `cursors` (device_id -> seq). The db image is a placeholder —
+    /// reclamation reads only the pointer/meta signatures and the cursors.
+    async fn publish_snapshot(
+        storage: &MockSyncStorage,
+        owner: &UserKeypair,
+        seq: u64,
+        cursors: &[(&str, u64)],
+    ) {
+        let cursors: BTreeMap<String, u64> =
+            cursors.iter().map(|(d, s)| (d.to_string(), *s)).collect();
+        let db = vec![0u8];
+        let db_hash = snapshot_db_hash(&db);
+        let author = pubkey_hex(owner);
+        let meta = SnapshotMetaJson::signed(test_library_id(), cursors, db_hash.clone(), owner);
+        storage
+            .put_snapshot_meta(&author, seq, serde_json::to_vec(&meta).unwrap())
+            .await
+            .unwrap();
+        storage.put_snapshot(&author, seq, db).await.unwrap();
+        let pointer = SnapshotPointerJson::signed(test_library_id(), seq, db_hash, owner);
+        storage
+            .put_snapshot_pointer(serde_json::to_vec(&pointer).unwrap())
+            .await
+            .unwrap();
+    }
+
+    /// Publish `device`'s pull-ack (`cursors`: peer_id -> seq), signed by its own
+    /// key so its author matches its head.
+    async fn publish_ack(storage: &MockSyncStorage, device: &Device, cursors: &[(&str, u64)]) {
+        let cursors: BTreeMap<String, u64> =
+            cursors.iter().map(|(d, s)| (d.to_string(), *s)).collect();
+        let ack = AckJson::signed(&device.id, cursors, &device.kp);
+        storage
+            .put_ack(&device.id, serde_json::to_vec(&ack).unwrap())
+            .await
+            .unwrap();
+    }
+
+    /// Store changesets `changes/{device_id}/{seq}` for `seq` in `1..=n`.
+    async fn add_log(storage: &MockSyncStorage, device_id: &str, n: u64) {
+        for seq in 1..=n {
+            storage
+                .put_changeset(device_id, seq, vec![seq as u8])
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn reclaim(storage: &MockSyncStorage, owner: &UserKeypair) -> GcResult {
+        reclaim_superseded_changesets(storage, test_library_id(), Some(&pubkey_hex(owner)))
+            .await
+            .expect("reclaim")
+    }
+
+    /// 1. Behind member kept: the snapshot covers A->5, but the one other current
+    ///    device acks A->3, so the floor is 3 — 1..=3 are reclaimed, 4..=5 survive.
+    #[tokio::test]
+    async fn behind_member_pins_the_floor() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_ack(&storage, &b, &[("A", 3)]).await;
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 3);
+        assert_eq!(storage.list_changesets("A").await.unwrap(), vec![4, 5]);
+    }
+
+    /// 2. New-bootstrapper protection: every other current device acks A->5, but the
+    ///    live snapshot's cursor is only 3 (no newer snapshot yet), so the floor is 3
+    ///    — 4..=5 survive for a fresh device bootstrapping from that snapshot.
+    #[tokio::test]
+    async fn snapshot_cursor_pins_the_floor_for_bootstrappers() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 3)]).await;
+        publish_ack(&storage, &b, &[("A", 5)]).await;
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 3);
+        assert_eq!(storage.list_changesets("A").await.unwrap(), vec![4, 5]);
+    }
+
+    /// 3. Full reclaim: every other current device acks A->5 AND the snapshot covers
+    ///    A->5, so the floor is 5 and the whole log is reclaimed.
+    #[tokio::test]
+    async fn full_reclaim_when_snapshot_and_acks_agree() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_ack(&storage, &b, &[("A", 5)]).await;
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 5);
+        assert!(storage.list_changesets("A").await.unwrap().is_empty());
+    }
+
+    /// 4. Missing ack pauses reclamation: a current member with a head but no ack
+    ///    contributes cursor 0, pinning every floor to 0 — nothing is reclaimed.
+    #[tokio::test]
+    async fn missing_ack_pauses_reclamation() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        // B publishes no ack.
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 0);
+        assert_eq!(
+            storage.list_changesets("A").await.unwrap(),
+            vec![1, 2, 3, 4, 5]
+        );
+    }
+
+    /// 5. Removed member releases reclamation: same as the missing-ack case, but the
+    ///    ack-less device is removed from the chain, so it is no longer a current
+    ///    device and no longer counted — the floor returns to the snapshot cursor.
+    #[tokio::test]
+    async fn removed_member_releases_reclamation() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &owner, MembershipAction::Remove, &b, 4).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        // B (removed) publishes no ack.
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 5);
+        assert!(storage.list_changesets("A").await.unwrap().is_empty());
+    }
+
+    /// 6. Non-member ack ignored: an ack planted in member B's slot but signed by a
+    ///    non-member — claiming A->5 — is ignored (its author does not match B's
+    ///    head), so the forged high cursor cannot raise the floor and trigger
+    ///    deletion. B contributes 0, so nothing is reclaimed.
+    #[tokio::test]
+    async fn non_member_ack_is_ignored() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+
+        // An outsider signs an ack for B's slot claiming B has pulled A->5.
+        let outsider = UserKeypair::generate();
+        let forged = AckJson::signed("B", BTreeMap::from([("A".to_string(), 5u64)]), &outsider);
+        storage
+            .put_ack("B", serde_json::to_vec(&forged).unwrap())
+            .await
+            .unwrap();
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 0);
+        assert_eq!(
+            storage.list_changesets("A").await.unwrap(),
+            vec![1, 2, 3, 4, 5]
+        );
+    }
+
+    /// 7. Single-device library: with no other current device the ack term is
+    ///    unbounded, so the floor is just the snapshot cursor (3) — 1..=3 reclaimed,
+    ///    4..=5 survive.
+    #[tokio::test]
+    async fn single_device_floor_is_the_snapshot_cursor() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 3)]).await;
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 3);
+        assert_eq!(storage.list_changesets("A").await.unwrap(), vec![4, 5]);
+    }
+
+    /// 8. Self-exclusion: A's own ack carries no entry for itself (a device does not
+    ///    ack its own log). A is excluded from its own min, so its missing self-entry
+    ///    does not force A's floor to 0 — the floor is B's ack on A (4), not 0.
+    #[tokio::test]
+    async fn device_is_excluded_from_its_own_floor() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        // A acks only its peer B (no self-entry for A); B acks A->4.
+        publish_ack(&storage, &a, &[("B", 2)]).await;
+        publish_ack(&storage, &b, &[("A", 4)]).await;
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 4);
+        assert_eq!(storage.list_changesets("A").await.unwrap(), vec![5]);
     }
 }

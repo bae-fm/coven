@@ -216,17 +216,28 @@ pub(crate) trait SyncStorage: crate::MaybeThreadSafe {
     async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError>;
 
     /// Delete a single changeset from storage.
-    /// Removes `changes/{device_id}/{seq}{suffix}`.
-    /// Test-only: the changeset-GC machinery that uses it has no production caller
-    /// (see `snapshot::garbage_collect`).
-    #[cfg(test)]
+    /// Removes `changes/{device_id}/{seq}{suffix}`. Driven by changeset GC
+    /// ([`crate::sync::snapshot::reclaim_superseded_changesets`]) to reclaim a
+    /// changeset below the safe reclaim floor.
     async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError>;
 
     /// List all changeset keys for a device.
-    /// Returns the sequence numbers that exist in `changes/{device_id}/`.
-    /// Test-only: see [`Self::delete_changeset`].
-    #[cfg(test)]
+    /// Returns the sequence numbers that exist in `changes/{device_id}/`. Driven by
+    /// changeset GC to enumerate a device's log before reclaiming below the floor.
     async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError>;
+
+    /// Publish this device's signed pull-ack (plaintext -- the implementation
+    /// seals it). Writes to `acks/{device_id}.json{suffix}`. The bytes are a signed
+    /// [`AckJson`](crate::sync::signed_control::AckJson) reporting how far this
+    /// device has pulled every other device; changeset GC reads it to compute the
+    /// safe reclaim floor.
+    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError>;
+
+    /// Download a device's pull-ack (opened).
+    /// Reads from `acks/{device_id}.json{suffix}`. Returns NotFound if the device
+    /// has not published an ack yet; GC treats that (and any ack that fails to
+    /// verify) as the device contributing cursor 0, which only pauses reclamation.
+    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError>;
 
     /// Get the minimum schema version required to sync with this storage, with
     /// the public key its signature verified against.

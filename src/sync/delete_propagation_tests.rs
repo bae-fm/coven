@@ -512,11 +512,14 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
         .await
         .expect("A push update changeset");
 
-    // The changeset is stored in the clear too.
+    // The update changeset is stored in the clear too. It is A's seq 2: the seq-1
+    // insert was covered by the initial snapshot (a single-device library, so the
+    // floor is the snapshot cursor) and reclaimed, while this post-snapshot update
+    // is above the snapshot cursor and persists for B to pull.
     let cs_at_rest = storage
-        .get_changeset("A", 1)
+        .get_changeset("A", 2)
         .await
-        .expect("A's changeset present");
+        .expect("A's update changeset present");
     assert!(
         !cs_at_rest.is_empty(),
         "A's plaintext changeset is stored under its bare key",
