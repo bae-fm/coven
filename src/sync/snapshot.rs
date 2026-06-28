@@ -652,9 +652,9 @@ async fn resolve_current_meta(
 /// Finally, reclaims superseded snapshot generations through the own-keyspace sweep
 /// ([`delete_superseded_generations`]) using `keypair`'s public key.
 ///
-/// Test-only: this changeset GC has no production caller (the live tombstone GC
-/// runs inline in [`crate::sync::cycle`]); it exists with its test suite as a
-/// built-but-unwired capability.
+/// Test-only: this changeset GC has no production caller — the live tombstone GC
+/// runs inline in [`crate::sync::cycle`]. It and its test suite cover a changeset
+/// GC path that nothing in production drives.
 #[cfg(test)]
 pub async fn garbage_collect(
     storage: &dyn SyncStorage,
