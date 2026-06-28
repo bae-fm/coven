@@ -19,7 +19,7 @@ use super::apply::apply_changeset_lww_with_schema;
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
-use super::membership::{MemberRole, MembershipChain, MembershipCoord, MembershipEntry};
+use super::membership::{MembershipChain, MembershipCoord, MembershipEntry};
 use super::push::SCHEMA_VERSION;
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
@@ -56,16 +56,6 @@ fn cursor_for_device(cursors: &HashMap<String, u64>, device_id: &str) -> u64 {
 /// reads, so its head is legitimate even though it may not author changesets.
 fn is_current_member(chain: &MembershipChain, pubkey: &str) -> bool {
     chain.current_members().iter().any(|(pk, _)| pk == pubkey)
-}
-
-/// Whether `pubkey` is a current *Owner* of `chain`. The gate for honoring a
-/// `min_schema_version` floor: only an owner may raise the fleet's required
-/// schema, so a Member- or Follower-signed floor is ignored.
-fn is_current_owner(chain: &MembershipChain, pubkey: &str) -> bool {
-    chain
-        .current_members()
-        .iter()
-        .any(|(pk, role)| pk == pubkey && *role == MemberRole::Owner)
 }
 
 /// A changeset skipped because its author is not a write-capable member, judged
@@ -251,7 +241,7 @@ pub async fn pull_changes(
         .map_err(PullError::Storage)?
     {
         let honor = match membership_chain.as_ref() {
-            Some(chain) => is_current_owner(chain, &min.author_pubkey),
+            Some(chain) => chain.is_owner_now(&min.author_pubkey),
             None => true,
         };
         if honor {

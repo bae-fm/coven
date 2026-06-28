@@ -608,9 +608,45 @@ pub async fn run_single_sync_cycle(
     // the host keeps off until its blobs upload — is already excluded. No global
     // upload deferral is needed: the snapshot can never carry a row whose blobs
     // aren't in the cloud.
-    if is_initial_sync
-        || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since)
-    {
+    // Owner-only snapshots: a snapshot restates the whole catalog — the image a new
+    // device bootstraps from wholesale — so only a current Owner may author one.
+    // Decide whether a snapshot is both due and permitted BEFORE create_snapshot
+    // (the VACUUM), so a non-owner never builds an image, publishes one readers
+    // would reject, or runs the reclaim a publish triggers. A non-owner's rows still
+    // propagate via the changeset push above.
+    let snapshot_due = is_initial_sync
+        || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since);
+    let may_snapshot = if snapshot_due {
+        // Reuse the acceptance-side authorization rather than re-deriving it, so the
+        // producer and the readers apply the same rule: the author must be a current
+        // Owner, and an open/browsable library with no pinned owner is accepted (it
+        // has no owner to gate against). A `UnauthorizedAuthor` result means this
+        // device may not snapshot — skip it. A genuine failure to read the chain is
+        // fatal to the cycle, the same fail-closed stance `refresh_authorization_state`
+        // takes on the membership load.
+        let our_pk = hex::encode(user_keypair.public_key);
+        let pinned_owner = db
+            .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+            .await
+            .map_err(|e| format!("read pinned owner for snapshot authorization: {e}"))?;
+        match super::snapshot::authorize_author(storage, &our_pk, pinned_owner.as_deref()).await {
+            Ok(()) => true,
+            Err(super::snapshot::SnapshotError::UnauthorizedAuthor(reason)) => {
+                info!(
+                    device = %our_pk,
+                    owner = pinned_owner.as_deref().unwrap_or("<none>"),
+                    %reason,
+                    "Snapshot skipped: this device may not author a snapshot"
+                );
+                false
+            }
+            Err(e) => return Err(format!("verify snapshot authorization: {e}")),
+        }
+    } else {
+        false
+    };
+
+    if may_snapshot {
         if is_initial_sync {
             info!("Initial sync: pushing snapshot of existing library data");
         } else {

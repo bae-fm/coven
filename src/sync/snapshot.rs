@@ -503,10 +503,10 @@ pub fn should_create_snapshot(
 /// signed object that decrypts could still have been written by anyone with the
 /// credential. The signature (checked by the caller) proves *who* authored the
 /// object; this proves whether that author *may* publish a catalog image — the
-/// same split the changeset path enforces. The author must be a current
-/// write-capable member (Owner or Member — a snapshot is a catalog write, so a
-/// read-only Follower may not author one), and, when an owner is pinned, the chain
-/// must be anchored to that owner.
+/// same split the changeset path enforces. The author must be a current Owner — a
+/// snapshot restates the whole catalog, so a Member may push changesets but may not
+/// author a catalog image (and a read-only Follower may not either) — and, when an
+/// owner is pinned, the chain must be anchored to that owner.
 ///
 /// A chain-less (browsable/open) library has no membership to authorize against,
 /// so the object is accepted on its (already verified) signature alone — open by
@@ -518,7 +518,12 @@ pub fn should_create_snapshot(
 /// pins) when known — `Some` on the join path. `None` on the restore path (the
 /// owner is adopted trust-on-first-use from the chain's own founder after the
 /// pull), so the chain is anchored to whatever founder it self-validates to.
-async fn authorize_author(
+///
+/// This is the one owner-authorization check, shared by the read paths (resolving
+/// a snapshot to bootstrap or GC from) and the sync cycle's pre-publish decision
+/// (whether this device may author a snapshot at all), so the producer and the
+/// readers can never disagree on who may write a catalog image.
+pub(crate) async fn authorize_author(
     storage: &dyn SyncStorage,
     author_pubkey: &str,
     owner_pubkey: Option<&str>,
@@ -557,9 +562,9 @@ async fn authorize_author(
         .await
         .map_err(|e| SnapshotError::UnauthorizedAuthor(e.to_string()))?;
 
-    if !chain.can_write_now(author_pubkey) {
+    if !chain.is_owner_now(author_pubkey) {
         return Err(SnapshotError::UnauthorizedAuthor(format!(
-            "author {author_pubkey} is not a current write-capable member"
+            "author {author_pubkey} is not a current owner"
         )));
     }
 
@@ -3148,6 +3153,91 @@ mod authorization_tests {
             "expected UnauthorizedAuthor, got {err:?}",
         );
         assert!(!target.exists());
+    }
+
+    /// Owner-only snapshots (#161): a snapshot restates the whole catalog, so even a
+    /// write-capable Member may not author one — only an Owner. The owner's snapshot
+    /// is adopted; a Member's, signed and internally consistent in every other way, is
+    /// refused. Both the pointer and the meta authorize through `resolve_current_meta`,
+    /// so the Member's is rejected at the pointer's author check before any DB image is
+    /// fetched. (Contrast the changeset path, which a Member may still author.)
+    #[tokio::test]
+    async fn snapshot_authorization_is_owner_only() {
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        found_chain(&storage, &owner).await;
+        // The owner adds a write-capable Member.
+        let add = make_entry(
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-owner",
+        );
+        storage
+            .put_membership_entry(&pubkey_hex(&owner), 2, serde_json::to_vec(&add).unwrap())
+            .await
+            .unwrap();
+
+        // The owner's snapshot is adopted.
+        push_snapshot(
+            &storage,
+            test_library_id(),
+            fake_snapshot(),
+            "owner-dev",
+            HashMap::new(),
+            1,
+            &owner,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("owner pushes a signed snapshot");
+
+        let temp = tempfile::tempdir().unwrap();
+        let owner_target = temp.path().join("owner.db");
+        bootstrap_from_snapshot(
+            &storage,
+            test_library_id(),
+            &cipher(),
+            Some(&pubkey_hex(&owner)),
+            &owner_target,
+        )
+        .await
+        .expect("an owner-signed snapshot is adopted");
+        assert!(owner_target.exists());
+
+        // The Member overwrites the snapshot with one it signs. Its changesets are
+        // accepted (it is write-capable), but a catalog image is owner-only — so
+        // bootstrap refuses, the pointer's author judged not a current Owner.
+        push_snapshot(
+            &storage,
+            test_library_id(),
+            fake_snapshot(),
+            "member-dev",
+            HashMap::new(),
+            1,
+            &member,
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("the member writes a signed snapshot");
+
+        let member_target = temp.path().join("member.db");
+        let err = bootstrap_from_snapshot(
+            &storage,
+            test_library_id(),
+            &cipher(),
+            Some(&pubkey_hex(&owner)),
+            &member_target,
+        )
+        .await
+        .expect_err("a member-signed snapshot must be refused");
+        assert!(
+            matches!(err, SnapshotError::UnauthorizedAuthor(_)),
+            "expected UnauthorizedAuthor, got {err:?}",
+        );
+        assert!(!member_target.exists());
     }
 
     /// The DB image and the metadata are bound by one signature: a bucket writer
