@@ -277,6 +277,14 @@ impl MembershipChain {
             .any(|(pk, role)| pk == pubkey && role.can_write())
     }
 
+    /// Whether `pubkey` is *currently* a library Owner. Owner-only writes
+    /// (snapshots) authorize against this rather than `can_write_now`.
+    pub fn is_owner_now(&self, pubkey: &str) -> bool {
+        self.current_members()
+            .into_iter()
+            .any(|(pk, role)| pk == pubkey && role == MemberRole::Owner)
+    }
+
     /// Return current active members with their roles.
     pub fn current_members(&self) -> Vec<(String, MemberRole)> {
         let mut active: Vec<(String, MemberRole)> = Vec::new();
@@ -541,6 +549,59 @@ mod tests {
             .iter()
             .any(|(pk, _)| pk == &pubkey_hex(&follower)));
         assert!(!chain.can_write_now(&pubkey_hex(&follower)));
+    }
+
+    #[test]
+    fn is_owner_now_is_true_only_for_current_owners() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let follower = gen_keypair();
+        let owner2 = gen_keypair();
+
+        let mut chain = MembershipChain::new();
+        chain
+            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
+            .unwrap();
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &member,
+                MemberRole::Member,
+                "0000000002000-0000-dev1",
+            ))
+            .unwrap();
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &follower,
+                MemberRole::Follower,
+                "0000000003000-0000-dev1",
+            ))
+            .unwrap();
+        // The founder promotes a second Owner — already-supported multi-owner.
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &owner2,
+                MemberRole::Owner,
+                "0000000004000-0000-dev1",
+            ))
+            .unwrap();
+        chain.validate().unwrap();
+
+        // Only Owners pass: the founder and the second Owner.
+        assert!(chain.is_owner_now(&pubkey_hex(&owner)));
+        assert!(chain.is_owner_now(&pubkey_hex(&owner2)));
+        // A write-capable Member is NOT an Owner — the owner-only bar is stricter
+        // than can_write_now.
+        assert!(chain.can_write_now(&pubkey_hex(&member)));
+        assert!(!chain.is_owner_now(&pubkey_hex(&member)));
+        // A read-only Follower and an outsider are not Owners.
+        assert!(!chain.is_owner_now(&pubkey_hex(&follower)));
+        assert!(!chain.is_owner_now("deadbeef"));
     }
 
     #[test]

@@ -975,3 +975,122 @@ async fn cycle_keeps_a_behind_peers_changeset() {
         "the behind peer pulls the kept changeset forward",
     );
 }
+
+/// Owner-only snapshots (#161), write side: a Member device with local data and a
+/// pinned owner pushes its changeset but does NOT author a snapshot. The catalog
+/// image is owner-only — a Member may push bounded changesets, not restate the whole
+/// catalog — yet its rows still reach the cloud through the changeset push.
+#[tokio::test]
+async fn member_device_does_not_create_a_snapshot() {
+    use crate::sync::membership::{MemberRole, MembershipAction};
+    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[5u8; 32],
+    )));
+    let hlc = Hlc::new("M".to_string());
+
+    let owner = UserKeypair::generate();
+    let member = UserKeypair::generate();
+
+    // The owner founds the chain and adds this device as a write-capable Member.
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(
+            &pubkey_hex(&owner),
+            1,
+            serde_json::to_vec(&founder).unwrap(),
+        )
+        .await
+        .unwrap();
+    let add = make_entry(
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "0000000002000-0000-owner",
+    );
+    storage
+        .put_membership_entry(&pubkey_hex(&owner), 2, serde_json::to_vec(&add).unwrap())
+        .await
+        .unwrap();
+
+    // This device pins the owner (set on join in production) — an opaque library.
+    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
+        .await
+        .expect("pin owner");
+
+    // Local data: a shareable note (gate on). With no prior snapshot, pushing it
+    // trips `should_create_snapshot`, so the owner gate is the only thing that can
+    // stop the snapshot.
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+
+    run_cycle_m(&storage, &db, &cipher, &member, &hlc, &ld).await;
+
+    // The Member's row reached the cloud as a changeset...
+    assert_eq!(
+        SyncStorage::list_changesets(&storage, "M").await.unwrap(),
+        vec![1],
+        "the member's rows still propagate via the changeset push",
+    );
+    // ...but no catalog snapshot was authored — the pointer is absent, not merely
+    // unreadable.
+    assert!(
+        matches!(
+            SyncStorage::get_snapshot_pointer(&storage).await,
+            Err(crate::sync::storage::StorageError::NotFound(_))
+        ),
+        "a non-owner device must not author a catalog snapshot (no pointer written)",
+    );
+}
+
+/// The mirror of the above: an Owner device with local data and itself pinned as the
+/// owner DOES author the snapshot — the founder/initial-sync path a freshly-founded
+/// library bootstraps from is preserved by the gate's owner branch.
+#[tokio::test]
+async fn owner_device_creates_a_snapshot() {
+    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[6u8; 32],
+    )));
+    let hlc = Hlc::new("M".to_string());
+
+    let owner = UserKeypair::generate();
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    storage
+        .put_membership_entry(
+            &pubkey_hex(&owner),
+            1,
+            serde_json::to_vec(&founder).unwrap(),
+        )
+        .await
+        .unwrap();
+    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
+        .await
+        .expect("pin owner");
+
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+
+    run_cycle_m(&storage, &db, &cipher, &owner, &hlc, &ld).await;
+
+    SyncStorage::get_snapshot_pointer(&storage)
+        .await
+        .expect("an owner device must author the catalog snapshot");
+}
