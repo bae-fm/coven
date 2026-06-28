@@ -570,9 +570,8 @@ mod tests {
     use crate::keys::{test_keyring, KeyService};
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::sync::cloud_storage::CloudCipher;
-    use crate::sync::session::BlobDecl;
     use crate::sync::sync_manager::ConfigProvider;
-    use crate::sync::test_helpers::{open_test_db_with_blob, temp_library_dir};
+    use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_library_dir};
 
     /// `connect_sync_with_test_home` stands a real `SyncManager` over an injected
     /// `InMemoryCloudHome` and routes BOTH the upload drain and the read path
@@ -590,13 +589,10 @@ mod tests {
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (tmp, library_dir) = temp_library_dir();
-        // `note_photos` carries a blob so the read path can resolve a planted row up to
-        // its gated `notes` root (the gate that decides Local vs Remote).
-        let db = open_test_db_with_blob(BlobDecl::new(
-            "images",
-            Provenance::UserProvided,
-            CacheFill::CacheLazy,
-        ));
+        // `note_photos` carries a blob in the `images` namespace so the read path can
+        // resolve a planted row up to its gated `notes` root (the gate that decides
+        // Local vs Remote).
+        let db = read_test_db("images");
 
         // A browsable home: plaintext at rest, readable `{namespace}/{cloud_path}`
         // blob keys. The cipher passed below is the matching `Plaintext`.
@@ -661,26 +657,10 @@ mod tests {
 
         // The drain above ran the plain-upload path (no backing row) deliberately. A
         // real read happens after a make_remote flipped the blob's gated root Remote,
-        // so plant that state now — a `notes` root (`shared = 1`) with the `note_photos`
-        // child carrying this id — so the read resolves the blob's locality to Remote
+        // so plant that Remote state now (a gated `notes` root with the `note_photos`
+        // child carrying this id) so the read resolves the blob's locality to Remote
         // and fetches it back out of the home (rather than failing locality resolution).
-        db.call(|conn| {
-            conn.execute(
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-                 VALUES ('note-cover-1', 'home-test', 1, '0000000001000-0000-dev1', '2026-01-01')",
-                [],
-            )
-            .map_err(crate::database::DbError::from)?;
-            conn.execute(
-                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-                 VALUES ('cover-1', 'note-cover-1', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
-                [],
-            )
-            .map_err(crate::database::DbError::from)?;
-            Ok(())
-        })
-        .await
-        .expect("plant the Remote backing row");
+        plant_blob_row(&db, "cover-1", true).await;
 
         // Read through the handle: a Remote miss resolves back out of the same home.
         let blob = BlobRef {
