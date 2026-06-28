@@ -275,20 +275,50 @@ impl BlobDecls {
         blob_id: &str,
     ) -> Result<Option<(String, String)>, BlobDeclError> {
         for (table, tb) in &self.tables {
-            let sql = format!(
-                "SELECT id FROM {} WHERE {} = ?1",
-                quote_ident(table),
-                quote_ident(&tb.id_col_name),
-            );
-            let pk: Option<String> = conn
-                .query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
-                .optional()?;
-            if let Some(pk) = pk {
+            if let Some(pk) = pk_carrying_blob(conn, table, tb, blob_id)? {
                 return Ok(Some((table.clone(), pk)));
             }
         }
         Ok(None)
     }
+
+    /// The `(table, primary key)` of the row carrying `blob_id` in the table declared
+    /// for `namespace` — the carrying table resolved from the blob's own namespace
+    /// (part of its address), not by scanning every blob-bearing table. `None` when no
+    /// declared table owns `namespace`, or that table has no row with the id. The read
+    /// path uses this so a blob id that collides across namespaces reads the right
+    /// table's gate, never the first id match.
+    pub fn row_for_blob_in_namespace(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<Option<(String, String)>, BlobDeclError> {
+        let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
+            return Ok(None);
+        };
+        Ok(pk_carrying_blob(conn, table, tb, blob_id)?.map(|pk| (table.clone(), pk)))
+    }
+}
+
+/// The primary key (`id`) of the row in `table` whose declared blob-id column equals
+/// `blob_id`, or `None`. The single per-table lookup both [`BlobDecls::row_for_blob`]
+/// (looped over every table) and [`BlobDecls::row_for_blob_in_namespace`] (called for
+/// the one namespace-resolved table) share.
+fn pk_carrying_blob(
+    conn: &Connection,
+    table: &str,
+    tb: &TableBlob,
+    blob_id: &str,
+) -> Result<Option<String>, BlobDeclError> {
+    let sql = format!(
+        "SELECT id FROM {} WHERE {} = ?1",
+        quote_ident(table),
+        quote_ident(&tb.id_col_name),
+    );
+    conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(BlobDeclError::from)
 }
 
 /// Column names of `table`, in declared (schema) order, via `PRAGMA table_info` —

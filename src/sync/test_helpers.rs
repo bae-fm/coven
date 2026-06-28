@@ -74,6 +74,67 @@ pub fn open_test_db_with_blob(decl: BlobDecl) -> Database {
     open_test_db_schema(test_synced_tables_with_blob(decl), create_synced_schema)
 }
 
+/// Open a read-test [`Database`] whose `note_photos` child carries a blob in
+/// `namespace`, so [`crate::blob::cache::read_blob`]'s locality dispatch can resolve a
+/// blob in that namespace up to its gated `notes` root. The decl's namespace MUST
+/// match the blobs the test reads (the read path resolves the carrying table from the
+/// blob's namespace); its provenance/fill don't matter to that resolution (the read
+/// reads the row → root → gate, and takes provenance off the `BlobRef`), so this fixes
+/// them. Pair with [`plant_blob_row`].
+pub fn read_test_db(namespace: &str) -> Database {
+    open_test_db_with_blob(BlobDecl::new(
+        namespace,
+        crate::blob::Provenance::UserProvided,
+        crate::blob::CacheFill::CacheLazy,
+    ))
+}
+
+/// Plant the backing row [`crate::blob::cache::read_blob`] resolves a blob's locality
+/// from: a gated `notes` root with `shared = remote` and a `note_photos` child whose
+/// id is `blob_id`. `remote = true` ⇒ the blob resolves **Remote** (cache/cloud);
+/// `remote = false` ⇒ **Local** (and the read then dispatches on the `BlobRef`'s
+/// provenance — external file vs local store). Requires a db whose `note_photos`
+/// carries a blob (e.g. [`read_test_db`] / [`open_test_db_with_blob`]).
+pub async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool) {
+    let note = format!("note-{blob_id}");
+    let blob_id = blob_id.to_string();
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES (?1, 'read-test', ?2, '0000000001000-0000-dev1', '2026-01-01')",
+            (note.as_str(), remote as i64),
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+             VALUES (?1, ?2, 'attach', '0000000001000-0000-dev1', '2026-01-01')",
+            (blob_id.as_str(), note.as_str()),
+        )
+        .map_err(DbError::from)?;
+        Ok(())
+    })
+    .await
+    .expect("plant blob row");
+}
+
+/// Flip the gate on a blob's planted `notes` root — `shared = remote` for the row
+/// [`plant_blob_row`] created — so a read re-resolves the blob's locality. Models the
+/// gate side of a make_remote (Local → Remote) / make_local (Remote → Local) without
+/// running the whole transition.
+pub async fn set_blob_remote(db: &Database, blob_id: &str, remote: bool) {
+    let note = format!("note-{blob_id}");
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE notes SET shared = ?1 WHERE id = ?2",
+            (remote as i64, note.as_str()),
+        )
+        .map_err(DbError::from)?;
+        Ok(())
+    })
+    .await
+    .expect("flip blob gate");
+}
+
 /// Open a test [`Database`] with both `note_photos` (per `photo_decl`) and
 /// `note_covers` (per `cover_decl`) declared blob-bearing — the schema for the
 /// per-provenance transition tests.
