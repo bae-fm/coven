@@ -192,19 +192,36 @@ impl SyncService {
                     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
                 info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
 
-                // The blob is now Remote. If its bytes were in the local store (its
-                // Local home), move that copy into the cache — its on-device copy is
-                // now a cache copy. The move is the load-bearing step (a host-provided
-                // blob left in the local store would read as Local); reached only on a
-                // successful upload, so the bytes are durably in the cloud first.
+                // The blob is now Remote, so its local-store copy (its Local home)
+                // must not stay there — a Remote blob's bytes in the local store
+                // would read as Local. What happens to that copy is a CacheFill
+                // policy, not a provenance one: `CacheEager` warms the cache so the
+                // first read is a local hit (move the copy into the evictable cache);
+                // `CacheLazy` drops it, since the cloud has the bytes and a later read
+                // fetches them. Reached only on a successful upload, so the bytes are
+                // durably in the cloud before we touch the local copy. A copy already
+                // in the cache (crash-recovery fallback) needs neither.
                 if was_in_local_store {
-                    crate::blob::cache::move_local_into_cache(
-                        library_dir,
-                        &blob.namespace,
-                        &blob.id,
-                    )
-                    .await
-                    .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+                    match blob.fill {
+                        crate::blob::CacheFill::CacheEager => {
+                            crate::blob::cache::move_local_into_cache(
+                                library_dir,
+                                &blob.namespace,
+                                &blob.id,
+                            )
+                            .await
+                            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+                        }
+                        crate::blob::CacheFill::CacheLazy => {
+                            crate::blob::local_files::drop_blob(
+                                library_dir,
+                                &blob.namespace,
+                                &blob.id,
+                            )
+                            .await
+                            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+                        }
+                    }
                 }
             }
         }

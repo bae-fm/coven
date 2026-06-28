@@ -674,6 +674,120 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     );
 }
 
+/// The inline push, after uploading a host-provided blob, decides what to do with
+/// the local-store copy by the blob's `CacheFill`, not its provenance: `CacheEager`
+/// warms the evictable cache (the first read is a local hit), while `CacheLazy`
+/// drops the local copy outright (the cloud has the bytes; a later read fetches
+/// them). Either way the local store must NOT keep a Remote blob's bytes — that
+/// would read as Local. Two host-provided blobs in one subtree, one of each fill,
+/// prove the split is driven by fill alone.
+#[tokio::test]
+async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
+    let storage = MockSyncStorage::new();
+
+    // Both children host-provided, differing only in fill: the photo is CacheEager,
+    // the cover CacheLazy. Both inherit the `notes` gate, so a shared note carries
+    // both through the inline push in one cycle.
+    let eager_decl = || BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
+    let lazy_decl = || BlobDecl::new("covers", Provenance::HostProvided, CacheFill::CacheLazy);
+
+    let db1 = open_test_db_with_user_and_host_blobs(eager_decl(), lazy_decl());
+    let (_t1, ld1) = temp_library_dir();
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithBlobs', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db1,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('peager01', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db1,
+        "INSERT INTO note_covers (id, note_id, _updated_at, created_at) \
+         VALUES ('clazy001', 'n1', '0000000001001-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    // The host stores both blobs in the local store (their Local home) before the
+    // inline push reads them to upload.
+    local_files::store(&ld1, "photos", "peager01", b"EAGER-BYTES")
+        .await
+        .expect("store eager blob in local store");
+    local_files::store(&ld1, "covers", "clazy001", b"LAZY-BYTES")
+        .await
+        .expect("store lazy blob in local store");
+    let outgoing = db1.take_changeset().await.expect("capture outgoing");
+
+    let service = SyncService::new("dev1".to_string());
+    let keypair = UserKeypair::generate();
+    service
+        .sync(
+            &db1,
+            &test_synced_tables_with_user_and_host_blobs(eager_decl(), lazy_decl()),
+            outgoing,
+            0,
+            &HashMap::new(),
+            &storage,
+            "2026-01-01T00:00:00Z",
+            "",
+            &keypair,
+            &ld1,
+        )
+        .await
+        .expect("sync");
+
+    // Both blobs reached the cloud — the inline push uploads regardless of fill.
+    assert!(
+        storage
+            .get_blob(
+                "photos",
+                "peager01",
+                crate::blob::ResolvedScope::Master,
+                None
+            )
+            .await
+            .is_ok(),
+        "the eager blob must be uploaded",
+    );
+    assert!(
+        storage
+            .get_blob(
+                "covers",
+                "clazy001",
+                crate::blob::ResolvedScope::Master,
+                None
+            )
+            .await
+            .is_ok(),
+        "the lazy blob must be uploaded",
+    );
+
+    // CacheEager: warmed into the cache, gone from the local store. The first read
+    // is a local cache hit.
+    assert!(
+        ld1.cache_blob_path("photos", "peager01").unwrap().exists(),
+        "an eager blob's local copy is moved into the cache",
+    );
+    assert!(
+        !ld1.local_blob_path("photos", "peager01").unwrap().exists(),
+        "a Remote blob's bytes must not stay in the local store (would read as Local)",
+    );
+
+    // CacheLazy: dropped from the local store, NOT placed in the cache. A later read
+    // fetches it from the cloud.
+    assert!(
+        !ld1.local_blob_path("covers", "clazy001").unwrap().exists(),
+        "a lazy blob's local copy is dropped after upload",
+    );
+    assert!(
+        !ld1.cache_blob_path("covers", "clazy001").unwrap().exists(),
+        "a lazy blob is not pre-primed into the cache — it streams on first read",
+    );
+}
+
 /// When a peer applies a changeset that DELETEs a blob-bearing row (a gate retract
 /// or a genuine delete), it drops that blob's local copy — both cache folders and the
 /// local store — or it would leak forever once the row is gone. The peer drops only
