@@ -3563,8 +3563,8 @@ mod authorization_tests {
 
 /// Changeset reclamation's ack-floor: for each current device `D`, reclaim
 /// `changes/D/{seq}` for `seq <= min(snapshot.cursors[D], min over OTHER current
-/// devices of their acked cursor on D)`. These drive the production-faithful
-/// [`crate::sync::test_helpers::MockSyncStorage`], which models a real membership
+/// devices of their acked cursor on D)`. These drive the
+/// [`crate::sync::test_helpers::MockSyncStorage`], which models a membership
 /// chain, per-device heads, signed acks, and the changeset/snapshot keyspaces.
 #[cfg(test)]
 mod reclaim_tests {

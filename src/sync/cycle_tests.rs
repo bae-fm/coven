@@ -745,7 +745,7 @@ async fn cycle_keeps_a_behind_peers_changeset() {
         &a_src,
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-           VALUES ('a1', 'One', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+           VALUES ('a1', 'Title Alpha', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
         ],
     )
     .await;
@@ -754,7 +754,7 @@ async fn cycle_keeps_a_behind_peers_changeset() {
         &a_src,
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-           VALUES ('a2', 'Two', NULL, 1, '0000000002000-0000-A', '2026-01-01')",
+           VALUES ('a2', 'Title Beta', NULL, 1, '0000000002000-0000-A', '2026-01-01')",
         ],
     )
     .await;

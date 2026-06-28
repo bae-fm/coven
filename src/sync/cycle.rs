@@ -403,10 +403,10 @@ pub async fn run_single_sync_cycle(
     match serde_json::to_vec(&ack) {
         Ok(bytes) => {
             if let Err(e) = storage.put_ack(device_id, bytes).await {
-                warn!("Failed to publish pull-ack: {e}");
+                warn!(device_id = %device_id, "Failed to publish pull-ack: {e}");
             }
         }
-        Err(e) => warn!("Failed to serialize pull-ack: {e}"),
+        Err(e) => warn!(device_id = %device_id, "Failed to serialize pull-ack: {e}"),
     }
 
     // Republish our head every cycle, even when we pushed no changeset of our
