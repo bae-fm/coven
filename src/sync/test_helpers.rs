@@ -698,10 +698,16 @@ impl SyncStorage for MockSyncStorage {
     async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
         let prefix = format!("changes/{device_id}/");
         let objects = self.objects.lock().unwrap();
-        let mut seqs: Vec<u64> = objects
-            .keys()
-            .filter_map(|k| k.strip_prefix(&prefix).and_then(|s| s.parse().ok()))
-            .collect();
+        let mut seqs = Vec::new();
+        for key in objects.keys() {
+            let Some(seq_str) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            match seq_str.parse::<u64>() {
+                Ok(seq) => seqs.push(seq),
+                Err(e) => tracing::warn!("skipping changeset key {key} with non-numeric seq: {e}"),
+            }
+        }
         seqs.sort_unstable();
         Ok(seqs)
     }
