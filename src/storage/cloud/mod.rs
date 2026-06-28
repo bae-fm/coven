@@ -103,8 +103,8 @@ pub type UploadProgress<'a> = dyn Fn(u64) + Send + Sync + 'a;
 pub(crate) const PROGRESS_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// A progress sink that discards its reports. For `write` calls whose payload
-/// is a small control file (auth keys, head pointers, the snapshot) where no
-/// per-file progress bar is driven — only the blob outbox surfaces progress.
+/// is a small control file (head pointers, the snapshot) where no per-file
+/// progress bar is driven — only the blob outbox surfaces progress.
 pub fn no_progress() -> impl Fn(u64) + Send + Sync {
     |_| {}
 }

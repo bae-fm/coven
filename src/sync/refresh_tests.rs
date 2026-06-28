@@ -1,12 +1,11 @@
 //! Per-cycle authorization/decryption refresh (#85/#87).
 //!
-//! `run_single_sync_cycle` re-reads membership, the authorized-keys set, and the
-//! rotatable library key at the top of every cycle, so a running device picks up
-//! a membership change or a key rotation made by another device WITHOUT a restart.
-//! Before this, those were loaded once at init/join and never again, so a removed
-//! member kept acting on stale authorization (#85) and a non-rotating device kept
-//! using a dead library key after a rotation it didn't perform, silently diverging
-//! (#87).
+//! `run_single_sync_cycle` re-reads membership and the rotatable library key at
+//! the top of every cycle, so a running device picks up a membership change or a
+//! key rotation made by another device without a restart. Loaded only once at
+//! init/join, a removed member would keep acting on stale authorization (#85) and
+//! a non-rotating device would keep using a dead library key after a rotation it
+//! didn't perform, silently diverging (#87).
 //!
 //! Each test proves fail-before/pass-after: the assertion that passes with the
 //! refresh in place fails when the corresponding refresh step is dropped (the
@@ -52,8 +51,8 @@ async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain) {
 }
 
 /// Run one real sync cycle for `device_id` over an encrypted home, with the mock
-/// as both the SyncStorage and the CloudHome (so the refresh's `auth/keys` writes
-/// and wrapped-key reads hit the same store).
+/// as both the SyncStorage and the CloudHome (so the refresh's wrapped-key reads
+/// hit the same store).
 async fn run_cycle(
     storage: &MockSyncStorage,
     db: &crate::database::Database,
@@ -273,153 +272,6 @@ async fn refresh_rejects_a_forged_wrapped_key() {
         forged_key,
         "the attacker's key was rejected",
     );
-}
-
-/// #85: a membership change made by another device is reflected in B's
-/// authorized-keys set on B's next cycle, no restart. `sync_authorized_keys` —
-/// which materializes the proxy's `auth/keys/{pubkey}` files from the current
-/// member set — used to run only in `init_sync`, so a long-running device never
-/// pruned a removed member's key or wrote a newly-added member's. The per-cycle
-/// refresh re-runs it: after device A removes the victim and adds a newcomer, B's
-/// next cycle drops `auth/keys/{victim}` and writes `auth/keys/{newcomer}`.
-///
-/// Mutation proof: drop the auth-keys refresh (step 2) and `auth/keys/{victim}`
-/// survives B's cycle and `auth/keys/{newcomer}` is never written — exactly the
-/// init-only staleness this fixes. The assertions below fail under that mutation.
-#[tokio::test]
-async fn authorized_keys_reconcile_each_cycle_without_restart() {
-    use crate::storage::cloud::CloudHome;
-
-    crate::keys::test_keyring::install();
-
-    let owner = UserKeypair::generate(); // device A
-    let device_b = UserKeypair::generate();
-    let victim = UserKeypair::generate();
-    let newcomer = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
-    let key: [u8; 32] = [33u8; 32];
-
-    let storage = MockSyncStorage::new();
-
-    // Chain: owner founds, adds B and the victim.
-    let mut chain = bootstrap_chain(&owner);
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &victim,
-            MemberRole::Member,
-            "0000000003000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
-
-    // The owner wraps B's key, signed by the owner, so B's per-cycle wrapped-key
-    // read authenticates and is a no-op (B already holds this key).
-    let b_x = device_b.to_x25519_public_key();
-    let wrapped = signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &key, &owner);
-    storage
-        .put_wrapped_key(&pubkey_hex(&device_b), wrapped)
-        .await
-        .unwrap();
-
-    // Seed the auth/keys set as it stood at B's join: owner, B, victim. (This is
-    // what `init_sync`'s one-time bootstrap would have written.)
-    crate::sync::membership_ops::sync_authorized_keys(&storage, &chain)
-        .await
-        .unwrap();
-    assert!(
-        storage
-            .exists(&format!("auth/keys/{}", pubkey_hex(&victim)))
-            .await
-            .unwrap(),
-        "precondition: the victim's auth key exists before removal",
-    );
-
-    // B's local state.
-    let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
-    let ks_b = KeyService::new(LIB_ID.to_string());
-    ks_b.set_encryption_key(&hex::encode(key)).unwrap();
-    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
-    let (_tmp_b, ld_b) = temp_library_dir();
-
-    // --- Device A changes membership: remove the victim, add a newcomer. Upload
-    //     only the two new entries (the chain in storage is what B reloads). ---
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Remove,
-            &victim,
-            MemberRole::Member,
-            "0000000004000-0000-A",
-        ))
-        .unwrap();
-    storage
-        .put_membership_entry(
-            &owner_pk,
-            4,
-            serde_json::to_vec(chain.entries().last().unwrap()).unwrap(),
-        )
-        .await
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &newcomer,
-            MemberRole::Member,
-            "0000000005000-0000-A",
-        ))
-        .unwrap();
-    storage
-        .put_membership_entry(
-            &owner_pk,
-            5,
-            serde_json::to_vec(chain.entries().last().unwrap()).unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // --- B's next cycle, no restart: reconcile auth/keys from the reloaded chain.
-    run_cycle(&storage, &db_b, &cipher_b, &device_b, "B", &ld_b)
-        .await
-        .expect("B's cycle");
-
-    assert!(
-        !storage
-            .exists(&format!("auth/keys/{}", pubkey_hex(&victim)))
-            .await
-            .unwrap(),
-        "the removed member's auth key is pruned this cycle, no restart (#85)",
-    );
-    assert!(
-        storage
-            .exists(&format!("auth/keys/{}", pubkey_hex(&newcomer)))
-            .await
-            .unwrap(),
-        "the newly-added member's auth key is written this cycle, no restart (#85)",
-    );
-    // B's own and the owner's keys remain.
-    assert!(storage
-        .exists(&format!("auth/keys/{}", pubkey_hex(&device_b)))
-        .await
-        .unwrap());
-    assert!(storage
-        .exists(&format!("auth/keys/{owner_pk}"))
-        .await
-        .unwrap());
 }
 
 /// #88 invariant carried into the refresh: for an owner-pinned library a chain the

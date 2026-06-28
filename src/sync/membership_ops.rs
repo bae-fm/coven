@@ -3,7 +3,7 @@
 //! These are the high-level orchestration functions that download the membership
 //! chain from the storage, perform the operation, and upload the results.
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyService, UserKeypair};
@@ -126,11 +126,6 @@ pub async fn invite_member(
         &public_key_hex[..public_key_hex.len().min(16)]
     );
 
-    // Sync authorized keys files for proxy auth
-    if let Err(e) = sync_authorized_keys(cloud_home, &chain).await {
-        warn!("Failed to sync authorized keys: {e}");
-    }
-
     // The invite anchors the joiner to the library's OWNER — the chain founder,
     // not whichever Owner happens to send the invite. A second Owner inviting must
     // still hand the joiner the founder's pubkey, or the joiner would pin the wrong
@@ -193,11 +188,6 @@ pub async fn remove_member(
         "Revoked member {}... and rotated encryption key",
         &public_key_hex[..public_key_hex.len().min(16)]
     );
-
-    // Sync authorized keys files for proxy auth
-    if let Err(e) = sync_authorized_keys(cloud_home, &chain).await {
-        warn!("Failed to sync authorized keys: {e}");
-    }
 
     Ok(new_key)
 }
@@ -354,58 +344,6 @@ pub(crate) async fn load_anchored_chain(
         }
     }
     Ok(chain)
-}
-
-/// Write individual `auth/keys/{pubkey}` files for each current member.
-///
-/// This materializes the membership chain into per-key files that the proxy
-/// can read without understanding the (encrypted) chain format. The file's
-/// *content* is the member's role wire string (`owner`/`member`/`follower`), so
-/// the proxy can gate writes by role: a Follower's signed requests authenticate
-/// but may only read. Keys are written for every current member (so a role
-/// change is reflected) and deleted for anyone no longer in the chain.
-pub async fn sync_authorized_keys(
-    cloud_home: &dyn crate::storage::cloud::CloudHome,
-    chain: &MembershipChain,
-) -> Result<(), MembershipOpsError> {
-    use std::collections::HashSet;
-
-    let current = chain.current_members();
-    let current_keys: HashSet<&String> = current.iter().map(|(pk, _)| pk).collect();
-
-    let existing = cloud_home
-        .list("auth/keys/")
-        .await
-        .map_err(|e| MembershipOpsError(format!("list auth keys: {e}")))?;
-    let existing_keys: HashSet<String> = existing
-        .iter()
-        .filter_map(|k| k.strip_prefix("auth/keys/"))
-        .map(|s| s.to_string())
-        .collect();
-
-    // Write (or overwrite) every current member's key file with its current
-    // role, so role changes (e.g. Member -> Follower) propagate to the proxy.
-    for (pk, role) in &current {
-        cloud_home
-            .write(
-                &format!("auth/keys/{pk}"),
-                role.as_str().as_bytes().to_vec(),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await
-            .map_err(|e| MembershipOpsError(format!("write auth key: {e}")))?;
-    }
-
-    for pk in &existing_keys {
-        if !current_keys.contains(pk) {
-            cloud_home
-                .delete(&format!("auth/keys/{pk}"))
-                .await
-                .map_err(|e| MembershipOpsError(format!("delete auth key: {e}")))?;
-        }
-    }
-
-    Ok(())
 }
 
 /// Membership operations error.
