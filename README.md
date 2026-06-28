@@ -20,23 +20,24 @@ browser — and never reaches into coven's storage or sync internals directly.
 
 ## Integration
 
-- Declare your synced tables with `sync::session::set_synced_tables`, **once at
-  startup, before sync starts** (and before any restore/join, which applies
-  changesets too). Each must have an `id` text primary key at column 0 and an
-  `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). This is required,
-  not optional: with no tables registered, `sync::cycle::init_sync` aborts and
-  logs an error rather than silently running a no-op (snapshot-only) sync. A
+- Declare your synced tables by passing them to `Database::open` (the
+  `synced_tables` arg), **at startup, before sync starts** (and before any
+  restore/join, which applies changesets too). Each must have an `id` text
+  primary key at column 0 and an `_updated_at TEXT NOT NULL` column (the HLC/LWW
+  timestamp). This is required, not optional: with no tables registered, coven
+  aborts sync init and logs an error rather than silently running a no-op
+  (snapshot-only) sync. A
   table you *don't* list stays local-only — that's how you keep device-local
   state (per-device pin/cache columns, local paths) out of sync.
-- Apply `db::MIGRATION_SQL` (creates `sync_cursors`, `sync_state`,
-  `cloud_outbox`) and implement `db::SyncBookkeeping` + `db::RawDbHandle` on your
-  database — coven imposes no SQLite driver.
-- Declare which rows carry blobs per table with
-  `sync::session::SyncedTable::carries_blob` (a `BlobDecl`: namespace, provenance,
-  cache fill, encryption scope), and optionally pass a
-  `blob::BlobTransitionObserver` to `CovenHandle::new`.
-- Register identity/OAuth at startup: `keys::set_keyring_service`,
-  `oauth::set_oauth_client_creds`.
+- Open a `Database` with `Database::open` (your SQLite path, your synced-table
+  list, a device id, and a `migrate` closure that creates your own app tables);
+  coven creates its bookkeeping tables (`sync_cursors`, `sync_state`,
+  `cloud_outbox`) itself.
+- Declare which rows carry blobs per table with `SyncedTable::carries_blob` (a
+  `BlobDecl`: namespace, provenance, cache fill, encryption scope), and
+  optionally pass a `BlobTransitionObserver` to `CovenHandle::new`.
+- Register identity/OAuth at startup: `set_keyring_service`,
+  `set_oauth_client_creds`.
 - Hold a `CovenHandle`, built once over the open `Database`. Run app SQL through
   `handle.database()`, read and write blobs through `handle.read_blob` /
   `store_blob` / `pin`, and — when a provider is connected — drive sync through
