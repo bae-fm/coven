@@ -555,12 +555,14 @@ impl SyncStorage for CloudSyncStorage {
         self.home.read(&key).await.map_err(StorageError::from)
     }
 
+    #[cfg(test)]
     async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
         let key = format!("changes/{device_id}/{seq}{}", self.suffix());
         self.home.delete(&key).await?;
         Ok(())
     }
 
+    #[cfg(test)]
     async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
         let suffix = self.suffix();
         let prefix = format!("changes/{device_id}/");
@@ -615,6 +617,7 @@ impl SyncStorage for CloudSyncStorage {
         }))
     }
 
+    #[cfg(test)]
     async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
         let payload = MinSchemaVersionJson::signed(version, &self.keypair);
         let json = serde_json::to_vec(&payload)
@@ -697,6 +700,7 @@ impl SyncStorage for CloudSyncStorage {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError> {
         let key = format!("keys/{user_pubkey}{}", self.suffix());
         // Wrapped keys are already sealed boxes; return as-is.
