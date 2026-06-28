@@ -203,8 +203,8 @@ pub async fn run_single_sync_cycle(
     let sync_service = SyncService::new(device_id.to_string());
 
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
-    // judges, or decrypts (#85/#87). Membership, the authorized-keys set, and the
-    // rotatable library key are per-cycle preconditions, not init-time bootstraps:
+    // judges, or decrypts (#85/#87). Membership and the rotatable library key are
+    // per-cycle preconditions, not init-time bootstraps:
     // re-read them now so a removed member's writes are rejected and a rotated key
     // is adopted on a running device without a restart. Runs before the blob drain
     // so the drain (and every push/pull below) uses the current key. A failure here
@@ -718,22 +718,22 @@ pub async fn run_single_sync_cycle(
 }
 
 /// Refresh this device's authorization/decryption state at the top of a cycle:
-/// the membership chain (re-anchored to the pinned owner), the `auth/keys/` set,
-/// and the rotatable library key. Membership and key state are per-cycle
-/// preconditions, not init-time bootstraps — without this a running device acts
-/// on a stale member set (#85) and keeps a dead library key after a rotation it
-/// did not perform (#87), recovering only on restart.
+/// the membership chain (re-anchored to the pinned owner) and the rotatable
+/// library key. Membership and key state are per-cycle preconditions, not
+/// init-time bootstraps — without this a running device acts on a stale member
+/// set (#85) and keeps a dead library key after a rotation it did not perform
+/// (#87), recovering only on restart.
 ///
-/// A plaintext (browsable) home has no membership chain, no `auth/keys/`, and no
-/// wrapped library key — it is open by design — so the whole refresh is a no-op
-/// there, mirroring how `init_sync` skips the chain for a plaintext home.
+/// A plaintext (browsable) home has no membership chain and no wrapped library
+/// key — it is open by design — so the whole refresh is a no-op there, mirroring
+/// how `init_sync` skips the chain for a plaintext home.
 ///
 /// Fail-closed: for an owner-pinned (opaque) library a chain that can't be listed,
 /// loaded, or anchored aborts the cycle (it retries next cycle) rather than
 /// proceeding with no chain — the #88 invariant that a failed membership load must
-/// never fall open. The auth-key write and the wrapped-key read likewise surface
-/// their failures as an aborted cycle: a refresh that can't complete must not leave
-/// durable state half-updated.
+/// never fall open. The wrapped-key read likewise surfaces its failure as an
+/// aborted cycle: a refresh that can't complete must not leave durable state
+/// half-updated.
 async fn refresh_authorization_state(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
@@ -742,8 +742,8 @@ async fn refresh_authorization_state(
     user_keypair: &UserKeypair,
     library_id: &str,
 ) -> Result<(), String> {
-    // A plaintext home is open by design — no chain, no auth keys, no library key
-    // to rotate. Nothing to refresh.
+    // A plaintext home is open by design — no chain and no library key to rotate.
+    // Nothing to refresh.
     if cipher.read().unwrap().is_plaintext() {
         debug!("refresh: plaintext home, nothing to refresh");
         return Ok(());
@@ -784,17 +784,11 @@ async fn refresh_authorization_state(
              (wiped membership/*)"
         ));
     }
-    let chain = super::membership_ops::load_anchored_chain(storage, &entries, Some(owner.as_str()))
+    super::membership_ops::load_anchored_chain(storage, &entries, Some(owner.as_str()))
         .await
         .map_err(|e| format!("refresh: load/anchor membership chain: {e}"))?;
 
-    // 2. Re-materialize `auth/keys/` from the current member set so a newly-added
-    //    member's key appears and a removed member's is pruned this cycle (#85).
-    super::membership_ops::sync_authorized_keys(cloud_home, &chain)
-        .await
-        .map_err(|e| format!("refresh: sync authorized keys: {e}"))?;
-
-    // 3. Adopt a rotated library key (#87). Read this device's own re-wrapped key at
+    // 2. Adopt a rotated library key (#87). Read this device's own re-wrapped key at
     //    `keys/{self}` and authenticate it the way join does — the owner signature
     //    over (library_id, recipient, sealed) verified against the pinned owner
     //    (#99) — so a bucket writer can't substitute it. If it differs from the key
@@ -836,9 +830,9 @@ async fn refresh_authorization_state(
 ///
 /// Creates the cloud storage with the caller's [`CloudCipher`] (so the sync loop
 /// and snapshot creation share one instance — a member removal rotates the key
-/// in place through it), bootstraps auth keys, and returns the components the
-/// sync loop needs. Returns None if any component isn't available (missing
-/// config, credentials, etc.).
+/// in place through it), establishes/verifies the membership chain on connect,
+/// and returns the components the sync loop needs. Returns None if any component
+/// isn't available (missing config, credentials, etc.).
 ///
 /// Native-only: builds the storage through the native-only
 /// [`crate::storage::cloud::setup::create_sync_storage`] (which constructs a
@@ -873,7 +867,7 @@ pub async fn init_sync(
 /// components the sync loop needs (or `None` on a startup failure already logged).
 ///
 /// The half of [`init_sync`] that does not build the storage: the synced-table
-/// guard, the auth-key / membership-chain bootstrap, and assembling
+/// guard, the membership-chain establish/verify, and assembling
 /// [`SyncComponents`]. [`init_sync`] builds the storage from config via
 /// [`create_sync_storage`](crate::storage::cloud::setup::create_sync_storage) and
 /// delegates here; the test seam
@@ -911,55 +905,16 @@ pub(crate) async fn init_sync_over_storage(
         }
     };
 
-    // Bootstrap auth keys if none exist yet.
-    let cloud_home = storage.cloud_home();
-
-    let existing_keys = match cloud_home.list("auth/keys/").await {
-        Ok(keys) => keys,
-        Err(e) => {
-            warn!("Failed to list auth keys: {e}");
+    // Opaque (encrypted) home: every library has an owner-anchored membership
+    // chain from creation (issue #102). Establish it on first connect, and on
+    // every connect verify the chain is still founded by the pinned owner —
+    // refusing a missing or refounded chain as a takeover attempt (#95/#104). A
+    // plaintext (browsable) home has no chain — open by design — so this is
+    // skipped there.
+    if !cipher.is_plaintext() {
+        if let Err(e) = ensure_owner_anchored_chain(&storage, db, &user_keypair, &hlc).await {
+            error!("Membership chain bootstrap/anchor failed: {e}");
             return None;
-        }
-    };
-
-    let our_pk = hex::encode(user_keypair.public_key);
-
-    if cipher.is_plaintext() {
-        // Browsable (plaintext) home: no membership chain — open by design. Keep
-        // only the device's own auth-key marker; a plaintext home has no chain.
-        if existing_keys.is_empty() {
-            if let Err(e) = cloud_home
-                .write(
-                    &format!("auth/keys/{our_pk}"),
-                    vec![],
-                    &crate::storage::cloud::no_progress(),
-                )
-                .await
-            {
-                warn!("Failed to write auth key: {e}");
-                return None;
-            }
-        }
-    } else {
-        // Opaque (encrypted) home: every library has an owner-anchored membership
-        // chain from creation (issue #102). Establish it on first connect, and on
-        // every connect verify the chain is still founded by the pinned owner —
-        // refusing a missing or refounded chain as a takeover attempt (#95/#104).
-        let chain = match ensure_owner_anchored_chain(&storage, db, &user_keypair, &hlc).await {
-            Ok(chain) => chain,
-            Err(e) => {
-                error!("Membership chain bootstrap/anchor failed: {e}");
-                return None;
-            }
-        };
-        // First-time auth-key bootstrap from the chain. Refreshing the auth-key set
-        // on every cycle (#85/#87) is the auth-key refresh path's job, separate from
-        // this one-time bootstrap.
-        if existing_keys.is_empty() {
-            if let Err(e) = super::membership_ops::sync_authorized_keys(cloud_home, &chain).await {
-                error!("Failed to bootstrap auth keys from membership chain: {e}");
-                return None;
-            }
         }
     }
 
@@ -976,7 +931,7 @@ pub(crate) async fn init_sync_over_storage(
 }
 
 /// Establish or verify the owner-anchored membership chain for an opaque library
-/// (issue #102). Returns the validated chain for auth-key bootstrap, or an error
+/// (issue #102). Returns once the chain is established and verified, or an error
 /// to abort sync.
 ///
 /// Founding is two non-atomic writes — the founder entry to cloud storage and the
@@ -994,7 +949,7 @@ pub(crate) async fn ensure_owner_anchored_chain(
     db: &Database,
     owner_keypair: &UserKeypair,
     hlc: &Hlc,
-) -> Result<crate::sync::membership::MembershipChain, String> {
+) -> Result<(), String> {
     use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let our_pk = hex::encode(owner_keypair.public_key);
@@ -1030,7 +985,7 @@ pub(crate) async fn ensure_owner_anchored_chain(
             .to_string();
         match pinned.as_deref() {
             // Anchored: the founder is the pinned owner.
-            Some(p) if p == founder => Ok(chain),
+            Some(p) if p == founder => Ok(()),
             // Refounded under a different key (#95) — refuse.
             Some(p) => Err(format!(
                 "membership chain founder {founder} does not match the pinned owner \
@@ -1049,7 +1004,7 @@ pub(crate) async fn ensure_owner_anchored_chain(
                 db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &our_pk)
                     .await
                     .map_err(|e| format!("pin owner: {e}"))?;
-                Ok(chain)
+                Ok(())
             }
             // No pin and the chain is founded by someone else: we neither founded
             // this nor pinned an owner (join/restore pin before this runs), so this
@@ -1063,9 +1018,9 @@ pub(crate) async fn ensure_owner_anchored_chain(
     }
 }
 
-/// Write the founder entry to cloud storage and pin the owner in the local DB,
-/// then return the single-entry founder chain. Shared by the first-connect found
-/// and the crash-recovery completion so the two writes can't drift.
+/// Write the founder entry to cloud storage and pin the owner in the local DB.
+/// Shared by the first-connect found and the crash-recovery completion so the
+/// two writes can't drift.
 #[cfg(not(target_arch = "wasm32"))]
 async fn found_and_pin(
     storage: &dyn SyncStorage,
@@ -1073,7 +1028,7 @@ async fn found_and_pin(
     owner_keypair: &UserKeypair,
     our_pk: &str,
     hlc: &Hlc,
-) -> Result<crate::sync::membership::MembershipChain, String> {
+) -> Result<(), String> {
     use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let ts = hlc.now().to_string();
@@ -1084,10 +1039,7 @@ async fn found_and_pin(
         .await
         .map_err(|e| format!("pin owner: {e}"))?;
     info!(owner = %our_pk, "Founded library: wrote owner-anchored founder entry");
-    crate::sync::membership::MembershipChain::from_entries(vec![
-        crate::sync::membership::founder_entry(owner_keypair, &ts),
-    ])
-    .map_err(|e| format!("build founder chain: {e}"))
+    Ok(())
 }
 
 /// Components needed to run sync cycles.

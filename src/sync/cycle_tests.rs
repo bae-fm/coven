@@ -231,7 +231,7 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
 async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     use crate::sync::cycle::ensure_owner_anchored_chain;
     use crate::sync::membership::founder_entry;
-    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+    use crate::sync::membership_ops::{download_chain, OWNER_PUBKEY_STATE_KEY};
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key);
@@ -240,26 +240,36 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
 
     // First connect: empty storage, no pinned owner → found + pin.
     let storage = MockSyncStorage::new();
-    let chain = ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+    ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
         .await
         .expect("first connect founds the library");
-    assert!(chain.is_founded_by(&owner_pk));
     assert_eq!(
         db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         Some(owner_pk.clone()),
         "the owner is pinned in sync_state",
     );
-    assert_eq!(
-        storage.list_membership_entries().await.unwrap().len(),
-        1,
-        "the founder entry is written to storage",
+    let entries = storage.list_membership_entries().await.unwrap();
+    assert_eq!(entries.len(), 1, "the founder entry is written to storage");
+    assert!(
+        download_chain(&storage, &entries)
+            .await
+            .unwrap()
+            .is_founded_by(&owner_pk),
+        "the persisted chain is founded by the owner",
     );
 
     // Second connect on the same storage + db: anchors fine (founder == owner).
-    let again = ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+    ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
         .await
         .expect("re-connect anchors to the pinned owner");
-    assert!(again.is_founded_by(&owner_pk));
+    let entries = storage.list_membership_entries().await.unwrap();
+    assert!(
+        download_chain(&storage, &entries)
+            .await
+            .unwrap()
+            .is_founded_by(&owner_pk),
+        "the persisted chain is still founded by the owner after re-connect",
+    );
 
     // Wiped membership/* with the owner still pinned → refuse (do not re-found).
     let wiped = MockSyncStorage::new();
@@ -298,7 +308,9 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
 #[tokio::test]
 async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign() {
     use crate::sync::cycle::ensure_owner_anchored_chain;
-    use crate::sync::membership_ops::{write_founder_entry, OWNER_PUBKEY_STATE_KEY};
+    use crate::sync::membership_ops::{
+        download_chain, write_founder_entry, OWNER_PUBKEY_STATE_KEY,
+    };
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key);
@@ -311,14 +323,21 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     write_founder_entry(&storage, &owner, "0000000001000-0000-owner")
         .await
         .unwrap();
-    let chain = ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+    ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
         .await
         .expect("completes our own half-done founding");
-    assert!(chain.is_founded_by(&owner_pk));
     assert_eq!(
         db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
-        Some(owner_pk),
+        Some(owner_pk.clone()),
         "the pin is completed from our own founder",
+    );
+    let entries = storage.list_membership_entries().await.unwrap();
+    assert!(
+        download_chain(&storage, &entries)
+            .await
+            .unwrap()
+            .is_founded_by(&owner_pk),
+        "the persisted chain is founded by the owner",
     );
 
     // Foreign chain, no pin: an attacker seeded a chain under their own key before

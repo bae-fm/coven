@@ -25,22 +25,14 @@ pub enum MemberRole {
     Owner,
     Member,
     /// Read-only member: holds the library key and is registered in the chain,
-    /// but may not author catalog changesets (rejected on pull) and is gated to
-    /// reads at the proxy. Revocable like any member.
+    /// but may not author catalog changesets. The restriction is enforced
+    /// acceptance-side: a puller re-derives each author's role from the chain and
+    /// rejects a Follower's changesets — there is no proxy. Revocable like any
+    /// member.
     Follower,
 }
 
 impl MemberRole {
-    /// Stable lowercase wire string. Written into `auth/keys/{pubkey}` so the
-    /// proxy can role-gate writes without decrypting the membership chain.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            MemberRole::Owner => "owner",
-            MemberRole::Member => "member",
-            MemberRole::Follower => "follower",
-        }
-    }
-
     /// Whether this role may author catalog changesets (write). Followers can't.
     pub fn can_write(&self) -> bool {
         matches!(self, MemberRole::Owner | MemberRole::Member)
