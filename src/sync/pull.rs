@@ -142,10 +142,10 @@ struct DeferredChangeset {
 /// network phases is still captured. Every other `db.call` here (schema read,
 /// blob-scope resolution, cursor bookkeeping) runs on the normal enabled path.
 ///
-/// `tables` is the synced set [`Database::open`] owns — the host's declared
-/// tables plus coven's injected `item_keys` (for the `_updated_at` index map and
-/// apply conflict resolution); call sites pass `db.synced_tables()`. `cursors`
-/// maps device_id -> last_seq we've applied from that device.
+/// `tables` is the synced set coven owns — the host's declared tables plus
+/// coven's injected `item_keys` (for the `_updated_at` index map and apply
+/// conflict resolution); call sites pass `db.synced_tables()`. `cursors` maps
+/// device_id -> last_seq we've applied from that device.
 ///
 /// Returns the updated cursors map and a summary of what was applied.
 #[allow(clippy::too_many_arguments)]
@@ -529,6 +529,18 @@ pub async fn pull_changes(
                     break;
                 }
             };
+            let old_changes = match crate::changeset::walk_old(&changeset_bytes) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        "failed to walk old changeset values, skipping without applying: {e}"
+                    );
+                    result.asset_downloads_failed = true;
+                    break;
+                }
+            };
 
             // The item content keys this changeset itself mints, recovered from its
             // `item_keys` rows BEFORE applying, so an item-scoped blob's key is
@@ -600,7 +612,9 @@ pub async fn pull_changes(
             // budget-exempt) and the local store — or it would leak forever once the
             // row is gone. A peer NEVER writes a cloud tombstone here; that belongs
             // to the deleting / make-Local owner.
-            if let Err(e) = drop_deleted_blob_local(&changes, &blob_decls, library_dir).await {
+            if let Err(e) =
+                drop_deleted_blob_local(&old_changes, &changes, &blob_decls, library_dir).await
+            {
                 warn!(
                     "Dropping local copies for deleted blob rows failed for {}/{}: {e}; \
                      cursor not advanced, will retry next cycle",
@@ -1017,20 +1031,75 @@ pub(crate) fn host_provided_blobs(
 /// was pulled there), but the local-store drop covers the case where the bytes are
 /// there too; a deleted row needs neither.
 async fn drop_deleted_blob_local(
-    changes: &[RowChange],
+    old_changes: &[RowChange],
+    new_changes: &[RowChange],
     blob_decls: &BlobDecls,
     library_dir: &LibraryDir,
 ) -> Result<(), crate::blob::cache::BlobCacheError> {
-    for change in changes {
-        if change.op != crate::changeset::ChangeOp::Delete {
-            continue;
-        }
-        let Some(blob) = blob_decls.ref_from_change(change) else {
-            continue;
+    if old_changes.len() != new_changes.len() {
+        return Err(crate::blob::cache::BlobCacheError::ChangesetWalkMismatch {
+            old_count: old_changes.len(),
+            new_count: new_changes.len(),
+        });
+    }
+    for (old, new) in old_changes.iter().zip(new_changes) {
+        let old_blob_to_drop = match old.op {
+            crate::changeset::ChangeOp::Delete => blob_decls.ref_from_change(old),
+            crate::changeset::ChangeOp::Update => {
+                let Some(old_blob) = blob_decls.ref_from_change(old) else {
+                    continue;
+                };
+                let should_drop = match blob_decls.ref_from_change(new) {
+                    Some(new_blob) => {
+                        old_blob.namespace != new_blob.namespace || old_blob.id != new_blob.id
+                    }
+                    None => true,
+                };
+                if should_drop {
+                    Some(old_blob)
+                } else {
+                    None
+                }
+            }
+            crate::changeset::ChangeOp::Insert => None,
         };
-        crate::blob::cache::drop_all_local_copies(library_dir, &blob.namespace, &blob.id).await?;
+        if let Some(blob) = old_blob_to_drop {
+            crate::blob::cache::drop_all_local_copies(library_dir, &blob.namespace, &blob.id)
+                .await?;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn change_walk_pairing_rejects_mismatched_lengths() {
+        let old_changes = vec![RowChange {
+            table: "files".to_string(),
+            op: crate::changeset::ChangeOp::Update,
+            columns: vec![Some("file-1".to_string())],
+        }];
+        let new_changes = Vec::new();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let library_dir = LibraryDir::new(tmp.path());
+        let db = rusqlite::Connection::open_in_memory().expect("db");
+        let decls = BlobDecls::from_tables(&db, &[]).expect("decls");
+
+        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &library_dir)
+            .await
+            .expect_err("mismatched changeset walks fail");
+
+        assert!(matches!(
+            err,
+            crate::blob::cache::BlobCacheError::ChangesetWalkMismatch {
+                old_count: 1,
+                new_count: 0
+            }
+        ));
+    }
 }
 
 /// Resolve a blob's public scope to its internal key scope WITHOUT requiring the

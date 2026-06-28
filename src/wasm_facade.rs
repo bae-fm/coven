@@ -155,9 +155,9 @@ impl CovenLibrary {
     /// This is the host's write path: the attached capture session records these
     /// writes into the outgoing changeset, so [`start_sync`](Self::start_sync)
     /// publishes them. Synced rows must carry the `_updated_at` register stamp the
-    /// synced-table contract requires (the demo schema's `notes` does); a real app
-    /// stamps it with the [`UpdatedAtStamper`](crate::UpdatedAtStamper)
-    /// `Database::open` returns.
+    /// synced-table contract requires; the demo schema's `notes` table uses
+    /// SQLite defaults for the facade's demo writes, while native hosts mint
+    /// stamps with [`crate::SqlContext::stamp`].
     pub fn exec(&self, sql: String) -> Result<(), JsValue> {
         // The wasm `Database::call` runs the closure synchronously on the borrowed
         // connection and returns an already-complete future, so `now_or_never`
@@ -330,8 +330,8 @@ fn build_cipher(storage: HomeStorage, key_hex: Option<&str>) -> Result<CloudCiph
 /// the sync layer, not the domain. This `notes` table is the minimum that
 /// demonstrates row sync: a text primary key, a body, and the `_updated_at`
 /// register the synced-table contract requires (`created_at` is ordinary app
-/// data). `IF NOT EXISTS` because `Database::open` re-runs the migration on every
-/// open, including a reopen that already has the table in OPFS.
+/// data). `IF NOT EXISTS` because coven re-runs the migration on every open,
+/// including a reopen that already has the table in OPFS.
 fn demo_schema(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS notes (

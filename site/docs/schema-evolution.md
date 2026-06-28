@@ -27,21 +27,17 @@ questions, answered by different mechanisms.
 ## Local migrations
 
 coven owns the SQLite connection. The host passes a `migrate` closure to
-[`Database::open`](rustdoc:method:coven::database::Database::open); coven runs its
-own bookkeeping migration, then the host's, against the connection it owns, every
-time the database opens:
+`Coven::builder(config).open(...)`; coven runs its own bookkeeping migration,
+then the host's, against the connection it owns, every time the database opens:
 
 ```rust
-let (db, stamper) = Database::open(
-    &db_path,
-    synced_tables,
-    device_id,
-    |conn| {
+let handle = Coven::builder(config)
+    .synced_tables(synced_tables)
+    .open(|conn| {
         conn.execute_batch(include_str!("migrations/0001_initial.sql"))?;
         conn.execute_batch(include_str!("migrations/0002_add_due_date.sql"))?;
         Ok(())
-    },
-)?;
+    })?;
 ```
 
 Each device runs this on the version of the binary it happens to be on, so a
@@ -152,7 +148,7 @@ closure over it. So:
   no-ops.
 - **Joiner below the snapshot's version (reverse):** has no per-snapshot guard.
   [`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot)
-  writes the file unconditionally, and `Database::open` has no "this database is
+  writes the file unconditionally, and the handle open path has no "this database is
   from the future" detector. The only protection is the floor, checked on the
   pull that immediately follows bootstrap, so a too-old joiner that should be
   fenced fails the join with `SchemaVersionTooOld`, plus additive-tolerance for

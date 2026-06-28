@@ -20,7 +20,8 @@
 //! ## What it owns
 //!
 //! - **Rows** — the [`Database`] (coven already owns the connection). The host
-//!   runs its app SQL through [`database`](CovenHandle::database)`().call(|conn| …)`.
+//!   runs its app SQL through [`sql`](CovenHandle::sql) and row+blob batches
+//!   through [`write`](CovenHandle::write).
 //! - **Blobs** — the [`LibraryDir`] the blob engine reads/writes, plus the
 //!   credentials to build a read [`SyncStorage`] on a cloud miss. Read, ranged
 //!   read, store, register external, pin/unpin, the locality transitions, and the
@@ -37,7 +38,6 @@ use tokio::sync::watch;
 use tracing::{debug, info};
 
 use crate::blob::cache::BlobCacheError;
-use crate::blob::local_files::LocalBlobError;
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver};
@@ -45,6 +45,7 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
+use crate::id_provider::IdRef;
 use crate::keys::KeyService;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::setup::create_sync_storage;
@@ -53,12 +54,15 @@ use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
+use crate::sync::membership::MemberRole;
 use crate::sync::storage::{StorageError, SyncStorage};
+use crate::sync::sync_loop::SyncLoopStatus;
+use crate::sync::sync_manager::MemberInfo;
 use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 
 /// The native handle over one coven library.
 ///
-/// Construct it once with [`new`](Self::new), then call methods. Cheap to
+/// Open it once with [`Coven::builder`](crate::Coven::builder), then call methods. Cheap to
 /// [`clone`](Clone) — every field is shared (an `Arc`, a `Clone` handle, or a
 /// reference-counted lock), so a clone drives the same database, sync manager,
 /// and storage as the original.
@@ -76,18 +80,16 @@ use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 /// #     -> Result<(), Box<dyn std::error::Error>> {
 /// // Rows: run app SQL on the connection coven owns.
 /// let note_count: i64 = handle
-///     .database()
-///     .call(|conn| {
-///         conn.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
-///             .map_err(coven::DbError::from)
+///     .sql(|sql| {
+///         sql.connection()
+///             .query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
+///             .map_err(coven::CovenError::from)
 ///     })
 ///     .await?;
 ///
 /// // Blobs: read by descriptor. coven resolves locality — the user's own file,
 /// // its local store, the cache, or a cloud fetch — and hands back plaintext.
 /// let bytes: Vec<u8> = handle.read_blob(cover).await?;
-/// // Store host-provided bytes that coven then owns.
-/// handle.store_blob("images", "release-1", &bytes).await?;
 ///
 /// // Sync is optional. Connect a provider, then drive it; a library with no
 /// // cloud home never calls these and stays fully usable on-device.
@@ -100,6 +102,7 @@ use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 #[derive(Clone)]
 pub struct CovenHandle {
     db: Database,
+    stamper: crate::sync::hlc::UpdatedAtStamper,
     library_dir: LibraryDir,
 
     /// Supplies the host's current config on demand. coven reads it fresh each
@@ -108,6 +111,7 @@ pub struct CovenHandle {
     config_provider: ConfigProvider,
     key_service: KeyService,
     clock: ClockRef,
+    stage_blob_ids: IdRef,
 
     /// Host bookkeeping for blob transitions (upload progress, materialize
     /// progress, completion). Passed to the [`SyncManager`] and to the upload
@@ -130,20 +134,24 @@ impl CovenHandle {
     /// config (the cloud-home selection, the blob-path scheme), so the host can
     /// reconnect a provider without rebuilding the handle. `observer` carries the
     /// host's transition bookkeeping; pass `None` if it surfaces none.
-    pub fn new(
+    pub(crate) fn new(
         db: Database,
+        stamper: crate::sync::hlc::UpdatedAtStamper,
         library_dir: LibraryDir,
         config_provider: ConfigProvider,
         key_service: KeyService,
         clock: ClockRef,
+        stage_blob_ids: IdRef,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
         Self {
             db,
+            stamper,
             library_dir,
             config_provider,
             key_service,
             clock,
+            stage_blob_ids,
             observer,
             sync: Arc::new(RwLock::new(None)),
         }
@@ -157,12 +165,23 @@ impl CovenHandle {
     // Rows
     // =========================================================================
 
-    /// The owned [`Database`]. The host runs its app SQL through
-    /// [`Database::call`] and reaches coven's row-level helpers (cache budgets,
-    /// external blob refs, item keys) on it. coven owns the connection; this is
-    /// how the host reaches it.
-    pub fn database(&self) -> &Database {
+    /// The owned [`Database`]. Public row access goes through
+    /// [`CovenHandle::sql`] and [`CovenHandle::write`]; coven internals use this
+    /// to reach row-level helpers.
+    pub(crate) fn db(&self) -> &Database {
         &self.db
+    }
+
+    pub(crate) fn stamper(&self) -> crate::sync::hlc::UpdatedAtStamper {
+        self.stamper.clone()
+    }
+
+    pub(crate) fn library_dir(&self) -> LibraryDir {
+        self.library_dir.clone()
+    }
+
+    pub(crate) fn stage_blob_ids(&self) -> IdRef {
+        self.stage_blob_ids.clone()
     }
 
     // =========================================================================
@@ -173,8 +192,20 @@ impl CovenHandle {
     /// whose provider has not been connected yet. The host reaches sync-engine
     /// operations not surfaced as handle methods (membership, invite/remove,
     /// status) through this.
-    pub fn sync_manager(&self) -> Option<Arc<SyncManager>> {
+    pub(crate) fn sync_manager(&self) -> Option<Arc<SyncManager>> {
         self.sync.read().unwrap().clone()
+    }
+
+    pub fn subscribe_sync_status(
+        &self,
+    ) -> Result<tokio::sync::broadcast::Receiver<SyncLoopStatus>, String> {
+        let manager = self
+            .sync_manager()
+            .ok_or_else(|| "sync is not configured".to_string())?;
+        let loop_handle = manager
+            .sync_loop_handle()
+            .ok_or_else(|| "sync loop is not running".to_string())?;
+        Ok(loop_handle.subscribe())
     }
 
     /// Build the [`SyncManager`] for a connected cloud provider, start its sync
@@ -189,14 +220,13 @@ impl CovenHandle {
     pub async fn connect_sync(
         &self,
         encryption_service: Option<EncryptionService>,
-    ) -> Result<Arc<SyncManager>, String> {
-        let manager = self
-            .build_and_install_sync(encryption_service, |manager| async move {
-                manager.start_sync().await
-            })
-            .await?;
+    ) -> Result<(), String> {
+        self.build_and_install_sync(encryption_service, |manager| async move {
+            manager.start_sync().await
+        })
+        .await?;
         info!("coven handle: sync manager connected");
-        Ok(manager)
+        Ok(())
     }
 
     /// Build a [`SyncManager`], start its loop via `start`, and install it — the
@@ -256,7 +286,7 @@ impl CovenHandle {
         &self,
         home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
-    ) -> Result<Arc<SyncManager>, String> {
+    ) -> Result<(), String> {
         // The test supplies encryption through the cipher, not a separate service;
         // derive the manager's service from it so `blob_cipher` and the membership
         // path agree with the at-rest protection the loop and storage seal under.
@@ -264,13 +294,12 @@ impl CovenHandle {
             CloudCipher::Encrypted(service) => Some(service.clone()),
             CloudCipher::Plaintext => None,
         };
-        let manager = self
-            .build_and_install_sync(encryption_service, move |manager| async move {
-                manager.start_sync_with_home(home, cipher).await
-            })
-            .await?;
+        self.build_and_install_sync(encryption_service, move |manager| async move {
+            manager.start_sync_with_home(home, cipher).await
+        })
+        .await?;
         info!("coven handle: sync manager connected over an injected test cloud home");
-        Ok(manager)
+        Ok(())
     }
 
     /// Start (or restart) the sync loop of the installed [`SyncManager`]. A no-op
@@ -396,19 +425,6 @@ impl CovenHandle {
             len,
         )
         .await
-    }
-
-    /// Store a host-provided blob's bytes in coven's local store
-    /// (`storage/local/<namespace>/<id>`). coven owns the copy from here: it
-    /// serves it locally while the blob is Local and moves it into the cache when
-    /// the blob is made Remote. The host writes the blob-bearing row separately.
-    pub async fn store_blob(
-        &self,
-        namespace: &str,
-        id: &str,
-        bytes: &[u8],
-    ) -> Result<(), LocalBlobError> {
-        crate::blob::local_files::store(&self.library_dir, namespace, id, bytes).await
     }
 
     /// Pin a Remote blob set for offline: coven fetches each into the protected
@@ -558,6 +574,73 @@ impl CovenHandle {
         )
         .await
     }
+
+    pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, crate::DbError> {
+        self.db.get_cache_budget(namespace).await
+    }
+
+    pub async fn set_cache_budget(
+        &self,
+        namespace: &str,
+        max_bytes: u64,
+    ) -> Result<(), crate::DbError> {
+        self.db.set_cache_budget(namespace, max_bytes).await
+    }
+
+    pub async fn mint_item_key(&self, item_id: &str) -> Result<[u8; 32], crate::DbError> {
+        self.db.mint_item_key(item_id).await
+    }
+
+    pub async fn item_key(&self, item_id: &str) -> Result<Option<[u8; 32]>, crate::DbError> {
+        self.db.item_key(item_id).await
+    }
+
+    pub fn get_user_pubkey(&self) -> Result<Option<String>, String> {
+        match self.sync_manager() {
+            Some(manager) => manager.get_user_pubkey(),
+            None => self
+                .key_service
+                .get_user_public_key()
+                .map(|opt| opt.map(hex::encode))
+                .map_err(|e| format!("Failed to read user public key: {e}")),
+        }
+    }
+
+    pub fn generate_restore_code(&self) -> Result<String, String> {
+        match self.sync_manager() {
+            Some(manager) => manager.generate_restore_code(),
+            None => crate::storage::cloud::setup::generate_restore_code(
+                &self.config(),
+                &self.key_service,
+            )
+            .map_err(|e| e.to_string()),
+        }
+    }
+
+    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, String> {
+        let manager = self
+            .sync_manager()
+            .ok_or_else(|| "sync is not configured".to_string())?;
+        manager.get_members().await
+    }
+
+    pub async fn invite_member(
+        &self,
+        public_key_hex: &str,
+        role: MemberRole,
+    ) -> Result<String, String> {
+        let manager = self
+            .sync_manager()
+            .ok_or_else(|| "sync is not configured".to_string())?;
+        manager.invite_member(public_key_hex, role).await
+    }
+
+    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, String> {
+        let manager = self
+            .sync_manager()
+            .ok_or_else(|| "sync is not configured".to_string())?;
+        manager.remove_member(public_key_hex).await
+    }
 }
 
 #[cfg(test)]
@@ -608,12 +691,15 @@ mod tests {
             Arc::new(move || config.clone())
         };
 
+        let stamper = db.stamper();
         let handle = CovenHandle::new(
             db.clone(),
+            stamper,
             library_dir,
             config_provider,
             KeyService::new("lib-test".to_string()),
             Arc::new(SystemClock),
+            Arc::new(crate::id_provider::UuidProvider),
             None,
         );
 

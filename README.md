@@ -20,48 +20,53 @@ browser — and never reaches into coven's storage or sync internals directly.
 
 ## Integration
 
-- Declare your synced tables by passing them to `Database::open` (the
-  `synced_tables` arg), **at startup, before sync starts** (and before any
-  restore/join, which applies changesets too). Each must have an `id` text
-  primary key at column 0 and an `_updated_at TEXT NOT NULL` column (the HLC/LWW
-  timestamp). This is required, not optional: with no tables registered, coven
-  aborts sync init and logs an error rather than silently running a no-op
-  (snapshot-only) sync. A
-  table you *don't* list stays local-only — that's how you keep device-local
-  state (per-device pin/cache columns, local paths) out of sync.
-- Open a `Database` with `Database::open` (your SQLite path, your synced-table
-  list, a device id, and a `migrate` closure that creates your own app tables);
-  coven creates its bookkeeping tables (`sync_cursors`, `sync_state`,
-  `cloud_outbox`) itself.
+- Declare your synced tables on `Coven::builder(config).synced_tables(...)`, at
+  startup, before sync starts. Each synced table has an `id` text primary key at
+  column 0 and an `_updated_at TEXT NOT NULL` column. Tables you don't list stay
+  local-only.
+- Open one native handle with `Coven::builder(config).open(|conn| ...)`; coven
+  opens SQLite, runs its bookkeeping migration, then runs your schema migration.
 - Declare which rows carry blobs per table with `SyncedTable::carries_blob` (a
   `BlobDecl`: namespace, provenance, cache fill, encryption scope), and
-  optionally pass a `BlobTransitionObserver` to `CovenHandle::new`.
+  optionally pass a `BlobTransitionObserver` to the builder.
 - Register identity/OAuth at startup: `set_keyring_service`,
   `set_oauth_client_creds`.
-- Hold a `CovenHandle`, built once over the open `Database`. Run app SQL through
-  `handle.database()`, read and write blobs through `handle.read_blob` /
-  `store_blob` / `pin`, and — when a provider is connected — drive sync through
-  `handle.connect_sync` / `sync_now`. The handle owns the `SyncManager`, so you
-  never build or thread it (or the storage) yourself; reach the connected
-  manager's `SyncLoopStatus { row_changes, .. }` through `handle.sync_manager()`
-  to react to pulled changes.
+- Run app SQL through `handle.sql(...)`. Use `handle.write(...)` when a row write
+  and host-provided blob bytes must commit together. Read blobs through
+  `handle.read_blob`, pin through `handle.pin`, and drive sync/membership through
+  handle methods.
 
 ```rust
-// Build the handle once over the open Database; then only call methods on it.
-let handle = CovenHandle::new(
-    db, library_dir, config_provider, key_service, clock, observer,
-);
+let handle = Coven::builder(config)
+    .synced_tables(vec![SyncedTable::new("files").carries_blob(file_blob_decl)])
+    .open(|conn| {
+        conn.execute_batch(APP_SCHEMA)?;
+        Ok(())
+    })?;
 
 // Rows: your app SQL on the connection coven owns.
-handle.database().call(|conn| { /* INSERT/SELECT ... */ Ok(()) }).await?;
+handle.sql(|sql| {
+    sql.connection().execute(
+        "INSERT INTO files (id, name, _updated_at) VALUES (?1, ?2, ?3)",
+        coven::rusqlite::params![id, name, sql.stamp()],
+    )?;
+    Ok(())
+}).await?;
 
-// Blobs: read/store by descriptor. coven resolves locality (the user's file,
-// its local store, the cache, or a cloud fetch) and at-rest encryption.
-let bytes = handle.read_blob(&cover).await?;
-handle.store_blob("images", "release-1", &bytes).await?;
+// Rows plus host-provided blob bytes: one batch.
+handle.write(|w| {
+    let blob = w.put_blob("files", blob_id, bytes);
+    w.sql(move |sql| {
+        sql.connection().execute(
+            "INSERT INTO files (id, blob_id, _updated_at) VALUES (?1, ?2, ?3)",
+            coven::rusqlite::params![file_id, blob.id(), sql.stamp()],
+        )?;
+        Ok(())
+    })
+}).await?;
 
 // Sync is optional. A library with no cloud home never calls these.
-handle.connect_sync(encryption_service).await;
+handle.connect_sync(Some(encryption_service)).await;
 handle.sync_now();
 ```
 

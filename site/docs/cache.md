@@ -52,11 +52,11 @@ the bytes the host reads.
 
 ## Reading a blob
 
-[`read_blob`](rustdoc:fn:coven::blob::cache::read_blob) serves a blob's whole
-contents.
+[`CovenHandle::read_blob`](rustdoc:method:coven::CovenHandle::read_blob) serves a
+blob's whole contents.
 
 ```rust
-let bytes = coven::blob::cache::read_blob(&db, &library_dir, &storage, &blob).await?;
+let bytes = handle.read_blob(&blob).await?;
 ```
 
 It resolves by where the bytes are, in order: a **user-provided Local** blob is
@@ -69,15 +69,14 @@ from the cloud, writes the plaintext to `cache/<namespace>/<id>` (the evictable
 folder, never the protected one), and returns the bytes it just fetched. A plain
 read populates the cache; it never pins.
 
-[`open_blob_stream`](rustdoc:fn:coven::blob::cache::open_blob_stream) is the
-ranged sibling, for a host that streams or seeks a large blob (audio playback)
-without loading the whole file:
+[`CovenHandle::open_blob_stream`](rustdoc:method:coven::CovenHandle::open_blob_stream)
+is the ranged sibling, for a host that streams or seeks a large blob (audio
+playback) without loading the whole file:
 
 ```rust
-let slice = coven::blob::cache::open_blob_stream(
-    &db, &library_dir, &storage, &blob,
-    source_size, offset, len,
-).await?;
+let slice = handle
+    .open_blob_stream(&blob, source_size, offset, len)
+    .await?;
 ```
 
 `source_size` is the blob's plaintext length, which the host knows (the row that
@@ -121,11 +120,11 @@ gesture below.
 The cache is evictable. Pinning is how a user keeps a chosen Remote blob local and
 safe from eviction (an offline-for-the-flight gesture).
 
-[`pin`](rustdoc:fn:coven::blob::cache::pin) ensures a blob is both present and
-protected, in `storage/pinned/<namespace>/<id>`:
+[`CovenHandle::pin`](rustdoc:method:coven::CovenHandle::pin) ensures a blob is
+both present and protected, in `storage/pinned/<namespace>/<id>`:
 
 ```rust
-coven::blob::cache::pin(&db, &library_dir, &storage, &blobs).await?;
+handle.pin(&blobs).await?;
 ```
 
 A pin *populates*, it is not a flag flip. Three cases per blob: already in
@@ -135,23 +134,21 @@ blob a read or an eager pull already fetched with no cloud round-trip); in neith
 bare ids because the from-absent case needs the blob's cloud coordinates
 (namespace, scope, cloud_path), which an id alone lacks. It is idempotent.
 
-[`unpin`](rustdoc:fn:coven::blob::cache::unpin) drops the protection: it moves
-`pinned/<namespace>/<id>` back to `cache/<namespace>/<id>`, so the file stays
-(still readable) but becomes evictable again. It is not a delete. Unpin works on
-any blob regardless of its `CacheFill`; a `CacheEager` blob that was never pinned
-is already evictable, so unpinning it is a no-op.
+[`CovenHandle::unpin`](rustdoc:method:coven::CovenHandle::unpin) drops the
+protection: it moves `pinned/<namespace>/<id>` back to `cache/<namespace>/<id>`,
+so the file stays readable but becomes evictable again. It is not a delete.
+Unpin works on any blob regardless of its `CacheFill`; a `CacheEager` blob that
+was never pinned is already evictable, so unpinning it is a no-op.
 
 ## The size budget
 
 `pinned/` grows with what the user chose to keep; `cache/` grows with what gets
 fetched. Left unbounded the evictable cache would grow forever, so the host can set
-a **per-namespace** budget,
-[`set_cache_budget`](rustdoc:method:coven::database::Database::set_cache_budget),
-in bytes:
+a **per-namespace** budget with `handle.set_cache_budget(...)`, in bytes:
 
 ```rust
-db.set_cache_budget("audio", 2 * 1024 * 1024 * 1024).await?; // 2 GiB for audio
-db.set_cache_budget("covers", 64 * 1024 * 1024).await?;      // 64 MiB for covers
+handle.set_cache_budget("audio", 2 * 1024 * 1024 * 1024).await?; // 2 GiB for audio
+handle.set_cache_budget("covers", 64 * 1024 * 1024).await?;      // 64 MiB for covers
 ```
 
 Each namespace evicts independently against its own budget, so a small namespace
@@ -159,19 +156,16 @@ Each namespace evicts independently against its own budget, so a small namespace
 **only** the files under that namespace's `cache/<namespace>/`. `pinned/` is
 structurally exempt, because the eviction sweep never looks there: a pinned blob
 can never be evicted, whatever the budget; the local store is never walked either.
-With no budget set for a namespace
-([`get_cache_budget`](rustdoc:method:coven::database::Database::get_cache_budget)
-returns `None`) eviction is off for it and that namespace's cache is unbounded
-until the host opts into a limit.
+With no budget set for a namespace (`handle.get_cache_budget(...)` returns
+`None`) eviction is off for it and that namespace's cache is unbounded until the
+host opts into a limit.
 
-[`evict_to_budget`](rustdoc:fn:coven::blob::cache::evict_to_budget) runs
-synchronously after every populate into a namespace (a `read_blob` miss-write, or a
-[`write_blob`](rustdoc:fn:coven::blob::cache::write_blob)). It sums that namespace's
-`cache/<namespace>/` files and, if the total is over budget, deletes the oldest by
-modification time until the total is back under it. Modification time is the
-recency proxy: there is no `last_accessed` column (the same folder-truth tradeoff
-the whole cache makes), so the oldest-written file goes first. Pinning, not access
-tracking, is how a blob is kept.
+Coven runs the budget sweep after every populate into a namespace. It sums that
+namespace's `cache/<namespace>/` files and, if the total is over budget, deletes
+the oldest by modification time until the total is back under it. Modification
+time is the recency proxy: there is no `last_accessed` column (the same
+folder-truth tradeoff the whole cache makes), so the oldest-written file goes
+first. Pinning, not access tracking, is how a blob is kept.
 
 The file a populate just wrote is excluded from the candidates outright, so a read
 or stage can never evict the very bytes it just produced (its size still counts
@@ -185,21 +179,13 @@ already succeeded, so the bytes are durably cached. A cache briefly over budget 
 not wrong state (the next populate's sweep corrects it), so an eviction failure is
 logged and the read or stage still returns its bytes.
 
-## Writing and clearing
+## Explicit Eviction
 
-[`write_blob`](rustdoc:fn:coven::blob::cache::write_blob) writes a Remote blob's
-plaintext into the evictable `cache/<namespace>/<id>` when coven already has the
-bytes in hand — the make-Remote transition moving a just-uploaded host-provided
-blob's local-store copy into the cache — so the cache is populated on write rather
-than fetched on first read. After the write it runs the namespace's
-`evict_to_budget` sweep, never dropping the bytes it just wrote.
-
-[`clear_cache`](rustdoc:fn:coven::blob::cache::clear_cache) drops the whole
-evictable cache in one sweep: it removes all of `storage/cache/` and leaves
-`storage/pinned/` untouched. Every unpinned blob goes; a pinned blob survives
-because it lives in the other folder. An absent `cache/` is not an error (nothing
-has been cached yet); every other I/O failure is, because a swept directory must
-actually be gone.
+[`CovenHandle::evict_blob`](rustdoc:method:coven::CovenHandle::evict_blob) removes
+one blob's local cache copies from both `cache/<namespace>/` and
+`pinned/<namespace>/`. It does not delete the cloud blob or the row that
+references it; a later `read_blob` can fetch the bytes again if the row still
+exists.
 
 ## At a glance
 
@@ -208,5 +194,5 @@ actually be gone.
 | Holds | user-pinned Remote blobs | eagerly-pulled (`CacheEager`) + read-populated (`CacheLazy`) Remote blobs |
 | Counts toward the namespace budget | no (exempt) | yes |
 | Evicted by budget sweep | never | oldest-by-mtime when over the namespace budget |
-| Cleared by `clear_cache` | no | yes |
+| Removed by `evict_blob` | yes | yes |
 | Populated by | `pin` | the pull's `CacheEager` download, `read_blob` miss, `write_blob` |

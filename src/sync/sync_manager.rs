@@ -83,8 +83,8 @@ impl SyncManager {
     /// that `Arc<Hlc>` so the sync loop's advance-on-pull and envelope stamps use
     /// the same instance the host stamps rows from.
     ///
-    /// Construction is infallible and synchronous: seeding happened in
-    /// `Database::open`. The manager is built lazily, only once a provider is
+    /// Construction is infallible and synchronous: seeding already happened in
+    /// the open path. The manager is built lazily, only once a provider is
     /// connected.
     pub fn new(
         config_provider: ConfigProvider,
@@ -106,10 +106,6 @@ impl SyncManager {
             sync_loop_handle: RwLock::new(None),
             cloud_home: RwLock::new(None),
         }
-    }
-
-    pub fn encryption_service(&self) -> Option<&EncryptionService> {
-        self.encryption_service.as_ref()
     }
 
     pub fn cloud_home(&self) -> Option<Arc<dyn CloudHome>> {

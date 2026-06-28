@@ -246,10 +246,8 @@ is built, so master-, derived-, and item-key blobs all stream the same way.
 
 ## Lifecycle
 
-[`SyncManager::start_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::start_sync)
-builds the cloud home from the current config and spawns the sync loop when sync
-is enabled.
-[`SyncManager::stop_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::stop_sync)
-drops the loop and the cloud home. Because the config is read fresh each
+`handle.connect_sync(...)` builds the cloud home from the current config and
+spawns the sync loop when sync is enabled. `handle.stop_sync()` drops the loop,
+and `handle.start_sync()` starts it again. Because the config is read fresh each
 operation, swapping providers is a config change followed by a stop/start, with
 no app restart.

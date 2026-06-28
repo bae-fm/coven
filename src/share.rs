@@ -4,7 +4,7 @@
 //! a URL fragment — not a coven member, not in the signed membership chain. It is
 //! the symmetric counterpart to membership: membership wraps the library master
 //! key to a member's X25519 keypair (asymmetric `seal_box`); a share wraps one
-//! [item key](crate::Database::mint_item_key) under a random per-share secret
+//! [item key](crate::CovenHandle::mint_item_key) under a random per-share secret
 //! with the same symmetric AEAD ([`EncryptionService`], XChaCha20-Poly1305) that
 //! encrypts blobs. The recipient has no keypair, only the secret.
 //!
@@ -29,15 +29,15 @@ use serde::{Deserialize, Serialize};
 use crate::blob::BlobId;
 use tracing::warn;
 
+use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError};
-use crate::Database;
 
 /// What can go wrong creating, opening, or revoking a share.
 #[derive(Debug, thiserror::Error)]
 pub enum ShareError {
     /// The item has no minted key. The host must
-    /// [`mint_item_key`](crate::Database::mint_item_key) (and let it sync) before
+    /// [`mint_item_key`](crate::CovenHandle::mint_item_key) (and let it sync) before
     /// sharing — coven will not invent one, because a share recipient must hold
     /// the same key the item's blobs are encrypted under.
     #[error("no item key for {0}: mint_item_key must run before sharing the item")]

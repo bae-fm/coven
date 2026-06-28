@@ -146,8 +146,7 @@ against the latest chain coven holds.
 Removing a member is not a temporal replay of the chain ("was this author
 allowed when they claim they wrote this?"). It is enforced by rotating the key.
 [`revoke_member`](rustdoc:fn:coven::sync::invite::revoke_member), reached from
-the host as
-[`SyncManager::remove_member`](rustdoc:method:coven::sync::sync_manager::SyncManager::remove_member):
+the host as `handle.remove_member(...)`:
 
 1. Revokes the member's cloud access (a no-op on S3, an unshare on consumer
    clouds).
@@ -178,8 +177,7 @@ carries their Ed25519 public key (and an optional email). They send it to the
 owner out of band.
 
 The owner calls
-[`SyncManager::invite_member`](rustdoc:method:coven::sync::sync_manager::SyncManager::invite_member)
-with that public key and a role. Under it,
+`handle.invite_member(...)` with that public key and a role. Under it,
 [`create_invitation`](rustdoc:fn:coven::sync::invite::create_invitation) grants
 the joiner cloud access, wraps the library key to their X25519 key, signs and
 validates an `Add` entry against the local chain *before* writing anything, then
@@ -207,8 +205,7 @@ A restore code recovers a library on a *new device of an existing member*,
 without anyone re-inviting them. Where an invite code adds a new identity to the
 chain, a restore code re-establishes an identity that is already in it.
 
-[`SyncManager::generate_restore_code`](rustdoc:method:coven::sync::sync_manager::SyncManager::generate_restore_code)
-encodes everything needed to reconnect into one `coven:`-prefixed base64url
+`handle.generate_restore_code()` encodes everything needed to reconnect into one `coven:`-prefixed base64url
 string: the library id, the library key, the Ed25519 signing key, the cloud
 provider, and that provider's connection details. The
 [`RestoreCode`](rustdoc:struct:coven::sync::restore_code::RestoreCode) is plain
@@ -240,12 +237,11 @@ names (a todo with its attachments, a music release with its files), identified 
 an opaque `item_id`. It is the second key tier, below the library master key.
 
 Coven owns its lifecycle. The host calls
-[`mint_item_key(item_id)`](rustdoc:method:coven::database::Database::mint_item_key) when it
-creates the item; coven generates the key and stores it in the synced `item_keys`
-table. Because that table is synced like any other, the key rides the
-master-encrypted changeset to every member and is preserved in snapshots, a
-member who joins by changeset replay *or* by snapshot bootstrap gets it. The host
-never sees raw key bytes: it tags a blob with
+`handle.mint_item_key(item_id)` when it creates the item; coven generates the key
+and stores it in the synced `item_keys` table. Because that table is synced like
+any other, the key rides the master-encrypted changeset to every member and is
+preserved in snapshots, a member who joins by changeset replay *or* by snapshot
+bootstrap gets it. The host never sees raw key bytes: it tags a blob with
 [`BlobScope::Item(item_id)`](rustdoc:enum:coven::blob::BlobScope) (see
 [Blobs](blobs.md#encryption-scope)), and coven resolves the id to the key when it
 encrypts on push and decrypts on pull.
@@ -323,4 +319,3 @@ deletes the `shares/{share_id}/` objects. Whatever serves the share can no longe
 read the manifest, so it stops serving the share and the URL goes dead. Bytes the
 recipient already downloaded are not clawed back, the same envelope model coven
 uses for membership revocation.
-

@@ -131,13 +131,12 @@ never the raw key bytes:
   decrypt. The corollary is that `scope_id` must be stable; a row id that later
   changes would re-derive a different key and the stored blob would not decrypt.
 - `Item(item_id)` encrypts with a coven-managed **item key**: a random per-item
-  key coven mints with
-  [`mint_item_key`](rustdoc:method:coven::database::Database::mint_item_key),
-  keeps in the synced `item_keys` table (so it reaches every member and survives a
-  snapshot), and resolves by `item_id` on push and pull. The host names the item;
-  coven holds the key. Unlike `Derived`, an item key is independent of the master,
-  so coven can hand it to a non-member without exposing the library. That export
-  is a [share](/docs/sharing#creating-and-opening-a-share).
+  key coven mints with `handle.mint_item_key(...)`, keeps in the synced
+  `item_keys` table (so it reaches every member and survives a snapshot), and
+  resolves by `item_id` on push and pull. The host names the item; coven holds
+  the key. Unlike `Derived`, an item key is independent of the master, so coven
+  can hand it to a non-member without exposing the library. That export is a
+  [share](/docs/sharing#creating-and-opening-a-share).
 
 coven resolves the public scope to an internal key (looking up the `item_keys` row
 for `Item`) before it touches storage, at one resolution point shared by all three
@@ -152,40 +151,33 @@ and the `item_keys` table stays empty.
 
 A blob reaches the cloud one of two ways, split by [provenance](#provenance).
 
-**Inline with the changeset (host-provided).** coven owns a host-provided blob's
-bytes — in its local store or its cache — so it uploads each one inline as its row
-reaches the *outgoing* changeset, before the envelope is packed and pushed: it reads
-the plaintext, resolves the scope to a key, encrypts, and writes to the blob's cloud
-key. This is provenance-based, regardless of cache fill. If the bytes are not on
-disk the cycle **aborts** rather than publishing a row that points at a blob the
-cloud does not hold: a published-but-missing blob would 404 on every puller
-permanently. The next cycle retries once the bytes are present.
+**With the changeset (host-provided).** coven owns a host-provided blob's bytes —
+in its local store or its cache — so it uploads each one before the row is
+published. A host writes the row and bytes together through
+[`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write); a
+`make_remote` transition uploads any host-provided blobs before flipping the
+root's gate. If the bytes are not on disk the cycle aborts rather than publishing
+a row that points at a blob the cloud does not hold.
 
 **Through the upload outbox (user-provided).** A user-provided blob is the user's
 own file; coven uploads it from that path through the durable upload outbox, with
-progress and retry. The `make_remote` transition enqueues one upload per
-user-provided blob of a gated root; a host can also enqueue an upload directly for
-an out-of-band file (audio is the case):
+progress and retry. The host starts that transition through
+[`CovenHandle::make_remote`](rustdoc:method:coven::CovenHandle::make_remote):
 
 ```rust
-db.enqueue_upload(file_id, cloud_key, source_path, scope, retain_pinned, created_at).await?;
+handle.make_remote("todos", todo_id, pin).await?;
 ```
 
-`cloud_key` is the final cloud object key, persisted verbatim on the row.
-`source_path` overrides where the plaintext is read from when the file lives
-outside the library directory (`None` means coven's default storage path for
-`file_id`). `scope` is the blob's [`BlobScope`](#encryption-scope); coven persists
-it and resolves it to a key when the upload drains, long after the enqueue site is
-gone. Enqueuing an upload also cancels any pending delete of the same key (latest
-intent wins), so a re-upload is never tombstoned in the same cycle.
+`make_remote` enqueues one upload per user-provided blob of the gated root.
+Coven persists each blob's final cloud key and [`BlobScope`](#encryption-scope),
+then resolves the scope to a key when the upload drains, long after the enqueue
+site is gone. Enqueuing an upload also cancels any pending delete of the same key
+(latest intent wins), so a re-upload is never tombstoned in the same cycle.
 
-The outbox is coven's `cloud_outbox` table, created in
-[`Database::open`](rustdoc:method:coven::database::Database::open). The host never
-mutates it by hand: it enqueues and reads through the
-[`Database`](rustdoc:struct:coven::database::Database) methods
-(`enqueue_upload`/`enqueue_delete`, `get_pending_cloud_uploads`/`get_pending_cloud_deletes`,
-`remove_cloud_outbox_uploads_for_key`, `reset_cloud_outbox_backoff`), or reads the
-shared table in its own queries. Each row is an
+The outbox is coven's `cloud_outbox` table, created by the handle open path. The
+host does not mutate it by hand; user-provided transitions and sync enqueue rows
+through coven, and host-provided row+blob writes go through `handle.write(...)`.
+Each row is an
 [`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) whose
 [`OutboxOperation`](rustdoc:enum:coven::db::OutboxOperation) is an `Upload`,
 `Delete`, or `Cancel`.
@@ -197,13 +189,12 @@ bytes to the entry's `cloud_key`, and removes the entry on success. The drain ru
 before the changeset push, but the cycle does not hold the whole changeset back
 while it runs.
 
-Blob-before-row ordering is the host's job, per row, not a global push gate. A
-host keeps a blob-bearing row's [gate column](/docs/local-data) off until that
-row's blobs upload, then flips it on (typically in `on_blob_uploaded`). The gate
-cuts the row while its column is off and re-emits the row's full subtree when it
-flips on, so a peer never pulls a changeset that points at a blob the cloud does
-not yet hold. Because this is per row, one slow or stuck upload holds back only its
-own row, and a row whose upload fails for good never wedges the rest.
+Blob-before-row ordering is owned by coven, per gated root, not by a global push
+gate. `make_remote` keeps the root's [gate column](/docs/local-data) off until
+the root's blobs upload, then coven flips it on. The gate cuts the row while its
+column is off and re-emits the row's full subtree when it flips on, so a peer
+never pulls a changeset that points at a blob the cloud does not yet hold.
+Because this is per root, one slow or stuck upload holds back only its own root.
 
 The drain does not stop on a failure. A failed entry stays queued with its
 `attempt_count` bumped and `last_error`/`last_attempt_at` recorded, and the loop
@@ -251,11 +242,9 @@ duplicate it.
 A blob is shared cloud state that rows on every device may still reference.
 Deleting it the instant the deletion drains would strand a device that has not yet
 pulled the row removal: it would see a row pointing at nothing. So a delete is not
-immediate. The host enqueues it:
-
-```rust
-db.enqueue_delete(cloud_key, created_at).await?;
-```
+immediate. The host requests blob replacement or row removal through
+[`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write), and coven
+enqueues the cloud delete with the row change.
 
 The next cycle's [`drain_tombstones`](rustdoc:fn:coven::blob::delete::drain_tombstones)
 writes a signed **tombstone** (a durable, signed record that the blob was deleted,

@@ -109,6 +109,10 @@ pub enum BlobCacheError {
     /// sweep), or a scope that couldn't be resolved to an encryption key. Carries a
     /// human-readable cause.
     Io(String),
+    /// The old-value and new-value walks of one changeset disagreed on row count.
+    /// They are two views of the same changeset; a mismatch means cleanup cannot
+    /// pair updated rows with their previous blob ids.
+    ChangesetWalkMismatch { old_count: usize, new_count: usize },
     /// A registered external blob ref (a user-provided Local blob's user-owned
     /// file) points at a file that is no longer there — the user moved, renamed, or
     /// deleted it. Terminal: an external blob has no cloud copy to fall back to, so
@@ -159,6 +163,13 @@ impl std::fmt::Display for BlobCacheError {
                 write!(f, "no cloud home connected to read a Remote blob")
             }
             BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
+            BlobCacheError::ChangesetWalkMismatch {
+                old_count,
+                new_count,
+            } => write!(
+                f,
+                "changeset old/new walks disagree: {old_count} old rows, {new_count} new rows"
+            ),
             BlobCacheError::ExternalMissing { id, path, source } => write!(
                 f,
                 "external blob {id} could not be read at {}: {source}",
@@ -220,12 +231,10 @@ impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
 /// After the bytes land, [`evict_to_budget`] runs so a write that pushes the blob's
 /// namespace cache over that namespace's budget evicts its oldest files back under
 /// budget (a no-op when the namespace has no budget set). The just-written file is
-/// passed as `protect`, so it is
-/// excluded from eviction — this write can never drop the very bytes it produced.
-/// Eviction is best-effort: the write has already succeeded, so an eviction failure
-/// is logged and swallowed, not returned (see below).
-#[cfg(test)]
-pub async fn write_blob(
+/// passed as `protect`, so it is excluded from eviction — this write can never drop
+/// the very bytes it produced. An eviction failure is returned to the caller instead
+/// of reporting a budgeted write as complete while the cache could not be trimmed.
+pub(crate) async fn write_blob(
     db: &Database,
     library_dir: &LibraryDir,
     blob: &BlobRef,
@@ -238,18 +247,7 @@ pub async fn write_blob(
     // The write into `cache/<namespace>/` may have pushed that namespace over its
     // budget; evict its oldest files back under it, never the file just written
     // (passed as `protect`). A no-op when the namespace has no budget set.
-    //
-    // Eviction is best-effort and must not fail the write: the write above already
-    // succeeded, so the bytes are durably in `cache/`. The cache being briefly over
-    // its budget is not wrong state — it self-corrects on the next populate's sweep —
-    // so failing a successful write because cleanup failed would be wrong. Log and
-    // continue.
-    if let Err(e) = evict_to_budget(db, library_dir, &blob.namespace, Some(&dest)).await {
-        tracing::warn!(
-            "write_blob: wrote {} but eviction failed (cache may be over budget until the next populate): {e}",
-            dest.display()
-        );
-    }
+    evict_to_budget(db, library_dir, &blob.namespace, Some(&dest)).await?;
     Ok(())
 }
 
@@ -634,25 +632,6 @@ async fn read_remote_range(
         )
         .await
         .map_err(BlobCacheError::Storage)
-}
-
-/// Move a host-provided blob's local-store copy (`storage/local/<namespace>/<id>`)
-/// into the evictable cache (`storage/cache/<id>`), the local-side completion of a
-/// host-provided blob's Local → Remote transition: once the inline push has uploaded
-/// it, its on-device copy is a cache copy (evictable, re-fetchable), no longer the
-/// Local home. A `rename` within `storage/` (one filesystem, atomic on native), so
-/// the blob is never in both stores or neither mid-move; the destination's
-/// `{ab}/{cd}` shard is created first. No eviction sweep runs — a `rename` populates
-/// nothing the budget counts until the next read; the cover is now Remote and
-/// re-fetchable if it does fall out.
-pub async fn move_local_into_cache(
-    library_dir: &LibraryDir,
-    namespace: &str,
-    id: &str,
-) -> Result<(), BlobCacheError> {
-    let from = library_dir.local_blob_path(namespace, id)?;
-    let to = library_dir.cache_blob_path(namespace, id)?;
-    rename_within_storage(&from, &to).await
 }
 
 /// Ensure a blob is local AND protected: present in `storage/pinned/<id>`, exempt

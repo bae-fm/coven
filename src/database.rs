@@ -5,9 +5,9 @@
 //! coven's bookkeeping, changeset capture and apply — runs against that one
 //! connection, so access is serialized and the session sees every write.
 //!
-//! The host no longer opens a connection, lends a raw pointer, or implements
-//! bookkeeping. It hands coven a path and a schema migration, then runs its own
-//! SQL through [`Database::call`].
+//! Native hosts open coven with [`crate::Coven::builder`] and run app SQL through
+//! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`]. The browser
+//! facade drives the same owned connection through its JS-callable methods.
 //!
 //! How the connection is held is target-split, because the platforms differ on
 //! what "one owner" can mean:
@@ -23,7 +23,8 @@
 //!   and returns a ready future, keeping the `async fn` signatures identical.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -55,10 +56,17 @@ enum Request {
     /// bookkeeping both arrive this way; writes are captured by the attached
     /// session. The closure boxes its own typed reply.
     Call(Box<dyn FnOnce(&Connection) + Send>),
-    /// Capture the outgoing changeset bytes from the session, then reset the
-    /// recorded batch so the next capture starts empty. Capture stays ENABLED —
-    /// this does NOT suspend; host writes after it are recorded normally.
+    /// Test-only raw capture path for lower-level sync tests that inspect a
+    /// changeset directly instead of running a full cycle.
+    #[cfg(test)]
     TakeChangeset(oneshot::Sender<Result<Vec<u8>, DbError>>),
+    /// Capture the outgoing changeset, stage non-empty bytes to disk, then reset
+    /// the recorded batch. A staging failure returns before reset so the live
+    /// session still owns the batch for retry.
+    TakeChangesetStaged {
+        path: PathBuf,
+        reply: oneshot::Sender<Result<Vec<u8>, DbError>>,
+    },
     /// Run a changeset apply on the connection with capture disabled around just
     /// the apply, so the applied rows are not re-recorded as this device's own
     /// writes. The closure (which performs the apply) boxes its own typed reply;
@@ -255,6 +263,7 @@ impl Database {
 
         // coven's bookkeeping tables first, then the host's schema.
         conn.execute_batch(MIGRATION_SQL).map_err(DbError::from)?;
+        migrate_bookkeeping_schema(&conn)?;
         migrate(&conn)?;
 
         // `item_keys` is coven-owned but is library-global content every member
@@ -335,6 +344,11 @@ impl Database {
         self.hlc.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn stamper(&self) -> UpdatedAtStamper {
+        UpdatedAtStamper::new(self.hlc.clone())
+    }
+
     /// The receiver's current wall-clock millis, read from this database's
     /// register clock. The pull reads it once and passes it down to bound an
     /// incoming `_updated_at`'s physical component (a grossly-future stamp must not
@@ -384,13 +398,8 @@ impl Database {
         f(&owned.conn)
     }
 
-    /// Capture the outgoing changeset bytes and reset the recorded batch, leaving
-    /// capture ENABLED. The returned bytes are the local changes recorded since the
-    /// last capture; empty bytes mean none. Capture is NOT suspended — a host write
-    /// after this is recorded into the next batch. (SQLite cannot clear a session
-    /// in place, so the reset drops and immediately recreates the session, all
-    /// within this one actor request, leaving a fresh enabled session attached.)
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Test-only raw capture path for tests that inspect changeset bytes directly.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -401,16 +410,43 @@ impl Database {
             .map_err(|_| DbError("db thread dropped the reply".to_string()))?
     }
 
-    /// See the native `take_changeset`. Same logic the actor runs for
-    /// `Request::TakeChangeset`, inline on the borrowed session: capture the batch,
-    /// then reset it unconditionally so the result (Ok or Err) leaves a fresh
-    /// enabled session attached.
-    #[cfg(target_arch = "wasm32")]
+    /// Capture the outgoing changeset and stage non-empty bytes at `path` before
+    /// resetting the recorded batch. If staging fails, the session is left
+    /// un-reset so the same batch can be captured again on the next cycle.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn take_changeset_staged(&self, path: PathBuf) -> Result<Vec<u8>, DbError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Request::TakeChangesetStaged {
+                path,
+                reply: reply_tx,
+            })
+            .map_err(|_| DbError("db thread is gone".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| DbError("db thread dropped the reply".to_string()))?
+    }
+
+    /// Test-only raw capture path for tests that inspect changeset bytes directly.
+    #[cfg(all(test, target_arch = "wasm32"))]
     pub(crate) async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
         let mut owned = self.owned.borrow_mut();
         let bytes = capture_changeset(owned.session.as_mut());
         reset_session(&mut owned, &self.synced_tables);
         bytes
+    }
+
+    /// See the native `take_changeset_staged`. wasm runs the same
+    /// stage-before-reset ordering inline on the owned connection.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn take_changeset_staged(&self, path: PathBuf) -> Result<Vec<u8>, DbError> {
+        let mut owned = self.owned.borrow_mut();
+        let bytes = capture_changeset(owned.session.as_mut())?;
+        if !bytes.is_empty() {
+            stage_changeset_bytes(&path, &bytes)?;
+        }
+        reset_session(&mut owned, &self.synced_tables);
+        Ok(bytes)
     }
 
     /// Apply an incoming changeset with capture disabled around just the apply, so
@@ -657,6 +693,7 @@ impl Database {
     /// the enqueue site is gone. Idempotent on `(operation, cloud_key)`. Queuing an
     /// upload also cancels any pending delete of the same key — latest intent wins,
     /// so a re-upload isn't tombstoned in the same cycle.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn enqueue_upload(
         &self,
         file_id: &str,
@@ -732,6 +769,7 @@ impl Database {
     /// has passed (see [`crate::blob::delete`]). Idempotent on `(operation,
     /// cloud_key)`. Queuing a delete also cancels any pending upload of the same key
     /// — latest intent wins.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn enqueue_delete(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
         let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
         self.call(move |conn| Self::enqueue_delete_on(conn, &cloud_key, &created_at))
@@ -795,7 +833,7 @@ impl Database {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, operation, file_id, cloud_key, source_path, scope, \
-                            retain_pinned, created_at, attempt_count, last_error, last_attempt_at \
+                            retain_pinned, attempt_count, last_attempt_at \
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
                 .map_err(DbError::from)?;
@@ -821,26 +859,9 @@ impl Database {
         .await
     }
 
-    /// Drop any queued uploads for `cloud_key`. The host calls this when a file
-    /// is deleted before its upload ran — no point uploading what's about to go.
-    pub async fn remove_cloud_outbox_uploads_for_key(
-        &self,
-        cloud_key: &str,
-    ) -> Result<(), DbError> {
-        let cloud_key = cloud_key.to_string();
-        self.call(move |conn| {
-            conn.execute(
-                "DELETE FROM cloud_outbox WHERE operation = 'upload' AND cloud_key = ?1",
-                [cloud_key],
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
     /// Clear the retry-backoff timestamp on failed uploads so the next cycle
     /// retries them immediately. Backs a host "retry now" action.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn reset_cloud_outbox_backoff(&self) -> Result<(), DbError> {
         self.call(move |conn| {
             conn.execute(
@@ -884,6 +905,7 @@ impl Database {
     /// re-registers) overwrites the prior row. coven reads this file but does not
     /// own it; a read validates it by presence + size (see
     /// [`crate::db`]'s `local_blob_refs` and [`crate::blob::cache::read_blob`]).
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn register_external_blob(
         &self,
         blob_id: &str,
@@ -935,6 +957,7 @@ impl Database {
 
     /// Remove the external blob ref for `blob_id`, so the blob resolves through the
     /// normal cache/cloud path again. A no-op if no ref is registered.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn clear_external_blob(&self, blob_id: &str) -> Result<(), DbError> {
         let blob_id = blob_id.to_string();
         self.call(move |conn| Self::clear_external_blob_on(conn, &blob_id))
@@ -955,22 +978,22 @@ impl Database {
 
     // ---- Blob make-Remote intents (device-local in-flight make_remote markers) ----
 
-    /// Record an in-flight make_remote of `(root_table, root_id)` as a presence
+    /// Record an in-flight make_remote of `(root_table, root_id)` as a durable
     /// marker. Transaction-composable: coven's `make_remote` inserts this in the same
-    /// transaction that enqueues the root's user-provided blob uploads, so an
-    /// in-flight make_remote is a durable, atomic fact (the upload drain's completion
-    /// check reads it to know an uploaded blob's root is a make_remote to finish, and
-    /// it survives a restart). The pin choice rides each upload row's `retain_pinned`,
-    /// not this marker.
+    /// transaction that enqueues the root's user-provided blob uploads or flips a
+    /// host-provided-only root, so an in-flight make_remote is a durable, atomic fact.
+    /// `retain_pinned` is consumed by inline host-provided uploads, which have no
+    /// upload outbox row to carry the pin choice.
     pub fn insert_make_remote_intent_on(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
+        retain_pinned: bool,
     ) -> Result<(), DbError> {
         conn.execute(
-            "INSERT OR REPLACE INTO blob_make_remote_intents (root_table, root_id) \
-             VALUES (?1, ?2)",
-            (root_table, root_id),
+            "INSERT OR REPLACE INTO blob_make_remote_intents \
+             (root_table, root_id, retain_pinned) VALUES (?1, ?2, ?3)",
+            (root_table, root_id, retain_pinned),
         )
         .map(|_| ())
         .map_err(DbError::from)
@@ -1002,12 +1025,28 @@ impl Database {
         root_id: &str,
     ) -> Result<bool, DbError> {
         conn.query_row(
-            "SELECT 1 FROM blob_make_remote_intents WHERE root_table = ?1 AND root_id = ?2",
+            "SELECT 1 FROM blob_make_remote_intents \
+             WHERE root_table = ?1 AND root_id = ?2",
             (root_table, root_id),
             |_| Ok(()),
         )
         .optional()
-        .map(|o| o.is_some())
+        .map(|value| value.is_some())
+        .map_err(DbError::from)
+    }
+
+    pub fn make_remote_intent_retain_pinned(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Option<bool>, DbError> {
+        conn.query_row(
+            "SELECT retain_pinned FROM blob_make_remote_intents \
+             WHERE root_table = ?1 AND root_id = ?2",
+            (root_table, root_id),
+            |r| r.get::<_, bool>(0),
+        )
+        .optional()
         .map_err(DbError::from)
     }
 
@@ -1062,6 +1101,21 @@ fn read_item_key(conn: &Connection, item_id: &str) -> Result<Option<[u8; 32]>, D
     }
 }
 
+fn migrate_bookkeeping_schema(conn: &Connection) -> Result<(), DbError> {
+    let columns = crate::blob::decl::table_columns(conn, "blob_make_remote_intents")
+        .map_err(|e| DbError(e.to_string()))?;
+    let has_retain_pinned = columns.iter().any(|column| column == "retain_pinned");
+    if !has_retain_pinned {
+        conn.execute(
+            "ALTER TABLE blob_make_remote_intents \
+             ADD COLUMN retain_pinned INTEGER",
+            [],
+        )
+        .map_err(DbError::from)?;
+    }
+    Ok(())
+}
+
 /// Map a `cloud_outbox` row to an [`OutboxEntry`]. Column order matches the
 /// SELECT in [`Database::pending_outbox`]. The flat row reads back as one
 /// [`OutboxOperation`] variant or the other, built from the columns that belong
@@ -1090,10 +1144,8 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
     Ok(OutboxEntry {
         id: r.get(0)?,
         cloud_key: r.get(3)?,
-        created_at: r.get(7)?,
-        attempt_count: r.get(8)?,
-        last_error: r.get(9)?,
-        last_attempt_at: r.get(10)?,
+        attempt_count: r.get(7)?,
+        last_attempt_at: r.get(8)?,
         operation,
     })
 }
@@ -1180,15 +1232,29 @@ fn run_actor(
                     );
                 }
             }
+            #[cfg(test)]
             Request::TakeChangeset(reply) => {
-                // Capture the recorded batch, then reset it by dropping and
-                // recreating the session — synchronously, here in the one actor
-                // request — so the loop continues with a fresh ENABLED session and
-                // capture is never suspended across a caller's `await`.
                 let bytes = capture_changeset(session.as_mut());
                 reset_session(&mut session, &conn, synced_tables);
                 if reply.send(bytes).is_err() {
                     debug!("db actor: changeset-capture caller dropped its reply receiver");
+                }
+            }
+            Request::TakeChangesetStaged { path, reply } => {
+                // Stage non-empty capture bytes before resetting the session. If
+                // staging fails, the current session remains attached with its
+                // recorded batch still present, so the next cycle can retry the
+                // whole capture rather than publishing from a partial file.
+                let staged = match capture_changeset(session.as_mut()) {
+                    Ok(bytes) if bytes.is_empty() => Ok(bytes),
+                    Ok(bytes) => stage_changeset_bytes(&path, &bytes).map(|()| bytes),
+                    Err(e) => Err(e),
+                };
+                if staged.is_ok() {
+                    reset_session(&mut session, &conn, synced_tables);
+                }
+                if reply.send(staged).is_err() {
+                    debug!("db actor: staged changeset-capture caller dropped its reply receiver");
                 }
             }
             Request::ApplyChangeset(f) => {
@@ -1272,6 +1338,69 @@ fn capture_changeset(
                 .to_string(),
         )),
     }
+}
+
+fn stage_changeset_bytes(path: &Path, bytes: &[u8]) -> Result<(), DbError> {
+    let tmp = staged_temp_path(path)?;
+    let write_result: Result<(), DbError> = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| DbError(format!("open staged changeset temp {}: {e}", tmp.display())))?;
+        file.write_all(bytes).map_err(|e| {
+            DbError(format!(
+                "write staged changeset temp {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        file.sync_all()
+            .map_err(|e| DbError(format!("sync staged changeset temp {}: {e}", tmp.display())))?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        if let Err(remove_error) = std::fs::remove_file(&tmp) {
+            if remove_error.kind() != std::io::ErrorKind::NotFound {
+                return Err(DbError(format!(
+                    "{error}; additionally failed to remove staged changeset temp {}: {remove_error}",
+                    tmp.display()
+                )));
+            }
+        }
+        return Err(error);
+    }
+    if let Err(rename_error) = std::fs::rename(&tmp, path) {
+        if let Err(remove_error) = std::fs::remove_file(&tmp) {
+            if remove_error.kind() != std::io::ErrorKind::NotFound {
+                return Err(DbError(format!(
+                    "install staged changeset {} from {}: {rename_error}; additionally failed to remove staged changeset temp {}: {remove_error}",
+                    path.display(),
+                    tmp.display(),
+                    tmp.display()
+                )));
+            }
+        }
+        return Err(DbError(format!(
+            "install staged changeset {} from {}: {rename_error}",
+            path.display(),
+            tmp.display()
+        )));
+    }
+    Ok(())
+}
+
+fn staged_temp_path(path: &Path) -> Result<PathBuf, DbError> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| {
+            DbError(format!(
+                "stage changeset path has no file name: {}",
+                path.display()
+            ))
+        })?
+        .to_string_lossy();
+    Ok(path.with_file_name(format!("{file_name}.tmp")))
 }
 
 /// Reset the recorded batch by dropping the session and immediately recreating it,

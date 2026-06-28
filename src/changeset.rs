@@ -20,12 +20,10 @@ pub enum ChangeOp {
 
 /// One row change extracted from a changeset.
 ///
-/// `columns` holds the row's column values in schema order. The value chosen
-/// per column follows the changeset's old/new semantics:
-/// - `Insert`: the new value.
-/// - `Delete`: the old value.
-/// - `Update`: the old value if present, else the new value (so unchanged
-///   columns — primary keys, foreign keys — are still available).
+/// `columns` holds the row's column values in schema order. [`walk`] returns the
+/// row's new values for INSERT/UPDATE and old values for DELETE, with unchanged
+/// UPDATE columns filled from the old side so primary keys and foreign keys stay
+/// available.
 ///
 /// `None` means SQL NULL or a column absent from the changeset.
 #[derive(Debug, Clone)]
@@ -33,6 +31,12 @@ pub struct RowChange {
     pub table: String,
     pub op: ChangeOp,
     pub columns: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateValue {
+    New,
+    Old,
 }
 
 impl RowChange {
@@ -47,10 +51,26 @@ impl RowChange {
     }
 }
 
+enum ColumnCell {
+    Absent,
+    Present(Option<String>),
+}
+
 /// Walk a changeset and return every row change with its column values.
 ///
 /// Returns an empty vec for an empty changeset.
 pub fn walk(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, String> {
+    walk_with_update_values(changeset_bytes, UpdateValue::New)
+}
+
+pub(crate) fn walk_old(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, String> {
+    walk_with_update_values(changeset_bytes, UpdateValue::Old)
+}
+
+fn walk_with_update_values(
+    changeset_bytes: &[u8],
+    update_value: UpdateValue,
+) -> Result<Vec<RowChange>, String> {
     if changeset_bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -73,10 +93,16 @@ pub fn walk(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, String> {
         };
         let ncol = op.number_of_columns();
 
-        let columns = (0..ncol)
-            .map(|c| extract_col(item, c as usize, change_op))
+        let cells = (0..ncol)
+            .map(|c| extract_col(item, c as usize, change_op, update_value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let columns = cells
+            .iter()
+            .map(|cell| match cell {
+                ColumnCell::Absent => None,
+                ColumnCell::Present(value) => value.clone(),
+            })
             .collect();
-
         changes.push(RowChange {
             table: op.table_name().to_string(),
             op: change_op,
@@ -166,15 +192,39 @@ fn extract_col(
     item: &rusqlite::session::ChangesetItem,
     col: usize,
     op: ChangeOp,
-) -> Option<String> {
+    update_value: UpdateValue,
+) -> Result<ColumnCell, String> {
     match op {
-        ChangeOp::Insert => item.new_value(col).ok().and_then(value_ref_to_string),
-        ChangeOp::Delete => item.old_value(col).ok().and_then(value_ref_to_string),
-        ChangeOp::Update => item
-            .old_value(col)
-            .ok()
-            .and_then(value_ref_to_string)
-            .or_else(|| item.new_value(col).ok().and_then(value_ref_to_string)),
+        ChangeOp::Insert => changeset_value(item, col, UpdateValue::New),
+        ChangeOp::Delete => changeset_value(item, col, UpdateValue::Old),
+        ChangeOp::Update => {
+            let fallback = match update_value {
+                UpdateValue::New => UpdateValue::Old,
+                UpdateValue::Old => UpdateValue::New,
+            };
+            match changeset_value(item, col, update_value)? {
+                ColumnCell::Absent => changeset_value(item, col, fallback),
+                present => Ok(present),
+            }
+        }
+    }
+}
+
+fn changeset_value(
+    item: &rusqlite::session::ChangesetItem,
+    col: usize,
+    side: UpdateValue,
+) -> Result<ColumnCell, String> {
+    let value = match side {
+        UpdateValue::New => item.new_value(col),
+        UpdateValue::Old => item.old_value(col),
+    };
+    match value {
+        Ok(value) => Ok(ColumnCell::Present(value_ref_to_string(value))),
+        Err(rusqlite::Error::InvalidColumnIndex(_)) => Ok(ColumnCell::Absent),
+        Err(e) => Err(format!(
+            "changeset {side:?} value read failed for column {col}: {e}"
+        )),
     }
 }
 

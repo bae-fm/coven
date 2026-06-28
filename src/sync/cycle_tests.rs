@@ -13,16 +13,18 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
-use crate::blob::BlobScope;
+use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::CloudCipher;
-use crate::sync::cycle::run_single_sync_cycle;
+use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
 use crate::sync::push::SCHEMA_VERSION;
+use crate::sync::session::BlobDecl;
 use crate::sync::signed_control::AckJson;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
@@ -650,6 +652,164 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         !row_exists(&db_c, "SELECT 1 FROM notes WHERE id = 'a1'").await,
         "the row M applied from A must NOT echo back through M's own changeset \
          (capture is disabled around the apply)",
+    );
+}
+
+#[tokio::test]
+async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[8u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('hponly', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
+        .await
+        .expect("store host-provided blob");
+
+    storage.fail_next_blob_puts(1);
+    let failed = match run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &keypair,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(_) => panic!("blob upload should fail before publish"),
+        Err(error) => error,
+    };
+    assert!(
+        failed.contains("forced blob upload failure"),
+        "cycle surfaces the blob upload failure: {failed}"
+    );
+    assert!(
+        cycle::read_staged_captured_changeset(&ld)
+            .expect("read staged captured changeset")
+            .is_some(),
+        "the captured changeset stays staged for retry"
+    );
+    assert!(
+        !storage.exists("photos/hponly").await.expect("exists check"),
+        "the failed blob upload did not publish the blob"
+    );
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        cycle::read_staged_captured_changeset(&ld)
+            .expect("read staged captured changeset")
+            .is_none(),
+        "the staged capture clears once the retry reaches packed staging"
+    );
+    assert!(
+        storage.exists("photos/hponly").await.expect("exists check"),
+        "the retried captured changeset uploads the host-provided blob"
+    );
+}
+
+#[test]
+fn staged_captured_changeset_read_errors_are_returned() {
+    let (_tmp, ld) = temp_library_dir();
+    std::fs::create_dir(cycle::captured_staging_path(&ld)).expect("block staged capture read");
+    let error = cycle::read_staged_captured_changeset(&ld)
+        .expect_err("directory at staged capture path is a read error");
+    assert!(
+        error.contains("read staged captured changeset"),
+        "read error is surfaced: {error}"
+    );
+}
+
+#[test]
+fn staged_captured_changeset_clear_errors_are_returned() {
+    let (_tmp, ld) = temp_library_dir();
+    std::fs::create_dir(cycle::captured_staging_path(&ld)).expect("block staged capture clear");
+    let error = cycle::clear_staged_captured_changeset(&ld)
+        .expect_err("directory at staged capture path is a clear error");
+    assert!(error.contains("remove"), "clear error is surfaced: {error}");
+}
+
+#[tokio::test]
+async fn capture_stage_failure_keeps_session_batch_for_retry() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
+        &[9u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
+
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('stage-fail', 'Stage Fail', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+
+    let capture_stage_tmp =
+        cycle::captured_staging_path(&ld).with_file_name("sync_capture_staging.bin.tmp");
+    std::fs::create_dir(&capture_stage_tmp).expect("block staging temp path");
+    let failed = match run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &keypair,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(_) => panic!("capture staging should fail"),
+        Err(error) => error,
+    };
+    assert!(
+        failed.contains("Failed to stage captured changeset"),
+        "cycle surfaces the capture staging failure: {failed}"
+    );
+    assert!(
+        storage.get_changeset("M", 1).await.is_err(),
+        "the unstaged changeset is not published"
+    );
+
+    std::fs::remove_dir(capture_stage_tmp).expect("unblock staging temp path");
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        storage.get_changeset("M", 1).await.is_ok(),
+        "the same captured batch publishes after staging is available"
     );
 }
 

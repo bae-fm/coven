@@ -20,7 +20,7 @@ one pass:
 1. `VACUUM INTO` writes a clean, defragmented copy of the live database to a temp
    file. This copy still holds every table, including ones that never sync.
 2. Local-only tables (any table the host did not pass to
-   [`Database::open`](rustdoc:method:coven::database::Database::open) as a
+   `Coven::builder(config).synced_tables(...)` as a
    [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable), plus coven's
    own `sync_cursors`, `sync_state`, and `cloud_outbox`) have their rows deleted.
    Their schema stays, so the restored database opens against the same schema it
@@ -154,37 +154,25 @@ the restore flow (the owner recovering the library on new hardware). Both call
    [`BootstrapResult`](rustdoc:struct:coven::sync::snapshot::BootstrapResult)
    carrying the per-device cursors from the metadata.
 
-The device then opens the bootstrapped file with
-[`Database::open`](rustdoc:method:coven::database::Database::open) and pulls every
-changeset newer than the bootstrap cursors, so it catches up on anything written
-between the snapshot and now. coven owns the connection from this point: there is
-no host reopen step. The snapshot already carries the full schema (the host's
-tables and coven's bookkeeping), so `Database::open`'s bookkeeping migration finds
-its `IF NOT EXISTS` tables already present and the host's `migrate` closure is a
-no-op here.
+The device then opens the bootstrapped file through
+`Coven::builder(config).open(...)` and pulls every changeset newer than the
+bootstrap cursors, so it catches up on anything written between the snapshot and
+now. coven owns the connection from this point: there is no host reopen step. The
+snapshot already carries the full schema (the host's tables and coven's
+bookkeeping), so coven's bookkeeping migration finds its `IF NOT EXISTS` tables
+already present and the host's `migrate` closure is a no-op here.
 
 Capture stays enabled through the bootstrap pull. A just-bootstrapped library has
 no local writer, so there is no whole-cycle suspend to manage; the pull disables
 capture only around each apply, exactly as a steady-state cycle does.
 
 ```rust
-let bootstrap = bootstrap_from_snapshot(storage, library_id, &cipher, owner_pubkey, &db_path).await?;
-let (db, _stamper) = Database::open(
-    &db_path,
-    synced_tables.to_vec(),
-    device_id.to_string(),
-    |_conn| Ok(()), // schema already in the snapshot; nothing to migrate
-)?;
-let applied = pull_changes(
-    &db,
-    synced_tables,
-    storage,
-    device_id,
-    owner_pubkey,
-    &bootstrap.cursors,
-    library_dir,
-    blob_source,
-).await?;
+let _bootstrap = bootstrap_from_snapshot(storage, library_id, &cipher, owner_pubkey, &db_path).await?;
+let handle = Coven::builder(config)
+    .synced_tables(synced_tables.to_vec())
+    .open(|_conn| Ok(()))?; // schema already in the snapshot; nothing to migrate
+handle.connect_sync(Some(encryption_service)).await?;
+handle.sync_now();
 ```
 
 The snapshot's row-clearing step empties `sync_cursors`, so a bootstrapped database

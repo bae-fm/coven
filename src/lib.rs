@@ -10,39 +10,29 @@
 //!
 //! Integration contract for the host:
 //! - coven OWNS the SQLite connection. The host opens it once with
-//!   [`database::Database::open`]`(path, synced_tables, device_id, migrate)`:
-//!   coven runs its own bookkeeping migration, then the host's `migrate` closure
-//!   for the app's tables, seeds the register clock off the rows on disk,
-//!   attaches the capture session, and spawns the connection thread. The host
-//!   runs all of its own SQL through [`database::Database::call`]`(|conn| …)`;
-//!   coven captures those writes through the attached session.
+//!   [`Coven::builder(config)`], declares synced tables, and calls `open`: coven
+//!   runs its own bookkeeping migration, then the host's `migrate` closure for the
+//!   app's tables, seeds the register clock off the rows on disk, attaches the
+//!   capture session, and spawns the connection thread. The host runs its SQL
+//!   through [`CovenHandle::sql`] or [`CovenHandle::write`]; coven captures those
+//!   writes through the attached session.
 //! - Every synced table has an `id` text primary key at column 0 and an
 //!   `_updated_at TEXT NOT NULL` column, and is declared as a
-//!   [`sync::session::SyncedTable`] in the set passed to `Database::open`. A plain
+//!   [`SyncedTable`] in the builder's `synced_tables` set. A plain
 //!   [`sync::session::SyncedTable::new`] table syncs unconditionally;
 //!   [`sync::session::SyncedTable::gated_by`] marks a *gated root* whose boolean
 //!   gate column decides, per row, whether that row and its declared
 //!   FK-descendants are shared. See [`sync::gate`] for the gating semantics.
 //! - `_updated_at` is coven's last-writer-wins register, an opaque Hybrid Logical
-//!   Clock stamp the host mints with the [`UpdatedAtStamper`] that
-//!   `Database::open` returns (non-optional, already seeded) and binds into every
-//!   synced-row write. The host must not parse or compare the stamp as a
-//!   wall-clock time; coven advances the clock past pulled rows so a later local
-//!   write always sorts causally after them, which a wall clock cannot guarantee
-//!   under skew. Changeset envelopes and membership entries also carry an HLC
-//!   stamp for ordering/debuggability, but it is not authorization-load-bearing —
-//!   pull authorizes by signature and current write-capable membership, and
-//!   revocation is enforced by key rotation.
-//! - When (and only when) a cloud provider is connected, the host builds the
-//!   [`sync::sync_manager::SyncManager`] lazily, passing it the same `Database`
-//!   handle and synced-table set. `SyncManager::new` is synchronous and
-//!   infallible — all seeding happened in `Database::open`. Which rows carry blobs
-//!   is declared per table via [`sync::session::SyncedTable::carries_blob`]; the
-//!   host also supplies an optional [`blob::BlobTransitionObserver`].
-//!
-//!   A local-only library that never connects a provider simply stamps and
-//!   writes rows through `Database::call` without ever building a `SyncManager`,
-//!   an `EncryptionService`, or a cloud config.
+//!   Clock stamp the host mints with [`SqlContext::stamp`] and binds into every
+//!   synced-row write. The host must not parse or compare the stamp as a wall-clock
+//!   time; coven advances the clock past pulled rows so a later local write always
+//!   sorts causally after them, which a wall clock cannot guarantee under skew.
+//! - When a cloud provider is connected, the host calls
+//!   [`CovenHandle::connect_sync`]. Which rows carry blobs is declared per table
+//!   via [`sync::session::SyncedTable::carries_blob`]; the host also supplies an
+//!   optional [`blob::BlobTransitionObserver`] to the builder. A local-only library
+//!   that never connects a provider still reads and writes through the handle.
 //!
 //! # Blob storage model
 //!
@@ -67,7 +57,7 @@
 //!
 //! The **cache** ([`blob::cache`]) is a Remote-only mechanism: it holds
 //! re-fetchable copies of Remote blobs under `storage/cache/<namespace>/…`
-//! (evictable, against a per-namespace size budget — [`Database::set_cache_budget`])
+//! (evictable, against a per-namespace size budget — [`CovenHandle::set_cache_budget`])
 //! and `storage/pinned/<namespace>/…` (kept). A Local blob is never in the cache,
 //! and `CacheEager`/`CacheLazy`/pin/budget describe a blob only while it is Remote.
 //! An *asset* (a cover, an artist image — [`sync::session::SyncedTable::asset`])
@@ -80,10 +70,12 @@ pub(crate) mod blob;
 pub(crate) mod changeset;
 pub(crate) mod clock;
 pub(crate) mod config;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod coven;
 pub(crate) mod database;
 pub(crate) mod db;
 pub(crate) mod encryption;
-// The native data handle: one object a host constructs that owns coven's pieces
+// The native data handle: one object coven opens that owns coven's pieces
 // (the `Database`, the `LibraryDir`, the keys, and — once a provider is connected
 // — the `SyncManager`) and exposes the whole data interface as methods. The
 // native counterpart of the browser-only `wasm_facade::CovenLibrary`. Documented
@@ -168,14 +160,18 @@ mod wasm_keystore_test;
 // implementation module is `pub(crate)`; a host reaches coven only through these
 // names, never through `coven::blob::…` or `coven::sync::…`.
 
-// Top-level handle + database.
-pub use database::{Database, DbError};
+// Top-level native handle + database error.
+#[cfg(not(target_arch = "wasm32"))]
+pub use coven::{
+    Coven, CovenBuilder, CovenConfig, CovenError, CovenResult, PendingBlob, SqlContext, WriteBatch,
+};
+pub use database::DbError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use handle::CovenHandle;
 
 /// The exact `rusqlite` coven owns the connection through. The host runs its app
-/// SQL via [`Database::call`]`(|conn| …)` against this same crate — use
-/// `coven::rusqlite::{params, Row, …}` rather than depending on `rusqlite`
+/// SQL via [`CovenHandle::sql`] / [`CovenHandle::write`] against this same crate
+/// — use `coven::rusqlite::{params, Row, …}` rather than depending on `rusqlite`
 /// directly, so the host can never drift onto a `libsqlite3-sys` version that
 /// conflicts with coven's.
 pub use rusqlite;
@@ -209,18 +205,16 @@ pub use keys::{
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthTokens};
 
 // At-rest crypto the host configures (the host sizes cloud stream reads from
-// `CHUNK_SIZE`), and the library directory the host points coven at (it is in
-// `CovenHandle::new`'s signature).
+// `CHUNK_SIZE`), and the library directory the host points coven at.
 pub use encryption::{EncryptionError, EncryptionService, CHUNK_SIZE};
 pub use library_dir::LibraryDir;
 
-// Sync: the manager the host holds, membership, the row clock + HLC stamp.
-// `SyncManager` and the cloud setup/restore/join bootstrap are native-only; the
-// browser drives sync through `wasm_facade` instead.
-pub use sync::hlc::{Timestamp, UpdatedAtStamper};
+// Sync vocabulary exposed through the native handle. The browser drives sync
+// through `wasm_facade` instead.
+pub use sync::hlc::Timestamp;
 pub use sync::membership::MemberRole;
 #[cfg(not(target_arch = "wasm32"))]
-pub use sync::sync_manager::{ConfigProvider, MemberInfo, SyncManager};
+pub use sync::sync_manager::MemberInfo;
 
 // Sync setup / restore / join bootstrap.
 pub use join_code::{

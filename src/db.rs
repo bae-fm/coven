@@ -4,28 +4,25 @@
 //! coven owns five device-local bookkeeping tables — `sync_cursors`,
 //! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents` — plus
 //! the library-global synced table `item_keys`, all created by `MIGRATION_SQL`,
-//! which
-//! [`crate::database::Database::open`] runs against the connection coven owns.
-//! The host no longer implements any of this; it runs its own SQL through
-//! [`crate::database::Database::call`] and reads/writes the outbox through the
-//! [`crate::database::Database`] API.
+//! which coven runs against the connection it owns during open. The host does
+//! not implement any of this; native app SQL goes through
+//! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 //!
 //! Unlike the bookkeeping tables, `item_keys` is content every member needs, so
-//! coven injects it into the synced-table set (see
-//! [`crate::database::Database::open`]) and it rides both sync paths: the
-//! changeset capture session records `mint_item_key` INSERTs, and the snapshot
-//! preserves it (it is in the synced set, so `clear_non_synced` keeps its rows).
+//! coven injects it into the synced-table set during open and it rides both sync
+//! paths: the changeset capture session records `mint_item_key` INSERTs, and the
+//! snapshot preserves it (it is in the synced set, so `clear_non_synced` keeps
+//! its rows).
 
 /// The coven-owned synced table holding per-item content keys. Injected into the
-/// synced-table set by [`crate::database::Database::open`], so it is captured,
-/// snapshotted, and applied like any synced table — but is owned by coven, not
-/// the host. The `_updated_at` HLC stamp satisfies the synced-table contract;
-/// rows are immutable (idempotent INSERT) so LWW never has to pick a winner.
+/// synced-table set during open, so it is captured, snapshotted, and applied
+/// like any synced table — but is owned by coven, not the host. The `_updated_at`
+/// HLC stamp satisfies the synced-table contract; rows are immutable
+/// (idempotent INSERT) so LWW never has to pick a winner.
 pub(crate) const ITEM_KEYS_TABLE: &str = "item_keys";
 
 /// SQL that creates coven's bookkeeping tables and the `item_keys` synced table,
-/// run by `Database::open` before the host's own migration. Idempotent
-/// (`IF NOT EXISTS`).
+/// run before the host's own migration. Idempotent (`IF NOT EXISTS`).
 pub(crate) const MIGRATION_SQL: &str = "\
 CREATE TABLE IF NOT EXISTS sync_cursors (
     device_id TEXT PRIMARY KEY,
@@ -80,15 +77,15 @@ CREATE TABLE IF NOT EXISTS local_blob_refs (
 -- the transition, so this row makes it durable. It is set in the same transaction
 -- that enqueues the root's user-provided blob uploads, and removed in the same
 -- transaction that flips the gate true once the last upload lands (the single commit
--- point). It is a pure presence marker: its existence tells the upload drain's
+-- point) or once inline host-provided uploads consume it. Its existence tells the upload drain's
 -- completion check that an uploaded blob's root is a make_remote to finish (vs. an
--- orphan from a cancelled make_remote to tombstone), and it makes completion +
--- cancel idempotent across a restart. The pin choice rides each upload row's
--- `retain_pinned`, not this marker. Device-local like the other bookkeeping tables —
+-- orphan from a cancelled make_remote to tombstone), and `retain_pinned` carries the
+-- root pin choice for host-provided blobs that do not have upload rows. Device-local like the other bookkeeping tables —
 -- no `_updated_at`, never synced or snapshotted.
 CREATE TABLE IF NOT EXISTS blob_make_remote_intents (
     root_table TEXT NOT NULL,
     root_id    TEXT NOT NULL,
+    retain_pinned INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (root_table, root_id)
 );
 
@@ -124,12 +121,9 @@ pub struct ExternalBlob {
 pub struct OutboxEntry {
     pub id: i64,
     pub cloud_key: String,
-    pub created_at: String,
     /// How many times an upload of this entry has failed. `0` for a freshly
     /// queued entry.
     pub attempt_count: i64,
-    /// The error from the most recent failed attempt, if any.
-    pub last_error: Option<String>,
     /// RFC 3339 timestamp of the most recent attempt, if any. Drives retry
     /// backoff.
     pub last_attempt_at: Option<String>,

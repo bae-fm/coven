@@ -401,6 +401,7 @@ pub struct MockSyncStorage {
     /// consistent) resolves it — the exact lag issue #84's grant-coordinate fetch
     /// is built for.
     hidden_from_listing: Mutex<std::collections::HashSet<(String, u64)>>,
+    fail_blob_puts: std::sync::atomic::AtomicUsize,
 }
 
 impl MockSyncStorage {
@@ -420,6 +421,7 @@ impl MockSyncStorage {
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
+            fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -442,6 +444,11 @@ impl MockSyncStorage {
             .lock()
             .unwrap()
             .insert((author_pubkey.to_string(), seq));
+    }
+
+    pub fn fail_next_blob_puts(&self, count: usize) {
+        self.fail_blob_puts
+            .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Remove a blob object from the mock cloud, keyed the same flat
@@ -613,6 +620,19 @@ impl SyncStorage for MockSyncStorage {
         cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
+        if self
+            .fail_blob_puts
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(StorageError::S3(format!(
+                "forced blob upload failure for {namespace}/{id}"
+            )));
+        }
         let key = blob_key(namespace, id, cloud_path);
         self.objects.lock().unwrap().insert(key, data);
         Ok(())

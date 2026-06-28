@@ -13,11 +13,14 @@
 //! All connection access goes through the owned [`Database`]; capture is never
 //! suspended across the network steps — only the apply briefly disables it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
-use tracing::{error, info};
+use rusqlite::OptionalExtension;
+use tracing::{debug, error, info, warn};
 
 use crate::blob::decl::BlobDecls;
+use crate::blob::{BlobRef, CacheFill, Provenance};
 use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
@@ -25,6 +28,7 @@ use crate::sync::session::SyncedTable;
 
 use super::envelope;
 use super::gate;
+use super::gate::Gates;
 use super::membership::{self, MembershipCoord};
 use super::pull::{self, PullResult};
 use super::push::{OutgoingChangeset, SCHEMA_VERSION};
@@ -49,6 +53,52 @@ pub struct SyncResult {
 impl SyncService {
     pub fn new(device_id: String) -> Self {
         SyncService { device_id }
+    }
+
+    pub async fn complete_host_provided_make_remotes(
+        &self,
+        db: &Database,
+        tables: &[SyncedTable],
+        storage: &dyn SyncStorage,
+        timestamp: &str,
+        library_dir: &LibraryDir,
+    ) -> Result<bool, SyncCycleError> {
+        let roots = ready_host_provided_make_remotes(db, tables).await?;
+        let mut completed = false;
+        for root in roots {
+            let mut uploaded = Vec::new();
+            for blob in &root.host_blobs {
+                uploaded.push(
+                    upload_host_provided_blob(
+                        db,
+                        storage,
+                        library_dir,
+                        blob,
+                        root.intent.retain_pinned,
+                    )
+                    .await?,
+                );
+            }
+
+            finish_host_provided_make_remote(db, root.clone(), timestamp.to_string()).await?;
+
+            for path in root.user_external_paths {
+                crate::local_blob::remove_file(&path).await.map_err(|e| {
+                    SyncCycleError::AssetUpload(format!(
+                        "make_remote of {}/{} completed but deleting the external source {} failed: {e}",
+                        root.intent.root_table,
+                        root.intent.root_id,
+                        path.display()
+                    ))
+                })?;
+            }
+
+            for uploaded in uploaded {
+                uploaded.drop_local_store(library_dir).await?;
+            }
+            completed = true;
+        }
+        Ok(completed)
     }
 
     /// Gate the captured `outgoing` changeset, prepare its push envelope, and
@@ -120,77 +170,27 @@ impl SyncService {
         if let Some(ref cs) = outgoing_cs {
             let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
             let tables = tables.to_vec();
+            let decl_tables = tables.clone();
             let blob_decls = db
                 .call(move |conn| {
-                    BlobDecls::from_tables(conn, &tables)
+                    BlobDecls::from_tables(conn, &decl_tables)
                         .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))
                 })
                 .await
                 .map_err(|e| SyncCycleError::AssetScan(e.0))?;
-            for blob in crate::sync::pull::host_provided_blobs(&blob_decls, &changes) {
-                // The Local home for a host-provided blob is the local store; the
-                // cache fallback covers a re-run after a crash that uploaded but did
-                // not finish the move.
-                let local =
-                    match crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id)
-                        .await
-                    {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            return Err(SyncCycleError::AssetUpload(format!(
-                                "reading local-store blob for {}: {e}",
-                                blob.id
-                            )));
-                        }
-                    };
-                let was_in_local_store = local.is_some();
-                let bytes = match local {
-                    Some(bytes) => bytes,
-                    None => match crate::blob::cache::read_staged(
-                        library_dir,
-                        &blob.namespace,
-                        &blob.id,
-                    )
-                    .await
-                    {
-                        Ok(Some(bytes)) => bytes,
-                        Ok(None) => {
-                            error!(
-                                id = %blob.id,
-                                "host-provided blob is in neither the local store nor the cache; \
-                                 aborting push so the changeset is not published without its blob"
-                            );
-                            return Err(SyncCycleError::BlobMissing(format!(
-                                "host-provided blob {} is in neither the local store nor the cache",
-                                blob.id
-                            )));
-                        }
-                        Err(e) => {
-                            return Err(SyncCycleError::AssetUpload(format!(
-                                "reading cached blob for {}: {e}",
-                                blob.id
-                            )));
-                        }
-                    },
-                };
-                // Resolve the host's public scope to the internal key scope before
-                // storage encrypts. An `Item(id)` scope reads the key from
-                // `item_keys`; a missing row is a host bug and aborts the cycle.
-                let resolved = db
-                    .resolve_blob_scope(blob.scope.clone())
-                    .await
-                    .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
-                storage
-                    .put_blob(
-                        &blob.namespace,
-                        &blob.id,
-                        resolved,
-                        blob.cloud_path.as_deref(),
-                        bytes,
-                    )
-                    .await
-                    .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-                info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
+            let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes);
+            let make_remote_intents =
+                make_remote_intents_for_blobs(db, &tables, &host_blobs).await?;
+            let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
+            for blob in host_blobs {
+                let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
+                let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
+                let uploaded =
+                    upload_host_provided_blob(db, storage, library_dir, &blob, retain_pinned)
+                        .await?;
+                if let Some(intent) = intent {
+                    consumed_intents.insert((intent.root_table.clone(), intent.root_id.clone()));
+                }
 
                 // The blob is now Remote, so its local-store copy (its Local home)
                 // must not stay there — a Remote blob's bytes in the local store
@@ -201,28 +201,10 @@ impl SyncService {
                 // fetches them. Reached only on a successful upload, so the bytes are
                 // durably in the cloud before we touch the local copy. A copy already
                 // in the cache (crash-recovery fallback) needs neither.
-                if was_in_local_store {
-                    match blob.fill {
-                        crate::blob::CacheFill::CacheEager => {
-                            crate::blob::cache::move_local_into_cache(
-                                library_dir,
-                                &blob.namespace,
-                                &blob.id,
-                            )
-                            .await
-                            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-                        }
-                        crate::blob::CacheFill::CacheLazy => {
-                            crate::blob::local_files::drop_blob(
-                                library_dir,
-                                &blob.namespace,
-                                &blob.id,
-                            )
-                            .await
-                            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-                        }
-                    }
-                }
+                uploaded.drop_local_store(library_dir).await?;
+            }
+            if !consumed_intents.is_empty() {
+                delete_make_remote_intents(db, consumed_intents).await?;
             }
         }
 
@@ -301,6 +283,319 @@ impl SyncService {
         let our_pubkey = hex::encode(keypair.public_key);
         Ok(membership::write_grant_coord(&entries, &our_pubkey))
     }
+}
+
+#[derive(Clone)]
+struct InlineMakeRemoteIntent {
+    root_table: String,
+    root_id: String,
+    retain_pinned: bool,
+}
+
+#[derive(Clone)]
+struct ReadyHostProvidedMakeRemote {
+    intent: InlineMakeRemoteIntent,
+    gate_column: String,
+    user_blob_ids: Vec<String>,
+    user_external_paths: Vec<PathBuf>,
+    host_blobs: Vec<BlobRef>,
+}
+
+struct UploadedHostBlob {
+    blob: BlobRef,
+    was_in_local_store: bool,
+}
+
+impl UploadedHostBlob {
+    async fn drop_local_store(self, library_dir: &LibraryDir) -> Result<(), SyncCycleError> {
+        if self.was_in_local_store {
+            crate::blob::local_files::drop_blob(library_dir, &self.blob.namespace, &self.blob.id)
+                .await
+                .map_err(|e| {
+                    SyncCycleError::AssetUpload(format!(
+                        "make_remote completed but dropping local-store blob {}/{} failed: {e}",
+                        self.blob.namespace, self.blob.id
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+}
+
+async fn upload_host_provided_blob(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    library_dir: &LibraryDir,
+    blob: &BlobRef,
+    retain_pinned: bool,
+) -> Result<UploadedHostBlob, SyncCycleError> {
+    let local = match crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Err(SyncCycleError::AssetUpload(format!(
+                "reading local-store blob for {}: {e}",
+                blob.id
+            )));
+        }
+    };
+    let was_in_local_store = local.is_some();
+    let bytes = match local {
+        Some(bytes) => bytes,
+        None => match crate::blob::cache::read_staged(library_dir, &blob.namespace, &blob.id).await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                error!(
+                    id = %blob.id,
+                    "host-provided blob is in neither the local store nor the cache; \
+                     aborting push so the changeset is not published without its blob"
+                );
+                return Err(SyncCycleError::BlobMissing(format!(
+                    "host-provided blob {} is in neither the local store nor the cache",
+                    blob.id
+                )));
+            }
+            Err(e) => {
+                return Err(SyncCycleError::AssetUpload(format!(
+                    "reading cached blob for {}: {e}",
+                    blob.id
+                )));
+            }
+        },
+    };
+
+    let resolved = db
+        .resolve_blob_scope(blob.scope.clone())
+        .await
+        .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
+    storage
+        .put_blob(
+            &blob.namespace,
+            &blob.id,
+            resolved,
+            blob.cloud_path.as_deref(),
+            bytes.clone(),
+        )
+        .await
+        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+    info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
+
+    if retain_pinned {
+        crate::blob::cache::populate_pinned(library_dir, &blob.namespace, &blob.id, &bytes)
+            .await
+            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+    } else if was_in_local_store && blob.fill == CacheFill::CacheEager {
+        crate::blob::cache::write_blob(db, library_dir, blob, &bytes)
+            .await
+            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+    }
+
+    Ok(UploadedHostBlob {
+        blob: blob.clone(),
+        was_in_local_store,
+    })
+}
+
+async fn ready_host_provided_make_remotes(
+    db: &Database,
+    tables: &[SyncedTable],
+) -> Result<Vec<ReadyHostProvidedMakeRemote>, SyncCycleError> {
+    let tables = tables.to_vec();
+    db.call(move |conn| {
+        let gates = Gates::from_tables(conn, &tables)
+            .map_err(|e| crate::database::DbError(format!("gate build: {e}")))?;
+        let decls = BlobDecls::from_tables(conn, &tables)
+            .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?;
+        let gate_columns: HashMap<String, String> = tables
+            .iter()
+            .filter_map(|table| {
+                table
+                    .gate_column()
+                    .map(|column| (table.name().to_string(), column.to_string()))
+            })
+            .collect();
+        let mut stmt = conn
+            .prepare(
+                "SELECT root_table, root_id, retain_pinned FROM blob_make_remote_intents \
+                 ORDER BY root_table, root_id",
+            )
+            .map_err(crate::database::DbError::from)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(crate::database::DbError::from)?;
+        let mut ready = Vec::new();
+        for row in rows {
+            let (root_table, root_id, retain_pinned) =
+                row.map_err(crate::database::DbError::from)?;
+            let refs = decls
+                .refs_for_root(conn, &gates, &root_table, &root_id)
+                .map_err(|e| crate::database::DbError(e.to_string()))?;
+            let user_blob_ids: Vec<String> = refs
+                .iter()
+                .filter(|blob| blob.provenance == Provenance::UserProvided)
+                .map(|blob| blob.id.clone())
+                .collect();
+            let host_blobs: Vec<BlobRef> = refs
+                .into_iter()
+                .filter(|blob| blob.provenance == Provenance::HostProvided)
+                .collect();
+            if host_blobs.is_empty() {
+                warn!(
+                    root_table = %root_table,
+                    root_id = %root_id,
+                    "make_remote intent has no host-provided blobs ready for inline completion"
+                );
+                continue;
+            }
+            if has_pending_upload(conn, &user_blob_ids)? {
+                debug!(
+                    root_table = %root_table,
+                    root_id = %root_id,
+                    user_blob_count = user_blob_ids.len(),
+                    "make_remote intent is waiting for user-provided blob uploads"
+                );
+                continue;
+            }
+            let user_external_paths =
+                crate::blob::upload::external_source_paths(conn, &user_blob_ids)?;
+            let gate_column = gate_columns.get(&root_table).cloned().ok_or_else(|| {
+                crate::database::DbError(format!(
+                    "make_remote completion: gated root {root_table} has no gate column"
+                ))
+            })?;
+            ready.push(ReadyHostProvidedMakeRemote {
+                intent: InlineMakeRemoteIntent {
+                    root_table,
+                    root_id,
+                    retain_pinned,
+                },
+                gate_column,
+                user_blob_ids,
+                user_external_paths,
+                host_blobs,
+            });
+        }
+        Ok(ready)
+    })
+    .await
+    .map_err(|e| SyncCycleError::AssetScan(e.0))
+}
+
+fn has_pending_upload(
+    conn: &rusqlite::Connection,
+    blob_ids: &[String],
+) -> Result<bool, crate::database::DbError> {
+    for id in blob_ids {
+        let pending = conn
+            .query_row(
+                "SELECT 1 FROM cloud_outbox WHERE operation = 'upload' AND file_id = ?1 LIMIT 1",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(crate::database::DbError::from)?
+            .is_some();
+        if pending {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn finish_host_provided_make_remote(
+    db: &Database,
+    root: ReadyHostProvidedMakeRemote,
+    stamp: String,
+) -> Result<(), SyncCycleError> {
+    db.call(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        crate::sync::gate::write_gate(
+            &tx,
+            &root.intent.root_table,
+            &root.gate_column,
+            true,
+            &stamp,
+            &root.intent.root_id,
+        )
+        .map_err(crate::database::DbError::from)?;
+        for id in &root.user_blob_ids {
+            Database::clear_external_blob_on(&tx, id)?;
+        }
+        Database::delete_make_remote_intent_on(&tx, &root.intent.root_table, &root.intent.root_id)?;
+        tx.commit().map_err(crate::database::DbError::from)
+    })
+    .await
+    .map_err(|e| SyncCycleError::AssetUpload(e.0))
+}
+
+async fn make_remote_intents_for_blobs(
+    db: &Database,
+    tables: &[SyncedTable],
+    blobs: &[BlobRef],
+) -> Result<HashMap<(String, String), InlineMakeRemoteIntent>, SyncCycleError> {
+    if blobs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let tables = tables.to_vec();
+    let blobs = blobs.to_vec();
+    db.call(move |conn| {
+        let gates = Gates::from_tables(conn, &tables)
+            .map_err(|e| crate::database::DbError(format!("gate build: {e}")))?;
+        let decls = BlobDecls::from_tables(conn, &tables)
+            .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?;
+        let mut out = HashMap::new();
+        for blob in blobs {
+            let Some((table, pk)) = decls
+                .row_for_blob_in_namespace(conn, &blob.namespace, &blob.id)
+                .map_err(|e| crate::database::DbError(e.to_string()))?
+            else {
+                continue;
+            };
+            let Some((root_table, root_id)) = gates
+                .resolve_root_of(conn, &table, &pk)
+                .map_err(|e| crate::database::DbError(e.to_string()))?
+            else {
+                continue;
+            };
+            let Some(retain_pinned) =
+                Database::make_remote_intent_retain_pinned(conn, &root_table, &root_id)?
+            else {
+                continue;
+            };
+            out.insert(
+                (blob.namespace, blob.id),
+                InlineMakeRemoteIntent {
+                    root_table,
+                    root_id,
+                    retain_pinned,
+                },
+            );
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| SyncCycleError::AssetScan(e.0))
+}
+
+async fn delete_make_remote_intents(
+    db: &Database,
+    roots: HashSet<(String, String)>,
+) -> Result<(), SyncCycleError> {
+    db.call(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        for (root_table, root_id) in roots {
+            Database::delete_make_remote_intent_on(&tx, &root_table, &root_id)?;
+        }
+        tx.commit().map_err(crate::database::DbError::from)
+    })
+    .await
+    .map_err(|e| SyncCycleError::AssetUpload(e.0))
 }
 
 #[derive(Debug)]

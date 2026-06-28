@@ -582,15 +582,29 @@ async fn commit_after_upload(
             .filter(|b| b.provenance == Provenance::UserProvided)
             .map(|b| b.id.clone())
             .collect();
+        let has_host_provided = refs
+            .iter()
+            .any(|b| b.provenance == Provenance::HostProvided);
         if count_other_pending_uploads(conn, &blob_ids, final_outbox_id)? > 0 {
             // Not the last blob: remove this row, leave the gate off until the rest land.
             commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
             return Ok(PostUpload::Continued);
         }
 
-        // The last blob: the SINGLE atomic commit. Removing the final outbox row
-        // here (not before) is the crash-safety invariant — until commit the row is
-        // present, so a crash re-runs the idempotent upload and retries this flip.
+        // Host-provided blobs still need to land before the root may publish. The
+        // pre-capture host-provided completion sees the intent with no pending
+        // user-provided uploads, uploads those local-store blobs, then flips the
+        // gate and clears the external refs. Removing this final outbox row is safe:
+        // the intent remains as the durable driver for the remaining completion.
+        if has_host_provided {
+            commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+            return Ok(PostUpload::Continued);
+        }
+
+        // The last blob and no host-provided blobs: the SINGLE atomic commit.
+        // Removing the final outbox row here (not before) is the crash-safety
+        // invariant — until commit the row is present, so a crash re-runs the
+        // idempotent upload and retries this flip.
         let gate_col = gate_columns.get(&root_table).ok_or_else(|| {
             DbError(format!(
                 "make_remote completion: gated root {root_table} has no gate column"
@@ -685,7 +699,10 @@ fn count_other_pending_uploads(
 /// user-provided blobs, each registered external at make_remote time, so a missing
 /// ref is unexpected — logged (not silently skipped) so the absence is visible; the
 /// only consequence is a source file left undeleted.
-fn external_source_paths(conn: &Connection, blob_ids: &[String]) -> Result<Vec<PathBuf>, DbError> {
+pub(crate) fn external_source_paths(
+    conn: &Connection,
+    blob_ids: &[String],
+) -> Result<Vec<PathBuf>, DbError> {
     let mut out = Vec::new();
     for id in blob_ids {
         let path: Option<String> = conn

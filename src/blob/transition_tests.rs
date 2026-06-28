@@ -510,7 +510,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 /// A release with a user-provided audio file AND a host-provided cover, through both
 /// transitions. make_remote: the audio uploads via the outbox and flips the gate;
 /// the gate flip re-emits the subtree and the cycle's inline push uploads the cover
-/// (host-provided) from the local store and moves that copy into the cache. A peer
+/// (host-provided) from the local store and pins that copy. A peer
 /// pulls the cover eagerly (`CacheEager`) into its cache. make_local: the audio goes
 /// back to its dest (external ref) and the cover back to the local store (NO dest),
 /// both cloud copies tombstoned.
@@ -550,7 +550,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
 
     // make_remote: the audio drains, the gate flips, and this cycle's inline push
-    // uploads the cover from the local store and moves it into the cache.
+    // uploads the cover from the local store and keeps the requested pin.
     make_remote(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
         .await
         .expect("make_remote");
@@ -563,10 +563,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
     assert!(
         lib_a
-            .cache_blob_path("covers", "coveraaa")
+            .pinned_blob_path("covers", "coveraaa")
             .unwrap()
             .exists(),
-        "the cover's local-store copy moved into the evictable cache",
+        "the cover's local-store copy moved into the pinned cache",
     );
     assert!(
         !lib_a
@@ -672,6 +672,107 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         !src.exists(),
         "the original imported audio was deleted on make_remote"
     );
+}
+
+#[tokio::test]
+async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_intent() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp_a = UserKeypair::generate();
+    let hlc_a = Hlc::new("A".to_string());
+    let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
+    let (_tmp_a, lib_a) = temp_library_dir();
+    let cover = b"HOST-ONLY-COVER".to_vec();
+
+    exec(
+        &db_a,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n-host', 'Host Only', NULL, 0, '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db_a,
+        "INSERT INTO note_covers (id, note_id, _updated_at, created_at, cloud_path) \
+         VALUES ('coverhost', 'n-host', '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
+    )
+    .await;
+    local_files::store(&lib_a, "covers", "coverhost", &cover)
+        .await
+        .expect("store host-provided cover");
+
+    let before = cache::read_blob(
+        &db_a,
+        &lib_a,
+        Some(&storage),
+        &cover_ref("coverhost", "cv/host.jpg"),
+    )
+    .await
+    .expect("read Local host-provided cover");
+    assert_eq!(before, cover);
+
+    make_remote(
+        &db_a,
+        BlobPathScheme::Plain,
+        &hlc_a,
+        "notes",
+        "n-host",
+        true,
+    )
+    .await
+    .expect("make host-provided-only root remote");
+    assert_eq!(
+        shared_flag(&db_a, "n-host").await,
+        0,
+        "host-provided-only make_remote leaves the gate off until the blob uploads"
+    );
+    assert!(
+        has_intent(&db_a, "notes", "n-host").await,
+        "the pin choice is durable until inline upload consumes it"
+    );
+    assert_eq!(pending_uploads(&db_a).await, 0);
+    assert!(
+        !storage.exists("covers/cv/host.jpg").await.unwrap(),
+        "the host-provided blob is not published before the cycle uploads it"
+    );
+
+    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+
+    assert_eq!(
+        shared_flag(&db_a, "n-host").await,
+        1,
+        "the gate flips after the host-provided blob lands"
+    );
+    assert!(
+        storage.exists("covers/cv/host.jpg").await.unwrap(),
+        "inline push uploads the host-provided blob"
+    );
+    assert!(
+        !has_intent(&db_a, "notes", "n-host").await,
+        "inline upload consumes the make_remote intent"
+    );
+    assert!(
+        lib_a
+            .pinned_blob_path("covers", "coverhost")
+            .unwrap()
+            .exists(),
+        "pin=true keeps the host-provided blob in the protected cache"
+    );
+    assert!(
+        !lib_a
+            .local_blob_path("covers", "coverhost")
+            .unwrap()
+            .exists(),
+        "after Remote upload the local store no longer holds the blob"
+    );
+    let after = cache::read_blob(
+        &db_a,
+        &lib_a,
+        Some(&storage),
+        &cover_ref("coverhost", "cv/host.jpg"),
+    )
+    .await
+    .expect("read Remote host-provided cover");
+    assert_eq!(after, cover);
 }
 
 // ===========================================================================

@@ -67,16 +67,52 @@ pub fn staging_path(library_dir: &LibraryDir) -> PathBuf {
     library_dir.join("sync_staging.bin")
 }
 
+/// Path for staging captured changeset bytes before fallible blob uploads.
+pub fn captured_staging_path(library_dir: &LibraryDir) -> PathBuf {
+    library_dir.join("sync_capture_staging.bin")
+}
+
+fn captured_staging_temp_path(library_dir: &LibraryDir) -> PathBuf {
+    library_dir.join("sync_capture_staging.bin.tmp")
+}
+
+fn write_staged(path: PathBuf, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 /// Stage outgoing changeset bytes to disk before pushing.
-pub fn stage_changeset(library_dir: &LibraryDir, packed: &[u8]) {
-    if let Err(e) = std::fs::write(staging_path(library_dir), packed) {
-        warn!("Failed to stage outgoing changeset: {e}");
-    }
+pub fn stage_changeset(library_dir: &LibraryDir, packed: &[u8]) -> Result<(), String> {
+    write_staged(staging_path(library_dir), packed)
 }
 
 /// Clear the staged changeset after a successful push.
 pub fn clear_staged_changeset(library_dir: &LibraryDir) {
     let _ = std::fs::remove_file(staging_path(library_dir));
+}
+
+fn remove_file_if_exists(path: PathBuf) -> Result<(), String> {
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove {}: {e}", path.display())),
+    }
+}
+
+pub fn read_staged_captured_changeset(library_dir: &LibraryDir) -> Result<Option<Vec<u8>>, String> {
+    let path = captured_staging_path(library_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "read staged captured changeset {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+pub fn clear_staged_captured_changeset(library_dir: &LibraryDir) -> Result<(), String> {
+    remove_file_if_exists(captured_staging_path(library_dir))?;
+    remove_file_if_exists(captured_staging_temp_path(library_dir))
 }
 
 /// Read a previously staged changeset (if any) for retry.
@@ -316,17 +352,27 @@ pub async fn run_single_sync_cycle(
 
     let timestamp = hlc.now().to_string();
 
-    // Capture the outgoing changeset and reset the recorded batch. Capture stays
-    // ENABLED across everything below — push, pull, bookkeeping, snapshot — so a
-    // host write that lands at any `await` here (notably during the pull's network
-    // phases) is recorded into the NEXT outgoing changeset rather than lost. The
-    // pull's apply disables capture around only the apply itself (see
-    // [`Database::apply_changeset`]), so applied rows are not echoed. There is no
-    // whole-cycle suspend, hence nothing to unconditionally resume.
-    let outgoing = db
-        .take_changeset()
+    if sync_service
+        .complete_host_provided_make_remotes(db, tables, storage, &timestamp, library_dir)
         .await
-        .map_err(|e| format!("Failed to capture outgoing changeset: {e}"))?;
+        .map_err(|e| format!("Host-provided make_remote completion failed: {e}"))?
+    {
+        resume_drain_promptly = true;
+    }
+
+    // Capture the outgoing changeset and reset the recorded batch, or retry a
+    // captured batch whose blob upload failed before an envelope existed. While
+    // retrying a captured batch, leave the live session untouched so writes made
+    // after the failed cycle remain captured for the next successful cycle.
+    let retrying_captured = read_staged_captured_changeset(library_dir)
+        .map_err(|e| format!("Failed to read staged captured changeset: {e}"))?;
+    let outgoing = match retrying_captured {
+        Some(bytes) => bytes,
+        None => db
+            .take_changeset_staged(captured_staging_path(library_dir))
+            .await
+            .map_err(|e| format!("Failed to stage captured changeset: {e}"))?,
+    };
 
     // Run the core gate + push-prep + pull.
     let sync_result = sync_service
@@ -354,10 +400,13 @@ pub async fn run_single_sync_cycle(
     if let Some(outgoing) = &sync_result.outgoing {
         let seq = outgoing.seq;
 
-        stage_changeset(library_dir, &outgoing.packed);
+        stage_changeset(library_dir, &outgoing.packed)
+            .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
         db.set_sync_state("staged_seq", &seq.to_string())
             .await
             .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
+        clear_staged_captured_changeset(library_dir)
+            .map_err(|e| format!("Failed to clear staged captured changeset: {e}"))?;
 
         match push_changeset(
             storage,
@@ -377,6 +426,9 @@ pub async fn run_single_sync_cycle(
                 warn!(seq, "Push failed, changeset staged for retry: {e}");
             }
         }
+    } else {
+        clear_staged_captured_changeset(library_dir)
+            .map_err(|e| format!("Failed to clear staged captured changeset: {e}"))?;
     }
 
     // Persist updated cursors. A failure here aborts the cycle like the
@@ -837,14 +889,14 @@ pub(crate) async fn init_sync_over_storage(
     hlc: std::sync::Arc<Hlc>,
     storage: CloudSyncStorage,
 ) -> Option<SyncComponents> {
-    // Integration guard. The host declared its synced tables to `Database::open`;
-    // an empty set means a synced library would attach nothing, every changeset
-    // would come out empty, and sync would silently become snapshot-only. Refuse
-    // loudly instead of pretending to sync.
+    // Integration guard. The host declared its synced tables on the builder; an
+    // empty set means a synced library would attach nothing, every changeset would
+    // come out empty, and sync would silently become snapshot-only. Refuse loudly
+    // instead of pretending to sync.
     if db.synced_tables().is_empty() {
         error!(
             "sync init aborted: no synced tables — the host must pass a non-empty \
-             synced-table set to coven::database::Database::open before sync starts"
+             synced-table set to Coven::builder(...).synced_tables(...) before sync starts"
         );
         return None;
     }

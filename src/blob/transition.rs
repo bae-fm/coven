@@ -9,11 +9,12 @@
 //!
 //! - [`make_remote`] enqueues an upload per **user-provided** blob from its external
 //!   file and records a [`blob_make_remote_intents`](crate::db) marker, then returns.
-//!   The upload drain ([`crate::blob::upload::drain_uploads`]) uploads each and, on
-//!   the last, takes the single commit `{remove the outbox row + flip the gate true +
-//!   drop the external refs + delete the intent}`. The gate flip re-emits the
-//!   subtree, and the cycle's inline push then uploads the root's **host-provided**
-//!   blobs (which coven owns, in its local store) and moves each copy into the cache.
+//!   The upload drain ([`crate::blob::upload::drain_uploads`]) uploads each. Once no
+//!   user-provided uploads remain, the sync cycle uploads the root's
+//!   **host-provided** blobs (which coven owns, in its local store), then takes the
+//!   single commit `{flip the gate true + drop external refs + delete the intent}`.
+//!   The gate flip re-emits the subtree, and local host-provided copies move into
+//!   the cache.
 //!   [`cancel_make_remote`] undoes an in-flight make_remote (clears the marker +
 //!   pending uploads, tombstones any blob that already landed); the gate never flips,
 //!   so the root stays Local.
@@ -26,10 +27,10 @@
 //!   drain reclaims the cloud blobs after the grace.
 //!
 //! make_remote's outbox operates on the root's **user-provided** blobs — the user's
-//! own files it promotes to the cloud, and the exact set its cancel (and the drain's
-//! completion) act on. A host-provided blob is uploaded by the cycle's inline push
-//! once the gate flips, not via this outbox. make_local, by contrast, brings back
-//! **every** blob of the root, branching per provenance.
+//! own files it promotes to the cloud, and the exact set its cancel acts on. A
+//! host-provided blob is uploaded by the pre-capture cycle completion, not via this
+//! outbox. make_local, by contrast, brings back **every** blob of the root,
+//! branching per provenance.
 //!
 //! Every destructive step is enqueued durably *inside* the one commit, and nothing
 //! destructive happens before it, so there is no representable half-state and retry
@@ -68,7 +69,7 @@ pub enum MakeRemoteError {
     SyncNotReady,
     #[error("table {0:?} is not a gated root, so it has no Local/Remote state")]
     NotGated(String),
-    #[error("nothing to make Remote: root {0:?}/{1:?} has no user-provided blobs")]
+    #[error("nothing to make Remote: root {0:?}/{1:?} has no blobs")]
     NothingToMakeRemote(String, String),
     #[error("blob {0:?} is not a user-provided (external) file, so it cannot be made Remote")]
     NotExternal(String),
@@ -146,13 +147,9 @@ async fn refs_for_root(
     .await
 }
 
-/// The **user-provided** blobs of the gated root's subtree — the user files a
-/// make_remote promotes to the cloud via the durable outbox, and the exact set its
-/// cancel (and the drain's completion) act on. A host-provided blob is not part of
-/// this outbox set (the inline push uploads it once the gate flips). Rejects a
-/// non-gated root. Shared by [`make_remote`] and [`cancel_make_remote`] (both
-/// returning a [`MakeRemoteError`]).
-async fn user_provided_root_refs(
+/// The blobs of the gated root's subtree. Rejects a non-gated root. Shared by
+/// [`make_remote`] and [`cancel_make_remote`].
+async fn root_refs(
     db: &Database,
     root_table: &str,
     root_id: &str,
@@ -161,13 +158,9 @@ async fn user_provided_root_refs(
     if gate_column(&tables, root_table).is_none() {
         return Err(MakeRemoteError::NotGated(root_table.to_string()));
     }
-    Ok(
-        refs_for_root(db, tables, root_table.to_string(), root_id.to_string())
-            .await?
-            .into_iter()
-            .filter(|b| b.provenance == Provenance::UserProvided)
-            .collect(),
-    )
+    refs_for_root(db, tables, root_table.to_string(), root_id.to_string())
+        .await
+        .map_err(MakeRemoteError::from)
 }
 
 /// The final cloud object key for `blob` under `scheme`. Shared by the make_remote,
@@ -184,10 +177,9 @@ fn cloud_key_for(scheme: BlobPathScheme, blob: &BlobRef) -> Result<String, Strin
 
 /// Start making `(root_table, root_id)` Remote: verify each user-provided blob's
 /// external source file, then enqueue an upload per blob and record the make_remote
-/// intent in one transaction. Returns once enqueued — the upload drain uploads each
-/// blob and, on the last, flips the gate true (see [`crate::blob::upload`]); the
-/// gate flip then re-emits the subtree so the cycle's inline push uploads the root's
-/// host-provided blobs. The caller triggers a sync cycle to start the drain.
+/// intent in one transaction. Returns once enqueued — the sync cycle uploads all
+/// needed blobs and flips the gate true only after they land. The caller triggers a
+/// sync cycle to start that completion.
 ///
 /// Verifying every source up front (exists + length matches the registered size)
 /// means a missing file aborts with nothing enqueued, rather than leaving a
@@ -201,12 +193,25 @@ pub async fn make_remote(
     root_id: &str,
     pin: bool,
 ) -> Result<(), MakeRemoteError> {
-    let user_provided = user_provided_root_refs(db, root_table, root_id).await?;
-    if user_provided.is_empty() {
+    let refs = root_refs(db, root_table, root_id).await?;
+    if refs.is_empty() {
         return Err(MakeRemoteError::NothingToMakeRemote(
             root_table.to_string(),
             root_id.to_string(),
         ));
+    }
+    let user_provided: Vec<BlobRef> = refs
+        .iter()
+        .filter(|b| b.provenance == Provenance::UserProvided)
+        .cloned()
+        .collect();
+    if user_provided.is_empty() {
+        let (root_table, root_id) = (root_table.to_string(), root_id.to_string());
+        db.call(move |conn| {
+            Database::insert_make_remote_intent_on(conn, &root_table, &root_id, pin)
+        })
+        .await?;
+        return Ok(());
     }
 
     // Verify each external source and derive its cloud key up front: any miss aborts
@@ -254,7 +259,7 @@ pub async fn make_remote(
     let (root_table, root_id) = (root_table.to_string(), root_id.to_string());
     db.call(move |conn| {
         let tx = conn.unchecked_transaction()?;
-        Database::insert_make_remote_intent_on(&tx, &root_table, &root_id)?;
+        Database::insert_make_remote_intent_on(&tx, &root_table, &root_id, pin)?;
         for (id, cloud_key, source, scope) in &uploads {
             Database::enqueue_upload_on(
                 &tx,
@@ -301,7 +306,11 @@ pub async fn cancel_make_remote(
     root_table: &str,
     root_id: &str,
 ) -> Result<(), MakeRemoteError> {
-    let user_provided = user_provided_root_refs(db, root_table, root_id).await?;
+    let user_provided: Vec<BlobRef> = root_refs(db, root_table, root_id)
+        .await?
+        .into_iter()
+        .filter(|b| b.provenance == Provenance::UserProvided)
+        .collect();
     // The cloud key + cache namespace per blob (derived outside the closure, which
     // can't reach the home's path scheme; the namespace places the post-commit cache
     // drop under the segmented `storage/cache/<namespace>/<id>`).

@@ -10,6 +10,7 @@ use crate::blob::{local_files, CacheFill, Provenance};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
 use crate::sync::envelope;
@@ -27,6 +28,11 @@ use crate::sync::test_helpers::*;
 /// scheme.
 fn photo_decl() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
+}
+
+fn photo_decl_with_blob_id_column() -> BlobDecl {
+    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
+        .with_id_column("cloud_path")
 }
 
 /// Store `bytes` into `ld`'s local store under blob id `id`, the way a host stores a
@@ -288,6 +294,178 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
         .expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
+}
+
+#[tokio::test]
+async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
+    let storage = MockSyncStorage::new();
+    let decl = photo_decl_with_blob_id_column();
+    let tables = test_synced_tables_with_blob(decl.clone());
+
+    let db1 = open_test_db_with_blob(decl.clone());
+    let (_tmp1, ld1) = temp_library_dir();
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db1,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
+    )
+    .await;
+    db1.take_changeset().await.expect("drain insert changeset");
+    exec(
+        &db1,
+        "UPDATE note_photos SET cloud_path = 'newaaaa', _updated_at = '0000000002000-0000-dev1' \
+         WHERE id = 'p-row'",
+    )
+    .await;
+    store_local(&ld1, "newaaaa", b"NEW-BLOB").await;
+    let outgoing = db1.take_changeset().await.expect("capture update");
+
+    let service = SyncService::new("dev1".to_string());
+    let keypair = UserKeypair::generate();
+    let result = service
+        .sync(
+            &db1,
+            &tables,
+            outgoing,
+            0,
+            &HashMap::new(),
+            &storage,
+            "2026-01-01T00:00:00Z",
+            "",
+            &keypair,
+            &ld1,
+        )
+        .await
+        .expect("sync update");
+    let outgoing = result.outgoing.expect("outgoing update");
+    assert!(
+        storage.exists("photos/newaaaa").await.unwrap(),
+        "push uploads the UPDATE's new blob id"
+    );
+    assert!(
+        !storage.exists("photos/oldaaaa").await.unwrap(),
+        "push must not upload the UPDATE's old blob id"
+    );
+
+    cycle::push_changeset(
+        &storage,
+        "dev1",
+        outgoing.seq,
+        outgoing.packed,
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .await
+    .expect("publish update");
+
+    let db2 = open_test_db_with_blob(decl);
+    let (_tmp2, ld2) = temp_library_dir();
+    exec(
+        &db2,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev2', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db2,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
+    )
+    .await;
+    crate::local_blob::write_atomic(
+        &ld2.cache_blob_path("photos", "oldaaaa")
+            .expect("old cache path"),
+        b"OLD-BLOB",
+    )
+    .await
+    .expect("seed old cache");
+    db2.take_changeset()
+        .await
+        .expect("drain target seed changes");
+
+    let (_updated, pull) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+    assert_eq!(pull.changesets_applied, 1);
+    assert!(
+        ld2.cache_blob_path("photos", "newaaaa")
+            .expect("new cache path")
+            .exists(),
+        "pull downloads the UPDATE's new blob id"
+    );
+    assert!(
+        !ld2.cache_blob_path("photos", "oldaaaa")
+            .expect("old cache path")
+            .exists(),
+        "pull cleanup drops the UPDATE's old blob id"
+    );
+}
+
+#[tokio::test]
+async fn update_to_null_drops_old_local_blob_copy() {
+    let storage = MockSyncStorage::new();
+    let decl = photo_decl_with_blob_id_column();
+    let db1 = open_test_db_with_blob(decl.clone());
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db1,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01', 'oldnull')",
+    )
+    .await;
+    db1.take_changeset().await.expect("drain insert changeset");
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "UPDATE note_photos SET cloud_path = NULL, _updated_at = '0000000002000-0000-dev1' \
+          WHERE id = 'p-row'",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+    let db2 = open_test_db_with_blob(decl);
+    let (_tmp, ld) = temp_library_dir();
+    exec(
+        &db2,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev2', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db2,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01', 'oldnull')",
+    )
+    .await;
+    crate::local_blob::write_atomic(
+        &ld.cache_blob_path("photos", "oldnull")
+            .expect("old cache path"),
+        b"OLD-BLOB",
+    )
+    .await
+    .expect("seed old cache");
+    db2.take_changeset()
+        .await
+        .expect("drain target seed changes");
+
+    let (_updated, pull) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    assert_eq!(pull.changesets_applied, 1);
+    assert!(
+        !ld.cache_blob_path("photos", "oldnull")
+            .expect("old cache path")
+            .exists(),
+        "pull cleanup drops the old blob when UPDATE removes the blob id"
+    );
 }
 
 /// A `CacheLazy` blob's row still crosses to the puller, but its bytes are NOT

@@ -18,14 +18,13 @@ bootstrap from a snapshot has its own page, [Bootstrap](/docs/bootstrap).
 ## Change capture
 
 coven owns the SQLite connection. The host opens it once through
-[`Database::open`](rustdoc:method:coven::database::Database::open), passing the
-synced tables as [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable)
-values. Every synced table must have a text `id` primary key at column 0 and an
+`Coven::builder(config).synced_tables(...).open(...)`, passing the synced tables
+as [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values.
+Every synced table must have a text `id` primary key at column 0 and an
 `_updated_at TEXT NOT NULL` column. A table not in the set is local-only and
 never leaves the device. From then on the host runs all its SQL through
-[`Database::call`](rustdoc:method:coven::database::Database::call); coven
-re-exports rusqlite, so the closure works against `&coven::rusqlite::Connection`
-and the host never depends on rusqlite directly.
+`handle.sql(...)`; coven re-exports rusqlite, so the closure works against
+`&coven::rusqlite::Connection` and the host never depends on rusqlite directly.
 
 The connection lives on one dedicated thread (an actor) natively, or on the one
 Worker in the browser. Capture is the SQLite session extension, attached over
@@ -46,10 +45,9 @@ A background loop runs one cycle at a time.
 loads the persisted sync state each cycle (rather than holding it across calls)
 and drives these steps:
 
-1. Capture the outgoing changeset and reset the recorded batch
-   ([`take_changeset`](rustdoc:method:coven::database::Database::take_changeset)).
-   Capture stays enabled: a host write that lands later in this cycle is recorded
-   into the next batch, not lost.
+1. Capture the outgoing changeset and reset the recorded batch. Capture stays
+   enabled: a host write that lands later in this cycle is recorded into the next
+   batch, not lost.
 2. Apply row-level gating to the captured changeset, cutting rows that should
    stay local (see [Local data](/docs/local-data)).
 3. Upload any blobs the outgoing changeset references, so a puller can fetch them
@@ -67,7 +65,7 @@ each individual apply in step 5: the pull disables the session, applies one
 incoming changeset synchronously, and re-enables it at once, so the applied rows
 are not re-recorded as this device's own writes while a host write landing
 anywhere else in the cycle still is. This is the one thing the session is ever
-blind to; every other read and write goes through `Database::call` on the normal
+blind to; every other read and write goes through the handle SQL path on the normal
 enabled path. (An earlier design suspended capture across the whole network span;
 that left a window in which a host write could be dropped, so it was removed.)
 
@@ -141,15 +139,12 @@ The clock is an [`Hlc`](rustdoc:struct:coven::sync::hlc::Hlc).
 [`Hlc::now`](rustdoc:method:coven::sync::hlc::Hlc::now) mints the next stamp: if
 wall-clock millis moved forward it adopts them and resets the counter, otherwise
 it bumps the counter, so each stamp is strictly greater than the last. The host
-never calls this directly. It holds the
-[`UpdatedAtStamper`](rustdoc:struct:coven::sync::hlc::UpdatedAtStamper) that
-`Database::open` returns and calls
-[`stamp`](rustdoc:method:coven::sync::hlc::UpdatedAtStamper::stamp) in its write
-path, binding the result into every synced-row write. The stamper and the sync
-layer share one `Arc<Hlc>`.
+never calls this directly. It calls `sql.stamp()` inside `handle.sql` or
+`handle.write`, binding the result into every synced-row write. The SQL context
+and the sync layer share one `Arc<Hlc>`.
 
-`Database::open` seeds that clock before it returns, so the stamper the host gets
-back is already non-optional and past every value on disk. The floor is
+The handle open path seeds that clock before it returns, so every stamp minted
+through the handle is already past every value on disk. The floor is
 `max(persisted high-water mark, max(_updated_at) scanned across every synced
 table)`, so a restart cannot mint a stamp behind a value already written. The
 on-disk scan is the authoritative source: the high-water mark is flushed only at
@@ -235,24 +230,12 @@ is its own page: [Schema evolution](/docs/schema-evolution).
 
 ## Lifecycle
 
-[`SyncManager`](rustdoc:struct:coven::sync::sync_manager::SyncManager) owns the
-sync lifecycle natively. The host builds it once with
-[`new`](rustdoc:method:coven::sync::sync_manager::SyncManager::new), passing the
-owned `Database`; the manager reads the shared `Arc<Hlc>` from it, so it advances
-the same clock the host stamps rows from. Construction is synchronous and
-infallible, because the clock was already seeded in `Database::open`. (In the
-browser the equivalent is [`WasmSyncRuntime`](/docs/web).)
-
-[`start_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::start_sync)
-builds the cloud home from the current config and, if sync is enabled, spawns the
-loop.
-[`stop_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::stop_sync)
-drops the loop handle and cloud home. The pair runs when a provider is connected
-or disconnected, with no app restart.
-[`is_sync_ready`](rustdoc:method:coven::sync::sync_manager::SyncManager::is_sync_ready)
-reports whether the loop thread is running, and
-[`trigger_sync`](rustdoc:method:coven::sync::sync_manager::SyncManager::trigger_sync)
-asks the loop to run a cycle now.
+`CovenHandle` owns the sync lifecycle natively. The host calls
+`handle.connect_sync(...)` once a provider is connected; the handle builds the
+cloud home and, if sync is enabled, spawns the loop. `handle.stop_sync()` drops
+the loop handle and cloud home, `handle.is_syncing()` reports whether the loop
+thread is running, and `handle.sync_now()` asks the loop to run a cycle now. In
+the browser the equivalent is [`WasmSyncRuntime`](/docs/web).
 
 The keys the loop signs and encrypts with come from the OS keyring. The host
 installs the keyring service and identity at startup with

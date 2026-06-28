@@ -369,8 +369,8 @@ async fn bootstrap_and_save(
 /// the snapshot.
 ///
 /// The snapshot the bootstrap wrote already carries the full schema (the host's
-/// tables and coven's bookkeeping), so `Database::open`'s bookkeeping migration
-/// is idempotent and the host migrate is a no-op here. Capture stays enabled — a
+/// tables and coven's bookkeeping), so coven's bookkeeping migration is
+/// idempotent and the host migrate is a no-op here. Capture stays enabled — a
 /// just-bootstrapped library has no local host writer, so there is no whole-cycle
 /// suspend to manage; `pull_changes` disables capture around only its apply.
 pub(crate) async fn open_db_and_pull(
@@ -431,8 +431,8 @@ pub(crate) async fn open_db_and_pull(
         ))
     })?;
 
-    // Pull over the set `Database::open` owns (the host's tables plus coven's
-    // injected `item_keys`), not the raw host list — one source of truth.
+    // Pull over the set coven owns (the host's tables plus coven's injected
+    // `item_keys`), not the raw host list — one source of truth.
     let (updated_cursors, pull_result) = pull_changes(
         &db,
         db.synced_tables(),

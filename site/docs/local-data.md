@@ -5,7 +5,7 @@ library. To keep some rows on one device, never synced, the host *gates* the
 table: a row syncs only while a condition holds. The host declares the gate per
 table on the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable)
 values it passes to
-[`Database::open`](rustdoc:method:coven::database::Database::open), and coven
+`Coven::builder(config).synced_tables(...)`, and coven
 enforces it on both paths a row can take to another device: the per-cycle
 changeset and the bootstrap snapshot.
 

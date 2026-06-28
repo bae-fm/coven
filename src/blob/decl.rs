@@ -305,7 +305,7 @@ fn pk_carrying_blob(
 /// Column names of `table`, in declared (schema) order, via `PRAGMA table_info` —
 /// the safe-rusqlite sibling of the gate's FFI `column_names`. The index of a name
 /// here is the index a changeset reports for that column.
-fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, BlobDeclError> {
+pub(crate) fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, BlobDeclError> {
     let sql = format!("PRAGMA table_info({})", quote_ident(table));
     let mut stmt = conn.prepare(&sql)?;
     let names = stmt

@@ -63,47 +63,58 @@ or who is allowed to write.
 
 ## In your code
 
-**Open the database.** coven owns the connection. Hand it a path, the tables
-that sync, and your schema; it returns the handle and a stamper for the
-last-writer-wins clock. Tables you don't list stay local to the device.
+**Open the library.** coven owns the connection. Hand it the tables that sync
+and your schema; it returns one handle. Tables you don't list stay local to the
+device.
 
 ```rust
-use coven::Database;
-use coven::sync::session::SyncedTable;
+use coven::{Coven, SyncedTable};
 
-let (db, stamper) = Database::open(
-    &db_path,
-    vec![SyncedTable::new("todos"), SyncedTable::new("todo_attachments")],
-    device_id,
-    |conn| { conn.execute_batch(MY_SCHEMA)?; Ok(()) },
-)?;
+let handle = Coven::builder(config)
+    .synced_tables(vec![
+        SyncedTable::new("todos"),
+        SyncedTable::new("todo_attachments"),
+    ])
+    .open(|conn| { conn.execute_batch(MY_SCHEMA)?; Ok(()) })?;
 ```
 
-**Write normally, through coven's connection.** coven captures the change.
-Synced rows carry an `_updated_at` you mint with the stamper.
+**Write normally, through the handle.** coven captures the change. Synced rows
+carry an `_updated_at` you mint with `SqlContext::stamp()`.
 
 ```rust
-db.call(move |conn| {
-    conn.execute(
+handle.sql(move |sql| {
+    sql.connection().execute(
         "INSERT INTO todos (id, title, _updated_at) VALUES (?1, ?2, ?3)",
-        coven::rusqlite::params![id, title, stamper.stamp()],
+        coven::rusqlite::params![id, title, sql.stamp()],
     )?;
     Ok(())
 }).await?;
 ```
 
-**Start the manager** once a cloud provider is connected.
+**Store a row plus host-provided blob bytes** with one batch.
 
 ```rust
-let manager = SyncManager::new(/* config, keys, encryption, db, clock, blob_source */);
-manager.start_sync().await;
-manager.trigger_sync();
+handle.write(|w| {
+    let blob = w.put_blob("attachments", blob_id, bytes);
+    w.sql(move |sql| {
+        sql.connection().execute(
+            "INSERT INTO todo_attachments (id, todo_id, blob_id, _updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            coven::rusqlite::params![attachment_id, todo_id, blob.id(), sql.stamp()],
+        )?;
+        Ok(())
+    })
+}).await?;
 ```
 
-**React to remote changes.** Subscribe to the status stream.
+**Start sync and react to remote changes.** Once a cloud provider is connected,
+start sync through the handle and subscribe to the status stream.
 
 ```rust
-let mut status = manager.sync_loop_handle().unwrap().subscribe();
+handle.connect_sync(Some(encryption_service)).await?;
+handle.sync_now();
+
+let mut status = handle.subscribe_sync_status()?;
 while let Ok(s) = status.recv().await {
     if let Some(changes) = s.row_changes {
         refresh_ui(&changes);
@@ -115,7 +126,7 @@ while let Ok(s) = status.recv().await {
 library key.
 
 ```rust
-let code = manager.invite_member(teammate_pubkey, MemberRole::Member).await?;
+let code = handle.invite_member(teammate_pubkey, MemberRole::Member).await?;
 ```
 
 ## Who owns what

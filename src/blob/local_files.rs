@@ -62,6 +62,7 @@ impl From<PathTokenError> for LocalBlobError {
 /// torn-file guard every blob write relies on. There is NO eviction: the local
 /// store is never swept (the bytes here ARE the blob while Local, not a re-fetchable
 /// cache mirror).
+#[cfg(test)]
 pub async fn store(
     library_dir: &LibraryDir,
     namespace: &str,

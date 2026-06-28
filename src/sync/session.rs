@@ -2,11 +2,11 @@
 //!
 //! [`SyncedTable`] is how a host declares which tables participate in changeset
 //! sync. The set is no longer a process-global: the host passes it to
-//! [`crate::database::Database::open`], which owns it for the lifetime of the
-//! connection and hands it to the capture session, the gate, and apply.
+//! [`crate::CovenBuilder::synced_tables`], and coven owns it for the lifetime of
+//! the connection and hands it to the capture session, the gate, and apply.
 
 /// A table that participates in changeset sync, declared at startup by the host
-/// and passed to [`crate::database::Database::open`].
+/// and passed to [`crate::CovenBuilder::synced_tables`].
 ///
 /// A plain [`SyncedTable::new`] table syncs unconditionally — every row goes to
 /// peers. [`SyncedTable::gated_by`] makes it a *gated root*: a boolean column
@@ -37,10 +37,10 @@
 ///
 /// Each table must have an `id` text primary key at column 0 and an
 /// `_updated_at TEXT NOT NULL` column (the HLC/LWW timestamp). Tables not in the
-/// set the host passes to `Database::open` are local-only and never synced —
-/// that is also the mechanism for keeping device-local state (per-device
-/// pin/cache columns, local paths) out of sync: put it in a table you don't
-/// declare. An empty set is rejected by [`super::cycle::init_sync`].
+/// set the host declares on the builder are local-only and never synced — that is
+/// also the mechanism for keeping device-local state (per-device pin/cache
+/// columns, local paths) out of sync: put it in a table you don't declare. An
+/// empty set is rejected by [`super::cycle::init_sync`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncedTable {
     name: String,
