@@ -26,6 +26,9 @@ use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::cycle::SyncComponents;
 use crate::sync::hlc::Hlc;
+/// `MemberInfo` lives next to [`MemberRole`] in the membership module; coven's
+/// public path reaches it through here (re-exported from `lib.rs`).
+pub use crate::sync::membership::MemberInfo;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_loop::SyncLoopHandle;
@@ -67,14 +70,6 @@ pub struct SyncManager {
     // Mutable sync state — updated when providers are connected/disconnected
     sync_loop_handle: RwLock<Option<Arc<SyncLoopHandle>>>,
     cloud_home: RwLock<Option<Arc<dyn CloudHome>>>,
-}
-
-/// A member as returned by get_members.
-#[derive(Debug, Clone)]
-pub struct MemberInfo {
-    pub pubkey: String,
-    pub role: MemberRole,
-    pub is_self: bool,
 }
 
 impl SyncManager {
@@ -440,21 +435,12 @@ impl SyncManager {
             .key_service
             .get_user_public_key()
             .map_err(|e| format!("Failed to read user public key: {e}"))?;
-        let members = crate::sync::membership_ops::get_members(
+        crate::sync::membership_ops::get_members(
             &storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
         )
         .await
-        .map_err(|e| e.0)?;
-
-        Ok(members
-            .into_iter()
-            .map(|m| MemberInfo {
-                pubkey: m.pubkey,
-                role: m.role,
-                is_self: m.is_self,
-            })
-            .collect())
+        .map_err(|e| e.0)
     }
 
     pub async fn invite_member(

@@ -11,7 +11,7 @@ use crate::keys::{KeyService, UserKeypair};
 use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
 use super::membership::{
-    founder_entry, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
+    founder_entry, MemberInfo, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
 };
 use super::storage::SyncStorage;
 
@@ -20,13 +20,6 @@ use super::storage::SyncStorage;
 /// The membership chain is anchored to it: a chain whose founder differs is a
 /// takeover attempt and is rejected (issue #95).
 pub(crate) const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
-
-/// A member as seen by the caller.
-pub struct MemberInfo {
-    pub pubkey: String,
-    pub role: MemberRole,
-    pub is_self: bool,
-}
 
 /// Read the membership chain from the sync storage and return the current members.
 pub async fn get_members(
