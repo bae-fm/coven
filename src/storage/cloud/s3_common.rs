@@ -35,13 +35,6 @@ pub fn list_strip_prefix(prefix: Option<&str>) -> Option<String> {
     prefix.map(|p| format!("{p}/"))
 }
 
-/// The HTTP `Range` header value for a ranged GET. `start` is inclusive and `end`
-/// is exclusive (the `CloudHome` contract); the header is inclusive on both ends,
-/// so the upper bound is `end - 1`. The one definition both S3 backends use.
-pub fn range_header(start: u64, end: u64) -> String {
-    format!("bytes={start}-{}", end.saturating_sub(1))
-}
-
 /// Whether an S3 error code/marker means "absent key" — `NoSuchKey` (GCS's S3 XML
 /// API) or `NotFound` (AWS HeadObject). The shared not-found rule both backends'
 /// `delete` (404 is success) and `exists` (404 is false) apply, instead of each

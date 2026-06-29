@@ -43,9 +43,9 @@ use reqwest::Response;
 use tracing::warn;
 
 use super::s3_common::{
-    apply_prefix, list_strip_prefix, normalize_prefix, probe_error, range_header, s3_join_info,
+    apply_prefix, list_strip_prefix, normalize_prefix, probe_error, s3_join_info,
 };
-use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{range_header, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
 /// S3-backed cloud home that signs requests and sends them over `fetch`.
 pub struct S3WasmCloudHome {

@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 
-use super::http::{self, ensure_ok, NotFound};
+use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::key_encoding::{decode_key, encode_key};
 use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
@@ -129,7 +129,7 @@ impl OAuthRestHome for OneDriveCloudHome {
         range: Option<(u64, u64)>,
     ) -> Result<reqwest::Response, CloudHomeError> {
         let url = format!("{}/content", self.item_path_url(key));
-        let range = range.map(|(start, end)| http::range_header(start, end));
+        let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
             .api_call(|token| {
                 let mut req = self.client().get(&url).bearer_auth(token);
@@ -282,11 +282,7 @@ impl CloudHome for OneDriveCloudHome {
             .session
             .api_call(|token| self.client().get(&url).bearer_auth(token))
             .await?;
-        match ensure_ok(resp, &format!("exists {key}"), NotFound::Status).await {
-            Ok(_) => Ok(true),
-            Err(CloudHomeError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        exists_from_response(resp, &format!("exists {key}"), NotFound::Status).await
     }
 
     async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {

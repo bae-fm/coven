@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use reqwest::StatusCode;
 
-use super::http::{self, ensure_ok, NotFound};
+use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
@@ -272,7 +272,7 @@ impl OAuthRestHome for DropboxCloudHome {
         range: Option<(u64, u64)>,
     ) -> Result<reqwest::Response, CloudHomeError> {
         let arg = serde_json::json!({ "path": self.full_path(key) }).to_string();
-        let range = range.map(|(start, end)| http::range_header(start, end));
+        let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
             .api_call(|token| {
                 let mut req = self
@@ -471,11 +471,7 @@ impl CloudHome for DropboxCloudHome {
                     .json(&body)
             })
             .await?;
-        match ensure_ok(resp, &format!("exists {key}"), self.not_found()).await {
-            Ok(_) => Ok(true),
-            Err(CloudHomeError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        exists_from_response(resp, &format!("exists {key}"), self.not_found()).await
     }
 
     async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {

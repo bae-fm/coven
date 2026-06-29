@@ -105,6 +105,14 @@ impl CloudHomeJoinInfo {
     }
 }
 
+/// The HTTP `Range` header value for a ranged GET. `start` is inclusive and
+/// `end` is exclusive (the `CloudHome` contract); the header is inclusive on
+/// both ends, so the upper bound is `end - 1`. The one definition every backend
+/// — both S3 transports and the OAuth REST backends — uses.
+pub(crate) fn range_header(start: u64, end: u64) -> String {
+    format!("bytes={start}-{}", end.saturating_sub(1))
+}
+
 /// Reports how many bytes of a `write` have reached the backend so far.
 /// Called with the cumulative byte count as the body uploads; backends that
 /// can't observe sub-call progress call it once at the end with the full size.

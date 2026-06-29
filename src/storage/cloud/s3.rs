@@ -12,10 +12,9 @@ use aws_sdk_s3::Client;
 use tracing::warn;
 
 use super::s3_common::{
-    apply_prefix, is_not_found_code, list_strip_prefix, normalize_prefix, probe_error,
-    range_header, s3_join_info,
+    apply_prefix, is_not_found_code, list_strip_prefix, normalize_prefix, probe_error, s3_join_info,
 };
-use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{range_header, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
 /// S3-backed cloud home.
 pub struct S3CloudHome {

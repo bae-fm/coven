@@ -218,7 +218,7 @@ impl OAuthRestHome for GoogleDriveCloudHome {
             .find_file_id(&encode_key(key))
             .await?
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
-        let range = range.map(|(start, end)| http::range_header(start, end));
+        let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
             .api_call(|token| {
                 let mut req = self
