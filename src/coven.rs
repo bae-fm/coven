@@ -534,7 +534,7 @@ mod tests {
     fn files_table() -> SyncedTable {
         SyncedTable::new("files").carries_blob(
             BlobDecl::new(
-                "torrent-files",
+                "media-files",
                 Provenance::HostProvided,
                 CacheFill::CacheLazy,
             )
@@ -620,7 +620,7 @@ mod tests {
         let bytes = b"piece-bytes".to_vec();
         handle
             .write(move |w| {
-                let blob = w.put_blob("torrent-files", "blobaaaa", bytes.clone());
+                let blob = w.put_blob("media-files", "blobaaaa", bytes.clone());
                 let blob_id = blob.id().to_string();
                 w.sql(move |sql| {
                     sql.tx().execute(
@@ -635,7 +635,7 @@ mod tests {
             .expect("write row and blob");
         let path = handle
             .library_dir()
-            .local_blob_path("torrent-files", "blobaaaa")
+            .local_blob_path("media-files", "blobaaaa")
             .expect("local path");
         assert_eq!(
             std::fs::read(path).expect("read local blob"),
@@ -648,7 +648,7 @@ mod tests {
         let (_tmp, handle) = open_files_handle();
         let err = handle
             .write::<_, ()>(|w| {
-                w.put_blob("torrent-files", "blobbbbb", b"staged".to_vec());
+                w.put_blob("media-files", "blobbbbb", b"staged".to_vec());
                 w.sql(|_sql| Err(CovenError::Blob("sql failed".to_string())))
             })
             .await
@@ -656,7 +656,7 @@ mod tests {
         assert!(err.to_string().contains("sql failed"));
         let path = handle
             .library_dir()
-            .local_blob_path("torrent-files", "blobbbbb")
+            .local_blob_path("media-files", "blobbbbb")
             .expect("local path");
         assert!(!path.exists());
     }
@@ -666,7 +666,7 @@ mod tests {
         let (_tmp, handle) = open_files_handle();
         let result = handle
             .write(|w| {
-                w.put_blob("torrent-files", "..", b"bad".to_vec());
+                w.put_blob("media-files", "..", b"bad".to_vec());
                 w.sql(|sql| {
                     sql.connection().execute(
                         "INSERT INTO files (id, blob_id, size, _updated_at) \
@@ -692,7 +692,7 @@ mod tests {
     #[tokio::test]
     async fn replacement_deletes_old_blob_after_sql_drops_reference() {
         let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.library_dir(), "torrent-files", "oldaaaa", b"old")
+        crate::blob::local_files::store(&handle.library_dir(), "media-files", "oldaaaa", b"old")
             .await
             .expect("store old");
         handle
@@ -706,7 +706,7 @@ mod tests {
             .await
             .expect("seed row");
         let old_ref = BlobRef {
-            namespace: "torrent-files".to_string(),
+            namespace: "media-files".to_string(),
             id: "oldaaaa".to_string(),
             scope: BlobScope::Master,
             cloud_path: None,
@@ -715,7 +715,7 @@ mod tests {
         };
         handle
             .write(move |w| {
-                let new_blob = w.put_blob("torrent-files", "newaaaa", b"new".to_vec());
+                let new_blob = w.put_blob("media-files", "newaaaa", b"new".to_vec());
                 w.delete_blob(old_ref);
                 let new_id = new_blob.id().to_string();
                 w.sql(move |sql| {
@@ -730,12 +730,12 @@ mod tests {
             .expect("replace blob");
         assert!(!handle
             .library_dir()
-            .local_blob_path("torrent-files", "oldaaaa")
+            .local_blob_path("media-files", "oldaaaa")
             .expect("old path")
             .exists());
         assert!(handle
             .library_dir()
-            .local_blob_path("torrent-files", "newaaaa")
+            .local_blob_path("media-files", "newaaaa")
             .expect("new path")
             .exists());
     }
@@ -743,7 +743,7 @@ mod tests {
     #[tokio::test]
     async fn replacement_is_rejected_while_sql_still_references_old_blob() {
         let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.library_dir(), "torrent-files", "oldbbbb", b"old")
+        crate::blob::local_files::store(&handle.library_dir(), "media-files", "oldbbbb", b"old")
             .await
             .expect("store old");
         handle
@@ -757,7 +757,7 @@ mod tests {
             .await
             .expect("seed row");
         let old_ref = BlobRef {
-            namespace: "torrent-files".to_string(),
+            namespace: "media-files".to_string(),
             id: "oldbbbb".to_string(),
             scope: BlobScope::Master,
             cloud_path: None,
@@ -766,7 +766,7 @@ mod tests {
         };
         let result = handle
             .write(move |w| {
-                w.put_blob("torrent-files", "newbbbb", b"new".to_vec());
+                w.put_blob("media-files", "newbbbb", b"new".to_vec());
                 w.delete_blob(old_ref);
                 w.sql(move |sql| {
                     sql.connection().execute(
@@ -783,12 +783,12 @@ mod tests {
         ));
         assert!(handle
             .library_dir()
-            .local_blob_path("torrent-files", "oldbbbb")
+            .local_blob_path("media-files", "oldbbbb")
             .expect("old path")
             .exists());
         assert!(!handle
             .library_dir()
-            .local_blob_path("torrent-files", "newbbbb")
+            .local_blob_path("media-files", "newbbbb")
             .expect("new path")
             .exists());
     }
@@ -798,7 +798,7 @@ mod tests {
         let (_tmp, handle) = open_files_handle();
         let result = handle
             .write::<_, ()>(|w| {
-                w.put_blob("torrent-files", "panicccc", b"new".to_vec());
+                w.put_blob("media-files", "panicccc", b"new".to_vec());
                 w.sql(|_sql| panic!("boom"))
             })
             .await;
@@ -808,7 +808,7 @@ mod tests {
             .contains("panicked"));
         assert!(!handle
             .library_dir()
-            .local_blob_path("torrent-files", "panicccc")
+            .local_blob_path("media-files", "panicccc")
             .expect("panic path")
             .exists());
     }
@@ -822,7 +822,7 @@ mod tests {
         let write_winner = tokio::spawn(async move {
             winner
                 .write(move |w| {
-                    let blob = w.put_blob("torrent-files", "raceblob", b"committed".to_vec());
+                    let blob = w.put_blob("media-files", "raceblob", b"committed".to_vec());
                     let blob_id = blob.id().to_string();
                     w.sql(move |sql| {
                         sql.tx().execute(
@@ -839,7 +839,7 @@ mod tests {
         let write_loser = tokio::spawn(async move {
             loser
                 .write::<_, ()>(move |w| {
-                    w.put_blob("torrent-files", "raceblob", b"rolled-back".to_vec());
+                    w.put_blob("media-files", "raceblob", b"rolled-back".to_vec());
                     w.sql(|_sql| Err(CovenError::Blob("force rollback".to_string())))
                 })
                 .await
@@ -852,7 +852,7 @@ mod tests {
 
         let path = handle
             .library_dir()
-            .local_blob_path("torrent-files", "raceblob")
+            .local_blob_path("media-files", "raceblob")
             .expect("race path");
         assert_eq!(std::fs::read(path).expect("read race blob"), b"committed");
         let rows: i64 = handle

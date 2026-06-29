@@ -953,7 +953,7 @@ pub(crate) const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_
 ///
 /// `bootstrap_from_snapshot` writes only the catalog DB; the incremental pull
 /// that follows starts past the snapshot's per-device cursors, so the original
-/// INSERT changesets that carried each row's image/torrent blob (seq <= cursor)
+/// INSERT changesets that carried each row's eager blob (seq <= cursor)
 /// are never re-walked and the per-changeset blob download never fires for them.
 /// Without this reconciliation a bootstrapped device has the rows but none of the
 /// files they point at (a synced album shows a placeholder cover). Only the

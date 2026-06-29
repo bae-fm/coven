@@ -46,7 +46,7 @@ use crate::sync::hlc::Hlc;
 /// coven's `write` reports per chunk (every few MiB), which on a fast link can be
 /// many times a second; coalescing to this interval keeps the host from
 /// rebuilding its outbox snapshot on every chunk while still moving the bar
-/// smoothly. Modeled on the torrent download session's fixed progress tick.
+/// smoothly. Uses the same fixed progress tick as the download path.
 const PROGRESS_TICK: Duration = Duration::from_millis(300);
 
 /// Run one blob upload while forwarding coalesced byte progress to the observer.

@@ -424,7 +424,7 @@ pub(crate) async fn open_db_and_pull(
     }
 
     // Download the blob files the snapshot's rows reference. The snapshot carried
-    // the catalog rows but no per-row image/torrent files, and the pull below
+    // the catalog rows but no per-row eager blob files, and the pull below
     // starts past the snapshot's cursors so it never re-walks the INSERTs that
     // first carried them — without this a bootstrapped device renders placeholders
     // for synced cover art. A blob whose object is not yet in the cloud (or whose
