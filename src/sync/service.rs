@@ -279,7 +279,7 @@ impl SyncService {
         }
         let entries = super::membership_ops::download_entries(storage, &entry_keys)
             .await
-            .map_err(|e| SyncCycleError::Membership(e.0))?;
+            .map_err(SyncCycleError::Membership)?;
         let our_pubkey = hex::encode(keypair.public_key);
         Ok(membership::write_grant_coord(&entries, &our_pubkey))
     }

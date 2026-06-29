@@ -447,7 +447,6 @@ impl SyncManager {
             user_pubkey.as_ref().map(|k| k.as_slice()),
         )
         .await
-        .map_err(|e| e.0)
     }
 
     pub async fn invite_member(
@@ -496,8 +495,7 @@ impl SyncManager {
             &library_id,
             &library_name,
         )
-        .await
-        .map_err(|e| e.0)?;
+        .await?;
 
         Ok(crate::join_code::encode(&invite_code))
     }
@@ -528,8 +526,7 @@ impl SyncManager {
             public_key_hex,
             &library_id,
         )
-        .await
-        .map_err(|e| e.0)?;
+        .await?;
 
         // Rotate the in-use key; the host records the returned fingerprint and
         // that a key is stored in its own config.
@@ -537,8 +534,7 @@ impl SyncManager {
             new_key,
             &self.key_service,
             sync_loop.cipher(),
-        )
-        .map_err(|e| e.0)?;
+        )?;
 
         Ok(fingerprint)
     }

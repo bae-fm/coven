@@ -25,11 +25,11 @@ pub(crate) const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
 pub async fn get_members(
     storage: &dyn SyncStorage,
     user_pubkey: Option<&[u8]>,
-) -> Result<Vec<MemberInfo>, MembershipOpsError> {
+) -> Result<Vec<MemberInfo>, String> {
     let entry_keys = storage
         .list_membership_entries()
         .await
-        .map_err(|e| MembershipOpsError(format!("Failed to list membership entries: {e}")))?;
+        .map_err(|e| format!("Failed to list membership entries: {e}"))?;
 
     if entry_keys.is_empty() {
         return Ok(Vec::new());
@@ -71,18 +71,18 @@ pub async fn invite_member(
     encryption_key: &[u8; 32],
     library_id: &str,
     library_name: &str,
-) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+) -> Result<crate::join_code::InviteCode, String> {
     let user_pubkey_hex = hex::encode(user_keypair.public_key);
 
     if public_key_hex == user_pubkey_hex {
-        return Err(MembershipOpsError("Cannot invite yourself".to_string()));
+        return Err("Cannot invite yourself".to_string());
     }
 
     // Download existing membership entries
     let entry_keys = storage
         .list_membership_entries()
         .await
-        .map_err(|e| MembershipOpsError(format!("Failed to list membership entries: {e}")))?;
+        .map_err(|e| format!("Failed to list membership entries: {e}"))?;
 
     // The founder is written once, when a library is created and first connects
     // its cloud (issue #102) — never lazily here. An empty listing at invite time
@@ -90,11 +90,11 @@ pub async fn invite_member(
     // `membership/*`); bootstrapping a new founder on the spot is the takeover
     // primitive #104 describes, so refuse instead.
     if entry_keys.is_empty() {
-        return Err(MembershipOpsError(
+        return Err(
             "no membership chain to invite into: the library's founder entry is \
              missing (it is established at library creation, not on invite)"
                 .to_string(),
-        ));
+        );
     }
     let mut chain = download_chain(storage, &entry_keys).await?;
 
@@ -112,7 +112,7 @@ pub async fn invite_member(
         &invite_ts,
     )
     .await
-    .map_err(|e| MembershipOpsError(format!("Failed to create invitation: {e}")))?;
+    .map_err(|e| format!("Failed to create invitation: {e}"))?;
 
     info!(
         "Invited member {}...",
@@ -125,7 +125,7 @@ pub async fn invite_member(
     // owner and reject the (correctly founder-anchored) chain forever (issue #102).
     let owner_pubkey = chain
         .founder_pubkey()
-        .ok_or_else(|| MembershipOpsError("membership chain has no founder".to_string()))?
+        .ok_or_else(|| "membership chain has no founder".to_string())?
         .to_string();
 
     // Build the invite code
@@ -150,15 +150,15 @@ pub async fn remove_member(
     hlc: &Hlc,
     public_key_hex: &str,
     library_id: &str,
-) -> Result<[u8; 32], MembershipOpsError> {
+) -> Result<[u8; 32], String> {
     // Download existing membership entries and build the chain.
     let entry_keys = storage
         .list_membership_entries()
         .await
-        .map_err(|e| MembershipOpsError(format!("Failed to list membership entries: {e}")))?;
+        .map_err(|e| format!("Failed to list membership entries: {e}"))?;
 
     if entry_keys.is_empty() {
-        return Err(MembershipOpsError("No membership chain exists".to_string()));
+        return Err("No membership chain exists".to_string());
     }
 
     let mut chain = download_chain(storage, &entry_keys).await?;
@@ -175,7 +175,7 @@ pub async fn remove_member(
         &revoke_ts,
     )
     .await
-    .map_err(|e| MembershipOpsError(format!("Failed to revoke member: {e}")))?;
+    .map_err(|e| format!("Failed to revoke member: {e}"))?;
 
     info!(
         "Revoked member {}... and rotated encryption key",
@@ -196,22 +196,20 @@ pub fn apply_key_rotation(
     new_key: [u8; 32],
     key_service: &KeyService,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
-) -> Result<String, MembershipOpsError> {
+) -> Result<String, String> {
     let new_fingerprint = {
         let mut cipher = cipher_lock.write().unwrap();
         match &mut *cipher {
             CloudCipher::Encrypted(enc) => {
                 let new_key_hex = hex::encode(new_key);
-                key_service.set_encryption_key(&new_key_hex).map_err(|e| {
-                    MembershipOpsError(format!("Failed to persist new encryption key: {e}"))
-                })?;
+                key_service
+                    .set_encryption_key(&new_key_hex)
+                    .map_err(|e| format!("Failed to persist new encryption key: {e}"))?;
                 *enc = EncryptionService::from_key(new_key);
                 enc.fingerprint()
             }
             CloudCipher::Plaintext => {
-                return Err(MembershipOpsError(
-                    "sharing requires an encrypted cloud home".to_string(),
-                ));
+                return Err("sharing requires an encrypted cloud home".to_string());
             }
         }
     };
@@ -227,14 +225,14 @@ pub(crate) async fn write_founder_entry(
     storage: &dyn SyncStorage,
     owner: &UserKeypair,
     timestamp: &str,
-) -> Result<(), MembershipOpsError> {
+) -> Result<(), String> {
     let entry = founder_entry(owner, timestamp);
     let bytes = serde_json::to_vec(&entry)
-        .map_err(|e| MembershipOpsError(format!("Failed to serialize founder entry: {e}")))?;
+        .map_err(|e| format!("Failed to serialize founder entry: {e}"))?;
     storage
         .put_membership_entry(&hex::encode(owner.public_key), 1, bytes)
         .await
-        .map_err(|e| MembershipOpsError(format!("Failed to upload founder entry: {e}")))?;
+        .map_err(|e| format!("Failed to upload founder entry: {e}"))?;
     info!("Wrote founder Owner entry for the library's membership chain");
     Ok(())
 }
@@ -246,23 +244,16 @@ pub(crate) async fn write_founder_entry(
 pub(crate) async fn download_entries(
     storage: &dyn SyncStorage,
     entry_keys: &[(String, u64)],
-) -> Result<Vec<(MembershipCoord, MembershipEntry)>, MembershipOpsError> {
+) -> Result<Vec<(MembershipCoord, MembershipEntry)>, String> {
     let mut entries = Vec::with_capacity(entry_keys.len());
     for (author, seq) in entry_keys {
         let data = storage
             .get_membership_entry(author, *seq)
             .await
-            .map_err(|e| {
-                MembershipOpsError(format!(
-                    "Failed to get membership entry {author}/{seq}: {e}"
-                ))
-            })?;
+            .map_err(|e| format!("Failed to get membership entry {author}/{seq}: {e}"))?;
 
-        let entry: MembershipEntry = serde_json::from_slice(&data).map_err(|e| {
-            MembershipOpsError(format!(
-                "Failed to parse membership entry {author}/{seq}: {e}"
-            ))
-        })?;
+        let entry: MembershipEntry = serde_json::from_slice(&data)
+            .map_err(|e| format!("Failed to parse membership entry {author}/{seq}: {e}"))?;
         entries.push((
             MembershipCoord {
                 author_pubkey: author.clone(),
@@ -278,15 +269,14 @@ pub(crate) async fn download_entries(
 pub(crate) async fn download_chain(
     storage: &dyn SyncStorage,
     entry_keys: &[(String, u64)],
-) -> Result<MembershipChain, MembershipOpsError> {
+) -> Result<MembershipChain, String> {
     let raw_entries = download_entries(storage, entry_keys)
         .await?
         .into_iter()
         .map(|(_, entry)| entry)
         .collect();
 
-    MembershipChain::from_entries(raw_entries)
-        .map_err(|e| MembershipOpsError(format!("Invalid membership chain: {e}")))
+    MembershipChain::from_entries(raw_entries).map_err(|e| format!("Invalid membership chain: {e}"))
 }
 
 /// Why [`load_anchored_chain`] refused a chain. Split so each caller renders the
@@ -298,7 +288,7 @@ pub(crate) async fn download_chain(
 pub(crate) enum AnchoredChainError {
     /// The entries didn't download, parse, or validate into a well-formed chain.
     #[error("membership chain failed to load/validate: {0}")]
-    LoadFailed(#[from] MembershipOpsError),
+    LoadFailed(String),
     /// The chain is well-formed but its founder is not the library's pinned owner.
     #[error("chain founder {founder:?} is not the pinned owner {owner}")]
     FounderMismatch {
@@ -327,7 +317,9 @@ pub(crate) async fn load_anchored_chain(
     entry_keys: &[(String, u64)],
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let chain = download_chain(storage, entry_keys).await?;
+    let chain = download_chain(storage, entry_keys)
+        .await
+        .map_err(AnchoredChainError::LoadFailed)?;
     if let Some(owner) = owner_pubkey {
         if !chain.is_founded_by(owner) {
             return Err(AnchoredChainError::FounderMismatch {
@@ -338,11 +330,6 @@ pub(crate) async fn load_anchored_chain(
     }
     Ok(chain)
 }
-
-/// Membership operations error.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct MembershipOpsError(pub String);
 
 #[cfg(test)]
 mod tests {
