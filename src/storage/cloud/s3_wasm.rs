@@ -897,6 +897,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_upload_id_extracts_it() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult>
+  <Bucket>b</Bucket><Key>k</Key>
+  <UploadId>VXBsb2FkIElEIGZvciA2aWWpbmcncyBteS1tb3ZpZS5tMnRz</UploadId>
+</InitiateMultipartUploadResult>"#;
+        assert_eq!(
+            parse_upload_id(xml).expect("upload id"),
+            "VXBsb2FkIElEIGZvciA2aWWpbmcncyBteS1tb3ZpZS5tMnRz"
+        );
+    }
+
+    #[test]
+    fn parse_upload_id_errors_when_absent() {
+        assert!(parse_upload_id("<InitiateMultipartUploadResult/>").is_err());
+    }
+
+    #[test]
+    fn complete_multipart_xml_lists_parts_in_order() {
+        let xml = complete_multipart_xml(&[
+            (1, "\"etag-one\"".to_string()),
+            (2, "\"etag-two\"".to_string()),
+        ]);
+        assert_eq!(
+            xml,
+            "<CompleteMultipartUpload>\
+             <Part><PartNumber>1</PartNumber><ETag>\"etag-one\"</ETag></Part>\
+             <Part><PartNumber>2</PartNumber><ETag>\"etag-two\"</ETag></Part>\
+             </CompleteMultipartUpload>"
+        );
+    }
+
+    #[test]
     fn parse_list_empty_result() {
         let xml = r#"<ListBucketResult><KeyCount>0</KeyCount><IsTruncated>false</IsTruncated></ListBucketResult>"#;
         let page = parse_list_objects_v2(xml).expect("parse list");
