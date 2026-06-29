@@ -451,14 +451,26 @@ impl CloudHome for S3CloudHome {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+        use aws_sdk_s3::error::ProvideErrorMetadata;
         let full = self.full_key(key);
-        self.client
+        if let Err(e) = self
+            .client
             .delete_object()
             .bucket(&self.bucket)
             .key(&full)
             .send()
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("delete {key}: {e}")))?;
+        {
+            // Delete is idempotent: AWS S3 returns 204 for an already-absent key,
+            // but GCS's S3 XML API returns 404 `NoSuchKey`. A missing object is not
+            // a failure — `cancel_tombstone` deletes the tombstone after every
+            // upload and relies on the no-tombstone case being a no-op — so swallow
+            // not-found and surface only real errors. The wasm S3 backend already
+            // treats 404 as success; this matches it on the native path.
+            if e.code() != Some("NoSuchKey") {
+                return Err(CloudHomeError::Storage(format!("delete {key}: {e}")));
+            }
+        }
         Ok(())
     }
 
