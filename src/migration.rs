@@ -31,8 +31,11 @@ pub struct Migration {
 
 /// The boxed closure a [`MigrationStep::Run`] holds. `Fn` (not `FnOnce`) because
 /// the engine runs migrations through a `&[Migration]`, and a step runs at most
-/// once anyway.
-type MigrationFn = Box<dyn Fn(&Connection) -> Result<(), DbError> + Send>;
+/// once anyway. `Send + Sync` keeps `Migration` `Sync`, so `&[Migration]` is
+/// `Send`: the bootstrap paths (`join`/`restore`) hold the slice across an
+/// `.await`, and a host that spawns those futures on a multi-threaded runtime
+/// needs them to stay `Send`.
+type MigrationFn = Box<dyn Fn(&Connection) -> Result<(), DbError> + Send + Sync>;
 
 /// How a migration applies its change to the synced schema.
 pub enum MigrationStep {
@@ -61,7 +64,7 @@ impl Migration {
     /// express.
     pub fn run<F>(version: u32, name: &'static str, f: F) -> Self
     where
-        F: Fn(&Connection) -> Result<(), DbError> + Send + 'static,
+        F: Fn(&Connection) -> Result<(), DbError> + Send + Sync + 'static,
     {
         Migration {
             version,
@@ -216,6 +219,19 @@ fn apply_step(conn: &Connection, step: &MigrationStep) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Migration` must stay `Send + Sync` so `&[Migration]` is `Send`. The
+    /// bootstrap paths (`join`/`restore`) hold the slice across an `.await`, and a
+    /// host that spawns those futures on a multi-threaded runtime requires them to
+    /// be `Send` — dropping `Sync` from the `Run` closure regresses that silently
+    /// (coven builds fine; the host fails to compile). This fails to compile if it
+    /// regresses.
+    #[test]
+    fn migration_types_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Migration>();
+        assert_send_sync::<MigrationStep>();
+    }
 
     fn user_version(conn: &Connection) -> u32 {
         read_user_version(conn).expect("read user_version")

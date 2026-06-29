@@ -231,7 +231,7 @@ fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_test_db_with_hlc(
     hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
-    seed: impl Fn(&Connection) -> Result<(), DbError> + Send + 'static,
+    seed: impl Fn(&Connection) -> Result<(), DbError> + Send + Sync + 'static,
 ) -> Database {
     let migrations = vec![Migration::run(1, "test-schema", move |conn| {
         create_synced_schema(conn)?;
