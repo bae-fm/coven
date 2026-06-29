@@ -351,6 +351,21 @@ impl CovenHandle {
             .is_some_and(|manager| manager.is_sync_ready())
     }
 
+    /// Whether a [`SyncManager`] is installed — a provider is connected. Distinct
+    /// from [`is_syncing`](Self::is_syncing), which additionally requires the loop
+    /// to be running: this is the predicate a host uses for "has a cloud home"
+    /// without the loop-ready condition.
+    pub fn is_connected(&self) -> bool {
+        self.sync_manager().is_some()
+    }
+
+    /// The active [`EncryptionService`] for the connected opaque home, or `None`
+    /// for a home-less library or a connected browsable home (stored in the
+    /// clear).
+    pub fn encryption_service(&self) -> Option<EncryptionService> {
+        self.sync_manager().and_then(|m| m.encryption_service())
+    }
+
     // =========================================================================
     // Blobs
     // =========================================================================
