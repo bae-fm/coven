@@ -107,6 +107,13 @@ impl SyncManager {
         self.cloud_home.read().unwrap().clone()
     }
 
+    /// The encryption service this manager holds: `Some` for an opaque home
+    /// (sealed under the library key), `None` for a browsable one (no library
+    /// key, stored in the clear).
+    pub fn encryption_service(&self) -> Option<EncryptionService> {
+        self.encryption_service.clone()
+    }
+
     /// The at-rest cipher this home applies to its blob objects, derived from the
     /// configured storage mode (see [`CloudCipher::for_storage`]): `Encrypted`
     /// under the library key for an opaque home, `Plaintext` for a browsable one.
