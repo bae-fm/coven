@@ -42,7 +42,9 @@ use reqsign_core::{Context, Signer};
 use reqwest::Response;
 use tracing::warn;
 
-use super::s3_common::{apply_prefix, s3_join_info};
+use super::s3_common::{
+    apply_prefix, list_strip_prefix, normalize_prefix, probe_error, range_header, s3_join_info,
+};
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
 /// S3-backed cloud home that signs requests and sends them over `fetch`.
@@ -87,11 +89,9 @@ impl S3WasmCloudHome {
             endpoint,
             access_key,
             secret_key,
-            // Normalize once at the source: store the prefix without a trailing
-            // slash (and drop an empty one), so neither full_key nor list re-trims.
-            key_prefix: key_prefix
-                .map(|p| p.trim_end_matches('/').to_string())
-                .filter(|p| !p.is_empty()),
+            // Normalize once at the source (shared with the native backend), so
+            // neither full_key nor list re-trims.
+            key_prefix: normalize_prefix(key_prefix),
             base_url,
         }
     }
@@ -382,13 +382,6 @@ fn list_url(
     url
 }
 
-/// Build the HTTP `Range` header value for a `read_range`. `start` is inclusive
-/// and `end` is exclusive (the `CloudHome` contract); the header is inclusive on
-/// both ends, so the upper bound is `end - 1`.
-fn range_header(start: u64, end: u64) -> String {
-    format!("bytes={start}-{}", end.saturating_sub(1))
-}
-
 /// Map a non-success response to a storage error, including the response body so
 /// the S3 error code/message is visible. `op` names the operation for the message
 /// (e.g. `"put heads/dev1.json"`). Reading the body can itself fail (a dropped
@@ -574,21 +567,10 @@ impl CloudHome for S3WasmCloudHome {
         let status = resp.status();
         if status.is_success() {
             Ok(())
-        } else if status == reqwest::StatusCode::NOT_FOUND {
-            Err(CloudHomeError::Storage(format!(
-                "bucket {:?} does not exist",
-                self.bucket
-            )))
-        } else if status == reqwest::StatusCode::FORBIDDEN {
-            Err(CloudHomeError::Storage(format!(
-                "S3 credentials rejected (status {})",
-                status.as_u16()
-            )))
         } else {
-            Err(CloudHomeError::Storage(format!(
-                "S3 probe failed (status {})",
-                status.as_u16()
-            )))
+            // The shared 404→missing / 403→creds-rejected classification (no S3
+            // error code on this path).
+            Err(probe_error(status.as_u16(), None, &self.bucket))
         }
     }
 
@@ -680,8 +662,7 @@ impl CloudHome for S3WasmCloudHome {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
         let full_prefix = self.full_key(prefix);
-        // key_prefix is already normalized (no trailing slash) at construction.
-        let strip_prefix = self.key_prefix.as_ref().map(|p| format!("{p}/"));
+        let strip_prefix = list_strip_prefix(self.key_prefix.as_deref());
 
         let mut keys = Vec::new();
         let mut continuation_token: Option<String> = None;
@@ -804,9 +785,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_prefix_strips_trailing_slash() {
+    fn normalized_prefix_drops_trailing_slash() {
+        let prefix = normalize_prefix(Some("libs/abc/".to_string()));
         assert_eq!(
-            apply_prefix(Some("libs/abc/"), "heads/dev1.json"),
+            apply_prefix(prefix.as_deref(), "heads/dev1.json"),
             "libs/abc/heads/dev1.json"
         );
     }

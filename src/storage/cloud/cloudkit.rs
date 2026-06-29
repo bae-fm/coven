@@ -40,6 +40,20 @@ impl CloudKitCloudHome {
     }
 }
 
+/// Run a synchronous CloudKit op on the blocking pool, mapping a join failure to a
+/// storage error. The Swift bridge methods block, so every `CloudHome` method
+/// wraps its call this way — one helper instead of the same `spawn_blocking(...)
+/// .await.map_err(...)` in each.
+async fn blocking<T, F>(f: F) -> Result<T, CloudHomeError>
+where
+    F: FnOnce() -> Result<T, CloudHomeError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+}
+
 /// If a key ends with `.part{digits}`, strip that suffix to get the base key.
 fn strip_part_suffix(key: &str) -> &str {
     if let Some(idx) = key.rfind(".part") {
@@ -99,9 +113,7 @@ impl super::PartSink for CloudKitPartSink {
         let ops = self.ops.clone();
         let chunk_key = format!("{}.part{i}", self.key);
         let data = part.to_vec();
-        tokio::task::spawn_blocking(move || ops.write_record(&chunk_key, data))
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+        blocking(move || ops.write_record(&chunk_key, data)).await
     }
 
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
@@ -116,15 +128,11 @@ impl CloudHome for CloudKitCloudHome {
         // transition between single and chunked layouts).
         let ops = self.ops.clone();
         let k = key.to_string();
-        tokio::task::spawn_blocking(move || delete_all_variants(&*ops, &k))
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))??;
+        blocking(move || delete_all_variants(&*ops, &k)).await?;
 
         let ops = self.ops.clone();
         let k = key.to_string();
-        tokio::task::spawn_blocking(move || ops.write_record(&k, data))
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+        blocking(move || ops.write_record(&k, data)).await
     }
 
     async fn open_multipart<'a>(
@@ -135,9 +143,7 @@ impl CloudHome for CloudKitCloudHome {
         // Clear any existing records before the first part lands.
         let ops = self.ops.clone();
         let k = key.to_string();
-        tokio::task::spawn_blocking(move || delete_all_variants(&*ops, &k))
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))??;
+        blocking(move || delete_all_variants(&*ops, &k)).await?;
         Ok(Box::new(CloudKitPartSink {
             ops: self.ops.clone(),
             key: key.to_string(),
@@ -152,7 +158,7 @@ impl CloudHome for CloudKitCloudHome {
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         let ops = self.ops.clone();
         let key = key.to_string();
-        tokio::task::spawn_blocking(move || {
+        blocking(move || {
             // Try single record first
             if ops.record_exists(&key)? {
                 return ops.read_record(&key);
@@ -189,7 +195,6 @@ impl CloudHome for CloudKitCloudHome {
             Ok(result)
         })
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
@@ -199,7 +204,7 @@ impl CloudHome for CloudKitCloudHome {
 
         let ops = self.ops.clone();
         let key = key.to_string();
-        tokio::task::spawn_blocking(move || {
+        blocking(move || {
             let start = start as usize;
             let end = end as usize;
 
@@ -240,13 +245,12 @@ impl CloudHome for CloudKitCloudHome {
             Ok(result)
         })
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
         let ops = self.ops.clone();
         let prefix = prefix.to_string();
-        tokio::task::spawn_blocking(move || {
+        blocking(move || {
             let raw_keys = ops.list_records(&prefix)?;
 
             // Strip .partN suffixes and deduplicate
@@ -259,21 +263,18 @@ impl CloudHome for CloudKitCloudHome {
             Ok(base_keys)
         })
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
         let ops = self.ops.clone();
         let key = key.to_string();
-        tokio::task::spawn_blocking(move || delete_all_variants(&*ops, &key))
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+        blocking(move || delete_all_variants(&*ops, &key)).await
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
         let ops = self.ops.clone();
         let key = key.to_string();
-        tokio::task::spawn_blocking(move || {
+        blocking(move || {
             if ops.record_exists(&key)? {
                 return Ok(true);
             }
@@ -282,26 +283,22 @@ impl CloudHome for CloudKitCloudHome {
             Ok(!chunks.is_empty())
         })
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
     }
 
     async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
         let ops = self.ops.clone();
         let member_id = member_id.to_string();
-        tokio::task::spawn_blocking(move || {
+        blocking(move || {
             let share_url = ops.grant_access(&member_id)?;
             Ok(CloudHomeJoinInfo::CloudKit { share_url })
         })
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
     }
 
     async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
         let ops = self.ops.clone();
         let member_id = member_id.to_string();
-        tokio::task::spawn_blocking(move || ops.revoke_access(&member_id))
-            .await
-            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+        blocking(move || ops.revoke_access(&member_id)).await
     }
 }
 

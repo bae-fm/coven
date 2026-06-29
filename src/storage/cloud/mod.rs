@@ -15,9 +15,14 @@ pub mod cloudkit;
 pub mod dropbox;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub mod google_drive;
-// Shared HTTP plumbing and the resumable-session PartSink for the OAuth backends.
+// Shared HTTP plumbing, key encoding, the read-method collapse, the
+// resumable-session PartSink, and revoke-by-email sharing for the OAuth backends.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 mod http;
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+mod key_encoding;
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+mod oauth_rest;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub mod oauth_session;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
@@ -26,6 +31,8 @@ pub mod onedrive;
 mod resumable;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod s3;
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+mod sharing;
 // Pure helpers (prefix handling, join info) the native and browser S3 backends
 // share so both compute identical object keys and join info for one library.
 mod s3_common;

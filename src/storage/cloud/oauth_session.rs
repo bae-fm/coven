@@ -13,8 +13,11 @@ use crate::clock::ClockRef;
 use crate::keys::{CloudHomeCredentials, KeyService};
 use crate::oauth::{self, OAuthConfig, OAuthTokens};
 
-/// Owns a provider's OAuth tokens and refreshes them as needed.
+/// Owns a provider's OAuth tokens (refreshing them as needed) and the
+/// `reqwest::Client` its requests go out on — every OAuth backend shared the same
+/// client field and token lifecycle, so both live here once.
 pub struct OAuthSession {
+    client: reqwest::Client,
     tokens: RwLock<OAuthTokens>,
     key_service: KeyService,
     clock: ClockRef,
@@ -32,12 +35,18 @@ impl OAuthSession {
         provider_label: &'static str,
     ) -> Self {
         Self {
+            client: reqwest::Client::new(),
             tokens: RwLock::new(tokens),
             key_service,
             clock,
             config,
             provider_label,
         }
+    }
+
+    /// The shared HTTP client requests go out on.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// The current access token, refreshing if it's expired or about to expire.

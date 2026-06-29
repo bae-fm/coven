@@ -11,7 +11,10 @@ use aws_sdk_s3::config::ResponseChecksumValidation;
 use aws_sdk_s3::Client;
 use tracing::warn;
 
-use super::s3_common::{apply_prefix, s3_join_info};
+use super::s3_common::{
+    apply_prefix, is_not_found_code, list_strip_prefix, normalize_prefix, probe_error,
+    range_header, s3_join_info,
+};
 use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
 /// S3-backed cloud home.
@@ -100,7 +103,10 @@ impl S3CloudHome {
             endpoint,
             access_key,
             secret_key,
-            key_prefix,
+            // Normalize once here (trim trailing slash, drop empty), so neither
+            // full_key nor list re-trims — the same normalization the wasm backend
+            // does, now shared.
+            key_prefix: normalize_prefix(key_prefix),
         })
     }
 
@@ -295,35 +301,15 @@ impl CloudHome for S3CloudHome {
     /// HeadBucket — cheap auth + existence check, no listing cost.
     async fn probe(&self) -> Result<(), CloudHomeError> {
         use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-        use aws_sdk_s3::operation::head_bucket::HeadBucketError;
 
         match self.client.head_bucket().bucket(&self.bucket).send().await {
             Ok(_) => Ok(()),
             Err(SdkError::ServiceError(svc)) => {
                 let status = svc.raw().status().as_u16();
                 let code: Option<String> = svc.err().code().map(str::to_string);
-                let bucket = self.bucket.clone();
-                match svc.into_err() {
-                    HeadBucketError::NotFound(_) => Err(CloudHomeError::Storage(format!(
-                        "bucket {bucket:?} does not exist"
-                    ))),
-                    other => {
-                        let is_auth = status == 403
-                            || matches!(
-                                code.as_deref(),
-                                Some("SignatureDoesNotMatch") | Some("InvalidAccessKeyId")
-                            );
-                        if is_auth {
-                            Err(CloudHomeError::Storage(format!(
-                                "S3 credentials rejected (status {status}, code {code:?})"
-                            )))
-                        } else {
-                            Err(CloudHomeError::Storage(format!(
-                                "S3 probe failed (status {status}, code {code:?}): {other}"
-                            )))
-                        }
-                    }
-                }
+                // The shared 404→missing / 403→creds-rejected classification both
+                // S3 backends use.
+                Err(probe_error(status, code.as_deref(), &self.bucket))
             }
             Err(e) => Err(CloudHomeError::Storage(format!("S3 probe failed: {e}"))),
         }
@@ -400,7 +386,7 @@ impl CloudHome for S3CloudHome {
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
         let full = self.full_key(key);
-        let range = format!("bytes={start}-{}", end.saturating_sub(1));
+        let range = range_header(start, end);
         let resp = self
             .client
             .get_object()
@@ -424,10 +410,7 @@ impl CloudHome for S3CloudHome {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
         let full_prefix = self.full_key(prefix);
-        let strip_prefix = self
-            .key_prefix
-            .as_ref()
-            .map(|p| format!("{}/", p.trim_end_matches('/')));
+        let strip_prefix = list_strip_prefix(self.key_prefix.as_deref());
 
         let mut keys = Vec::new();
         let mut continuation_token: Option<String> = None;
@@ -483,9 +466,9 @@ impl CloudHome for S3CloudHome {
             // but GCS's S3 XML API returns 404 `NoSuchKey`. A missing object is not
             // a failure — `cancel_tombstone` deletes the tombstone after every
             // upload and relies on the no-tombstone case being a no-op — so swallow
-            // not-found and surface only real errors. The wasm S3 backend already
-            // treats 404 as success; this matches it on the native path.
-            if e.code() != Some("NoSuchKey") {
+            // not-found (the shared rule both S3 backends apply) and surface only
+            // real errors.
+            if !is_not_found_code(e.code()) {
                 return Err(CloudHomeError::Storage(format!("delete {key}: {e}")));
             }
         }
@@ -493,6 +476,7 @@ impl CloudHome for S3CloudHome {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
         let full = self.full_key(key);
         match self
             .client
@@ -503,13 +487,14 @@ impl CloudHome for S3CloudHome {
             .await
         {
             Ok(_) => Ok(true),
+            // Apply the shared not-found rule (NoSuchKey/NotFound, or a raw 404)
+            // off the modeled error code and status, not a Display-string match.
             Err(e) => {
-                let msg = format!("{e}");
-                if msg.contains("NotFound")
-                    || msg.contains("not found")
-                    || msg.contains("404")
-                    || msg.contains("NoSuchKey")
-                {
+                let status = match &e {
+                    SdkError::ServiceError(svc) => Some(svc.raw().status().as_u16()),
+                    _ => None,
+                };
+                if is_not_found_code(e.code()) || status == Some(404) {
                     Ok(false)
                 } else {
                     Err(CloudHomeError::Storage(format!("head {key}: {e}")))
@@ -558,8 +543,9 @@ mod tests {
     }
 
     #[test]
-    fn full_key_strips_trailing_slash() {
-        let key = apply_prefix(Some("libs/abc/"), "heads/dev1.json");
+    fn normalized_prefix_drops_trailing_slash() {
+        let prefix = normalize_prefix(Some("libs/abc/".to_string()));
+        let key = apply_prefix(prefix.as_deref(), "heads/dev1.json");
         assert_eq!(key, "libs/abc/heads/dev1.json");
     }
 

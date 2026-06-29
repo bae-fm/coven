@@ -86,10 +86,7 @@ pub async fn sign_in_google_drive(
             .map_err(|e| SetupError(format!("Failed to create Google Drive folder: {e}")))?;
 
         if !resp.status().is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            let body = super::http::body_text(resp).await;
             return Err(SetupError(format!(
                 "Failed to create Google Drive folder: {body}"
             )));
@@ -151,10 +148,7 @@ pub async fn sign_in_dropbox(
 
     let status = resp.status();
     if !status.is_success() {
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+        let body = super::http::body_text(resp).await;
         // 409 with "path/conflict" means the folder already exists -- fine
         if !(status == reqwest::StatusCode::CONFLICT && body.contains("conflict")) {
             return Err(SetupError(format!(
@@ -201,10 +195,7 @@ pub async fn sign_in_onedrive(
         .map_err(|e| SetupError(format!("Failed to get drive info: {e}")))?;
 
     if !drive_resp.status().is_success() {
-        let body = drive_resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+        let body = super::http::body_text(drive_resp).await;
         return Err(SetupError(format!("Failed to get OneDrive info: {body}")));
     }
 
@@ -235,10 +226,7 @@ pub async fn sign_in_onedrive(
         .map_err(|e| SetupError(format!("Failed to create OneDrive folder: {e}")))?;
 
     if !create_resp.status().is_success() {
-        let body = create_resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+        let body = super::http::body_text(create_resp).await;
         return Err(SetupError(format!(
             "Failed to create OneDrive folder: {body}"
         )));
