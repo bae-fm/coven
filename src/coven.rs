@@ -15,6 +15,7 @@ use crate::handle::CovenHandle;
 use crate::id_provider::{IdRef, UuidProvider};
 use crate::keys::KeyService;
 use crate::library_dir::PathTokenError;
+use crate::migration::Migration;
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::sync::session::SyncedTable;
 use crate::sync::sync_manager::ConfigProvider;
@@ -31,6 +32,8 @@ pub enum CovenError {
     Blob(String),
     #[error("synced_tables must be set before opening a coven library")]
     MissingSyncedTables,
+    #[error("migrations must be set before opening a coven library")]
+    MissingMigrations,
     #[error("write batch did not install a SQL closure")]
     MissingSql,
     #[error("write batch can install only one SQL closure")]
@@ -100,6 +103,7 @@ impl Coven {
         CovenBuilder {
             config,
             synced_tables: None,
+            migrations: None,
             clock: Arc::new(SystemClock),
             key_service: KeyService::new(current.library_id),
             observer: None,
@@ -111,6 +115,7 @@ impl Coven {
 pub struct CovenBuilder {
     config: CovenConfig,
     synced_tables: Option<Vec<SyncedTable>>,
+    migrations: Option<Vec<Migration>>,
     clock: ClockRef,
     key_service: KeyService,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -120,6 +125,14 @@ pub struct CovenBuilder {
 impl CovenBuilder {
     pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
         self.synced_tables = Some(tables);
+        self
+    }
+
+    /// The host's synced-schema migration ladder, applied over `PRAGMA
+    /// user_version` at open. The top version is the wire `schema_version` every
+    /// changeset is stamped with.
+    pub fn migrations(mut self, migrations: Vec<Migration>) -> Self {
+        self.migrations = Some(migrations);
         self
     }
 
@@ -143,19 +156,15 @@ impl CovenBuilder {
         self
     }
 
-    pub fn open(
-        self,
-        migrate: impl FnOnce(&Connection) -> CovenResult<()> + Send + 'static,
-    ) -> CovenResult<CovenHandle> {
+    pub fn open(self) -> CovenResult<CovenHandle> {
         let config = self.config.current();
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
+        let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
         let db_path = config.library_dir.db_path();
         let provider = self.config.provider();
         let library_dir = config.library_dir.clone();
         let (db, stamper) =
-            Database::open(&db_path, tables, config.device_id.clone(), move |conn| {
-                migrate(conn).map_err(|e| DbError(e.to_string()))
-            })?;
+            Database::open(&db_path, tables, config.device_id.clone(), &migrations)?;
         Ok(CovenHandle::new(
             db,
             stamper,
@@ -538,17 +547,17 @@ mod tests {
         let dir = LibraryDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
-            .open(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE files (
-                        id TEXT PRIMARY KEY,
-                        blob_id TEXT,
-                        size INTEGER NOT NULL,
-                        _updated_at TEXT NOT NULL
-                    );",
-                )?;
-                Ok(())
-            })
+            .migrations(vec![Migration::sql(
+                1,
+                "test-schema",
+                "CREATE TABLE files (
+                    id TEXT PRIMARY KEY,
+                    blob_id TEXT,
+                    size INTEGER NOT NULL,
+                    _updated_at TEXT NOT NULL
+                );",
+            )])
+            .open()
             .expect("open handle");
         (tmp, handle)
     }

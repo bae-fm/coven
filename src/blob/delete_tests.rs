@@ -45,7 +45,7 @@ fn open_outbox_db() -> Database {
         std::path::Path::new(":memory:"),
         Vec::new(),
         "test-device".to_string(),
-        |_conn| Ok(()),
+        &[],
     )
     .expect("open outbox database");
     db

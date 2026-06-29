@@ -32,7 +32,7 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
-use crate::sync::test_helpers::{create_synced_schema, test_synced_tables_with_blob};
+use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -48,7 +48,7 @@ fn open_device(device_id: &str) -> Database {
             CacheFill::CacheEager,
         )),
         device_id.to_string(),
-        create_synced_schema,
+        &test_migrations(),
     )
     .expect("open in-memory Database");
     db

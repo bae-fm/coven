@@ -10,8 +10,9 @@
 //!
 //! Integration contract for the host:
 //! - coven OWNS the SQLite connection. The host opens it once with
-//!   [`Coven::builder(config)`], declares synced tables, and calls `open`: coven
-//!   runs its own bookkeeping migration, then the host's `migrate` closure for the
+//!   [`Coven::builder(config)`], declares synced tables and its synced-schema
+//!   [`Migration`] ladder, and calls `open`: coven runs its own bookkeeping
+//!   migration, then the host's migration ladder over `PRAGMA user_version` for the
 //!   app's tables, seeds the register clock off the rows on disk, attaches the
 //!   capture session, and spawns the connection thread. The host runs its SQL
 //!   through [`CovenHandle::sql`] or [`CovenHandle::write`]; coven captures those
@@ -86,6 +87,10 @@ pub(crate) mod id_provider;
 pub(crate) mod join_code;
 pub(crate) mod keys;
 pub(crate) mod library_dir;
+// The host's synced-schema ladder: ordered migrations tracked in `PRAGMA
+// user_version`, which doubles as the wire `schema_version`. Documented at the
+// module.
+pub(crate) mod migration;
 // The device-local plaintext file behind each `BlobRef`: read on push, written on
 // pull. Native uses the filesystem; wasm uses OPFS. Documented at the module.
 pub(crate) mod local_blob;
@@ -190,7 +195,9 @@ pub use blob::BlobId;
 // Applied-sync change notification (the host reacts to these).
 pub use changeset::{ChangeOp, RowChange};
 
-// Host schema declaration.
+// Host schema declaration: the synced-table set plus the synced-schema migration
+// ladder the host registers with the builder.
+pub use migration::{Migration, MigrationStep};
 pub use sync::session::{BlobDecl, SyncedTable};
 
 // Config.

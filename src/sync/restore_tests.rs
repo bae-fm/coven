@@ -19,7 +19,7 @@ use crate::sync::restore::{restore_from_code, RestoreError};
 use crate::sync::restore_code::{
     decode_restore_code, encode_restore_code, RestoreCode, RestoreCodeError, RestoreProvider,
 };
-use crate::sync::test_helpers::test_synced_tables;
+use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 
 /// A restore code carrying the given `lid`. The provider points at a loopback
 /// endpoint nothing listens on, so if execution ever reached the network it would
@@ -58,6 +58,7 @@ async fn restore_result_for(
     restore_from_code(
         code_str,
         &test_synced_tables(),
+        &test_migrations(),
         None,
         None,
         app_dir,

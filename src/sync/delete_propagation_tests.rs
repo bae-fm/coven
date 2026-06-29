@@ -94,12 +94,13 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
 
     // Device B joins: bootstrap from A's snapshot, then pull A/1.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &cipher, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &cipher, None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
         &lib_b.db_path(),
         &tables,
+        &test_migrations(),
         "B",
         None,
         &storage,
@@ -108,11 +109,13 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
     )
     .await
     .expect("B open_db_and_pull");
-    let (db_b, _stamper_b) =
-        Database::open(&lib_b.db_path(), tables.clone(), "B".to_string(), |_c| {
-            Ok(())
-        })
-        .expect("open B db");
+    let (db_b, _stamper_b) = Database::open(
+        &lib_b.db_path(),
+        tables.clone(),
+        "B".to_string(),
+        &test_migrations(),
+    )
+    .expect("open B db");
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "Album Title",
@@ -475,6 +478,7 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
         "test-lib",
         &CloudCipher::Plaintext,
         None,
+        1,
         &lib_b.db_path(),
     )
     .await
@@ -482,6 +486,7 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
     open_db_and_pull(
         &lib_b.db_path(),
         &tables,
+        &test_migrations(),
         "B",
         None,
         &storage,
@@ -490,11 +495,13 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
     )
     .await
     .expect("B open_db_and_pull");
-    let (db_b, _stamper_b) =
-        Database::open(&lib_b.db_path(), tables.clone(), "B".to_string(), |_c| {
-            Ok(())
-        })
-        .expect("open B db");
+    let (db_b, _stamper_b) = Database::open(
+        &lib_b.db_path(),
+        tables.clone(),
+        "B".to_string(),
+        &test_migrations(),
+    )
+    .expect("open B db");
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "Plain Album",

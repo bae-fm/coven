@@ -35,6 +35,7 @@ use tracing::debug;
 use tracing::error;
 
 use crate::db::{ExternalBlob, OutboxEntry, OutboxOperation, MIGRATION_SQL};
+use crate::migration::{run_migrations, Migration};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
 use crate::sync::session::SyncedTable;
 
@@ -91,6 +92,11 @@ pub struct Database {
     /// it from one place (the same set the capture session attaches and the
     /// register-clock seed scanned). See [`Database::synced_tables`].
     synced_tables: Arc<Vec<SyncedTable>>,
+    /// The applied synced-schema version (`PRAGMA user_version`) at open. The
+    /// migration ladder runs only at open, so this is fixed for the handle's life
+    /// and read without re-querying the connection. It is the wire `schema_version`
+    /// every changeset is stamped with. See [`Database::schema_version`].
+    schema_version: u32,
     _thread: Arc<JoinOnDrop>,
 }
 
@@ -111,6 +117,9 @@ pub struct Database {
     /// it from one place (the same set the capture session attaches and the
     /// register-clock seed scanned). See [`Database::synced_tables`].
     synced_tables: Arc<Vec<SyncedTable>>,
+    /// The applied synced-schema version (`PRAGMA user_version`) at open. See the
+    /// native [`Database`]'s field and [`Database::schema_version`].
+    schema_version: u32,
 }
 
 /// The wasm connection and its capture session, kept together.
@@ -199,12 +208,13 @@ impl Drop for JoinOnDrop {
 impl Database {
     /// Open and own the connection at `path`.
     ///
-    /// Runs coven's bookkeeping migration, then the host's `migrate` for the
-    /// app's own tables, seeds the register clock off the on-disk rows, and
-    /// attaches the capture session to `synced_tables`. Natively it then spawns
-    /// the connection thread; on wasm the connection and session are held
-    /// directly on this Worker. Returns the handle plus the non-optional
-    /// `_updated_at` stamper the host binds into every synced-row write.
+    /// Runs coven's bookkeeping migration, then the host's synced-schema migration
+    /// ladder (`migrations`) over `PRAGMA user_version`, seeds the register clock
+    /// off the on-disk rows, and attaches the capture session to `synced_tables`.
+    /// Natively it then spawns the connection thread; on wasm the connection and
+    /// session are held directly on this Worker. Returns the handle plus the
+    /// non-optional `_updated_at` stamper the host binds into every synced-row
+    /// write.
     ///
     /// On wasm, `path` is mapped to a flat OPFS filename (see `open_with_hlc`),
     /// and `coven::wasm::install_browser_storage` must have run once before this
@@ -213,9 +223,14 @@ impl Database {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         device_id: String,
-        migrate: impl FnOnce(&Connection) -> Result<(), DbError>,
+        migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), DbError> {
-        Self::open_with_hlc(path, synced_tables, Arc::new(Hlc::new(device_id)), migrate)
+        Self::open_with_hlc(
+            path,
+            synced_tables,
+            Arc::new(Hlc::new(device_id)),
+            migrations,
+        )
     }
 
     /// Open with a caller-supplied register clock instead of a fresh
@@ -234,7 +249,7 @@ impl Database {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         hlc: Arc<Hlc>,
-        migrate: impl FnOnce(&Connection) -> Result<(), DbError>,
+        migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), DbError> {
         #[cfg(not(target_arch = "wasm32"))]
         let conn = Connection::open(path).map_err(DbError::from)?;
@@ -261,10 +276,15 @@ impl Database {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
 
-        // coven's bookkeeping tables first, then the host's schema.
+        // coven's bookkeeping tables and the coven-owned `item_keys` synced table
+        // first (declarative, idempotent, run every open), then the host's synced
+        // schema ladder over `PRAGMA user_version`. The two are kept separate by
+        // sync-visibility: coven's bookkeeping rows are stripped on snapshot, so a
+        // versioned ledger can't track them; the host's synced ladder version rides
+        // inside the snapshot's DB header.
         conn.execute_batch(MIGRATION_SQL).map_err(DbError::from)?;
         migrate_bookkeeping_schema(&conn)?;
-        migrate(&conn)?;
+        let schema_version = run_migrations(&conn, migrations)?;
 
         // `item_keys` is coven-owned but is library-global content every member
         // needs, so coven — not the host — declares it synced. Injecting it here
@@ -307,6 +327,7 @@ impl Database {
                 tx,
                 hlc,
                 synced_tables,
+                schema_version,
                 _thread: Arc::new(JoinOnDrop {
                     handle: std::sync::Mutex::new(Some(handle)),
                 }),
@@ -321,6 +342,7 @@ impl Database {
             owned: std::rc::Rc::new(std::cell::RefCell::new(Owned::new(conn, &synced_tables)?)),
             hlc,
             synced_tables,
+            schema_version,
         };
 
         Ok((database, stamper))
@@ -333,6 +355,17 @@ impl Database {
     /// separately-passed copy that could silently diverge.
     pub fn synced_tables(&self) -> &[SyncedTable] {
         &self.synced_tables
+    }
+
+    /// The applied synced-schema version — `PRAGMA user_version` after the
+    /// migration ladder ran at open. This is the single source of the wire
+    /// `schema_version`: every outgoing changeset is stamped with it, the pull
+    /// gates compare incoming changesets and the min-floor against it, and the
+    /// snapshot meta carries it. A device cannot stamp a version it has not
+    /// migrated to. Cached because migrations run only at open, so the value is
+    /// fixed for the handle's life.
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
     }
 
     /// The shared register clock. coven's sync layer advances it past pulled rows

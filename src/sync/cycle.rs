@@ -677,6 +677,7 @@ pub async fn run_single_sync_cycle(
                     device_id,
                     sync_result.updated_cursors.clone(),
                     local_seq,
+                    db.schema_version(),
                     user_keypair,
                     clock,
                 )

@@ -12,6 +12,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::migration::Migration;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::apply::apply_changeset_lww;
 use crate::sync::envelope::{self, ChangesetEnvelope};
@@ -71,7 +72,7 @@ pub fn test_synced_tables_with_user_and_host_blobs(
 /// Open a test [`Database`] over the synthetic schema with `note_photos` declared
 /// blob-bearing per `decl`.
 pub fn open_test_db_with_blob(decl: BlobDecl) -> Database {
-    open_test_db_schema(test_synced_tables_with_blob(decl), create_synced_schema)
+    open_test_db_schema(test_synced_tables_with_blob(decl), test_migrations())
 }
 
 /// Open a read-test [`Database`] whose `note_photos` child carries a blob in
@@ -144,12 +145,19 @@ pub fn open_test_db_with_user_and_host_blobs(
 ) -> Database {
     open_test_db_schema(
         test_synced_tables_with_user_and_host_blobs(photo_decl, cover_decl),
-        create_synced_schema,
+        test_migrations(),
     )
 }
 
-/// Create the synthetic test schema on a connection. Used as the host `migrate`
-/// closure for [`open_test_db`].
+/// The synthetic test schema as a single-migration ladder, so a test db opens at
+/// `schema_version() == 1`. The host-schema ladder for every `open_test_db*`
+/// helper.
+pub fn test_migrations() -> Vec<Migration> {
+    vec![Migration::run(1, "test-schema", create_synced_schema)]
+}
+
+/// Create the synthetic test schema on a connection. Run as the host migration
+/// step for [`open_test_db`] (see [`test_migrations`]).
 pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(
         "CREATE TABLE notes (
@@ -196,25 +204,22 @@ pub fn open_test_db() -> Database {
     open_test_db_with(test_synced_tables())
 }
 
-/// Like [`open_test_db`] but with an explicit synced set and schema builder, for
+/// Like [`open_test_db`] but with an explicit synced set and migration ladder, for
 /// tests that exercise a different schema (gate tests).
-pub fn open_test_db_schema(
-    tables: Vec<SyncedTable>,
-    migrate: impl FnOnce(&Connection) -> Result<(), DbError>,
-) -> Database {
+pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>) -> Database {
     // `:memory:` is unique per connection; the Database owns exactly one.
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         tables,
         "test-device".to_string(),
-        migrate,
+        &migrations,
     )
     .expect("open test database");
     db
 }
 
 fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
-    open_test_db_schema(tables, create_synced_schema)
+    open_test_db_schema(tables, test_migrations())
 }
 
 /// Open a test [`Database`] over the synthetic schema with a caller-supplied
@@ -226,16 +231,17 @@ fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_test_db_with_hlc(
     hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
-    seed: impl FnOnce(&Connection) -> Result<(), DbError>,
+    seed: impl Fn(&Connection) -> Result<(), DbError> + Send + 'static,
 ) -> Database {
+    let migrations = vec![Migration::run(1, "test-schema", move |conn| {
+        create_synced_schema(conn)?;
+        seed(conn)
+    })];
     let (db, _stamper) = Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         hlc,
-        |conn| {
-            create_synced_schema(conn)?;
-            seed(conn)
-        },
+        &migrations,
     )
     .expect("open test database with hlc");
     db

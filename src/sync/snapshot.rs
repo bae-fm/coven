@@ -96,6 +96,18 @@ pub enum SnapshotError {
     /// chain). The snapshot is refused rather than adopted.
     #[error("snapshot author is not an authorized member: {0}")]
     UnauthorizedAuthor(String),
+    /// The snapshot's synced-schema version is newer than this binary's top
+    /// migration, so its DB image carries columns this binary's tables lack. The
+    /// generation is refused before its image is downloaded; the same refusal is
+    /// the at-open backstop in [`crate::migration::run_migrations`].
+    #[error(
+        "snapshot schema version {snapshot_version} is newer than this binary supports \
+         ({supported}); update the app"
+    )]
+    SchemaTooNew {
+        snapshot_version: u32,
+        supported: u32,
+    },
 }
 
 /// SHA-256 of a snapshot's stored (sealed) bytes, hex-encoded. The hash the
@@ -301,6 +313,7 @@ pub async fn push_snapshot(
     device_id: &str,
     applied_cursors: HashMap<String, u64>,
     current_seq: u64,
+    schema_version: u32,
     keypair: &UserKeypair,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(), SnapshotError> {
@@ -337,7 +350,13 @@ pub async fn push_snapshot(
     // Our own current_seq is included (our head hasn't been updated yet).
     cursors.insert(device_id.to_string(), current_seq);
 
-    let meta = SnapshotMetaJson::signed(library_id, cursors, db_hash.clone(), keypair);
+    let meta = SnapshotMetaJson::signed(
+        library_id,
+        cursors,
+        db_hash.clone(),
+        schema_version,
+        keypair,
+    );
     let meta_json =
         serde_json::to_vec(&meta).map_err(|e| SnapshotError::Io(std::io::Error::other(e)))?;
 
@@ -874,6 +893,7 @@ pub async fn bootstrap_from_snapshot(
     library_id: &str,
     cipher: &CloudCipher,
     owner_pubkey: Option<&str>,
+    binary_schema_version: u32,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
     // Resolve the pointer to the live generation and authenticate it before
@@ -881,6 +901,18 @@ pub async fn bootstrap_from_snapshot(
     // brand-new library) or its object is missing; either way there is no
     // consistent generation to adopt and we refuse, writing nothing.
     let (author, seq, meta) = resolve_current_meta(storage, library_id, owner_pubkey).await?;
+
+    // Refuse a generation whose synced-schema version is newer than this binary
+    // can apply, before downloading the image: its DB carries columns this binary's
+    // tables lack, and applying a later device's changesets into it would fail.
+    // This is the fail-fast gate; the at-open `run_migrations` SchemaTooNew check is
+    // the by-construction backstop if a device somehow gets past here.
+    if meta.schema_version > binary_schema_version {
+        return Err(SnapshotError::SchemaTooNew {
+            snapshot_version: meta.schema_version,
+            supported: binary_schema_version,
+        });
+    }
 
     // Download the named generation's DB image from its publisher's keyspace and
     // confirm it is the exact image the (now authenticated) meta and pointer commit
@@ -1492,6 +1524,7 @@ mod tests {
             test_library_id(),
             cursors.into_iter().collect(),
             db_hash.clone(),
+            0,
             keypair,
         );
         storage
@@ -1642,6 +1675,7 @@ mod tests {
             "devA",
             HashMap::new(),
             1,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -1649,7 +1683,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1678,6 +1712,72 @@ mod tests {
             0,
             "non-synced table must be empty in the restored DB",
         );
+    }
+
+    /// The fail-fast bootstrap gate: a snapshot whose synced-schema version is newer
+    /// than this binary's top migration is refused before its image is downloaded.
+    /// A binary at the writer's version — or newer — adopts it (a newer binary
+    /// carries the image forward at open, which `run_migrations` covers).
+    #[tokio::test]
+    async fn bootstrap_refuses_a_snapshot_newer_than_this_binary() {
+        let db_a = synced_conn();
+        exec(
+            &db_a,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('n1', 'Note One', 1, '0000000001000-0000-devA', '2026-01-01')",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
+
+        // Publish the generation stamped at synced-schema version 2.
+        let storage = MockSyncStorage::new();
+        push_snapshot(
+            &storage,
+            test_library_id(),
+            encrypted,
+            "devA",
+            HashMap::new(),
+            1,
+            2,
+            &test_keypair(),
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("push_snapshot");
+
+        // A binary topping out at version 1 cannot apply a version-2 image: refused
+        // before download, with the SchemaTooNew shape, writing nothing.
+        let too_old = temp.path().join("too_old.db");
+        let err = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 1, &too_old)
+            .await
+            .expect_err("a too-old binary must refuse a newer snapshot");
+        assert!(matches!(
+            err,
+            SnapshotError::SchemaTooNew {
+                snapshot_version: 2,
+                supported: 1
+            }
+        ));
+        assert!(
+            !too_old.exists(),
+            "nothing is written when the gate refuses"
+        );
+
+        // A binary at the writer's version adopts it.
+        let same = temp.path().join("same.db");
+        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 2, &same)
+            .await
+            .expect("a binary at the snapshot's version bootstraps");
+        assert!(same.exists());
+
+        // A newer binary (version 3) adopts it too.
+        let newer = temp.path().join("newer.db");
+        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 3, &newer)
+            .await
+            .expect("a newer binary bootstraps an older snapshot");
+        assert!(newer.exists());
     }
 
     /// The snapshot is a second propagation channel, so it must honor the same
@@ -1727,6 +1827,7 @@ mod tests {
             "devA",
             HashMap::new(),
             1,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -1734,7 +1835,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1815,6 +1916,7 @@ mod tests {
             "devA",
             HashMap::new(),
             1,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -1822,7 +1924,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1874,6 +1976,7 @@ mod tests {
             "dev-1",
             applied,
             42,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -1926,7 +2029,7 @@ mod tests {
         .await;
 
         let target = temp.path().join("bootstrapped.db");
-        let result = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        let result = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap");
 
@@ -1950,7 +2053,7 @@ mod tests {
         let target = temp.path().join("nope.db");
 
         let result =
-            bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target).await;
+            bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target).await;
 
         assert!(result.is_err());
         assert!(!target.exists());
@@ -1985,6 +2088,7 @@ mod tests {
             "dev-1",
             HashMap::new(),
             5,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -1992,7 +2096,7 @@ mod tests {
         .expect("push");
 
         let target = temp.path().join("device2.db");
-        let result = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        let result = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap");
         assert_eq!(result.cursors.get("dev-1"), Some(&5));
@@ -2125,7 +2229,7 @@ mod tests {
             .unwrap();
 
         let target = temp.path().join("torn.db");
-        let err = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        let err = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect_err("bootstrap must refuse a generation with no pointer");
         assert!(
@@ -2169,6 +2273,7 @@ mod tests {
             "self",
             HashMap::new(),
             5,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -2190,7 +2295,7 @@ mod tests {
         // Bootstrap resolves the pointer (still naming A) and adopts A's consistent
         // generation — the 'old' row, cursor {self: 5} — never B's orphan db.
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap resolves the consistent generation A");
         assert_eq!(
@@ -2244,6 +2349,7 @@ mod tests {
             test_library_id(),
             std::collections::BTreeMap::new(),
             db_hash_b,
+            0,
             &kp_b,
         );
         storage
@@ -2486,6 +2592,7 @@ mod tests {
             test_library_id(),
             std::collections::BTreeMap::from([("B".to_string(), 7)]),
             db_hash_b,
+            0,
             &kp_b,
         );
         storage
@@ -2515,7 +2622,7 @@ mod tests {
         // The pointer names A's generation, so a joiner resolves and adopts A's
         // catalog — A's db image was never aliased by B's same-seq publish.
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap resolves A's live generation");
         assert_eq!(boot.cursors.get("A"), Some(&7));
@@ -2596,6 +2703,7 @@ mod tests {
             "B",
             applied,
             0,
+            0,
             &kp,
             &crate::clock::SystemClock,
         )
@@ -2618,7 +2726,7 @@ mod tests {
             .expect("K+1 is above the snapshot cursor and must be preserved");
 
         let target = temp.path().join("device_c.db");
-        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap");
         let c_cursor = *boot.cursors.get("M").unwrap_or(&0);
@@ -2667,6 +2775,7 @@ mod tests {
             "owner",
             HashMap::new(),
             1,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -2675,7 +2784,7 @@ mod tests {
 
         // Device B bootstraps and has the note.
         let b_path = temp.path().join("b.db");
-        let b_boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &b_path)
+        let b_boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &b_path)
             .await
             .expect("b bootstrap");
         let db_b = open_db_at(&b_path);
@@ -2724,6 +2833,7 @@ mod tests {
             "B",
             b_cursors.clone(),
             0,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -2732,7 +2842,7 @@ mod tests {
 
         // Device C bootstraps + pulls and must also have the update.
         let c_path = temp.path().join("c.db");
-        let c_boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &c_path)
+        let c_boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &c_path)
             .await
             .expect("c bootstrap");
         let db_c = open_db_at(&c_path);
@@ -2771,6 +2881,7 @@ mod tests {
             "M",
             applied,
             2,
+            0,
             &kp,
             &crate::clock::SystemClock,
         )
@@ -2810,6 +2921,7 @@ mod tests {
             "self",
             applied,
             0,
+            0,
             &test_keypair(),
             &crate::clock::SystemClock,
         )
@@ -2817,7 +2929,7 @@ mod tests {
         .expect("push");
 
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, &target)
+        let boot = bootstrap_from_snapshot(&storage, test_library_id(), &enc, None, 0, &target)
             .await
             .expect("bootstrap");
         assert_eq!(boot.cursors.get("M"), Some(&7));
@@ -2840,6 +2952,7 @@ mod tests {
             vec![0u8; 4],
             "B",
             applied,
+            0,
             0,
             &test_keypair(),
             &crate::clock::SystemClock,
@@ -2910,6 +3023,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -2923,6 +3037,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -2959,6 +3074,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -2977,6 +3093,7 @@ mod authorization_tests {
             library_y,
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3012,6 +3129,7 @@ mod authorization_tests {
             "evil-dev",
             HashMap::from([("victim".to_string(), u64::MAX)]),
             1,
+            0,
             &outsider,
             &crate::clock::SystemClock,
         )
@@ -3025,6 +3143,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3062,6 +3181,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -3088,6 +3208,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3131,6 +3252,7 @@ mod authorization_tests {
             "follower-dev",
             HashMap::new(),
             1,
+            0,
             &follower,
             &crate::clock::SystemClock,
         )
@@ -3144,6 +3266,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3188,6 +3311,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -3201,6 +3325,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &owner_target,
         )
         .await
@@ -3217,6 +3342,7 @@ mod authorization_tests {
             "member-dev",
             HashMap::new(),
             1,
+            0,
             &member,
             &crate::clock::SystemClock,
         )
@@ -3229,6 +3355,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &member_target,
         )
         .await
@@ -3257,6 +3384,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -3282,6 +3410,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3315,6 +3444,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -3339,6 +3469,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3367,6 +3498,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::from([("peer".to_string(), 5)]),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -3396,6 +3528,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3426,6 +3559,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -3434,7 +3568,7 @@ mod authorization_tests {
 
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("restore.db");
-        bootstrap_from_snapshot(&storage, test_library_id(), &cipher(), None, &target)
+        bootstrap_from_snapshot(&storage, test_library_id(), &cipher(), None, 0, &target)
             .await
             .expect("restore adopts a member-signed snapshot anchored to the chain founder");
         assert!(target.exists());
@@ -3448,6 +3582,7 @@ mod authorization_tests {
             "evil-dev",
             HashMap::new(),
             1,
+            0,
             &outsider,
             &crate::clock::SystemClock,
         )
@@ -3455,9 +3590,10 @@ mod authorization_tests {
         .expect("outsider overwrites the snapshot objects");
 
         let target2 = temp.path().join("restore2.db");
-        let err = bootstrap_from_snapshot(&storage, test_library_id(), &cipher(), None, &target2)
-            .await
-            .expect_err("restore must refuse a non-member-signed snapshot");
+        let err =
+            bootstrap_from_snapshot(&storage, test_library_id(), &cipher(), None, 0, &target2)
+                .await
+                .expect_err("restore must refuse a non-member-signed snapshot");
         assert!(
             matches!(err, SnapshotError::UnauthorizedAuthor(_)),
             "expected UnauthorizedAuthor, got {err:?}",
@@ -3483,6 +3619,7 @@ mod authorization_tests {
             "evil-dev",
             HashMap::from([("victim".to_string(), u64::MAX)]),
             1,
+            0,
             &outsider,
             &crate::clock::SystemClock,
         )
@@ -3518,6 +3655,7 @@ mod authorization_tests {
             "owner-dev",
             HashMap::new(),
             1,
+            0,
             &owner,
             &crate::clock::SystemClock,
         )
@@ -3531,6 +3669,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3568,6 +3707,7 @@ mod authorization_tests {
             "founder-dev",
             HashMap::new(),
             1,
+            0,
             &chain_founder,
             &crate::clock::SystemClock,
         )
@@ -3582,6 +3722,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&pinned_owner)),
+            0,
             &target,
         )
         .await
@@ -3636,6 +3777,7 @@ mod authorization_tests {
             test_library_id(),
             &cipher(),
             Some(&pubkey_hex(&owner)),
+            0,
             &target,
         )
         .await
@@ -3725,7 +3867,7 @@ mod reclaim_tests {
         let db = vec![0u8];
         let db_hash = snapshot_db_hash(&db);
         let author = pubkey_hex(owner);
-        let meta = SnapshotMetaJson::signed(test_library_id(), cursors, db_hash.clone(), owner);
+        let meta = SnapshotMetaJson::signed(test_library_id(), cursors, db_hash.clone(), 0, owner);
         storage
             .put_snapshot_meta(&author, seq, serde_json::to_vec(&meta).unwrap())
             .await

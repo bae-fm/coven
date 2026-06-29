@@ -15,13 +15,16 @@ use super::cache::{
 };
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance, ResolvedScope};
 use crate::database::Database;
-use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     capture_bytes, open_test_db, open_test_db_with_blob, open_test_db_with_user_and_host_blobs,
     plant_blob_row, pull_into, read_test_db, set_blob_remote, temp_library_dir, MockSyncStorage,
 };
+
+/// The synthetic test db opens with a single migration, so its
+/// [`Database::schema_version`] is 1. Changesets are stored at that version.
+const SCHEMA_VERSION: u32 = 1;
 
 /// A `BlobRef` keyed by `id` in `namespace`, master-scoped, no `cloud_path`, of
 /// cache `fill` and `Provenance::UserProvided`. Blob ids are ≥4 chars so they form

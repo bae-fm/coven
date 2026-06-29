@@ -23,13 +23,16 @@ use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
-use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::BlobDecl;
 use crate::sync::signed_control::AckJson;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
 const T0: &str = "2024-01-01T00:00:00Z";
+
+/// The synthetic test db opens with a single migration, so its
+/// [`Database::schema_version`] is 1. Changesets are stored at that version.
+const SCHEMA_VERSION: u32 = 1;
 
 /// Run one sync cycle for device "M" with no cloud home (no outbox drain).
 async fn run_cycle_m(

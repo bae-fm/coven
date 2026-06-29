@@ -260,6 +260,11 @@ pub struct SnapshotMetaJson {
     pub cursors: std::collections::BTreeMap<String, u64>,
     /// Hex-encoded SHA-256 of the stored (sealed) snapshot DB bytes.
     pub db_hash: String,
+    /// The writer's applied synced-schema version (`PRAGMA user_version`) at
+    /// snapshot time. The DB image carries this version in its header anyway; the
+    /// signed copy lets a too-old joiner refuse the generation *before* downloading
+    /// the image, instead of relying solely on the at-open backstop.
+    pub schema_version: u32,
     /// Hex-encoded Ed25519 public key of the device that wrote this snapshot.
     pub author_pubkey: String,
     /// Hex-encoded detached signature over [`SnapshotMetaFields`].
@@ -276,6 +281,7 @@ struct SnapshotMetaFields<'a> {
     library_id: &'a str,
     cursors: &'a std::collections::BTreeMap<String, u64>,
     db_hash: &'a str,
+    schema_version: u32,
 }
 
 impl SnapshotMetaJson {
@@ -288,13 +294,15 @@ impl SnapshotMetaJson {
         library_id: &str,
         cursors: std::collections::BTreeMap<String, u64>,
         db_hash: String,
+        schema_version: u32,
         keypair: &UserKeypair,
     ) -> Self {
-        let payload = snapshot_meta_signing_payload(library_id, &cursors, &db_hash);
+        let payload = snapshot_meta_signing_payload(library_id, &cursors, &db_hash, schema_version);
         let sig = keypair.sign(&payload);
         SnapshotMetaJson {
             cursors,
             db_hash,
+            schema_version,
             author_pubkey: hex::encode(keypair.public_key),
             signature: hex::encode(sig),
         }
@@ -306,7 +314,12 @@ impl SnapshotMetaJson {
     /// replayed here, and must not be adopted. Whether the author is *authorized*
     /// (a current member) is a separate check the caller runs.
     pub fn verify(&self, library_id: &str) -> bool {
-        let payload = snapshot_meta_signing_payload(library_id, &self.cursors, &self.db_hash);
+        let payload = snapshot_meta_signing_payload(
+            library_id,
+            &self.cursors,
+            &self.db_hash,
+            self.schema_version,
+        );
         keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
@@ -315,11 +328,13 @@ fn snapshot_meta_signing_payload(
     library_id: &str,
     cursors: &std::collections::BTreeMap<String, u64>,
     db_hash: &str,
+    schema_version: u32,
 ) -> Vec<u8> {
     let fields = SnapshotMetaFields {
         library_id,
         cursors,
         db_hash,
+        schema_version,
     };
     serde_json::to_vec(&fields).expect("snapshot meta fields serialization cannot fail")
 }
@@ -704,9 +719,10 @@ mod tests {
         use std::collections::BTreeMap;
         let kp = UserKeypair::generate();
         let cursors = BTreeMap::from([("devA".to_string(), 5u64), ("devB".to_string(), 9)]);
-        let meta = SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), &kp);
+        let meta = SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), 3, &kp);
 
         assert_eq!(meta.author_pubkey, hex::encode(kp.public_key));
+        assert_eq!(meta.schema_version, 3);
         assert!(
             meta.verify("lib"),
             "a freshly signed snapshot meta verifies"
@@ -730,17 +746,27 @@ mod tests {
         // The signature binds the DB hash: a meta swapped onto a different DB image
         // (a substituted snapshot) no longer verifies.
         let mut tampered_db =
-            SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), &kp);
+            SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), 3, &kp);
         tampered_db.db_hash = "deadbeef".to_string();
         assert!(
             !tampered_db.verify("lib"),
             "a tampered db_hash fails verification"
         );
 
+        // It binds the schema_version too: bumping it after signing (so a too-old
+        // joiner is told the image is at a version it can apply) invalidates it.
+        let mut tampered_version =
+            SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), 3, &kp);
+        tampered_version.schema_version = 99;
+        assert!(
+            !tampered_version.verify("lib"),
+            "a tampered schema_version fails verification"
+        );
+
         // It also binds the cursors: poisoning a cursor (the bootstrap-skip attack)
         // invalidates the signature.
         let mut tampered_cursors =
-            SnapshotMetaJson::signed("lib", cursors, "abc123".to_string(), &kp);
+            SnapshotMetaJson::signed("lib", cursors, "abc123".to_string(), 3, &kp);
         tampered_cursors
             .cursors
             .insert("devA".to_string(), u64::MAX);
@@ -759,6 +785,7 @@ mod tests {
             "lib",
             BTreeMap::from([("devA".to_string(), 1u64)]),
             "hash".to_string(),
+            1,
             &kp,
         );
         // Swap the claimed author: the signature no longer matches, so the meta is
