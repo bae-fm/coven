@@ -907,6 +907,45 @@ mod tests {
     use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
 
+    /// A blob larger than the in-memory backend's multipart threshold, sealed by
+    /// the streaming `open_body` path and written through `CloudHome::write`, lands
+    /// as a byte-identical `[base_nonce][sealed chunks]` object that the unchanged
+    /// decrypt reads back — proving the multipart streaming path produces the same
+    /// wire format the whole-buffer encryptor does.
+    #[tokio::test]
+    async fn streaming_open_body_multipart_round_trips_through_write() {
+        let master = EncryptionService::new_with_key(&[11u8; 32]);
+        let cipher = CloudCipher::Encrypted(master.clone());
+        let home = InMemoryCloudHome::new();
+
+        // Larger than the backend's 4 MiB threshold so `write` streams it multipart.
+        let plaintext: Vec<u8> = (0..9_000_003u32).map(|i| (i % 251) as u8).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        std::fs::write(&path, &plaintext).unwrap();
+
+        let body = cipher
+            .open_body(ResolvedScope::Master, &path)
+            .await
+            .expect("open streaming body");
+        assert!(
+            body.len() > home.multipart_threshold(),
+            "the body must exceed the threshold so it streams multipart",
+        );
+        home.write("blob-key", body, &crate::storage::cloud::no_progress())
+            .await
+            .expect("streaming write");
+
+        // At rest it is the sealed wire format; the unchanged decrypt recovers the
+        // plaintext.
+        let stored = home.get("blob-key").expect("blob present");
+        assert_eq!(
+            master.decrypt(&stored).expect("decrypt streamed blob"),
+            plaintext,
+            "the multipart-streamed object decrypts to the original plaintext",
+        );
+    }
+
     /// `CloudCipher::for_storage` maps a home's storage mode to its at-rest
     /// cipher: an opaque home seals under the supplied library key, a browsable
     /// home is always plaintext (ignoring any key), and an opaque home with no
