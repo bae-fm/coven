@@ -39,6 +39,15 @@ impl MemberRole {
     }
 }
 
+/// A current member of the shared library, as returned by `get_members`: the
+/// member's public key, their role, and whether it is the local user.
+#[derive(Debug, Clone)]
+pub struct MemberInfo {
+    pub pubkey: String,
+    pub role: MemberRole,
+    pub is_self: bool,
+}
+
 /// A single membership entry in the chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MembershipEntry {
