@@ -1013,9 +1013,7 @@ pub(crate) async fn ensure_owner_anchored_chain(
             )),
         }
     } else {
-        let chain = super::membership_ops::download_chain(storage, &entries)
-            .await
-            .map_err(|e| e.0)?;
+        let chain = super::membership_ops::download_chain(storage, &entries).await?;
         let founder = chain
             .founder_pubkey()
             .ok_or_else(|| "loaded membership chain has no founder".to_string())?
@@ -1069,9 +1067,7 @@ async fn found_and_pin(
     use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let ts = hlc.now().to_string();
-    super::membership_ops::write_founder_entry(storage, owner_keypair, &ts)
-        .await
-        .map_err(|e| e.0)?;
+    super::membership_ops::write_founder_entry(storage, owner_keypair, &ts).await?;
     db.set_sync_state(OWNER_PUBKEY_STATE_KEY, our_pk)
         .await
         .map_err(|e| format!("pin owner: {e}"))?;
