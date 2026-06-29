@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 
-use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 
 /// In-memory CloudHome backed by a HashMap. `Clone` shares one backing store, so
 /// clones act as separate devices reading and writing the same cloud bucket, and
@@ -66,30 +67,62 @@ impl Default for InMemoryCloudHome {
     }
 }
 
+/// A [`PartSink`] for the in-memory backend: accumulate the streamed parts in
+/// order and store the assembled object on `finish`, so a multipart upload
+/// round-trips exactly like a single `put_object`.
+struct InMemoryPartSink {
+    writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    key: String,
+    buf: Vec<u8>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl PartSink for InMemoryPartSink {
+    fn part_size(&self) -> usize {
+        super::PROGRESS_CHUNK_SIZE
+    }
+
+    async fn send_part(
+        &mut self,
+        part: Bytes,
+        _offset: u64,
+        _is_last: bool,
+    ) -> Result<(), CloudHomeError> {
+        self.buf.extend_from_slice(&part);
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+        self.writes.lock().unwrap().insert(self.key, self.buf);
+        Ok(())
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CloudHome for InMemoryCloudHome {
-    async fn write(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        // Chunk the report so tests exercise the same incremental-progress path
-        // the real backends drive, then store the whole buffer at once.
-        let total = data.len() as u64;
-        let mut sent = 0u64;
-        for chunk in data.chunks(super::PROGRESS_CHUNK_SIZE) {
-            sent += chunk.len() as u64;
-            progress(sent);
-        }
-        // An empty write reports nothing above; signal completion so a
-        // zero-byte blob still reaches 100%.
-        if total == 0 {
-            progress(0);
-        }
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.writes.lock().unwrap().insert(key.to_string(), data);
         Ok(())
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        _total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        Ok(Box::new(InMemoryPartSink {
+            writes: self.writes.clone(),
+            key: key.to_string(),
+            buf: Vec::new(),
+        }))
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        // A small threshold so tests exercise the multipart driver path; the part
+        // size matches so a multi-part blob ticks progress several times.
+        super::PROGRESS_CHUNK_SIZE as u64
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -146,6 +179,7 @@ impl CloudHome for InMemoryCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::cloud::BlobBody;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -158,9 +192,13 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_roundtrips() {
         let h = InMemoryCloudHome::new();
-        h.write("foo", b"hello".to_vec(), &no_progress())
-            .await
-            .unwrap();
+        h.write(
+            "foo",
+            BlobBody::from_bytes(b"hello".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
         assert_eq!(h.read("foo").await.unwrap(), b"hello");
         assert!(h.exists("foo").await.unwrap());
         assert!(!h.exists("bar").await.unwrap());
@@ -180,7 +218,9 @@ mod tests {
             last2.store(n, Ordering::Relaxed);
             ticks2.fetch_add(1, Ordering::Relaxed);
         };
-        h.write("big", vec![0u8; len], &sink).await.unwrap();
+        h.write("big", BlobBody::from_bytes(vec![0u8; len]), &sink)
+            .await
+            .unwrap();
         assert_eq!(last.load(Ordering::Relaxed), len as u64);
         assert_eq!(ticks.load(Ordering::Relaxed), 3);
     }
@@ -188,18 +228,28 @@ mod tests {
     #[tokio::test]
     async fn read_range_returns_a_slice() {
         let h = InMemoryCloudHome::new();
-        h.write("k", b"0123456789".to_vec(), &no_progress())
-            .await
-            .unwrap();
+        h.write(
+            "k",
+            BlobBody::from_bytes(b"0123456789".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
         assert_eq!(h.read_range("k", 2, 5).await.unwrap(), b"234");
     }
 
     #[tokio::test]
     async fn list_filters_by_prefix() {
         let h = InMemoryCloudHome::new();
-        h.write("a/x", vec![1], &no_progress()).await.unwrap();
-        h.write("a/y", vec![2], &no_progress()).await.unwrap();
-        h.write("b/x", vec![3], &no_progress()).await.unwrap();
+        h.write("a/x", BlobBody::from_bytes(vec![1]), &no_progress())
+            .await
+            .unwrap();
+        h.write("a/y", BlobBody::from_bytes(vec![2]), &no_progress())
+            .await
+            .unwrap();
+        h.write("b/x", BlobBody::from_bytes(vec![3]), &no_progress())
+            .await
+            .unwrap();
         let mut got = h.list("a/").await.unwrap();
         got.sort();
         assert_eq!(got, vec!["a/x".to_string(), "a/y".to_string()]);
@@ -208,7 +258,9 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_and_records() {
         let h = InMemoryCloudHome::new();
-        h.write("k", vec![1], &no_progress()).await.unwrap();
+        h.write("k", BlobBody::from_bytes(vec![1]), &no_progress())
+            .await
+            .unwrap();
         h.delete("k").await.unwrap();
         assert!(matches!(
             h.read("k").await,

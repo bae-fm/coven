@@ -187,14 +187,21 @@ impl FailingCloudHome {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl CloudHome for FailingCloudHome {
-    async fn write(
-        &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.write_calls.fetch_add(1, Ordering::SeqCst);
         Err(CloudHomeError::Storage("induced write failure".into()))
+    }
+    async fn open_multipart<'a>(
+        &'a self,
+        _key: &str,
+        _total_len: u64,
+    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        Err(CloudHomeError::Storage("induced write failure".into()))
+    }
+    fn multipart_threshold(&self) -> u64 {
+        // Small upload payloads in these tests go via put_object.
+        8 * 1024 * 1024
     }
     async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
@@ -224,30 +231,60 @@ impl CloudHome for FailingCloudHome {
     }
 }
 
-/// A cloud backend whose `write` reports progress one chunk at a time with a
-/// delay between chunks, so the upload spans several of `drain_uploads`'
-/// coalescing ticks.
+/// A cloud backend whose multipart sink accepts each part after a delay, so the
+/// upload spans several of `drain_uploads`' coalescing ticks and the driver's
+/// per-part progress advances over time.
 struct SlowChunkedCloudHome {
     chunk: usize,
     per_chunk_delay: std::time::Duration,
 }
 
+/// The delay sink: each `send_part` sleeps, so the driver's progress advances one
+/// part at a time across several ticks.
+struct SlowPartSink {
+    part_size: usize,
+    per_chunk_delay: std::time::Duration,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl crate::storage::cloud::PartSink for SlowPartSink {
+    fn part_size(&self) -> usize {
+        self.part_size
+    }
+    async fn send_part(
+        &mut self,
+        _part: bytes::Bytes,
+        _offset: u64,
+        _is_last: bool,
+    ) -> Result<(), CloudHomeError> {
+        tokio::time::sleep(self.per_chunk_delay).await;
+        Ok(())
+    }
+    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl CloudHome for SlowChunkedCloudHome {
-    async fn write(
-        &self,
-        _key: &str,
-        data: Vec<u8>,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        let mut sent = 0u64;
-        for chunk in data.chunks(self.chunk) {
-            tokio::time::sleep(self.per_chunk_delay).await;
-            sent += chunk.len() as u64;
-            progress(sent);
-        }
+    async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
         Ok(())
+    }
+    async fn open_multipart<'a>(
+        &'a self,
+        _key: &str,
+        _total_len: u64,
+    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
+        Ok(Box::new(SlowPartSink {
+            part_size: self.chunk,
+            per_chunk_delay: self.per_chunk_delay,
+        }))
+    }
+    fn multipart_threshold(&self) -> u64 {
+        // Stream every non-empty payload so the delay sink drives progress.
+        0
     }
     async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")

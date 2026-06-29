@@ -14,9 +14,9 @@ use tracing::warn;
 
 use super::signed_control::{HeadJson, MinSchemaVersionJson};
 use super::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
-use crate::encryption::{EncryptionError, EncryptionService};
+use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
-use crate::storage::cloud::CloudHome;
+use crate::storage::cloud::{BlobBody, CloudHome};
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
 /// every object under the library key (the default); a `Plaintext` home stores
@@ -130,6 +130,39 @@ impl CloudCipher {
     /// Whether this is a plaintext (unencrypted) home.
     pub fn is_plaintext(&self) -> bool {
         matches!(self, CloudCipher::Plaintext)
+    }
+
+    /// The final object length for a blob of `plaintext_len` bytes under this
+    /// cipher: the chunked-encrypted length for an encrypted home, the plaintext
+    /// length verbatim for a browsable one.
+    pub fn body_len(&self, plaintext_len: u64) -> u64 {
+        match self {
+            CloudCipher::Encrypted(_) => chunked_encrypted_len(plaintext_len),
+            CloudCipher::Plaintext => plaintext_len,
+        }
+    }
+
+    /// Open a streaming [`BlobBody`] over the local plaintext file at `file_path`,
+    /// sealing each chunk under `scope`'s key for an encrypted home or passing the
+    /// plaintext through for a browsable one — without ever reading or sealing the
+    /// whole blob into memory. The streaming sibling of [`seal_scoped`](Self::seal_scoped),
+    /// used by the upload drain.
+    pub(crate) async fn open_body(
+        &self,
+        scope: crate::blob::ResolvedScope,
+        file_path: &std::path::Path,
+    ) -> Result<BlobBody, String> {
+        let plaintext_len = crate::local_blob::file_len(file_path).await?;
+        let reader = crate::local_blob::open_reader(file_path).await?;
+        let sealer = match self {
+            CloudCipher::Encrypted(e) => Some(encryption_for_scope(scope, e).sealer()),
+            CloudCipher::Plaintext => None,
+        };
+        Ok(BlobBody::from_file(
+            self.body_len(plaintext_len),
+            reader,
+            sealer,
+        ))
     }
 }
 
@@ -455,7 +488,11 @@ impl SyncStorage for CloudSyncStorage {
         let key = format!("changes/{device_id}/{seq}{}", self.suffix());
         let stored = self.cipher().seal(&data);
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -479,7 +516,11 @@ impl SyncStorage for CloudSyncStorage {
         let stored = self.cipher().seal(&json);
         let key = format!("heads/{device_id}.json{}", self.suffix());
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -495,7 +536,11 @@ impl SyncStorage for CloudSyncStorage {
         let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
         let stored = self.cipher().seal_scoped(scope, &data);
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -544,7 +589,11 @@ impl SyncStorage for CloudSyncStorage {
         crate::library_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
         self.home
-            .write(&key, data, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(data),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -588,7 +637,11 @@ impl SyncStorage for CloudSyncStorage {
         let stored = self.cipher().seal(&data);
         let key = format!("acks/{device_id}.json{}", self.suffix());
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -640,7 +693,11 @@ impl SyncStorage for CloudSyncStorage {
         let stored = self.cipher().seal(&json);
         let key = format!("min_schema_version.json{}", self.suffix());
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -654,7 +711,11 @@ impl SyncStorage for CloudSyncStorage {
         let key = format!("membership/{author_pubkey}/{seq}{}", self.suffix());
         let stored = self.cipher().seal(&data);
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -710,7 +771,11 @@ impl SyncStorage for CloudSyncStorage {
         // the home cipher — wrapping a library key is meaningful only for a
         // shared (encrypted) home.
         self.home
-            .write(&key, data, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(data),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -738,7 +803,11 @@ impl SyncStorage for CloudSyncStorage {
         let stored = self.cipher().seal(&data);
         let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -756,7 +825,11 @@ impl SyncStorage for CloudSyncStorage {
         let stored = self.cipher().seal(&data);
         let key = format!("snapshot/current.json{}", self.suffix());
         self.home
-            .write(&key, stored, &crate::storage::cloud::no_progress())
+            .write(
+                &key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
             .await?;
         Ok(())
     }
@@ -937,7 +1010,9 @@ mod tests {
             .cloud_home()
             .write(
                 "heads/foreign-device.json.enc",
-                b"a different library's head, encrypted with another key".to_vec(),
+                BlobBody::from_bytes(
+                    b"a different library's head, encrypted with another key".to_vec(),
+                ),
                 &crate::storage::cloud::no_progress(),
             )
             .await
@@ -993,7 +1068,7 @@ mod tests {
             .cloud_home()
             .write(
                 "heads/forged-device.json.enc",
-                sealed,
+                BlobBody::from_bytes(sealed),
                 &crate::storage::cloud::no_progress(),
             )
             .await
@@ -1044,7 +1119,7 @@ mod tests {
             .cloud_home()
             .write(
                 "min_schema_version.json.enc",
-                sealed,
+                BlobBody::from_bytes(sealed),
                 &crate::storage::cloud::no_progress(),
             )
             .await

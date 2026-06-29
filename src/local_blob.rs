@@ -17,6 +17,51 @@
 
 use std::path::Path;
 
+/// An incremental reader over a local plaintext file, handing out the bytes in
+/// bounded chunks so a large blob is sealed-and-uploaded without ever holding the
+/// whole plaintext in memory. The streaming analogue of [`read`], driven by
+/// [`crate::storage::cloud::BlobBody`]: each [`next_chunk`](PlaintextReader::next_chunk)
+/// returns up to `max` more bytes, and an empty result marks end of file.
+///
+/// Native: a `tokio::fs::File` read on the blocking pool. wasm: an OPFS sync-access
+/// handle read at a running offset (the handle is held open for the reader's life
+/// and closed on drop).
+pub struct PlaintextReader(imp::PlaintextReader);
+
+impl PlaintextReader {
+    /// Read up to `max` more bytes from the file (`max` must be positive). Returns
+    /// fewer than `max` only at end of file; an empty vec means the file is fully
+    /// drained. The reader fills a `max`-sized window (looping over short reads) so
+    /// a non-final chunk is always exactly `max` bytes — the property the chunked
+    /// sealer depends on to frame each 64 KiB plaintext chunk.
+    pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+        self.0.next_chunk(max).await
+    }
+}
+
+/// Open an incremental reader over the plaintext file at `path`. `Err` if it is
+/// missing or unopenable — the streaming sibling of [`read`].
+pub async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
+    imp::open_reader(path).await.map(PlaintextReader)
+}
+
+/// The byte length of the local file at `path` — the plaintext length a streaming
+/// upload needs up front to announce the encrypted object size (via
+/// [`crate::encryption::chunked_encrypted_len`]) before sealing a byte.
+pub async fn file_len(path: &Path) -> Result<u64, String> {
+    imp::file_len(path).await
+}
+
+/// Stream-copy the plaintext file at `src` to `dst` atomically, creating `dst`'s
+/// parent directories. Used to pin a just-uploaded blob into the protected cache
+/// folder without materializing it in RAM: a 1.5 GB pinned blob is copied window
+/// by window. Native: temp-in-same-dir + fsync + rename, the same atomicity guard
+/// as [`write_atomic`]. wasm/OPFS: a whole-file read+write (no cross-file rename),
+/// the same best-effort posture every other OPFS write here takes.
+pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+    imp::copy_atomic(src, dst).await
+}
+
 /// Read the whole local file at `path`. `Err` if it is missing or unreadable — a
 /// caller (the push read, the outbox drain) treats that as a failed upload, never
 /// as empty bytes.
@@ -142,6 +187,118 @@ pub async fn walk_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::path::Path;
+
+    use tokio::io::AsyncReadExt;
+
+    /// Native incremental reader: a `tokio::fs::File` plus the per-call fill loop.
+    pub struct PlaintextReader {
+        file: tokio::fs::File,
+        path: std::path::PathBuf,
+    }
+
+    impl PlaintextReader {
+        pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+            debug_assert!(max > 0, "next_chunk max must be positive");
+            let mut buf = vec![0u8; max];
+            let mut filled = 0;
+            // `read` may return fewer bytes than requested mid-file, so loop until
+            // the window is full or EOF — a non-final chunk must be exactly `max`.
+            while filled < max {
+                let n = self
+                    .file
+                    .read(&mut buf[filled..])
+                    .await
+                    .map_err(|e| format!("read local blob {}: {e}", self.path.display()))?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            buf.truncate(filled);
+            Ok(buf)
+        }
+    }
+
+    pub async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| format!("open local blob {} for streaming: {e}", path.display()))?;
+        Ok(PlaintextReader {
+            file,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub async fn file_len(path: &Path) -> Result<u64, String> {
+        tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .map_err(|e| format!("stat local blob {}: {e}", path.display()))
+    }
+
+    pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt;
+
+        let parent = dst
+            .parent()
+            .ok_or_else(|| format!("blob path has no parent dir: {}", dst.display()))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create parent dir for {}: {e}", dst.display()))?;
+        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+
+        let copy = async {
+            let mut input = tokio::fs::File::open(src)
+                .await
+                .map_err(|e| format!("open pin source {}: {e}", src.display()))?;
+            let mut out = tokio::fs::File::create(&tmp)
+                .await
+                .map_err(|e| format!("create temp pin {}: {e}", tmp.display()))?;
+            // Stream src → tmp in bounded windows so a large blob never lands whole
+            // in RAM (the whole point of pinning from the path, not the plaintext).
+            let mut buf = vec![0u8; 1 << 20];
+            loop {
+                let n = input
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| format!("read pin source {}: {e}", src.display()))?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&buf[..n])
+                    .await
+                    .map_err(|e| format!("write temp pin {}: {e}", tmp.display()))?;
+            }
+            out.sync_all()
+                .await
+                .map_err(|e| format!("fsync temp pin {}: {e}", tmp.display()))?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(e) = copy {
+            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
+                tracing::warn!(
+                    "could not remove temp pin {} after a failed copy: {rm}",
+                    tmp.display()
+                );
+            }
+            return Err(e);
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, dst).await {
+            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
+                tracing::warn!(
+                    "could not remove temp pin {} after a failed rename: {rm}",
+                    tmp.display()
+                );
+            }
+            return Err(format!(
+                "rename temp pin {} -> {}: {e}",
+                tmp.display(),
+                dst.display()
+            ));
+        }
+        Ok(())
+    }
 
     pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
         tokio::fs::read(path)
@@ -505,6 +662,80 @@ mod imp {
         let o = FileSystemReadWriteOptions::new();
         o.set_at(offset);
         o
+    }
+
+    /// wasm incremental reader: a held-open OPFS sync-access handle read at a
+    /// running offset. The handle locks the file, so it is closed on drop.
+    pub struct PlaintextReader {
+        sah: FileSystemSyncAccessHandle,
+        offset: u64,
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for PlaintextReader {
+        fn drop(&mut self) {
+            self.sah.close();
+        }
+    }
+
+    impl PlaintextReader {
+        pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+            let mut buf = vec![0u8; max];
+            let mut filled = 0usize;
+            while filled < max {
+                let read = self
+                    .sah
+                    .read_with_u8_array_and_options(
+                        &mut buf[filled..],
+                        &at((self.offset + filled as u64) as f64),
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "OPFS streaming read {}: {}",
+                            self.path.display(),
+                            err_str(&e)
+                        )
+                    })? as usize;
+                if read == 0 {
+                    break;
+                }
+                filled += read;
+            }
+            self.offset += filled as u64;
+            buf.truncate(filled);
+            Ok(buf)
+        }
+    }
+
+    pub async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
+        let fh = file_handle(path, false)
+            .await
+            .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
+        let sah = sync_access(&fh).await?;
+        Ok(PlaintextReader {
+            sah,
+            offset: 0,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub async fn file_len(path: &Path) -> Result<u64, String> {
+        let fh = file_handle(path, false)
+            .await
+            .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
+        let sah = sync_access(&fh).await?;
+        let size = sah
+            .get_size()
+            .map_err(|e| format!("OPFS size of {}: {}", path.display(), err_str(&e)));
+        sah.close();
+        size.map(|s| s as u64)
+    }
+
+    pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+        // OPFS has no cross-file rename, so the pin copy is a whole-file read+write
+        // — the same best-effort atomicity every OPFS write here relies on.
+        let bytes = read(src).await?;
+        write_atomic(dst, &bytes).await
     }
 
     pub async fn read(path: &Path) -> Result<Vec<u8>, String> {

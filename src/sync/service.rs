@@ -381,9 +381,17 @@ async fn upload_host_provided_blob(
     info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
 
     if retain_pinned {
-        crate::blob::cache::populate_pinned(library_dir, &blob.namespace, &blob.id, &bytes)
-            .await
+        // The host-provided inline push already holds the plaintext in memory
+        // (read from the local store / cache above), so pin it by writing those
+        // bytes into the protected cache folder. The streaming outbox drain pins
+        // from the source path instead (see `cache::populate_pinned`), never
+        // holding the whole blob.
+        let pinned = library_dir
+            .pinned_blob_path(&blob.namespace, &blob.id)
             .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        crate::local_blob::write_atomic(&pinned, &bytes)
+            .await
+            .map_err(SyncCycleError::AssetUpload)?;
     } else if was_in_local_store && blob.fill == CacheFill::CacheEager {
         crate::blob::cache::write_blob(db, library_dir, blob, &bytes)
             .await

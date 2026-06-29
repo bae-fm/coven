@@ -13,7 +13,7 @@ use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::migration::Migration;
-use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 use crate::sync::apply::apply_changeset_lww;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
@@ -939,19 +939,62 @@ impl SyncStorage for MockSyncStorage {
     }
 }
 
+/// A [`PartSink`] for [`MockSyncStorage`]: accumulate the streamed parts and store
+/// the assembled object on `finish`, so a multipart upload round-trips like a
+/// single `put_object`.
+struct MockPartSink<'a> {
+    storage: &'a MockSyncStorage,
+    key: String,
+    buf: Vec<u8>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl PartSink for MockPartSink<'_> {
+    fn part_size(&self) -> usize {
+        4 * 1024 * 1024
+    }
+    async fn send_part(
+        &mut self,
+        part: bytes::Bytes,
+        _offset: u64,
+        _is_last: bool,
+    ) -> Result<(), CloudHomeError> {
+        self.buf.extend_from_slice(&part);
+        Ok(())
+    }
+    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+        self.storage
+            .objects
+            .lock()
+            .unwrap()
+            .insert(self.key, self.buf);
+        Ok(())
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CloudHome for MockSyncStorage {
-    async fn write(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        progress: &crate::storage::cloud::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        let total = data.len() as u64;
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.objects.lock().unwrap().insert(key.to_string(), data);
-        progress(total);
         Ok(())
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        _total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        Ok(Box::new(MockPartSink {
+            storage: self,
+            key: key.to_string(),
+            buf: Vec::new(),
+        }))
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        8 * 1024 * 1024
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

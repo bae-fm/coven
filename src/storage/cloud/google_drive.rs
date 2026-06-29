@@ -6,7 +6,8 @@
 use async_trait::async_trait;
 
 use super::oauth_session::OAuthSession;
-use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::resumable::RangePutSink;
+use super::{http, BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
 use crate::oauth::{OAuthConfig, OAuthTokens};
@@ -187,48 +188,6 @@ impl GoogleDriveCloudHome {
                 ))
             })
     }
-
-    /// PUT the data to an open resumable session URL in chunks, reporting
-    /// cumulative bytes as each chunk's PUT returns. The session URL carries its
-    /// own auth, so the chunk PUTs need no bearer token.
-    async fn upload_resumable_chunks(
-        &self,
-        key: &str,
-        session_url: &str,
-        data: Vec<u8>,
-        op: &str,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        let total = data.len() as u64;
-        let mut sent: u64 = 0;
-        for chunk in data.chunks(GDRIVE_CHUNK_SIZE) {
-            let start = sent;
-            let end = sent + chunk.len() as u64 - 1;
-            let content_range = format!("bytes {start}-{end}/{total}");
-            let resp = self
-                .client
-                .put(session_url)
-                .header("Content-Length", chunk.len())
-                .header("Content-Range", &content_range)
-                .body(chunk.to_vec())
-                .send()
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("upload chunk {key}: {e}")))?;
-            let status = resp.status();
-            // Intermediate chunks return 308 Resume Incomplete; the final chunk
-            // returns 200/201. Anything else is a failure.
-            if !status.is_success() && status.as_u16() != 308 {
-                let body = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-                return Err(classify_write_error(status, &body, key, op));
-            }
-            sent += chunk.len() as u64;
-            progress(sent);
-        }
-        Ok(())
-    }
 }
 
 /// First `error.errors[].reason` in a Google API error body (the shape Drive,
@@ -285,35 +244,10 @@ const GDRIVE_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 #[async_trait]
 impl CloudHome for GoogleDriveCloudHome {
-    async fn write(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let encoded = Self::encode_key(key);
-        let total = data.len() as u64;
-        let existing = self.find_file_id(&encoded).await?;
-
-        // Large files: resumable session so progress advances per chunk.
-        if data.len() > GDRIVE_SIMPLE_UPLOAD_MAX {
-            let op = if existing.is_some() {
-                "update"
-            } else {
-                "create"
-            };
-            let session_url = self
-                .open_resumable_session(key, &encoded, existing.as_deref())
-                .await?;
-            return self
-                .upload_resumable_chunks(key, &session_url, data, op, progress)
-                .await;
-        }
-
-        // Small files: a single request, no sub-file progress to report —
-        // signal the whole size once on success.
-        if let Some(file_id) = existing {
-            // Update existing file
+        if let Some(file_id) = self.find_file_id(&encoded).await? {
+            // Update existing file content.
             let resp = self
                 .api_call(|token| {
                     self.client
@@ -323,38 +257,31 @@ impl CloudHome for GoogleDriveCloudHome {
                         .body(data.clone())
                 })
                 .await?;
-
             let status = resp.status();
             if !status.is_success() {
-                let body = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-                return Err(classify_write_error(status, &body, key, "update"));
+                return Err(classify_write_error(
+                    status,
+                    &http::body_text(resp).await,
+                    key,
+                    "update",
+                ));
             }
         } else {
-            // Create new file (multipart: metadata + content)
+            // Create a new file (multipart: metadata + content).
             let metadata = serde_json::json!({
                 "name": encoded,
                 "parents": [self.folder_id],
             });
-
             let boundary = "coven_multipart_boundary";
             let mut body = Vec::new();
-
-            // Part 1: metadata
             body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
             body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
             body.extend_from_slice(metadata.to_string().as_bytes());
             body.extend_from_slice(b"\r\n");
-
-            // Part 2: file content
             body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
             body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
             body.extend_from_slice(&data);
             body.extend_from_slice(b"\r\n");
-
-            // End boundary
             body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
 
             let resp = self
@@ -369,19 +296,51 @@ impl CloudHome for GoogleDriveCloudHome {
                         .body(body.clone())
                 })
                 .await?;
-
             let status = resp.status();
             if !status.is_success() {
-                let body = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-                return Err(classify_write_error(status, &body, key, "create"));
+                return Err(classify_write_error(
+                    status,
+                    &http::body_text(resp).await,
+                    key,
+                    "create",
+                ));
             }
         }
-
-        progress(total);
         Ok(())
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        let encoded = Self::encode_key(key);
+        let existing = self.find_file_id(&encoded).await?;
+        let op = if existing.is_some() {
+            "update"
+        } else {
+            "create"
+        };
+        let session_url = self
+            .open_resumable_session(key, &encoded, existing.as_deref())
+            .await?;
+        let key_owned = key.to_string();
+        let classify =
+            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned, op));
+        // Drive returns 308 Resume Incomplete for every non-final part.
+        Ok(Box::new(RangePutSink::new(
+            self.client.clone(),
+            session_url,
+            308,
+            total_len,
+            GDRIVE_CHUNK_SIZE,
+            key.to_string(),
+            classify,
+        )))
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        GDRIVE_SIMPLE_UPLOAD_MAX as u64
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -429,7 +388,7 @@ impl CloudHome for GoogleDriveCloudHome {
             .await?
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
 
-        let range = format!("bytes={}-{}", start, end.saturating_sub(1));
+        let range = http::range_header(start, end);
 
         let resp = self
             .api_call(|token| {

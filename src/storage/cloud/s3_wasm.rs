@@ -147,6 +147,203 @@ impl S3WasmCloudHome {
     }
 }
 
+/// Files at or below this size go up as one PUT; larger ones stream through a
+/// multipart upload. The threshold equals the part size, so the smallest
+/// multipart upload is two parts. S3 requires every non-final part to be ≥ 5 MiB;
+/// 8 MiB keeps the part count reasonable for large audio files.
+const MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
+const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
+
+/// A [`super::PartSink`] over an S3 multipart upload driven by the wasm signing
+/// path: each `send_part` is a signed `PUT ...?partNumber=N&uploadId=ID` whose
+/// `ETag` is kept, and `finish` is the `POST ...?uploadId=ID` completion. On any
+/// failure the upload is aborted (best-effort) so the bucket holds no orphan parts.
+struct WasmS3PartSink<'a> {
+    home: &'a S3WasmCloudHome,
+    full_key: String,
+    upload_id: String,
+    /// `(partNumber, ETag)` pairs in send order, replayed in the completion XML.
+    parts: Vec<(i32, String)>,
+    next_part_number: i32,
+}
+
+impl WasmS3PartSink<'_> {
+    /// Best-effort abort (`DELETE ...?uploadId=ID`) so a failed upload leaves no
+    /// orphaned parts.
+    async fn abort(&self) {
+        let url = format!(
+            "{}?uploadId={}",
+            object_url(&self.home.base_url, &self.home.bucket, &self.full_key),
+            encode_query_value(&self.upload_id)
+        );
+        let request = match Request::builder()
+            .method(Method::DELETE)
+            .uri(url)
+            .body(Vec::new())
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("could not build multipart abort for {}: {e}", self.full_key);
+                return;
+            }
+        };
+        match self.home.send(request).await {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => warn!(
+                "multipart abort for {} returned status {}",
+                self.full_key,
+                resp.status().as_u16()
+            ),
+            Err(e) => warn!("multipart abort for {} failed: {e}", self.full_key),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl super::PartSink for WasmS3PartSink<'_> {
+    fn part_size(&self) -> usize {
+        MULTIPART_PART_SIZE
+    }
+
+    async fn send_part(
+        &mut self,
+        part: bytes::Bytes,
+        _offset: u64,
+        _is_last: bool,
+    ) -> Result<(), CloudHomeError> {
+        let part_number = self.next_part_number;
+        self.next_part_number += 1;
+        let url = format!(
+            "{}?partNumber={part_number}&uploadId={}",
+            object_url(&self.home.base_url, &self.home.bucket, &self.full_key),
+            encode_query_value(&self.upload_id)
+        );
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri(url)
+            .body(part.to_vec())
+            .map_err(|e| {
+                CloudHomeError::Storage(format!(
+                    "build multipart part {part_number} {}: {e}",
+                    self.full_key
+                ))
+            })?;
+        let resp = match self.home.send(request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.abort().await;
+                return Err(e);
+            }
+        };
+        if !resp.status().is_success() {
+            let err = status_error(
+                &format!("multipart part {part_number} {}", self.full_key),
+                resp,
+            )
+            .await;
+            self.abort().await;
+            return Err(err);
+        }
+        let etag = resp
+            .headers()
+            .get(http::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                CloudHomeError::Storage(format!(
+                    "multipart part {part_number} {}: no ETag returned",
+                    self.full_key
+                ))
+            });
+        let etag = match etag {
+            Ok(etag) => etag,
+            Err(e) => {
+                self.abort().await;
+                return Err(e);
+            }
+        };
+        self.parts.push((part_number, etag));
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+        let body = complete_multipart_xml(&self.parts);
+        let url = format!(
+            "{}?uploadId={}",
+            object_url(&self.home.base_url, &self.home.bucket, &self.full_key),
+            encode_query_value(&self.upload_id)
+        );
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(url)
+            .body(body.into_bytes())
+            .map_err(|e| {
+                CloudHomeError::Storage(format!("build multipart complete {}: {e}", self.full_key))
+            })?;
+        let resp = match self.home.send(request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.abort().await;
+                return Err(e);
+            }
+        };
+        // S3 can return a 200 carrying an `<Error>` body for a completion failure,
+        // but a non-2xx status is the common failure; treat non-success as an error.
+        if !resp.status().is_success() {
+            let err = status_error(&format!("multipart complete {}", self.full_key), resp).await;
+            self.abort().await;
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+/// Build the `CompleteMultipartUpload` request body from the collected
+/// `(partNumber, ETag)` pairs. The ETag is XML-escaped (S3 returns it quoted).
+fn complete_multipart_xml(parts: &[(i32, String)]) -> String {
+    let mut xml = String::from("<CompleteMultipartUpload>");
+    for (n, etag) in parts {
+        let etag = etag.replace('&', "&amp;").replace('<', "&lt;");
+        xml.push_str(&format!(
+            "<Part><PartNumber>{n}</PartNumber><ETag>{etag}</ETag></Part>"
+        ));
+    }
+    xml.push_str("</CompleteMultipartUpload>");
+    xml
+}
+
+/// Extract `<UploadId>` from an `InitiateMultipartUploadResult` body. The body is
+/// an untrusted S3 response, so it goes through quick-xml like the list parser.
+fn parse_upload_id(xml: &str) -> Result<String, CloudHomeError> {
+    let mut reader = Reader::from_str(xml);
+    let mut in_upload_id = false;
+    let mut value = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                in_upload_id = start.local_name().as_ref() == b"UploadId";
+            }
+            Ok(Event::Text(chunk)) if in_upload_id => {
+                let piece = chunk
+                    .decode()
+                    .map_err(|e| CloudHomeError::Storage(format!("parse upload id: {e}")))?;
+                value.push_str(&piece);
+            }
+            Ok(Event::End(_)) => in_upload_id = false,
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => return Err(CloudHomeError::Storage(format!("parse upload id: {e}"))),
+        }
+    }
+    if value.is_empty() {
+        return Err(CloudHomeError::Storage(
+            "multipart create: no UploadId in response".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
 /// Resolve the base URL for path-style requests. A configured endpoint is used
 /// verbatim (S3-compatible providers, MinIO, R2); otherwise the regional AWS
 /// virtual endpoint. The trailing slash is trimmed so callers append `/bucket/key`.
@@ -395,23 +592,53 @@ impl CloudHome for S3WasmCloudHome {
         }
     }
 
-    async fn write(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
-        let total = data.len() as u64;
         let request = self.object_request(Method::PUT, &full, data)?;
         let resp = self.send(request).await?;
         if !resp.status().is_success() {
             return Err(status_error(&format!("put {key}"), resp).await);
         }
-        // fetch gives no streaming upload progress; report the whole size once the
-        // PUT completes.
-        progress(total);
         Ok(())
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        _total_len: u64,
+    ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
+        let full = self.full_key(key);
+        // POST {bucket}/{key}?uploads opens the multipart upload; the response XML
+        // carries the UploadId every later part and the completion reference.
+        let url = format!(
+            "{}?uploads",
+            object_url(&self.base_url, &self.bucket, &full)
+        );
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(url)
+            .body(Vec::new())
+            .map_err(|e| CloudHomeError::Storage(format!("build multipart create {key}: {e}")))?;
+        let resp = self.send(request).await?;
+        if !resp.status().is_success() {
+            return Err(status_error(&format!("multipart create {key}"), resp).await);
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("read multipart create {key}: {e}")))?;
+        let upload_id = parse_upload_id(&body)?;
+        Ok(Box::new(WasmS3PartSink {
+            home: self,
+            full_key: full,
+            upload_id,
+            parts: Vec::new(),
+            next_part_number: 1,
+        }))
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        MULTIPART_THRESHOLD as u64
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {

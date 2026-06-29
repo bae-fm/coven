@@ -21,9 +21,7 @@ use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{
-    no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo, UploadProgress,
-};
+use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::membership::{MemberRole, MembershipAction};
 use crate::sync::storage::SyncStorage;
@@ -97,7 +95,11 @@ async fn plant_tombstone(cloud: &dyn CloudHome, tombstone: &BlobTombstoneJson) {
     let key = format!("blob_tombstones/{}", tombstone.cloud_key);
     let bytes = serde_json::to_vec(tombstone).expect("serialize tombstone");
     cloud
-        .write(&key, bytes, &no_progress())
+        .write(
+            &key,
+            crate::storage::cloud::BlobBody::from_bytes(bytes),
+            &no_progress(),
+        )
         .await
         .expect("plant");
 }
@@ -117,13 +119,20 @@ struct CancelTombstoneOnExists<'a> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CloudHome for CancelTombstoneOnExists<'_> {
-    async fn write(
-        &self,
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        self.inner.put_object(key, data).await
+    }
+
+    async fn open_multipart<'b>(
+        &'b self,
         key: &str,
-        data: Vec<u8>,
-        progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        self.inner.write(key, data, progress).await
+        total_len: u64,
+    ) -> Result<crate::storage::cloud::BoxPartSink<'b>, CloudHomeError> {
+        self.inner.open_multipart(key, total_len).await
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        self.inner.multipart_threshold()
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -189,13 +198,20 @@ impl<'a> FailDeleteOnKey<'a> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CloudHome for FailDeleteOnKey<'_> {
-    async fn write(
-        &self,
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        self.inner.put_object(key, data).await
+    }
+
+    async fn open_multipart<'b>(
+        &'b self,
         key: &str,
-        data: Vec<u8>,
-        progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        self.inner.write(key, data, progress).await
+        total_len: u64,
+    ) -> Result<crate::storage::cloud::BoxPartSink<'b>, CloudHomeError> {
+        self.inner.open_multipart(key, total_len).await
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        self.inner.multipart_threshold()
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -246,7 +262,11 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     let kp = UserKeypair::generate();
     // The blob exists in the cloud; deleting must not remove it yet.
     cloud
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
 
@@ -333,7 +353,11 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
 
     // The blob exists; a member tombstoned it at a known instant.
     storage
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
     let deleted_at = "2024-06-01T00:00:00+00:00";
@@ -404,7 +428,7 @@ async fn tombstone_canceled_mid_gc_leaves_the_reuploaded_blob() {
     storage
         .write(
             "blob-key",
-            b"fresh re-uploaded contents".to_vec(),
+            crate::storage::cloud::BlobBody::from_bytes(b"fresh re-uploaded contents".to_vec()),
             &no_progress(),
         )
         .await
@@ -456,7 +480,11 @@ async fn tombstone_by_a_non_member_is_ignored() {
     let outsider = UserKeypair::generate(); // not in the chain
 
     storage
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
     // Validly signed by the outsider (the signature itself verifies), but the
@@ -525,7 +553,11 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // backdated well past the grace so only authorization stands between it and the
     // deletion.
     storage
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
     let deleted_at = "2024-06-01T00:00:00+00:00";
@@ -583,7 +615,11 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     // the grace.
     let attacker = UserKeypair::generate();
     storage
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
     let deleted_at = "2024-06-01T00:00:00+00:00";
@@ -628,7 +664,11 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
     let owner = pubkey_hex(&founder);
 
     storage
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
     // A member signs a tombstone for some OTHER key, then it's relocated to
@@ -672,7 +712,11 @@ async fn tombstone_bound_to_a_different_library_is_ignored() {
     let owner = pubkey_hex(&founder);
 
     storage
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
     // Signed for "other-lib" by a real member of THIS library; the GC runs as
@@ -852,7 +896,11 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
     cloud
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
 
@@ -1017,7 +1065,11 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     let cipher = plaintext_cipher();
 
     storage
-        .write("blob-key", b"contents".to_vec(), &no_progress())
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
         .await
         .unwrap();
     let deleted_at = "2024-06-01T00:00:00+00:00";

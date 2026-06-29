@@ -72,54 +72,81 @@ fn delete_all_variants(ops: &dyn CloudKitOps, key: &str) -> Result<(), CloudHome
     Ok(())
 }
 
+/// A [`PartSink`] over CloudKit's chunked record layout: each `send_part` writes
+/// one `{key}.part{i}` record (CKAsset caps at 50 MB, so a large blob is split),
+/// `finish` is a no-op. The existing records were cleared by `open_multipart`
+/// before the first part.
+struct CloudKitPartSink {
+    ops: Arc<dyn CloudKitOps>,
+    key: String,
+    index: usize,
+}
+
+#[async_trait]
+impl super::PartSink for CloudKitPartSink {
+    fn part_size(&self) -> usize {
+        CHUNK_SIZE
+    }
+
+    async fn send_part(
+        &mut self,
+        part: bytes::Bytes,
+        _offset: u64,
+        _is_last: bool,
+    ) -> Result<(), CloudHomeError> {
+        let i = self.index;
+        self.index += 1;
+        let ops = self.ops.clone();
+        let chunk_key = format!("{}.part{i}", self.key);
+        let data = part.to_vec();
+        tokio::task::spawn_blocking(move || ops.write_record(&chunk_key, data))
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl CloudHome for CloudKitCloudHome {
-    async fn write(
-        &self,
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        // Clean up any existing single or chunked records first (an overwrite may
+        // transition between single and chunked layouts).
+        let ops = self.ops.clone();
+        let k = key.to_string();
+        tokio::task::spawn_blocking(move || delete_all_variants(&*ops, &k))
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))??;
+
+        let ops = self.ops.clone();
+        let k = key.to_string();
+        tokio::task::spawn_blocking(move || ops.write_record(&k, data))
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
         key: &str,
-        data: Vec<u8>,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        let total = data.len() as u64;
+        _total_len: u64,
+    ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
+        // Clear any existing records before the first part lands.
+        let ops = self.ops.clone();
+        let k = key.to_string();
+        tokio::task::spawn_blocking(move || delete_all_variants(&*ops, &k))
+            .await
+            .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))??;
+        Ok(Box::new(CloudKitPartSink {
+            ops: self.ops.clone(),
+            key: key.to_string(),
+            index: 0,
+        }))
+    }
 
-        // Clean up any existing single or chunked records first.
-        {
-            let ops = self.ops.clone();
-            let key = key.to_string();
-            tokio::task::spawn_blocking(move || delete_all_variants(&*ops, &key))
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))??;
-        }
-
-        // CloudKit's synchronous Swift bridge gives no callback *within* a
-        // single CKAsset upload, so there's no sub-record byte signal to
-        // surface. But a large file is already split into separate `.part{i}`
-        // records (CKAsset caps at 50 MB), so report progress per completed
-        // record: each `write_record` lands one 10 MB chunk, advancing the bar.
-        // A small file is one record — start→done in one step.
-        if data.len() <= CHUNK_SIZE {
-            let ops = self.ops.clone();
-            let key = key.to_string();
-            tokio::task::spawn_blocking(move || ops.write_record(&key, data))
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))??;
-            progress(total);
-            return Ok(());
-        }
-
-        let mut sent: u64 = 0;
-        let chunks: Vec<Vec<u8>> = data.chunks(CHUNK_SIZE).map(<[u8]>::to_vec).collect();
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let len = chunk.len() as u64;
-            let ops = self.ops.clone();
-            let chunk_key = format!("{key}.part{i}");
-            tokio::task::spawn_blocking(move || ops.write_record(&chunk_key, chunk))
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))??;
-            sent += len;
-            progress(sent);
-        }
-        Ok(())
+    fn multipart_threshold(&self) -> u64 {
+        CHUNK_SIZE as u64
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -281,6 +308,7 @@ impl CloudHome for CloudKitCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::cloud::BlobBody;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -370,7 +398,9 @@ mod tests {
             last2.store(n, Ordering::Relaxed);
             ticks2.fetch_add(1, Ordering::Relaxed);
         };
-        ch.write("chunked.bin", data, &sink).await.unwrap();
+        ch.write("chunked.bin", BlobBody::from_bytes(data), &sink)
+            .await
+            .unwrap();
         assert_eq!(last.load(Ordering::Relaxed), total);
         assert_eq!(ticks.load(Ordering::Relaxed), 3);
     }
@@ -379,9 +409,13 @@ mod tests {
     async fn test_small_file_roundtrip() {
         let ch = make_cloud_home();
         let data = b"hello world".to_vec();
-        ch.write("small.bin", data.clone(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "small.bin",
+            BlobBody::from_bytes(data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
         let read = ch.read("small.bin").await.unwrap();
         assert_eq!(read, data);
     }
@@ -391,9 +425,13 @@ mod tests {
         let ch = make_cloud_home();
         // 25MB of data -- spans 3 chunks (10 + 10 + 5)
         let data: Vec<u8> = (0..25 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
-        ch.write("large.bin", data.clone(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "large.bin",
+            BlobBody::from_bytes(data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
         let read = ch.read("large.bin").await.unwrap();
         assert_eq!(read.len(), data.len());
         assert_eq!(read, data);
@@ -402,9 +440,13 @@ mod tests {
     #[tokio::test]
     async fn test_read_range_single() {
         let ch = make_cloud_home();
-        ch.write("range.bin", b"0123456789".to_vec(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "range.bin",
+            BlobBody::from_bytes(b"0123456789".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
         let slice = ch.read_range("range.bin", 3, 7).await.unwrap();
         assert_eq!(slice, b"3456");
     }
@@ -414,9 +456,13 @@ mod tests {
         let ch = make_cloud_home();
         // Create data that spans 2 chunks: 15MB
         let data: Vec<u8> = (0..15 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
-        ch.write("big.bin", data.clone(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "big.bin",
+            BlobBody::from_bytes(data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
 
         // Read a range that crosses the chunk boundary (last byte of chunk 0, first byte of chunk 1)
         let boundary = CHUNK_SIZE;
@@ -432,14 +478,22 @@ mod tests {
         let ch = make_cloud_home();
         // Write a chunked file
         let data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-        ch.write("files/album.flac", data, &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "files/album.flac",
+            BlobBody::from_bytes(data),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
 
         // Also write a small file
-        ch.write("files/cover.jpg", b"img".to_vec(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "files/cover.jpg",
+            BlobBody::from_bytes(b"img".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
 
         let keys = ch.list("files/").await.unwrap();
         assert_eq!(keys.len(), 2);
@@ -451,7 +505,7 @@ mod tests {
     async fn test_delete_removes_all_chunks() {
         let ch = make_cloud_home();
         let data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-        ch.write("to-delete.bin", data, &no_progress())
+        ch.write("to-delete.bin", BlobBody::from_bytes(data), &no_progress())
             .await
             .unwrap();
 
@@ -472,15 +526,19 @@ mod tests {
         let ch = make_cloud_home();
         // Write large file (chunked)
         let large_data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
-        ch.write("file.bin", large_data, &no_progress())
+        ch.write("file.bin", BlobBody::from_bytes(large_data), &no_progress())
             .await
             .unwrap();
 
         // Overwrite with small file (single record)
         let small_data = b"small".to_vec();
-        ch.write("file.bin", small_data.clone(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "file.bin",
+            BlobBody::from_bytes(small_data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
 
         let read = ch.read("file.bin").await.unwrap();
         assert_eq!(read, small_data);
@@ -494,15 +552,23 @@ mod tests {
     async fn test_overwrite_single_with_chunked() {
         let ch = make_cloud_home();
         // Write small file
-        ch.write("file.bin", b"small".to_vec(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "file.bin",
+            BlobBody::from_bytes(b"small".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
 
         // Overwrite with large file (chunked)
         let large_data: Vec<u8> = vec![1u8; 25 * 1024 * 1024];
-        ch.write("file.bin", large_data.clone(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "file.bin",
+            BlobBody::from_bytes(large_data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
 
         let read = ch.read("file.bin").await.unwrap();
         assert_eq!(read, large_data);
@@ -517,23 +583,33 @@ mod tests {
 
         assert!(!ch.exists("nope.bin").await.unwrap());
 
-        ch.write("yep.bin", b"data".to_vec(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "yep.bin",
+            BlobBody::from_bytes(b"data".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
         assert!(ch.exists("yep.bin").await.unwrap());
 
         // Chunked file
         let data: Vec<u8> = vec![0u8; 15 * 1024 * 1024];
-        ch.write("chunked.bin", data, &no_progress()).await.unwrap();
+        ch.write("chunked.bin", BlobBody::from_bytes(data), &no_progress())
+            .await
+            .unwrap();
         assert!(ch.exists("chunked.bin").await.unwrap());
     }
 
     #[tokio::test]
     async fn test_read_range_empty_when_end_leq_start() {
         let ch = make_cloud_home();
-        ch.write("range.bin", b"0123456789".to_vec(), &no_progress())
-            .await
-            .unwrap();
+        ch.write(
+            "range.bin",
+            BlobBody::from_bytes(b"0123456789".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
 
         // end == start returns empty
         let slice = ch.read_range("range.bin", 3, 3).await.unwrap();

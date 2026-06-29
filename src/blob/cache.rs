@@ -271,10 +271,10 @@ pub(crate) async fn populate_pinned(
     library_dir: &LibraryDir,
     namespace: &str,
     id: &str,
-    plaintext: &[u8],
+    src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
     let dest = library_dir.pinned_blob_path(namespace, id)?;
-    crate::local_blob::write_atomic(&dest, plaintext)
+    crate::local_blob::copy_atomic(src_path, &dest)
         .await
         .map_err(BlobCacheError::Io)
 }

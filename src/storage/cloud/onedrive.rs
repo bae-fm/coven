@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 
 use super::oauth_session::OAuthSession;
-use super::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::resumable::RangePutSink;
+use super::{http, BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
 use crate::oauth::{OAuthConfig, OAuthTokens};
@@ -94,78 +95,6 @@ impl OneDriveCloudHome {
     ) -> Result<reqwest::Response, CloudHomeError> {
         self.session.api_call(build_request).await
     }
-
-    /// Upload via a Graph resumable upload session, reporting cumulative bytes
-    /// as each chunk's PUT returns. Opens a session, PUTs `ONEDRIVE_CHUNK_SIZE`
-    /// chunks (the last is the remainder) with a `Content-Range` header, then
-    /// the final chunk's 200/201 completes the file. The session URL is
-    /// pre-authenticated, so chunk PUTs carry no bearer token.
-    async fn write_resumable(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        let total = data.len() as u64;
-        let session_url = format!("{}/createUploadSession", self.item_path_url(key));
-        let body = serde_json::json!({
-            "item": { "@microsoft.graph.conflictBehavior": "replace" }
-        });
-        let resp = self
-            .api_call(|token| {
-                self.client
-                    .post(&session_url)
-                    .bearer_auth(token)
-                    .json(&body)
-            })
-            .await?;
-        let status = resp.status();
-        let resp_body = resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-        if !status.is_success() {
-            return Err(classify_write_error(status, &resp_body, key));
-        }
-        let json: serde_json::Value = serde_json::from_str(&resp_body)
-            .map_err(|e| CloudHomeError::Storage(format!("parse upload session {key}: {e}")))?;
-        let upload_url = json["uploadUrl"]
-            .as_str()
-            .ok_or_else(|| {
-                CloudHomeError::Storage(format!("upload session {key}: no uploadUrl returned"))
-            })?
-            .to_string();
-
-        let mut sent: u64 = 0;
-        for chunk in data.chunks(ONEDRIVE_CHUNK_SIZE) {
-            let start = sent;
-            let end = sent + chunk.len() as u64 - 1;
-            let content_range = format!("bytes {start}-{end}/{total}");
-            // No bearer_auth: the session URL is already a signed one-time URL.
-            let resp = self
-                .client
-                .put(&upload_url)
-                .header("Content-Length", chunk.len())
-                .header("Content-Range", &content_range)
-                .body(chunk.to_vec())
-                .send()
-                .await
-                .map_err(|e| CloudHomeError::Storage(format!("upload chunk {key}: {e}")))?;
-            let status = resp.status();
-            // Each intermediate chunk returns 202 Accepted; the final returns
-            // 200/201. Anything else aborts the session by surfacing the error.
-            if !status.is_success() && status != reqwest::StatusCode::ACCEPTED {
-                let body = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-                return Err(classify_write_error(status, &body, key));
-            }
-            sent += chunk.len() as u64;
-            progress(sent);
-        }
-        Ok(())
-    }
 }
 
 /// `error.code` from a Microsoft Graph error body (e.g. `"quotaLimitReached"`,
@@ -209,43 +138,75 @@ const ONEDRIVE_CHUNK_SIZE: usize = 24 * 320 * 1024;
 
 #[async_trait]
 impl CloudHome for OneDriveCloudHome {
-    async fn write(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        progress: &super::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        let total = data.len() as u64;
-
-        // Small files: one PUT, no sub-file progress — report the whole size on
-        // success. Larger files go through a resumable session so progress
-        // advances per chunk.
-        if data.len() <= ONEDRIVE_SIMPLE_PUT_MAX {
-            let url = format!("{}/content", self.item_path_url(key));
-            let resp = self
-                .api_call(|token| {
-                    self.client
-                        .put(&url)
-                        .bearer_auth(token)
-                        .header("Content-Type", "application/octet-stream")
-                        .body(data.clone())
-                })
-                .await?;
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp
-                    .text()
-                    .await
-                    .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-                return Err(classify_write_error(status, &body, key));
-            }
-
-            progress(total);
-            return Ok(());
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let url = format!("{}/content", self.item_path_url(key));
+        let resp = self
+            .api_call(|token| {
+                self.client
+                    .put(&url)
+                    .bearer_auth(token)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(data.clone())
+            })
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(classify_write_error(
+                status,
+                &http::body_text(resp).await,
+                key,
+            ));
         }
+        Ok(())
+    }
 
-        self.write_resumable(key, data, progress).await
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        let session_url = format!("{}/createUploadSession", self.item_path_url(key));
+        let body = serde_json::json!({
+            "item": { "@microsoft.graph.conflictBehavior": "replace" }
+        });
+        let resp = self
+            .api_call(|token| {
+                self.client
+                    .post(&session_url)
+                    .bearer_auth(token)
+                    .json(&body)
+            })
+            .await?;
+        let status = resp.status();
+        let resp_body = http::body_text(resp).await;
+        if !status.is_success() {
+            return Err(classify_write_error(status, &resp_body, key));
+        }
+        let json: serde_json::Value = serde_json::from_str(&resp_body)
+            .map_err(|e| CloudHomeError::Storage(format!("parse upload session {key}: {e}")))?;
+        let upload_url = json["uploadUrl"]
+            .as_str()
+            .ok_or_else(|| {
+                CloudHomeError::Storage(format!("upload session {key}: no uploadUrl returned"))
+            })?
+            .to_string();
+        let key_owned = key.to_string();
+        let classify =
+            Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned));
+        // OneDrive returns 202 Accepted for every non-final part.
+        Ok(Box::new(RangePutSink::new(
+            self.client.clone(),
+            upload_url,
+            202,
+            total_len,
+            ONEDRIVE_CHUNK_SIZE,
+            key.to_string(),
+            classify,
+        )))
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        ONEDRIVE_SIMPLE_PUT_MAX as u64
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -279,7 +240,7 @@ impl CloudHome for OneDriveCloudHome {
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
         let url = format!("{}/content", self.item_path_url(key));
-        let range = format!("bytes={}-{}", start, end.saturating_sub(1));
+        let range = http::range_header(start, end);
 
         let resp = self
             .api_call(|token| {

@@ -37,7 +37,7 @@ use crate::blob::{BlobScope, BlobTransitionObserver, Provenance};
 use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
 use crate::library_dir::LibraryDir;
-use crate::storage::cloud::{CloudHome, CloudHomeError};
+use crate::storage::cloud::{BlobBody, CloudHome, CloudHomeError};
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::gate::Gates;
 use crate::sync::hlc::Hlc;
@@ -62,17 +62,17 @@ async fn upload_with_progress(
     cloud_home: &dyn CloudHome,
     cloud_key: &str,
     file_id: &str,
-    data: Vec<u8>,
+    body: BlobBody,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<(), CloudHomeError> {
-    let total = data.len() as u64;
+    let total = body.len();
     let sent = Arc::new(AtomicU64::new(0));
     let progress = {
         let sent = sent.clone();
         move |n: u64| sent.store(n, Ordering::Relaxed)
     };
 
-    let write = cloud_home.write(cloud_key, data, &progress);
+    let write = cloud_home.write(cloud_key, body, &progress);
 
     let Some(obs) = observer else {
         return write.await;
@@ -147,32 +147,33 @@ async fn record_failure(
     }
 }
 
-/// Read an upload's local plaintext, resolve its scope to a key, and seal it for
-/// storage (encrypting under the scope's key for an encrypted home, or storing
-/// it verbatim for a plaintext one). Returns `(plaintext, sealed)`: the cloud
-/// write consumes `sealed`, and a `retain_pinned` upload populates the protected
-/// cache folder from `plaintext` — the bytes the cache stores and serves — so it
-/// pins from the read we already did instead of re-reading the file.
+/// Resolve an upload's scope to a key and open a streaming [`BlobBody`] over its
+/// local plaintext file — sealing each chunk under the scope's key for an
+/// encrypted home, or passing the plaintext through for a browsable one — without
+/// ever reading or sealing the whole blob into memory. The cloud write consumes
+/// the body chunk by chunk; a `retain_pinned` upload pins by stream-copying the
+/// same source file afterward (it never holds the plaintext in RAM).
 ///
-/// The two failure modes — the local file can't be read, the scope can't be
-/// resolved to a key (a missing `item_keys` row) — both surface as an `Err`
+/// The two failure modes — the scope can't be resolved to a key (a missing
+/// `item_keys` row), or the local file can't be opened — both surface as an `Err`
 /// carrying a host-readable message, so the upload loop has one failure path
-/// (warn + record + skip) instead of one per step. The scope is resolved at
-/// drain (not enqueue) because the key may be minted/synced after the blob was
-/// queued, and an `Item` scope reads `item_keys` here, holding `db`.
-async fn resolve_and_seal(
+/// (warn + record + skip) instead of one per step. The scope is resolved at drain
+/// (not enqueue) because the key may be minted/synced after the blob was queued,
+/// and an `Item` scope reads `item_keys` here, holding `db`.
+async fn resolve_and_open(
     db: &Database,
     cipher: &std::sync::RwLock<CloudCipher>,
     file_path: &Path,
     scope: BlobScope,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let plaintext = crate::local_blob::read(file_path).await?;
+) -> Result<BlobBody, String> {
     let resolved = db
         .resolve_blob_scope(scope)
         .await
         .map_err(|e| format!("cannot resolve blob scope: {e}"))?;
-    let sealed = cipher.read().unwrap().seal_scoped(resolved, &plaintext);
-    Ok((plaintext, sealed))
+    // Snapshot the cipher out of the lock so the (streaming, await-holding) body
+    // doesn't keep the guard across the upload.
+    let cipher = cipher.read().unwrap().clone();
+    cipher.open_body(resolved, file_path).await
 }
 
 /// The result of one upload-queue drain pass.
@@ -314,43 +315,39 @@ pub async fn drain_uploads(
             },
         };
 
-        // Read the local plaintext, resolve the scope to a key (an `Item` scope
-        // reads `item_keys` here, holding `db`), and seal it for storage — all in
-        // one step with a single failure path. A missing key is a host bug;
-        // record it as a failure rather than silently sealing under the master
-        // key (which no share recipient could read).
-        let (plaintext, sealed) =
-            match resolve_and_seal(db, cipher, &file_path, scope.clone()).await {
-                Ok(bytes) => bytes,
-                Err(msg) => {
-                    warn!("Upload failed for {}: {msg}", entry.cloud_key);
-                    record_failure(db, &entry, file_id, &msg, now, observer).await;
-                    continue;
-                }
-            };
-        // Keep the plaintext alive across the upload only if this entry pins;
-        // otherwise drop it now so a large blob isn't held in memory during the
-        // cloud write. `then_some` moves it in eagerly, freeing it when unpinned.
-        let plaintext_for_pin = (*retain_pinned).then_some(plaintext);
+        // Resolve the scope to a key (an `Item` scope reads `item_keys` here,
+        // holding `db`) and open a streaming body over the local plaintext — the
+        // body seals each chunk as it uploads, never holding the whole blob. A
+        // missing key is a host bug; record it as a failure rather than silently
+        // sealing under the master key (which no share recipient could read).
+        let body = match resolve_and_open(db, cipher, &file_path, scope.clone()).await {
+            Ok(body) => body,
+            Err(msg) => {
+                warn!("Upload failed for {}: {msg}", entry.cloud_key);
+                record_failure(db, &entry, file_id, &msg, now, observer).await;
+                continue;
+            }
+        };
 
-        match upload_with_progress(cloud_home, &entry.cloud_key, file_id, sealed, observer).await {
+        match upload_with_progress(cloud_home, &entry.cloud_key, file_id, body, observer).await {
             Ok(()) => {
                 count += 1;
 
-                // A pinned upload keeps its blob local: write the plaintext we
-                // already read to seal into the protected cache folder
+                // A pinned upload keeps its blob local: stream-copy the source
+                // plaintext file into the protected cache folder
                 // (`storage/pinned/<id>`), so the blob is budget-exempt and serves
-                // from disk with no later cloud round-trip. Best-effort, like the
-                // cache's own post-populate eviction: the upload has already
-                // succeeded and the bytes are in the cloud, so a populate failure is
-                // logged and swallowed (a later read re-fetches into the cache)
-                // rather than failing a completed upload.
-                if let Some(plaintext) = plaintext_for_pin {
+                // from disk with no later cloud round-trip — and a large pinned blob
+                // is never materialized in RAM. Best-effort, like the cache's own
+                // post-populate eviction: the upload has already succeeded and the
+                // bytes are in the cloud, so a populate failure is logged and
+                // swallowed (a later read re-fetches into the cache) rather than
+                // failing a completed upload.
+                if *retain_pinned {
                     if let Err(e) = crate::blob::cache::populate_pinned(
                         library_dir,
                         namespace,
                         file_id,
-                        &plaintext,
+                        &file_path,
                     )
                     .await
                     {

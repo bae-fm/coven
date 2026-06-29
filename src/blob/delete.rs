@@ -248,7 +248,14 @@ pub async fn drain_tombstones(
                 // rest. The suffix the key carries matches the seal (plaintext
                 // home: passthrough + empty suffix).
                 let sealed = cipher.read().unwrap().seal(&bytes);
-                if let Err(e) = cloud_home.write(&key, sealed, &no_progress()).await {
+                if let Err(e) = cloud_home
+                    .write(
+                        &key,
+                        crate::storage::cloud::BlobBody::from_bytes(sealed),
+                        &no_progress(),
+                    )
+                    .await
+                {
                     // Leave the row queued for the next cycle; the deletion is
                     // durable intent and must not be dropped on a transient cloud
                     // error.

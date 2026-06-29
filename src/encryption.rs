@@ -25,6 +25,62 @@ pub fn generate_random_key() -> [u8; 32] {
     key
 }
 
+/// The length of the encrypted blob [`EncryptionService::encrypt_chunked`]
+/// produces for a plaintext of `plaintext_len` bytes: the base nonce, the
+/// plaintext itself, and one 16-byte tag per chunk. An empty plaintext still
+/// produces one (tag-only) chunk. Lets a streaming upload know the final object
+/// size up front, before a byte is sealed.
+pub fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
+    let chunks = plaintext_len.div_ceil(CHUNK_SIZE as u64).max(1);
+    NONCE_SIZE as u64 + plaintext_len + chunks * TAG_SIZE as u64
+}
+
+/// Incremental encryptor that emits the same `[base_nonce][chunk_0][chunk_1]...`
+/// bytes as [`EncryptionService::encrypt_chunked`], one chunk at a time, so a
+/// large blob is sealed and uploaded without ever holding the whole plaintext or
+/// ciphertext in memory. `encrypt_chunked` is itself implemented on top of this,
+/// so the streaming and whole-buffer forms cannot drift.
+pub struct ChunkSealer {
+    cipher: XChaCha20Poly1305,
+    base_nonce: [u8; NONCE_SIZE],
+    next_index: u64,
+}
+
+impl ChunkSealer {
+    /// Start a sealer with a fresh random base nonce.
+    fn new(key: &[u8; 32]) -> Self {
+        let mut base_nonce = [0u8; NONCE_SIZE];
+        rand::rng().fill_bytes(&mut base_nonce);
+        Self {
+            cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
+            base_nonce,
+            next_index: 0,
+        }
+    }
+
+    /// The base nonce — the first [`NONCE_SIZE`] bytes of the encrypted blob,
+    /// emitted before any chunk.
+    pub fn base_nonce(&self) -> [u8; NONCE_SIZE] {
+        self.base_nonce
+    }
+
+    /// Seal one plaintext chunk (at most [`CHUNK_SIZE`] bytes) into its
+    /// ciphertext-plus-tag, advancing the chunk counter. A chunk longer than
+    /// `CHUNK_SIZE` would desync the framing the decryptor expects, so the caller
+    /// must split the plaintext on `CHUNK_SIZE` boundaries.
+    pub fn seal_chunk(&mut self, plaintext: &[u8]) -> Vec<u8> {
+        debug_assert!(
+            plaintext.len() <= CHUNK_SIZE,
+            "a sealed chunk must be at most CHUNK_SIZE bytes"
+        );
+        let nonce = chunk_nonce(&self.base_nonce, self.next_index);
+        self.next_index += 1;
+        self.cipher
+            .encrypt(GenericArray::from_slice(&nonce), plaintext)
+            .expect("encryption should not fail")
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum EncryptionError {
     #[error("Encryption failed: {0}")]
@@ -113,35 +169,26 @@ impl EncryptionService {
     /// Returns: `[base_nonce: 24 bytes][chunk_0][chunk_1]...`
     /// Each chunk is independently encrypted, enabling random-access decryption.
     pub fn encrypt_chunked(&self, plaintext: &[u8]) -> Vec<u8> {
-        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&self.key));
+        let mut sealer = self.sealer();
+        let mut output = sealer.base_nonce().to_vec();
 
-        // Generate random base nonce
-        let mut base_nonce = [0u8; NONCE_SIZE];
-        rand::rng().fill_bytes(&mut base_nonce);
-
-        let mut output = base_nonce.to_vec();
-
-        // Handle empty plaintext - still produce one chunk with just auth tag
+        // Empty plaintext still produces one chunk holding just the auth tag.
         if plaintext.is_empty() {
-            let nonce = chunk_nonce(&base_nonce, 0);
-            let nonce_arr = GenericArray::from_slice(&nonce);
-            let ct = cipher
-                .encrypt(nonce_arr, &[][..])
-                .expect("encryption should not fail");
-            output.extend(ct);
+            output.extend(sealer.seal_chunk(&[]));
             return output;
         }
 
-        for (i, chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
-            let nonce = chunk_nonce(&base_nonce, i as u64);
-            let nonce_arr = GenericArray::from_slice(&nonce);
-            let ct = cipher
-                .encrypt(nonce_arr, chunk)
-                .expect("encryption should not fail");
-            output.extend(ct);
+        for chunk in plaintext.chunks(CHUNK_SIZE) {
+            output.extend(sealer.seal_chunk(chunk));
         }
 
         output
+    }
+
+    /// A streaming sealer over this service's key, for encrypting a blob
+    /// chunk-by-chunk straight into an upload. See [`ChunkSealer`].
+    pub fn sealer(&self) -> ChunkSealer {
+        ChunkSealer::new(&self.key)
     }
 
     /// Decrypt a specific chunk from chunked encrypted data.
@@ -470,6 +517,71 @@ mod tests {
         let decrypted = service.decrypt(&ciphertext).unwrap();
 
         assert_eq!(decrypted, plaintext);
+    }
+
+    /// The streaming sealer (base nonce + per-chunk `seal_chunk`) produces a blob
+    /// the existing whole-buffer decryptor reads back unchanged, across the
+    /// boundaries that matter: empty, sub-chunk, exact chunk, and several
+    /// non-aligned chunks. `encrypt_chunked` is built on the sealer, so this also
+    /// guards the streaming form against drifting from the stored format.
+    #[test]
+    fn streaming_sealer_matches_whole_buffer_format() {
+        let service = create_test_service();
+        for len in [
+            0usize,
+            1,
+            CHUNK_SIZE - 1,
+            CHUNK_SIZE,
+            CHUNK_SIZE + 1,
+            200_000,
+        ] {
+            let plaintext: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+
+            // Seal incrementally, exactly as a streaming upload would.
+            let mut sealer = service.sealer();
+            let mut streamed = sealer.base_nonce().to_vec();
+            if plaintext.is_empty() {
+                streamed.extend(sealer.seal_chunk(&[]));
+            } else {
+                for chunk in plaintext.chunks(CHUNK_SIZE) {
+                    streamed.extend(sealer.seal_chunk(chunk));
+                }
+            }
+
+            assert_eq!(
+                streamed.len() as u64,
+                chunked_encrypted_len(len as u64),
+                "predicted length wrong for len={len}"
+            );
+            assert_eq!(
+                service.decrypt(&streamed).unwrap(),
+                plaintext,
+                "streamed ciphertext failed to round-trip for len={len}"
+            );
+        }
+    }
+
+    /// `chunked_encrypted_len` predicts the exact byte length `encrypt_chunked`
+    /// produces, across the chunk boundaries that matter — so a streaming upload
+    /// can announce the final object size before sealing a byte.
+    #[test]
+    fn chunked_encrypted_len_matches_encrypt_chunked() {
+        let service = create_test_service();
+        for n in [
+            0usize,
+            1,
+            CHUNK_SIZE - 1,
+            CHUNK_SIZE,
+            CHUNK_SIZE + 1,
+            200_000,
+        ] {
+            let produced = service.encrypt_chunked(&vec![0u8; n]).len() as u64;
+            assert_eq!(
+                chunked_encrypted_len(n as u64),
+                produced,
+                "predicted length wrong for n={n}"
+            );
+        }
     }
 
     #[test]

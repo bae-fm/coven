@@ -407,7 +407,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
     storage
         .write(
             &format!("blob_tombstones/{victim}{suffix}"),
-            sealed,
+            crate::storage::cloud::BlobBody::from_bytes(sealed),
             &crate::storage::cloud::no_progress(),
         )
         .await

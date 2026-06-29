@@ -216,7 +216,7 @@ impl<'a> ShareProxy<'a> {
             self.cloud_home
                 .write(
                     &share_object_path(&share_id, filename),
-                    data,
+                    crate::storage::cloud::BlobBody::from_bytes(data),
                     &no_progress(),
                 )
                 .await?;
