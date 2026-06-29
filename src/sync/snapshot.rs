@@ -1654,12 +1654,12 @@ mod tests {
         exec(
             &db_a,
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-             VALUES ('n1', 'Gish', 1, '0000000001000-0000-devA', '2026-01-01')",
+             VALUES ('n1', 'Note One', 1, '0000000001000-0000-devA', '2026-01-01')",
         );
         exec(
             &db_a,
             "INSERT INTO device_local (note_id, local_path) \
-             VALUES ('n1', '/Users/dima/Torrents/Gish (1991)')",
+             VALUES ('n1', '/tmp/device-local/path')",
         );
 
         let temp = tempfile::tempdir().unwrap();
@@ -1691,7 +1691,7 @@ mod tests {
         // Synced data SHOULD cross.
         assert_eq!(
             query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'"),
-            "Gish",
+            "Note One",
             "synced-table data must survive a snapshot restore",
         );
         // Device-local data must NOT cross.
@@ -1894,7 +1894,7 @@ mod tests {
         exec(
             &db_a,
             "INSERT INTO local_blob_refs (blob_id, namespace, path, size) \
-             VALUES ('f1', 'audio', '/Users/peer/Music/track.flac', 1234)",
+             VALUES ('f1', 'audio', '/tmp/external/track.flac', 1234)",
         );
         // A synced row that SHOULD cross, to prove the snapshot still carries data.
         exec(
