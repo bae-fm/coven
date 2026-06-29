@@ -31,7 +31,7 @@ use super::gate;
 use super::gate::Gates;
 use super::membership::{self, MembershipCoord};
 use super::pull::{self, PullResult};
-use super::push::{OutgoingChangeset, SCHEMA_VERSION};
+use super::push::OutgoingChangeset;
 use super::storage::SyncStorage;
 
 /// Configuration for a sync service.
@@ -223,7 +223,7 @@ impl SyncService {
             let packed = envelope::pack_signed(
                 &self.device_id,
                 next_seq,
-                SCHEMA_VERSION,
+                db.schema_version(),
                 message,
                 timestamp,
                 keypair,

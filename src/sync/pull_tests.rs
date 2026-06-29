@@ -17,7 +17,10 @@ use crate::sync::envelope;
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipCoord};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::pull::PullError;
-use crate::sync::push::SCHEMA_VERSION;
+/// The synthetic test db opens with a single migration, so its
+/// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
+/// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
+const SCHEMA_VERSION: u32 = 1;
 use crate::sync::service::{SyncCycleError, SyncService};
 use crate::sync::session::{BlobDecl, BlobScopeSpec};
 use crate::sync::storage::SyncStorage;
@@ -109,6 +112,123 @@ async fn pull_skips_changeset_from_newer_schema() {
     // the cursor put re-fetches seq 1 after the upgrade.
     assert_eq!(updated.get("dev1"), None);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+}
+
+/// The pull gate compares an incoming changeset's `schema_version` against the
+/// opened db's [`Database::schema_version`], not a hand-bumped constant: a peer at
+/// version N applies a changeset stamped N and skips one stamped N+1 without
+/// advancing its cursor. The peer's own version is derived from the db, so this
+/// fails if the gate stops tracking the schema that actually exists on disk. (The
+/// push side — that an *outgoing* changeset is stamped with the db's version — is
+/// covered by `push_stamps_the_dbs_schema_version`, which drives the real producer.)
+#[tokio::test]
+async fn pull_gate_tracks_the_dbs_schema_version() {
+    let storage = MockSyncStorage::new();
+
+    let db1 = open_test_db();
+    let n = db1.schema_version();
+
+    // seq 1 stamped at exactly the peer's schema version: applies.
+    let cs1 = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'At N', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs1, n);
+
+    // seq 2 stamped one above the peer's schema version: skipped, cursor held.
+    let cs2 = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n2', 'Above N', NULL, '0000000002000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 2, &cs2, n + 1);
+
+    let db2 = open_test_db();
+    assert_eq!(
+        db2.schema_version(),
+        n,
+        "both peers open the same migration ladder, so they share the wire version"
+    );
+    let (updated, result) = pull_into(
+        &db2,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_library_dir().1,
+    )
+    .await;
+
+    assert_eq!(
+        result.changesets_applied, 1,
+        "the N-stamped changeset applies"
+    );
+    assert_eq!(
+        result.skipped_schema, 1,
+        "the N+1-stamped changeset is skipped"
+    );
+    assert_eq!(
+        updated.get("dev1"),
+        Some(&1),
+        "cursor stops at the applied seq, never past the skipped one"
+    );
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n2'").await);
+}
+
+/// The push side stamps an outgoing changeset with the db's
+/// [`Database::schema_version`], driven through the real producer
+/// (`SyncService::sync`) and read back off the produced envelope — so a regression
+/// that stamped a constant instead would fail here. Paired with
+/// `pull_gate_tracks_the_dbs_schema_version`, which covers the receiver gate.
+#[tokio::test]
+async fn push_stamps_the_dbs_schema_version() {
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+    let db1 = open_test_db();
+    let (_tmp, ld1) = temp_library_dir();
+
+    // `shared = 1` so the gated `notes` root survives the push gate and there is an
+    // outgoing changeset to inspect.
+    exec(
+        &db1,
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'One', 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db1.take_changeset().await.expect("capture insert");
+
+    let service = SyncService::new("dev1".to_string());
+    let keypair = UserKeypair::generate();
+    let result = service
+        .sync(
+            &db1,
+            &tables,
+            outgoing,
+            0,
+            &HashMap::new(),
+            &storage,
+            "2026-01-01T00:00:00Z",
+            "",
+            &keypair,
+            &ld1,
+        )
+        .await
+        .expect("sync push");
+
+    let packed = result.outgoing.expect("an outgoing changeset").packed;
+    let (env, _changeset) = envelope::unpack(&packed).expect("unpack outgoing envelope");
+    assert_eq!(
+        env.schema_version,
+        db1.schema_version(),
+        "the outgoing changeset is stamped with the db's applied schema version",
+    );
 }
 
 #[tokio::test]

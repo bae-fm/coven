@@ -29,7 +29,7 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::test_helpers::{create_synced_schema, test_synced_tables};
+use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -42,7 +42,7 @@ fn open_device(device_id: &str) -> Database {
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         device_id.to_string(),
-        create_synced_schema,
+        &test_migrations(),
     )
     .expect("open in-memory Database");
     db

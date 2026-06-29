@@ -14,6 +14,7 @@ use crate::encryption::{EncryptionError, EncryptionService};
 use crate::join_code::InviteCode;
 use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
 use crate::library_dir::LibraryDir;
+use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::invite::{unwrap_library_key, InviteError};
@@ -164,6 +165,7 @@ pub async fn join_from_invite_code(
     invite_code_str: &str,
     app_dir: &Path,
     synced_tables: &[SyncedTable],
+    migrations: &[Migration],
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
@@ -184,6 +186,7 @@ pub async fn join_from_invite_code(
         app_dir,
         code,
         synced_tables,
+        migrations,
         &global_ks,
         cloud_home,
         ids.as_ref(),
@@ -206,6 +209,7 @@ pub async fn join_library(
     data_dir: &Path,
     code: InviteCode,
     synced_tables: &[SyncedTable],
+    migrations: &[Migration],
     key_service: &KeyService,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
@@ -277,6 +281,7 @@ pub async fn join_library(
         &device_id,
         &code.owner_pubkey,
         synced_tables,
+        migrations,
         &code.join_info,
         &code.library_name,
         &new_key_service,
@@ -302,6 +307,7 @@ async fn bootstrap_and_save(
     device_id: &str,
     owner_pubkey: &str,
     synced_tables: &[SyncedTable],
+    migrations: &[Migration],
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
     key_service: &KeyService,
@@ -311,11 +317,20 @@ async fn bootstrap_and_save(
     // membership chain anchored to the founder the invite pins (`owner_pubkey`),
     // exactly as the changeset pull is: a snapshot that is unsigned, signed by a
     // non-member, or whose DB image was tampered with is refused, never adopted.
+    // A snapshot whose synced-schema version is newer than this binary's top
+    // migration is refused before download (`SchemaTooNew`).
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
-    let bootstrap_result =
-        bootstrap_from_snapshot(bucket_dyn, library_id, cipher, Some(owner_pubkey), &db_path)
-            .await?;
+    let binary_schema_version = supported_version(migrations);
+    let bootstrap_result = bootstrap_from_snapshot(
+        bucket_dyn,
+        library_id,
+        cipher,
+        Some(owner_pubkey),
+        binary_schema_version,
+        &db_path,
+    )
+    .await?;
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",
@@ -329,6 +344,7 @@ async fn bootstrap_and_save(
     let changesets_applied = open_db_and_pull(
         &db_path,
         synced_tables,
+        migrations,
         device_id,
         Some(owner_pubkey),
         bucket_dyn,
@@ -369,13 +385,17 @@ async fn bootstrap_and_save(
 /// the snapshot.
 ///
 /// The snapshot the bootstrap wrote already carries the full schema (the host's
-/// tables and coven's bookkeeping), so coven's bookkeeping migration is
-/// idempotent and the host migrate is a no-op here. Capture stays enabled — a
-/// just-bootstrapped library has no local host writer, so there is no whole-cycle
-/// suspend to manage; `pull_changes` disables capture around only its apply.
+/// tables and coven's bookkeeping) plus the writer's `PRAGMA user_version`, so the
+/// migration ladder runs here only to carry the image forward when this binary is
+/// newer than the writer (`user_version` below this binary's top migration); when
+/// they match it is a no-op. Capture stays enabled — a just-bootstrapped library
+/// has no local host writer, so there is no whole-cycle suspend to manage;
+/// `pull_changes` disables capture around only its apply.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn open_db_and_pull(
     db_path: &Path,
     synced_tables: &[SyncedTable],
+    migrations: &[Migration],
     device_id: &str,
     owner_pubkey: Option<&str>,
     storage: &dyn SyncStorage,
@@ -386,7 +406,7 @@ pub(crate) async fn open_db_and_pull(
         db_path,
         synced_tables.to_vec(),
         device_id.to_string(),
-        |_conn| Ok(()),
+        migrations,
     )
     .map_err(|e| {
         JoinError::Database(format!("Failed to open database for changeset apply: {e}"))

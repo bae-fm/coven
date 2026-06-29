@@ -21,14 +21,17 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::push_changeset;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::pull::pull_changes;
-use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::{BlobDecl, BlobScopeSpec};
 use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot, push_snapshot};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    capture_bytes, create_synced_schema, exec, temp_library_dir, test_synced_tables,
+    capture_bytes, exec, temp_library_dir, test_migrations, test_synced_tables,
     test_synced_tables_with_blob,
 };
+
+/// The synthetic test db opens with a single migration, so its
+/// [`Database::schema_version`] is 1. Changesets are stored at that version.
+const SCHEMA_VERSION: u32 = 1;
 
 /// A fixed master key, distinct from any minted item key, so "the master cannot
 /// read item content" is a real assertion.
@@ -42,7 +45,7 @@ fn open_db(device_id: &str) -> Database {
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         device_id.to_string(),
-        create_synced_schema,
+        &test_migrations(),
     )
     .expect("open item-key test database");
     db
@@ -271,7 +274,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         std::path::Path::new(":memory:"),
         test_synced_tables_with_blob(item_photo_decl()),
         "dev-b".to_string(),
-        create_synced_schema,
+        &test_migrations(),
     )
     .expect("open device B with the item-scoped blob declaration");
     assert_eq!(
@@ -376,6 +379,7 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
         "dev-a",
         std::collections::HashMap::new(),
         1,
+        db_a.schema_version(),
         &UserKeypair::generate(),
         &crate::clock::SystemClock,
     )
@@ -385,19 +389,20 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     // --- Device B: bootstrap from the snapshot bytes (no changeset replay). ---
     // This library has no membership chain (a bare storage with no founder entry),
     // so the snapshot is authorized on its signature alone — the open-library path.
+    // The bootstrapping binary supports the same schema version A wrote (1).
     let target = temp.path().join("device_b.db");
-    bootstrap_from_snapshot(&storage, "test-lib", &snapshot_enc, None, &target)
+    bootstrap_from_snapshot(&storage, "test-lib", &snapshot_enc, None, 1, &target)
         .await
         .expect("device B bootstraps from snapshot");
 
     // Open the bootstrapped file as a real Database so resolution runs over the
-    // injected synced set, exactly as a joined device would.
+    // injected synced set, exactly as a joined device would. The snapshot bytes
+    // already carry the schema at `user_version` 1, so the ladder is a no-op here.
     let (db_b, _stamper) = Database::open(
         &target,
         test_synced_tables(),
         "dev-b".to_string(),
-        // The snapshot bytes already carry the schema; migrate is a no-op.
-        |_conn| Ok(()),
+        &test_migrations(),
     )
     .expect("open bootstrapped database");
 

@@ -2,13 +2,12 @@
 //!
 //! The actual push orchestration happens in `SyncService::sync()`, which
 //! returns an `OutgoingChangeset` for the caller to encrypt and upload.
-//! This module holds the shared types and the schema version constant.
-
-/// Current schema version -- a monotonically increasing tag attached to
-/// outgoing changesets. Receivers reject changesets whose schema_version
-/// is higher than they support, so this must be bumped any time the on-disk
-/// shape of synced tables changes.
-pub const SCHEMA_VERSION: u32 = 4;
+//! This module holds the shared types.
+//!
+//! The outgoing changeset's `schema_version` is not a constant here: it is
+//! [`crate::database::Database::schema_version`], the applied `PRAGMA user_version`
+//! from the host's migration ladder, so a device can only stamp a version it has
+//! actually migrated to.
 
 /// An outgoing changeset ready to be pushed to sync storage.
 pub struct OutgoingChangeset {

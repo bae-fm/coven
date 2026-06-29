@@ -20,7 +20,6 @@ use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
 use super::membership::{MembershipChain, MembershipCoord, MembershipEntry};
-use super::push::SCHEMA_VERSION;
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
 use crate::blob::decl::BlobDecls;
@@ -245,9 +244,9 @@ pub async fn pull_changes(
             None => true,
         };
         if honor {
-            if SCHEMA_VERSION < min.version {
+            if db.schema_version() < min.version {
                 return Err(PullError::SchemaVersionTooOld {
-                    local_version: SCHEMA_VERSION,
+                    local_version: db.schema_version(),
                     min_version: min.version,
                 });
             }
@@ -358,12 +357,12 @@ pub async fn pull_changes(
                 envelope::unpack(&envelope_bytes).map_err(PullError::InvalidEnvelope)?;
 
             // Schema version check: skip changesets from a newer schema.
-            if env.schema_version > SCHEMA_VERSION {
+            if env.schema_version > db.schema_version() {
                 warn!(
                     device_id = %head.device_id,
                     seq,
                     remote_version = env.schema_version,
-                    local_version = SCHEMA_VERSION,
+                    local_version = db.schema_version(),
                     "skipping changeset with newer schema version"
                 );
                 result.skipped_schema += 1;

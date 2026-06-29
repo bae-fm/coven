@@ -24,13 +24,16 @@ use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::join::{join_from_invite_code, open_db_and_pull, JoinError};
-use crate::sync::push::SCHEMA_VERSION;
 use crate::sync::session::BlobDecl;
 use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SNAPSHOT_BLOB_BACKFILL_PENDING,
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
+
+/// The synthetic test db opens with a single migration, so its
+/// [`Database::schema_version`] is 1. Changesets are stored at that version.
+const SCHEMA_VERSION: u32 = 1;
 
 /// An invite code carrying an attacker-chosen `library_id` is the path-traversal
 /// vector: the code is unsigned, and the id becomes a directory the joiner creates
@@ -66,6 +69,7 @@ async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Co
         code_str,
         app_dir,
         &test_synced_tables(),
+        &test_migrations(),
         None,
         None,
         Arc::new(SystemClock),
@@ -189,6 +193,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         "A",
         HashMap::new(),
         0,
+        db_a.schema_version(),
         &UserKeypair::generate(),
         &SystemClock,
     )
@@ -215,12 +220,13 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     // Device B joins through the real path: bootstrap from the snapshot, then
     // pull the changesets published after it.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
         &lib_b.db_path(),
         &tables,
+        &test_migrations(),
         "B",
         None,
         &storage,
@@ -230,11 +236,13 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     .await
     .expect("B open_db_and_pull");
 
-    let (db_b, _stamper) =
-        Database::open(&lib_b.db_path(), tables.clone(), "B".to_string(), |_c| {
-            Ok(())
-        })
-        .expect("open B db");
+    let (db_b, _stamper) = Database::open(
+        &lib_b.db_path(),
+        tables.clone(),
+        "B".to_string(),
+        &test_migrations(),
+    )
+    .expect("open B db");
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "Album Title",
@@ -323,6 +331,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         "A",
         HashMap::new(),
         1,
+        db_a.schema_version(),
         &UserKeypair::generate(),
         &SystemClock,
     )
@@ -352,12 +361,13 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
         &lib_b.db_path(),
         &tables,
+        &test_migrations(),
         "B",
         None,
         &storage,
@@ -436,6 +446,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         "A",
         HashMap::new(),
         1,
+        db_a.schema_version(),
         &UserKeypair::generate(),
         &SystemClock,
     )
@@ -451,12 +462,13 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
         &lib_b.db_path(),
         &tables,
+        &test_migrations(),
         "B",
         None,
         &storage,
@@ -472,11 +484,13 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         !expected_blob.exists(),
         "the cover blob must be absent after a bootstrap whose download failed",
     );
-    let (db_b, _stamper) =
-        Database::open(&lib_b.db_path(), tables.clone(), "B".to_string(), |_c| {
-            Ok(())
-        })
-        .expect("open B db");
+    let (db_b, _stamper) = Database::open(
+        &lib_b.db_path(),
+        tables.clone(),
+        "B".to_string(),
+        &test_migrations(),
+    )
+    .expect("open B db");
     assert!(
         backfill_pending(&db_b).await,
         "bootstrap must record the backfill as pending when a blob did not land",

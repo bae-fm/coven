@@ -42,6 +42,7 @@ use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
+use crate::migration::Migration;
 use crate::storage::cloud::s3_wasm::S3WasmCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -247,11 +248,12 @@ impl CovenLibrary {
         // The OPFS VFS keys files by name, so the library_id is the filename. A
         // page that opens two libraries on one origin must give them distinct ids.
         let path = format!("{library_id}.db");
+        let migrations = vec![Migration::run(1, "demo-schema", demo_schema)];
         let (db, _stamper) = Database::open(
             std::path::Path::new(&path),
             demo_synced_tables(),
             device_id.clone(),
-            demo_schema,
+            &migrations,
         )
         .map_err(|e| format!("open database: {e}"))?;
 

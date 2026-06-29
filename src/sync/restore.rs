@@ -14,6 +14,7 @@ use crate::config::{Config, ConfigError, HomeStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::keys::{KeyError, KeyService, UserKeypair};
 use crate::library_dir::LibraryDir;
+use crate::migration::{supported_version, Migration};
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -201,6 +202,7 @@ pub async fn restore_from_cloud(
     encryption_key_hex: Option<&str>,
     library_name: &str,
     synced_tables: &[SyncedTable],
+    migrations: &[Migration],
     source: RestoreSource,
     keypair: &UserKeypair,
     app_dir: &Path,
@@ -274,6 +276,7 @@ pub async fn restore_from_cloud(
         library_id,
         &device_id,
         synced_tables,
+        migrations,
         &join_info,
         library_name,
         &key_service,
@@ -306,6 +309,7 @@ pub async fn restore_from_cloud(
 pub async fn restore_from_code(
     code: &str,
     synced_tables: &[SyncedTable],
+    migrations: &[Migration],
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     app_dir: &Path,
@@ -387,6 +391,7 @@ pub async fn restore_from_code(
         parsed.ek.as_deref(),
         &parsed.name,
         synced_tables,
+        migrations,
         source,
         &keypair,
         app_dir,
@@ -416,6 +421,7 @@ async fn bootstrap_and_save(
     library_id: &str,
     device_id: &str,
     synced_tables: &[SyncedTable],
+    migrations: &[Migration],
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
     key_service: &KeyService,
@@ -431,8 +437,16 @@ async fn bootstrap_and_save(
     on_status("Downloading library snapshot...");
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
-    let bootstrap_result =
-        bootstrap_from_snapshot(bucket_dyn, library_id, cipher, None, &db_path).await?;
+    let binary_schema_version = supported_version(migrations);
+    let bootstrap_result = bootstrap_from_snapshot(
+        bucket_dyn,
+        library_id,
+        cipher,
+        None,
+        binary_schema_version,
+        &db_path,
+    )
+    .await?;
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",
@@ -449,6 +463,7 @@ async fn bootstrap_and_save(
     let changesets_applied = open_db_and_pull(
         &db_path,
         synced_tables,
+        migrations,
         device_id,
         None,
         bucket_dyn,

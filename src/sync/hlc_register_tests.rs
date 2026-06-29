@@ -20,7 +20,10 @@ use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipEntry};
 use crate::sync::pull::pull_changes;
-use crate::sync::push::SCHEMA_VERSION;
+/// The synthetic test db opens with a single migration, so its
+/// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
+/// that version.
+const SCHEMA_VERSION: u32 = 1;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
@@ -278,7 +281,7 @@ async fn register_seeds_from_persisted_high_water() {
     // A high-water mark far ahead of any plausible wall millis. No synced rows on
     // disk, so the high-water mark is the only floor.
     let high = "9999999999000-0007-dev-a";
-    let db = open_test_db_with_hlc(Arc::new(Hlc::new("dev-a".into())), |conn| {
+    let db = open_test_db_with_hlc(Arc::new(Hlc::new("dev-a".into())), move |conn| {
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
             (HIGHWATER_STATE_KEY, high),
@@ -301,7 +304,7 @@ async fn register_seeds_from_persisted_high_water() {
 #[tokio::test]
 async fn register_seeds_from_on_disk_rows_above_high_water() {
     let row_stamp = "9999999999000-0011-dev-a";
-    let db = open_test_db_with_hlc(Arc::new(Hlc::new("dev-a".into())), |conn| {
+    let db = open_test_db_with_hlc(Arc::new(Hlc::new("dev-a".into())), move |conn| {
         conn.execute(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n0', 'row', NULL, ?1, '2026-01-01')",
@@ -328,20 +331,25 @@ async fn register_seeds_from_on_disk_rows_above_high_water() {
 #[tokio::test]
 async fn returned_stamper_shares_seeded_clock() {
     let seeded_floor = "9999999999000-0005-dev-a";
-    let (db, stamper) = crate::database::Database::open_with_hlc(
-        std::path::Path::new(":memory:"),
-        test_synced_tables(),
-        Arc::new(Hlc::new("dev-a".into())),
-        |conn| {
+    let migrations = vec![crate::migration::Migration::run(
+        1,
+        "test-schema",
+        move |conn| {
             create_synced_schema(conn)?;
             conn.execute(
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-                 VALUES ('n0', 'row', NULL, ?1, '2026-01-01')",
+             VALUES ('n0', 'row', NULL, ?1, '2026-01-01')",
                 [seeded_floor],
             )
             .map(|_| ())
             .map_err(crate::database::DbError::from)
         },
+    )];
+    let (db, stamper) = crate::database::Database::open_with_hlc(
+        std::path::Path::new(":memory:"),
+        test_synced_tables(),
+        Arc::new(Hlc::new("dev-a".into())),
+        &migrations,
     )
     .expect("open db");
 
@@ -531,18 +539,19 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // A db whose `sync_state` rejects every INSERT, so a `set_sync_state` inside
     // the cycle fails. Reads (the seed scan, the cycle's top-of-cycle loads) are
     // SELECTs and remain fine.
+    let migrations = vec![crate::migration::Migration::run(1, "test-schema", |conn| {
+        create_synced_schema(conn)?;
+        conn.execute_batch(
+            "CREATE TRIGGER block_sync_state_insert BEFORE INSERT ON sync_state \
+             BEGIN SELECT RAISE(ABORT, 'forced set_sync_state failure'); END;",
+        )
+        .map_err(crate::database::DbError::from)
+    })];
     let (db, _stamper) = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         "dev-self".to_string(),
-        |conn| {
-            create_synced_schema(conn)?;
-            conn.execute_batch(
-                "CREATE TRIGGER block_sync_state_insert BEFORE INSERT ON sync_state \
-                 BEGIN SELECT RAISE(ABORT, 'forced set_sync_state failure'); END;",
-            )
-            .map_err(crate::database::DbError::from)
-        },
+        &migrations,
     )
     .expect("open db with sync_state-blocking trigger");
 

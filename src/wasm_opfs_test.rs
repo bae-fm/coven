@@ -9,6 +9,7 @@
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 use crate::database::{Database, DbError};
+use crate::migration::Migration;
 use crate::sync::session::SyncedTable;
 use crate::wasm::install_browser_storage;
 
@@ -20,13 +21,13 @@ fn synced_tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("items"), SyncedTable::new("item_tags")]
 }
 
-/// The host `migrate` closure: both tables carry the required `id` text primary
-/// key at column 0 and an `_updated_at TEXT NOT NULL` register column.
+/// The host migration step: both tables carry the required `id` text primary key
+/// at column 0 and an `_updated_at TEXT NOT NULL` register column.
 ///
-/// Idempotent (`IF NOT EXISTS`), as a real host migration is — `Database::open`
-/// re-runs it on every open, including a reopen of a database whose schema is
-/// already on disk. The reopen below relies on that: the tables persist in OPFS,
-/// so re-running this must be a no-op rather than a "table already exists" error.
+/// Idempotent (`IF NOT EXISTS`). The migration ladder runs at every open, but on a
+/// reopen `PRAGMA user_version` is already at the top so this step does not re-run
+/// (the `IF NOT EXISTS` is belt-and-suspenders): the tables persist in OPFS, so the
+/// reopen below reads them without re-creating.
 fn migrate(conn: &rusqlite::Connection) -> Result<(), DbError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS items (
@@ -49,11 +50,12 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), DbError> {
 /// derived from the path's file name, so this path resolves to the same OPFS file
 /// on every open with the same `name`.
 fn open(name: &str) -> Database {
+    let migrations = vec![Migration::run(1, "test-schema", migrate)];
     let (db, _stamper) = Database::open(
         std::path::Path::new(name),
         synced_tables(),
         "wasm-test-device".to_string(),
-        migrate,
+        &migrations,
     )
     .expect("open Database on OPFS VFS");
     db
