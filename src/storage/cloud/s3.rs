@@ -525,13 +525,24 @@ impl CloudHome for S3CloudHome {
                     .map_err(|e| CloudHomeError::Storage(format!("list {prefix}: {e}")))?;
 
                 for obj in resp.contents() {
-                    if let Some(key) = obj.key() {
-                        let stripped = match &strip_prefix {
-                            Some(p) => key.strip_prefix(p.as_str()).unwrap_or(key),
-                            None => key,
-                        };
-                        keys.push(stripped.to_string());
-                    }
+                    let Some(key) = obj.key() else {
+                        warn!("list {prefix}: S3 returned an object with no key; skipping it");
+                        continue;
+                    };
+                    let stripped = match &strip_prefix {
+                        Some(p) => match key.strip_prefix(p.as_str()) {
+                            Some(s) => s,
+                            None => {
+                                warn!(
+                                    "list {prefix}: key {key} is outside the queried prefix {p}; \
+                                     keeping the full key"
+                                );
+                                key
+                            }
+                        },
+                        None => key,
+                    };
+                    keys.push(stripped.to_string());
                 }
 
                 if resp.is_truncated() == Some(true) {
