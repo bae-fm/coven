@@ -245,17 +245,20 @@ impl super::PartSink for WasmS3PartSink<'_> {
             self.abort().await;
             return Err(err);
         }
-        let etag = resp
-            .headers()
-            .get(http::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .ok_or_else(|| {
+        let etag = match resp.headers().get(http::header::ETAG) {
+            // A non-UTF-8 ETag is a real decode failure, not "no ETag" — surface
+            // it distinctly rather than swallowing it into the missing-header path.
+            Some(v) => v.to_str().map(str::to_string).map_err(|e| {
                 CloudHomeError::Storage(format!(
-                    "multipart part {part_number} {}: no ETag returned",
+                    "multipart part {part_number} {}: ETag header not valid UTF-8: {e}",
                     self.full_key
                 ))
-            });
+            }),
+            None => Err(CloudHomeError::Storage(format!(
+                "multipart part {part_number} {}: no ETag returned",
+                self.full_key
+            ))),
+        };
         let etag = match etag {
             Ok(etag) => etag,
             Err(e) => {

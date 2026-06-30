@@ -81,7 +81,11 @@ impl DropboxCloudHome {
 
         let status = resp.status();
         let resp_body = http::body_text(resp).await;
-        let json: serde_json::Value = serde_json::from_str(&resp_body).unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_str(&resp_body).map_err(|e| {
+            CloudHomeError::Storage(format!(
+                "share folder (HTTP {status}): unparseable response: {e}: {resp_body}"
+            ))
+        })?;
 
         // Immediate: {".tag": "complete", "shared_folder_id": "..."}
         if let Some(id) = json["shared_folder_id"].as_str() {
@@ -120,7 +124,11 @@ impl DropboxCloudHome {
                 })
                 .await?;
             let resp_body = http::body_text(resp).await;
-            let json: serde_json::Value = serde_json::from_str(&resp_body).unwrap_or_default();
+            let json: serde_json::Value = serde_json::from_str(&resp_body).map_err(|e| {
+                CloudHomeError::Storage(format!(
+                    "share job status: unparseable response: {e}: {resp_body}"
+                ))
+            })?;
             match json[".tag"].as_str() {
                 Some("complete") => {
                     if let Some(id) = json["shared_folder_id"].as_str() {
