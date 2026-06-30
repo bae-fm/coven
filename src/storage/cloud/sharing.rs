@@ -56,7 +56,11 @@ pub async fn revoke_by_email(
     )
     .await
     {
-        Ok(_) | Err(CloudHomeError::NotFound(_)) => Ok(()),
+        Ok(_) => Ok(()),
+        Err(CloudHomeError::NotFound(_)) => {
+            tracing::debug!("revoke for {member_id}: permission already absent (404 on delete)");
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }

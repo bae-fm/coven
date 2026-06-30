@@ -84,7 +84,10 @@ pub async fn rest_delete<T: OAuthRestHome + ?Sized>(
     let resp = home.send_delete(key).await?;
     match ensure_ok(resp, &format!("delete {key}"), home.not_found()).await {
         Ok(_) => Ok(()),
-        Err(CloudHomeError::NotFound(_)) => Ok(()),
+        Err(CloudHomeError::NotFound(_)) => {
+            tracing::debug!("delete of {key} found nothing; treating as already-deleted");
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }
@@ -102,7 +105,10 @@ pub async fn rest_list<T: OAuthRestHome + ?Sized>(
         let resp = match ensure_ok(resp, &format!("list {prefix}"), home.not_found()).await {
             Ok(resp) => resp,
             // An absent listing root is an empty result, not an error.
-            Err(CloudHomeError::NotFound(_)) => return Ok(keys),
+            Err(CloudHomeError::NotFound(_)) => {
+                tracing::debug!("list root for {prefix} absent; returning empty listing");
+                return Ok(keys);
+            }
             Err(e) => return Err(e),
         };
         let body = body_text(resp).await;
