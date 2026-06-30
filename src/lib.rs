@@ -261,7 +261,9 @@ pub use storage::local::BlobStore;
 // `CloudHome`, never `SyncStorage`.)
 #[cfg(not(target_arch = "wasm32"))]
 pub use storage::cloud::{cloudkit::CloudKitOps, s3::S3CloudHome};
-pub use storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo, UploadProgress};
+pub use storage::cloud::{
+    BlobBody, BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink, UploadProgress,
+};
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through
 // these instead of the desktop browser-callback `sign_in_*` above.
