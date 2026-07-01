@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
 
-// Size constants matching libsodium conventions. Exported so callers (sync modules,
-// envelope.rs, etc.) can use them for array sizes and length checks.
+// Size constants for our Curve25519/Ed25519 keys. Exported so callers (sync
+// modules, envelope.rs, etc.) can use them for array sizes and length checks.
 pub const SIGN_PUBLICKEYBYTES: usize = 32;
 pub const SIGN_SECRETKEYBYTES: usize = 64;
 pub const SIGN_BYTES: usize = 64;
@@ -135,41 +135,13 @@ pub fn verify_signature_hex(pk_hex: &str, sig_hex: &str, message: &[u8]) -> bool
 
 /// Encrypt a message to a recipient's X25519 public key using a sealed box.
 /// The sender is anonymous -- only the recipient can decrypt.
-///
-/// Reimplements crypto_box::PublicKey::seal() to avoid rand_core version
-/// mismatch (crypto_box uses rand_core 0.6, we use rand 0.9).
 pub fn seal_box_encrypt(
     message: &[u8],
     recipient_x25519_pk: &[u8; CURVE25519_PUBLICKEYBYTES],
 ) -> Vec<u8> {
-    use blake2::{digest::typenum::U24, Blake2b, Digest};
-    use crypto_box::aead::Aead;
-
-    let recipient_pk = crypto_box::PublicKey::from(*recipient_x25519_pk);
-
-    // Generate ephemeral X25519 keypair
-    let mut ephemeral_bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut ephemeral_bytes);
-    let ephemeral_sk = crypto_box::SecretKey::from(ephemeral_bytes);
-    let ephemeral_pk = ephemeral_sk.public_key();
-
-    // Nonce = Blake2b-192(ephemeral_pk || recipient_pk) -- matches libsodium sealed box spec
-    let mut hasher = Blake2b::<U24>::new();
-    hasher.update(ephemeral_pk.as_bytes());
-    hasher.update(recipient_pk.as_bytes());
-    let nonce = hasher.finalize();
-
-    // Encrypt with XSalsa20-Poly1305
-    let salsa_box = crypto_box::SalsaBox::new(&recipient_pk, &ephemeral_sk);
-    let encrypted = salsa_box
-        .encrypt(&nonce, message)
-        .expect("sealed box encryption should not fail");
-
-    // Output: ephemeral_pk || ciphertext (matches libsodium format)
-    let mut out = Vec::with_capacity(32 + encrypted.len());
-    out.extend_from_slice(ephemeral_pk.as_bytes());
-    out.extend_from_slice(&encrypted);
-    out
+    crypto_box::PublicKey::from(*recipient_x25519_pk)
+        .seal(&mut crypto_box::aead::OsRng, message)
+        .expect("sealed box encryption should not fail")
 }
 
 /// Decrypt a sealed box using the recipient's X25519 keypair.
