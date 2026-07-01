@@ -51,9 +51,7 @@ pub enum CloudHomeJoinInfo {
         drive_id: String,
         folder_id: String,
     },
-    CloudKit {
-        share_url: String,
-    },
+    CloudKit,
 }
 
 impl CloudHomeJoinInfo {
@@ -64,7 +62,7 @@ impl CloudHomeJoinInfo {
             CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
             CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
             CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
-            CloudHomeJoinInfo::CloudKit { .. } => CloudProvider::CloudKit,
+            CloudHomeJoinInfo::CloudKit => CloudProvider::CloudKit,
         }
     }
 }

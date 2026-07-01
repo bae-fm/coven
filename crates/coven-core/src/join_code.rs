@@ -220,20 +220,13 @@ mod tests {
         let code = InviteCode {
             library_id: "lib-ck".into(),
             library_name: "CloudKit Library".into(),
-            join_info: CloudHomeJoinInfo::CloudKit {
-                share_url: "https://www.icloud.com/share/abc123".into(),
-            },
+            join_info: CloudHomeJoinInfo::CloudKit,
             owner_pubkey: "aabbccdd".into(),
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.library_id, "lib-ck");
-        match decoded.join_info {
-            CloudHomeJoinInfo::CloudKit { share_url } => {
-                assert_eq!(share_url, "https://www.icloud.com/share/abc123")
-            }
-            _ => panic!("expected CloudKit variant"),
-        }
+        assert!(matches!(decoded.join_info, CloudHomeJoinInfo::CloudKit));
     }
 
     #[test]

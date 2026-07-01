@@ -147,7 +147,7 @@ async fn build_cloud_home_for_join(
         | CloudHomeJoinInfo::OneDrive { .. } => Err(JoinError::Database(
             "OAuth cloud providers are not supported in this build".to_string(),
         )),
-        CloudHomeJoinInfo::CloudKit { .. } => {
+        CloudHomeJoinInfo::CloudKit => {
             let ops = cloudkit_ops
                 .ok_or_else(|| JoinError::Database("CloudKit driver not provided".to_string()))?;
             Ok(Box::new(cloudkit::CloudKitCloudHome::new(ops)))
@@ -567,7 +567,7 @@ pub(crate) fn build_config(
         CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
         CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
         CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
-        CloudHomeJoinInfo::CloudKit { .. } => CloudProvider::CloudKit,
+        CloudHomeJoinInfo::CloudKit => CloudProvider::CloudKit,
     });
 
     match join_info {
@@ -596,7 +596,7 @@ pub(crate) fn build_config(
             config.cloud_home.onedrive_drive_id = Some(drive_id.clone());
             config.cloud_home.onedrive_folder_id = Some(folder_id.clone());
         }
-        CloudHomeJoinInfo::CloudKit { .. } => {
+        CloudHomeJoinInfo::CloudKit => {
             config.cloud_home.cloudkit_is_shared = true;
         }
     }
@@ -643,9 +643,7 @@ mod tests {
                 drive_id: "d".to_string(),
                 folder_id: "f".to_string(),
             },
-            CloudHomeJoinInfo::CloudKit {
-                share_url: String::new(),
-            },
+            CloudHomeJoinInfo::CloudKit,
         ] {
             assert!(
                 derive_credentials(&oauth).is_none(),

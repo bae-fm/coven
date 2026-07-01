@@ -116,9 +116,7 @@ async fn build_cloud_home(
 
         RestoreSource::CloudKit { ops } => {
             let home = cloudkit::CloudKitCloudHome::new(ops);
-            let info = CloudHomeJoinInfo::CloudKit {
-                share_url: String::new(),
-            };
+            let info = CloudHomeJoinInfo::CloudKit;
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
 
@@ -470,7 +468,7 @@ async fn bootstrap_and_save(
 
     // Restore is done by the owner — CloudKit uses the private database.
     // build_config sets cloudkit_is_shared = true (for joiners); override for restore.
-    if matches!(join_info, CloudHomeJoinInfo::CloudKit { .. }) {
+    if matches!(join_info, CloudHomeJoinInfo::CloudKit) {
         config.cloud_home.cloudkit_is_shared = false;
     }
 
