@@ -55,7 +55,11 @@ impl GoogleDriveCloudHome {
             client_secret: creds.client_secret,
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
             token_url: "https://oauth2.googleapis.com/token".to_string(),
-            scopes: vec!["https://www.googleapis.com/auth/drive.file".to_string()],
+            scopes: vec![
+                "https://www.googleapis.com/auth/drive.file".to_string(),
+                // Lets the joiner fetch its account email for OAuth folder sharing.
+                "https://www.googleapis.com/auth/userinfo.email".to_string(),
+            ],
             redirect_port: 19284,
             extra_auth_params: vec![("access_type".to_string(), "offline".to_string())],
         }

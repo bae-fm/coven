@@ -58,7 +58,12 @@ impl OneDriveCloudHome {
             auth_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
                 .to_string(),
             token_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/token".to_string(),
-            scopes: vec!["Files.ReadWrite".to_string(), "offline_access".to_string()],
+            scopes: vec![
+                "Files.ReadWrite".to_string(),
+                "offline_access".to_string(),
+                // Lets the joiner fetch its account email for OAuth folder sharing.
+                "User.Read".to_string(),
+            ],
             redirect_port: 19284,
             extra_auth_params: vec![],
         }

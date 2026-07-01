@@ -49,6 +49,12 @@ impl DropboxCloudHome {
             client_secret: creds.client_secret,
             auth_url: "https://www.dropbox.com/oauth2/authorize".to_string(),
             token_url: "https://api.dropboxapi.com/oauth2/token".to_string(),
+            // Empty on purpose: passing a `scope` param requests ONLY the listed
+            // scopes, which would narrow away the file scopes the app relies on.
+            // With no `scope` param Dropbox grants the app's console-configured
+            // default scope set. Fetching the account email (commit 2) needs the
+            // `account_info.read` scope; that dependency lives in the Dropbox app
+            // registration's default scope set, not here.
             scopes: vec![],
             redirect_port: 19284,
             extra_auth_params: vec![("token_access_type".to_string(), "offline".to_string())],
