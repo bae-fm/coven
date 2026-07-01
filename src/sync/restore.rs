@@ -66,25 +66,10 @@ pub enum RestoreError {
     Key(#[from] KeyError),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+    #[error("join: {0}")]
+    Join(#[from] JoinError),
     #[error("database: {0}")]
     Database(String),
-}
-
-impl From<JoinError> for RestoreError {
-    fn from(e: JoinError) -> Self {
-        match e {
-            JoinError::Encryption(e) => RestoreError::Encryption(e),
-            JoinError::Snapshot(e) => RestoreError::Snapshot(e),
-            JoinError::Pull(e) => RestoreError::Pull(e),
-            JoinError::Config(e) => RestoreError::Config(e),
-            JoinError::Key(e) => RestoreError::Key(e),
-            JoinError::Io(e) => RestoreError::Io(e),
-            JoinError::Database(s) => RestoreError::Database(s),
-            // CloudHome and Invite errors don't occur in restore path,
-            // but we need to handle them for exhaustiveness.
-            other => RestoreError::Database(other.to_string()),
-        }
-    }
 }
 
 /// Build a `(JoinInfo, Box<dyn CloudHome>)` from a `RestoreSource`.
