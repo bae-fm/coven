@@ -376,14 +376,12 @@ impl BlobRangeReader {
             }
         };
 
-        use crate::encryption::{
-            encrypted_blob_len_for_plaintext, encrypted_chunk_range, CHUNK_SIZE,
-        };
+        use crate::encryption::{chunked_encrypted_len, encrypted_chunk_range, CHUNK_SIZE};
 
         let nonce = self.nonce().await?;
 
         let (chunk_start, mut chunk_end) = encrypted_chunk_range(offset, end);
-        chunk_end = chunk_end.min(encrypted_blob_len_for_plaintext(self.source_size));
+        chunk_end = chunk_end.min(chunked_encrypted_len(self.source_size));
         let encrypted_chunks = self
             .home
             .read_range(&self.key, chunk_start, chunk_end)
