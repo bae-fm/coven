@@ -24,9 +24,6 @@ pub trait CloudKitOps: Send + Sync {
     fn list_records(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError>;
     fn delete_record(&self, key: &str) -> Result<(), CloudHomeError>;
     fn record_exists(&self, key: &str) -> Result<bool, CloudHomeError>;
-    fn grant_access(&self, email: &str) -> Result<String, CloudHomeError>;
-    fn revoke_access(&self, user_record_id: &str) -> Result<(), CloudHomeError>;
-    fn accept_share(&self, share_url: &str) -> Result<(), CloudHomeError>;
 }
 
 /// CloudKit-backed cloud home with automatic chunking for large files.
@@ -285,20 +282,16 @@ impl CloudHome for CloudKitCloudHome {
         .await
     }
 
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        let ops = self.ops.clone();
-        let member_id = member_id.to_string();
-        blocking(move || {
-            let share_url = ops.grant_access(&member_id)?;
-            Ok(CloudHomeJoinInfo::CloudKit { share_url })
-        })
-        .await
+    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        Err(CloudHomeError::Storage(
+            "a CloudKit library is single-account and cannot be shared with another device".into(),
+        ))
     }
 
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
-        let ops = self.ops.clone();
-        let member_id = member_id.to_string();
-        blocking(move || ops.revoke_access(&member_id)).await
+    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+        Err(CloudHomeError::Storage(
+            "a CloudKit library is single-account; there are no members to revoke".into(),
+        ))
     }
 }
 
@@ -354,18 +347,6 @@ mod tests {
 
         fn record_exists(&self, key: &str) -> Result<bool, CloudHomeError> {
             Ok(self.store.lock().unwrap().contains_key(key))
-        }
-
-        fn grant_access(&self, email: &str) -> Result<String, CloudHomeError> {
-            Ok(format!("https://www.icloud.com/share/{email}"))
-        }
-
-        fn revoke_access(&self, _user_record_id: &str) -> Result<(), CloudHomeError> {
-            Ok(())
-        }
-
-        fn accept_share(&self, _share_url: &str) -> Result<(), CloudHomeError> {
-            Ok(())
         }
     }
 
@@ -619,6 +600,16 @@ mod tests {
         // end == 0 returns empty (the underflow case)
         let slice = ch.read_range("range.bin", 0, 0).await.unwrap();
         assert!(slice.is_empty());
+    }
+
+    #[tokio::test]
+    async fn grant_access_is_rejected_single_account() {
+        // A CloudKit library lives on one iCloud account and has no cross-account
+        // share, so granting access to another member must fail loudly rather than
+        // pretend a share was created.
+        let ch = make_cloud_home();
+        let err = ch.grant_access("member-pubkey").await.unwrap_err();
+        assert!(matches!(err, CloudHomeError::Storage(_)));
     }
 
     #[test]
