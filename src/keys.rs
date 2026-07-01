@@ -144,19 +144,20 @@ pub fn seal_box_encrypt(
         .expect("sealed box encryption should not fail")
 }
 
-/// Decrypt a sealed box using the recipient's X25519 keypair.
+/// Decrypt a sealed box using the recipient's X25519 secret key.
+/// `crypto_box::SecretKey::unseal` derives the recipient public key internally.
 pub fn seal_box_decrypt(
     ciphertext: &[u8],
-    _recipient_x25519_pk: &[u8; CURVE25519_PUBLICKEYBYTES],
     recipient_x25519_sk: &[u8; CURVE25519_SECRETKEYBYTES],
 ) -> Result<Vec<u8>, KeyError> {
     if ciphertext.len() < SEALBYTES {
         return Err(KeyError::Crypto("Ciphertext too short".to_string()));
     }
-    let sk = crypto_box::SecretKey::from(*recipient_x25519_sk);
-    sk.unseal(ciphertext).map_err(|_| {
-        KeyError::Crypto("Sealed box decryption failed (wrong key or tampered)".to_string())
-    })
+    crypto_box::SecretKey::from(*recipient_x25519_sk)
+        .unseal(ciphertext)
+        .map_err(|_| {
+            KeyError::Crypto("Sealed box decryption failed (wrong key or tampered)".to_string())
+        })
 }
 
 /// Convert an Ed25519 public key to an X25519 public key.
@@ -559,7 +560,7 @@ mod tests {
 
         assert_eq!(ciphertext.len(), plaintext.len() + SEALBYTES);
 
-        let decrypted = seal_box_decrypt(&ciphertext, &x_pk, &x_sk).unwrap();
+        let decrypted = seal_box_decrypt(&ciphertext, &x_sk).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
@@ -570,11 +571,7 @@ mod tests {
 
         let ciphertext = seal_box_encrypt(b"secret", &kp1.to_x25519_public_key());
 
-        let result = seal_box_decrypt(
-            &ciphertext,
-            &kp2.to_x25519_public_key(),
-            &kp2.to_x25519_secret_key(),
-        );
+        let result = seal_box_decrypt(&ciphertext, &kp2.to_x25519_secret_key());
         assert!(result.is_err());
     }
 
@@ -585,7 +582,7 @@ mod tests {
         let x_sk = kp.to_x25519_secret_key();
 
         let ciphertext = seal_box_encrypt(b"", &x_pk);
-        let decrypted = seal_box_decrypt(&ciphertext, &x_pk, &x_sk).unwrap();
+        let decrypted = seal_box_decrypt(&ciphertext, &x_sk).unwrap();
         assert!(decrypted.is_empty());
     }
 
@@ -594,7 +591,6 @@ mod tests {
         let kp = UserKeypair::generate();
         let result = seal_box_decrypt(
             &[0u8; 10], // shorter than SEALBYTES
-            &kp.to_x25519_public_key(),
             &kp.to_x25519_secret_key(),
         );
         assert!(result.is_err());

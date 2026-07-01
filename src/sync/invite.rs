@@ -238,11 +238,9 @@ pub async fn unwrap_library_key(
         .verify_and_unwrap(library_id, &pubkey_hex, expected_owner)
         .map_err(|e| InviteError::Crypto(format!("wrapped library key: {e}")))?;
 
-    // Decrypt with our X25519 keys.
-    let x25519_pk = keypair.to_x25519_public_key();
+    // Decrypt with our X25519 secret key.
     let x25519_sk = keypair.to_x25519_secret_key();
-
-    let plaintext = keys::seal_box_decrypt(&sealed, &x25519_pk, &x25519_sk)?;
+    let plaintext = keys::seal_box_decrypt(&sealed, &x25519_sk)?;
 
     let encryption_key: [u8; 32] = plaintext
         .try_into()
