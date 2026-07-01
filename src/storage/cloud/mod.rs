@@ -40,7 +40,7 @@ mod s3_common;
 // reqwest's `fetch` transport, since the native `aws-sdk-s3` is tokio/C-bound and
 // won't build for wasm. Shipped only on wasm; also compiled in native test builds
 // so its pure URL/XML helpers and signing run under `cargo test`.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(all(target_arch = "wasm32", feature = "experimental-wasm"), test))]
 pub mod s3_wasm;
 pub mod setup;
 

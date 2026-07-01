@@ -2,8 +2,8 @@
 
 A minimal web page that opens a coven library in the browser and syncs a shared
 notes list between two tabs through an S3 bucket. It demonstrates the
-`CovenLibrary` wasm facade end to end: OPFS-backed database, the fetch-based S3
-cloud home, and the event-loop sync runtime.
+experimental `CovenLibrary` wasm facade end to end: OPFS-backed database, the
+fetch-based S3 cloud home, and the event-loop sync runtime.
 
 The page collects an S3 config, opens the library, and shows a notes list with an
 "add note" box and a sync indicator. Open it in two tabs against the same bucket
@@ -18,7 +18,7 @@ LLVM=/opt/homebrew/opt/llvm/bin
 RUSTC_WRAPPER= \
   CC_wasm32_unknown_unknown="$LLVM/clang" \
   AR_wasm32_unknown_unknown="$LLVM/llvm-ar" \
-  wasm-pack build --target web
+  wasm-pack build --target web --features experimental-wasm
 ```
 
 (The `CC`/`AR` overrides point the C build at Homebrew LLVM, which wasm32 needs;
@@ -91,5 +91,4 @@ runtime; nothing here stores or ships them.
 This harness exercises the full live path: real S3 over `fetch`, the OPFS
 database, and the sync runtime driving cycles on the event loop. It uses one
 unconditionally-synced `notes` table — coven's demo schema. It does **not** cover
-blobs, the encrypted-home key exchange between members, or snapshot bootstrap;
-those are noted as remaining work in the facade.
+blobs, the encrypted-home key exchange between members, or snapshot bootstrap.

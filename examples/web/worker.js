@@ -14,7 +14,7 @@
 //                   { type: "syncing", value }      (sync loop running?)
 //                   { type: "error",  message }
 //
-// The pkg/ directory is the `wasm-pack build --target web` output (see README).
+// The pkg/ directory is the feature-gated wasm-pack output (see README).
 
 import init, { CovenLibrary } from "../../pkg/coven.js";
 

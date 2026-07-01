@@ -101,21 +101,21 @@ pub(crate) mod storage;
 pub(crate) mod sync;
 // Browser-only storage setup: installing the OPFS-backed SQLite VFS that makes
 // the wasm `Database` durable across page loads. Documented at the module.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "experimental-wasm"))]
 pub mod wasm;
 
 // Browser-only key persistence: the device's Ed25519 identity, sealed with a
 // non-extractable WebCrypto key in IndexedDB. The async counterpart of the native
 // `KeyService` (whose synchronous `keyring_core::Store` can't wrap async browser
 // crypto/storage). Documented at the module.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "experimental-wasm"))]
 pub mod wasm_keystore;
 
 // Browser-only: the JS-callable facade (`CovenLibrary`) that assembles coven's
 // whole browser stack — OPFS storage, the `Database`, the cipher + blob-path
 // choices, the fetch-based S3 cloud home, and the event-loop sync runtime — behind
 // one `wasm_bindgen` object a web page drives. Documented at the module.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "experimental-wasm"))]
 pub mod wasm_facade;
 
 // Headless proof that the facade assembles a working library: two `CovenLibrary`
@@ -123,20 +123,20 @@ pub mod wasm_facade;
 // (`exec` / `query` / `start_sync` / `sync_now`), no live S3 needed. Inside the
 // crate because it reaches the crate-internal `from_home` seam and the
 // `#[cfg(test)]` in-memory cloud; see the module.
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_arch = "wasm32", feature = "experimental-wasm"))]
 mod wasm_facade_test;
 
 // Headless proof that the wasm `Database` persists on OPFS through coven's own
 // API. Inside the crate (not `tests/`) because it drives the crate-private
 // `take_changeset` capture path. Worker-only — see the module.
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_arch = "wasm32", feature = "experimental-wasm"))]
 mod wasm_opfs_test;
 
 // Headless proof that the sync engine runs on wasm: a row crosses from one
 // `Database` to another through capture → push → pull → apply over a shared
 // in-memory cloud. Inside the crate because it reaches crate-internal sync test
 // helpers; see the module.
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_arch = "wasm32", feature = "experimental-wasm"))]
 mod wasm_sync_test;
 
 // Headless proof that the wasm sync RUNTIME (not a manual cycle call) drives two
@@ -144,21 +144,21 @@ mod wasm_sync_test;
 // `WasmSyncRuntime` ticks on `spawn_local` + gloo-timers, and a row written on
 // one converges to the other. Inside the crate because it reaches crate-internal
 // sync test helpers; see the module.
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_arch = "wasm32", feature = "experimental-wasm"))]
 mod wasm_runtime_test;
 
 // Headless proof that device-local blob storage works on OPFS: `local_blob`
 // round-trips directly, and a photo blob crosses two devices through the real
 // cycle (push reads it from OPFS, pull writes it to OPFS). Inside the crate
 // because it reaches crate-internal sync test helpers; see the module.
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_arch = "wasm32", feature = "experimental-wasm"))]
 mod wasm_blob_opfs_test;
 
 // Headless proof that the browser keystore persists the device identity: a keypair
 // minted on first `open` comes back byte-for-byte on a later `open`, and survives
 // the in-memory handle being dropped (so it really round-tripped through IndexedDB
 // + WebCrypto, not a cache). See the module.
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_arch = "wasm32", feature = "experimental-wasm"))]
 mod wasm_keystore_test;
 
 // coven's public API is exactly this set of crate-root re-exports. Every

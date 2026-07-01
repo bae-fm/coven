@@ -1,10 +1,9 @@
 name: wasm
 
-# The browser build (wasm32-unknown-unknown). coven's blob cache and OPFS layer
-# only ever compile here, not under the native CI job, so without this gate a
-# native-only fs call can slip into otherwise-portable code and rot unnoticed —
-# which is exactly how `blob/cache.rs` ended up calling `tokio::fs` directly with
-# no wasm path. This job is that missing gate.
+# The experimental browser build (wasm32-unknown-unknown). coven's blob cache and
+# OPFS layer only ever compile here, not under the native CI job, so without this
+# gate a native-only fs call can slip into otherwise-portable code and rot
+# unnoticed.
 
 on:
   push:
@@ -31,4 +30,4 @@ jobs:
         env:
           CC_wasm32_unknown_unknown: clang
           AR_wasm32_unknown_unknown: llvm-ar
-        run: cargo check --target wasm32-unknown-unknown
+        run: scripts/check-wasm.sh

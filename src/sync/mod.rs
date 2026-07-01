@@ -72,5 +72,5 @@ mod tests;
 // (`spawn_local` + gloo-timers), the wasm counterpart of the native thread-based
 // `sync_loop`. It holds the `!Send` wasm `Database` directly, so it builds only on
 // wasm.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "experimental-wasm"))]
 pub mod wasm_runtime;

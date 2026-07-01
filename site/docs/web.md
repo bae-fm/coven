@@ -1,10 +1,11 @@
 # coven on the web
 
-coven compiles to `wasm32-unknown-unknown` and runs in a browser. It is the same
-engine, capture a change with SQLite's session extension, sign and encrypt it,
-push it to storage you own, pull and apply remote changes, with each platform
-seam swapped for a browser API. A note written in one tab converges to another
-tab, or to a native device, through the same cloud bucket.
+coven's browser surface is experimental and must be enabled with the
+`experimental-wasm` Cargo feature. It compiles to `wasm32-unknown-unknown` and
+runs in a browser: capture a change with SQLite's session extension, sign and
+encrypt it, push it to storage you own, pull and apply remote changes, with each
+platform seam swapped for a browser API. A note written in one tab converges to
+another tab, or to a native device, through the same cloud bucket.
 
 Everything runs on a **dedicated Web Worker**: the browser's synchronous file
 handles (which back the SQLite database) exist only off the main thread, and the
@@ -173,7 +174,7 @@ LLVM=/opt/homebrew/opt/llvm/bin
 RUSTC_WRAPPER= \
   CC_wasm32_unknown_unknown="$LLVM/clang" \
   AR_wasm32_unknown_unknown="$LLVM/llvm-ar" \
-  wasm-pack build --target web
+  wasm-pack build --target web --features experimental-wasm
 ```
 
 This writes the JS glue and the `.wasm` binary to `pkg/` at the crate root. The
@@ -191,8 +192,8 @@ browsable bucket for inspecting what coven writes).
 
 ## Status
 
-coven on the web is pre-1.0, like the rest of coven. The browser build runs the
-full sync engine, capture, push, pull, apply, snapshots, membership, over
-OPFS-backed SQLite and an S3 bucket, with the device identity persisted in the
-keystore. S3 is the only browser cloud backend; Google Drive, Dropbox, OneDrive,
-and the OAuth redirect flow are native-only.
+coven on the web is experimental and pre-1.0, like the rest of coven. The browser
+build runs the sync engine, capture, push, pull, apply, snapshots, membership,
+over OPFS-backed SQLite and an S3 bucket, with the device identity persisted in
+the keystore. S3 is the only browser cloud backend; Google Drive, Dropbox,
+OneDrive, and the OAuth redirect flow are native-only.

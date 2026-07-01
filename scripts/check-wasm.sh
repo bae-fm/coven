@@ -18,4 +18,4 @@ if [ "$(uname -s)" = "Darwin" ]; then
     export CC_wasm32_unknown_unknown AR_wasm32_unknown_unknown
 fi
 
-exec cargo check --target wasm32-unknown-unknown "$@"
+exec cargo check --target wasm32-unknown-unknown --features experimental-wasm "$@"
