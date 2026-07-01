@@ -112,16 +112,12 @@ impl EncryptionService {
     /// Create a new encryption service from a hex-encoded key string
     pub fn new(key_hex: &str) -> Result<Self, EncryptionError> {
         info!("Loading master key...");
-        let key_bytes = hex::decode(key_hex)
-            .map_err(|e| EncryptionError::KeyManagement(format!("Invalid key format: {}", e)))?;
-        if key_bytes.len() != 32 {
-            return Err(EncryptionError::KeyManagement(
-                "Invalid key length, expected 32 bytes".to_string(),
-            ));
-        }
-        let key: [u8; 32] = key_bytes.try_into().map_err(|_| {
-            EncryptionError::KeyManagement("Failed to convert key bytes to array".to_string())
-        })?;
+        let key: [u8; 32] = hex::decode(key_hex)
+            .map_err(|e| EncryptionError::KeyManagement(format!("Invalid key format: {e}")))?
+            .try_into()
+            .map_err(|_| {
+                EncryptionError::KeyManagement("Invalid key length, expected 32 bytes".to_string())
+            })?;
         Ok(EncryptionService { key })
     }
 
