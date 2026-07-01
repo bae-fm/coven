@@ -596,9 +596,7 @@ pub(crate) fn build_config(
             config.cloud_home.onedrive_drive_id = Some(drive_id.clone());
             config.cloud_home.onedrive_folder_id = Some(folder_id.clone());
         }
-        CloudHomeJoinInfo::CloudKit => {
-            config.cloud_home.cloudkit_is_shared = true;
-        }
+        CloudHomeJoinInfo::CloudKit => {}
     }
 
     config

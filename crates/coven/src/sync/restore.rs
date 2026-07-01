@@ -2,8 +2,7 @@
 //!
 //! Unlike join (which unwraps the encryption key from an invite), restore takes
 //! the encryption key directly from the user — present for an opaque home,
-//! absent for a browsable one. Unlike join, restore sets
-//! `cloudkit_is_shared = false` because the restorer is the owner.
+//! absent for a browsable one.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -457,7 +456,7 @@ async fn bootstrap_and_save(
 
     // Create and save config. The cipher records the home's storage mode:
     // opaque (key stored + fingerprint) or browsable (no key).
-    let mut config = build_config(
+    let config = build_config(
         library_id,
         device_id,
         library_dir,
@@ -465,12 +464,6 @@ async fn bootstrap_and_save(
         join_info,
         cipher,
     );
-
-    // Restore is done by the owner — CloudKit uses the private database.
-    // build_config sets cloudkit_is_shared = true (for joiners); override for restore.
-    if matches!(join_info, CloudHomeJoinInfo::CloudKit) {
-        config.cloud_home.cloudkit_is_shared = false;
-    }
 
     config.save_to_config_yaml()?;
 
