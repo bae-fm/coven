@@ -162,22 +162,11 @@ pub fn sign_membership_entry(entry: &mut MembershipEntry, keypair: &UserKeypair)
 
 /// Verify the signature on a membership entry.
 pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
-    let Ok(pk_bytes) = hex::decode(&entry.author_pubkey) else {
-        return false;
-    };
-    let Ok(sig_bytes) = hex::decode(&entry.signature) else {
-        return false;
-    };
-
-    let Ok(pk): Result<[u8; keys::SIGN_PUBLICKEYBYTES], _> = pk_bytes.try_into() else {
-        return false;
-    };
-    let Ok(sig): Result<[u8; keys::SIGN_BYTES], _> = sig_bytes.try_into() else {
-        return false;
-    };
-
-    let bytes = canonical_bytes(entry);
-    keys::verify_signature(&sig, &bytes, &pk)
+    keys::verify_signature_hex(
+        &entry.author_pubkey,
+        &entry.signature,
+        &canonical_bytes(entry),
+    )
 }
 
 /// An append-only membership chain.
