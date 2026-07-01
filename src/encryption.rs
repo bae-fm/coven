@@ -1,7 +1,6 @@
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -413,16 +412,12 @@ impl EncryptionService {
     /// The derivation is deterministic: same master key + same info string always
     /// produces the same derived key.
     ///
-    /// - Salt: `HMAC-SHA256(master_key, "coven-hkdf-salt-v1")`
+    /// - Salt: the constant `"coven-hkdf-salt-v1"` (RFC 5869 permits a fixed,
+    ///   non-secret salt)
     /// - IKM: master key
     /// - Info: caller-provided label
     pub fn derive_key(&self, info: &str) -> [u8; 32] {
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.key).expect("HMAC accepts any key length");
-        mac.update(b"coven-hkdf-salt-v1");
-        let salt = mac.finalize().into_bytes();
-
-        let hk = Hkdf::<Sha256>::new(Some(&salt), &self.key);
+        let hk = Hkdf::<Sha256>::new(Some(b"coven-hkdf-salt-v1"), &self.key);
         let mut okm = [0u8; 32];
         hk.expand(info.as_bytes(), &mut okm)
             .expect("32 bytes is a valid HKDF output length");
