@@ -110,18 +110,26 @@ pub enum MembershipError {
     EmptyChain,
 }
 
-/// Deterministic serialization of the signed fields (everything except signature).
+/// Canonical bytes of the signed fields (everything except `signature`).
+/// Field order is fixed here so the bytes are deterministic without depending
+/// on any serde feature flag.
 pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
-    // Use serde_json::json! with explicit field ordering for determinism.
-    // JSON object keys from json! macro are sorted alphabetically by serde_json.
-    let canonical = serde_json::json!({
-        "action": entry.action,
-        "author_pubkey": entry.author_pubkey,
-        "role": entry.role,
-        "timestamp": entry.timestamp,
-        "user_pubkey": entry.user_pubkey,
-    });
-    serde_json::to_vec(&canonical).expect("canonical serialization cannot fail")
+    #[derive(Serialize)]
+    struct Signed<'a> {
+        action: &'a MembershipAction,
+        author_pubkey: &'a str,
+        role: &'a MemberRole,
+        timestamp: &'a str,
+        user_pubkey: &'a str,
+    }
+    let signed = Signed {
+        action: &entry.action,
+        author_pubkey: &entry.author_pubkey,
+        role: &entry.role,
+        timestamp: &entry.timestamp,
+        user_pubkey: &entry.user_pubkey,
+    };
+    serde_json::to_vec(&signed).expect("entry fields serialize")
 }
 
 /// Build the founder entry of a library's membership chain: a self-signed `Add`
@@ -973,5 +981,22 @@ mod tests {
         let mut entry2 = entry.clone();
         entry2.signature = "something-else".to_string();
         assert_eq!(canonical_bytes(&entry2), b1);
+    }
+
+    /// Pin the exact signed bytes: fields serialize in alphabetical order with
+    /// no whitespace. A change here alters every membership signature, so it must
+    /// be caught, not silently absorbed.
+    #[test]
+    fn canonical_bytes_pins_exact_json() {
+        let entry = MembershipEntry {
+            action: MembershipAction::Add,
+            user_pubkey: "bbbb".to_string(),
+            role: MemberRole::Owner,
+            timestamp: "0000000001000-0000-dev1".to_string(),
+            author_pubkey: "aaaa".to_string(),
+            signature: "does-not-matter".to_string(),
+        };
+        let expected = r#"{"action":"Add","author_pubkey":"aaaa","role":"Owner","timestamp":"0000000001000-0000-dev1","user_pubkey":"bbbb"}"#;
+        assert_eq!(canonical_bytes(&entry), expected.as_bytes());
     }
 }
