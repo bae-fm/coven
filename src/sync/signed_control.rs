@@ -535,21 +535,13 @@ impl WrappedLibraryKey {
         expected_owner: &str,
     ) -> Result<Vec<u8>, WrappedKeyError> {
         let payload = wrapped_key_signing_payload(library_id, recipient_pubkey, &self.sealed);
-        // `verify_signature_hex` returning `bool` is not masking distinct
-        // failures — it is an authenticity predicate answering one question: do
-        // these bytes verify against `expected_owner`? Every way the answer is no
-        // — a wrong signer, a payload tampered after signing, OR malformed
-        // signature/pubkey bytes — is the same outcome to this caller: the key is
-        // not authentically the pinned owner's, so refuse it. Collapsing them into
-        // one `SignatureMismatch` is deliberate; splitting them would invent
-        // diagnostics the caller cannot act on differently (it rejects all alike).
+        // Any way this fails to verify against the pinned owner is one outcome:
+        // not authentically the owner's key, refuse it.
         if !keys::verify_signature_hex(expected_owner, &self.signature, &payload) {
             return Err(WrappedKeyError::SignatureMismatch);
         }
-        // Past the predicate the signature DID verify, so the owner authored these
-        // exact bytes — a sealed field that still won't hex-decode is a genuinely
-        // distinct outcome (a corrupt object, not an authenticity failure) and
-        // earns its own variant.
+        // Verified as the owner's bytes; an un-decodable sealed field is a corrupt
+        // object, a distinct failure.
         hex::decode(&self.sealed).map_err(|_| WrappedKeyError::MalformedSealed)
     }
 }

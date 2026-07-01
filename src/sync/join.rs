@@ -215,15 +215,10 @@ pub async fn join_library(
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
-    // A function that reaches `remove_dir_all` validates its own id: this guards
-    // the destructive `libraries/<id>` create/delete against any direct caller,
-    // independent of the decode-time check that validates untrusted input up front.
+    // Guard the destructive `libraries/<id>` create/delete against any direct
+    // caller, independent of the decode-time check on untrusted input.
     crate::library_dir::validate_path_token(&code.library_id)
         .map_err(|e| JoinError::Database(format!("invalid library id: {e}")))?;
-
-    // `code.library_id` is a safe single path component: `crate::join_code::decode`
-    // rejects any id that isn't, so a decoded `InviteCode` never carries a traversal
-    // id and the directory it names below stays under `libraries/`.
 
     // Load user keypair (must already exist — the inviter wrapped the
     // library key for this public key).
@@ -261,9 +256,7 @@ pub async fn join_library(
         user_keypair.clone(),
     );
 
-    // Create the library directory under `libraries/`, named by the invite's
-    // `library_id`. The decode guaranteed the id is a safe single component, so the
-    // directory is a direct child of `libraries/` and cannot escape it.
+    // Create the library directory under `libraries/`, named by the invite's id.
     let library_id = code.library_id;
     let device_id = ids.new_id();
     let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
@@ -383,15 +376,9 @@ async fn bootstrap_and_save(
 }
 
 /// Open a [`Database`] over the bootstrapped db file and pull changesets since
-/// the snapshot.
-///
-/// The snapshot the bootstrap wrote already carries the full schema (the host's
-/// tables and coven's bookkeeping) plus the writer's `PRAGMA user_version`, so the
-/// migration ladder runs here only to carry the image forward when this binary is
-/// newer than the writer (`user_version` below this binary's top migration); when
-/// they match it is a no-op. Capture stays enabled — a just-bootstrapped library
-/// has no local host writer, so there is no whole-cycle suspend to manage;
-/// `pull_changes` disables capture around only its apply.
+/// the snapshot. The snapshot already carries the full schema and the writer's
+/// `user_version`, so the migration ladder only carries the image forward when
+/// this binary is newer (a no-op when they match).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn open_db_and_pull(
     db_path: &Path,
@@ -424,14 +411,10 @@ pub(crate) async fn open_db_and_pull(
             .map_err(|e| JoinError::Database(format!("Failed to pin library owner: {e}")))?;
     }
 
-    // Download the blob files the snapshot's rows reference. The snapshot carried
-    // the catalog rows but no per-row eager blob files, and the pull below
-    // starts past the snapshot's cursors so it never re-walks the INSERTs that
-    // first carried them — without this a bootstrapped device renders placeholders
-    // for synced cover art. A blob whose object is not yet in the cloud (or whose
-    // download hits a transient error) here is not lost: the not-yet-complete
-    // state is recorded in `sync_state`, and each later sync cycle re-runs the
-    // reconciliation until every referenced blob is local.
+    // Download the blob files the snapshot's rows reference: the snapshot carried
+    // the catalog rows but no blob files, and the pull starts past its cursors so
+    // it never re-walks the INSERTs that first carried them. A blob not yet
+    // available is recorded pending in `sync_state` and retried each later cycle.
     let backfill_ok = crate::sync::snapshot::reconcile_snapshot_blobs(
         &db,
         db_path,

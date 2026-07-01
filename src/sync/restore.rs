@@ -195,16 +195,10 @@ pub async fn restore_from_cloud(
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
-    // A function that reaches `remove_dir_all` validates its own id: this guards
-    // the destructive `libraries/<id>` create/delete against any direct caller,
-    // independent of the decode-time check that validates untrusted input up front.
+    // Guard the destructive `libraries/<id>` create/delete against any direct
+    // caller, independent of the decode-time check on untrusted input.
     crate::library_dir::validate_path_token(library_id)
         .map_err(|e| RestoreError::Database(format!("invalid library id: {e}")))?;
-
-    // `library_id` is a safe single path component: `decode_restore_code` rejects
-    // any `lid` that isn't, so the directory it names below stays under
-    // `libraries/`. (A non-empty id is part of that guarantee — the decoder rejects
-    // the empty string too.)
 
     // The key's presence is the home's storage mode: a key present ⇒ an opaque
     // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
@@ -428,7 +422,7 @@ async fn bootstrap_and_save(
         bootstrap_result.cursors.len()
     );
 
-    // Step 4: Pull changesets since the snapshot.
+    // Pull changesets since the snapshot.
     on_status("Applying recent changes...");
     let cursors = bootstrap_result.cursors;
 
@@ -451,19 +445,19 @@ async fn bootstrap_and_save(
         info!("Applied {changesets_applied} changesets since snapshot");
     }
 
-    // Step 5: Save the encryption key to the keyring — only for a private home.
+    // Save the encryption key to the keyring — only for a private home.
     // A public home has no key to store.
     on_status("Saving configuration...");
     if let Some(key_hex) = encryption_key_hex {
         key_service.set_encryption_key(key_hex)?;
     }
 
-    // Step 6: Save cloud credentials to keyring.
+    // Save cloud credentials to keyring.
     if let Some(credentials) = derive_credentials(join_info) {
         key_service.set_cloud_home_credentials(&credentials)?;
     }
 
-    // Step 7: Create and save config. The cipher records the home's storage mode:
+    // Create and save config. The cipher records the home's storage mode:
     // opaque (key stored + fingerprint) or browsable (no key).
     let mut config = build_config(
         library_id,
