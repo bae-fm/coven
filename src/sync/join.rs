@@ -362,8 +362,9 @@ async fn bootstrap_and_save(
     key_service.set_encryption_key(encryption_key_hex)?;
 
     // Step 8: Save cloud credentials to keyring.
-    let credentials = derive_credentials(join_info);
-    key_service.set_cloud_home_credentials(&credentials)?;
+    if let Some(credentials) = derive_credentials(join_info) {
+        key_service.set_cloud_home_credentials(&credentials)?;
+    }
 
     // Step 9: Create and save config.
     let config = build_config(
@@ -530,28 +531,19 @@ pub(crate) async fn open_db_and_pull(
     Ok(pull_result.changesets_applied)
 }
 
-/// Derive the CloudHomeCredentials to persist from the JoinInfo.
-///
-/// S3 credentials come from the invite code. OAuth providers store the joiner's
-/// token, but that's already saved to the keyring by the caller before
-/// constructing the CloudHome.
-pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> CloudHomeCredentials {
+/// The credentials to persist for this join, or `None` when the provider needs
+/// no stored secret (OAuth tokens are already saved; CloudKit uses the container).
+pub(crate) fn derive_credentials(join_info: &CloudHomeJoinInfo) -> Option<CloudHomeCredentials> {
     match join_info {
         CloudHomeJoinInfo::S3 {
             access_key,
             secret_key,
             ..
-        } => CloudHomeCredentials::S3 {
+        } => Some(CloudHomeCredentials::S3 {
             access_key: access_key.clone(),
             secret_key: secret_key.clone(),
-        },
-        // OAuth providers: the joiner's token was already saved to the keyring
-        // before constructing the CloudHome. No additional save needed here,
-        // but set_cloud_home_credentials expects a value, so pass what we have.
-        CloudHomeJoinInfo::GoogleDrive { .. }
-        | CloudHomeJoinInfo::Dropbox { .. }
-        | CloudHomeJoinInfo::OneDrive { .. }
-        | CloudHomeJoinInfo::CloudKit { .. } => CloudHomeCredentials::None,
+        }),
+        _ => None,
     }
 }
 
@@ -626,4 +618,55 @@ pub(crate) fn build_config(
     }
 
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only S3 maps to a stored value; every other provider returns `None` so
+    /// the join never overwrites an already-saved OAuth token (or a CloudKit
+    /// container) with credentials.
+    #[test]
+    fn derive_credentials_only_stores_for_s3() {
+        let s3 = CloudHomeJoinInfo::S3 {
+            bucket: "b".to_string(),
+            region: "r".to_string(),
+            endpoint: None,
+            key_prefix: None,
+            access_key: "ak".to_string(),
+            secret_key: "sk".to_string(),
+        };
+        match derive_credentials(&s3) {
+            Some(CloudHomeCredentials::S3 {
+                access_key,
+                secret_key,
+            }) => {
+                assert_eq!(access_key, "ak");
+                assert_eq!(secret_key, "sk");
+            }
+            other => panic!("expected Some(S3), got {other:?}"),
+        }
+
+        for oauth in [
+            CloudHomeJoinInfo::GoogleDrive {
+                folder_id: "f".to_string(),
+            },
+            CloudHomeJoinInfo::Dropbox {
+                shared_folder_id: "f".to_string(),
+            },
+            CloudHomeJoinInfo::OneDrive {
+                drive_id: "d".to_string(),
+                folder_id: "f".to_string(),
+            },
+            CloudHomeJoinInfo::CloudKit {
+                share_url: String::new(),
+            },
+        ] {
+            assert!(
+                derive_credentials(&oauth).is_none(),
+                "non-S3 provider must not map to stored credentials"
+            );
+        }
+    }
 }

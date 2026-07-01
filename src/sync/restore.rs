@@ -484,8 +484,9 @@ async fn bootstrap_and_save(
     }
 
     // Step 6: Save cloud credentials to keyring.
-    let credentials = derive_credentials(join_info);
-    key_service.set_cloud_home_credentials(&credentials)?;
+    if let Some(credentials) = derive_credentials(join_info) {
+        key_service.set_cloud_home_credentials(&credentials)?;
+    }
 
     // Step 7: Create and save config. The cipher records the home's storage mode:
     // opaque (key stored + fingerprint) or browsable (no key).
