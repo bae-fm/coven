@@ -14,7 +14,6 @@
 //! suspended across the network steps — only the apply briefly disables it.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use rusqlite::OptionalExtension;
 use tracing::{debug, error, info, warn};
@@ -82,17 +81,12 @@ impl SyncService {
 
             finish_host_provided_make_remote(db, root.clone(), timestamp.to_string()).await?;
 
-            for path in root.user_external_paths {
-                crate::local_blob::remove_file(&path).await.map_err(|e| {
-                    SyncCycleError::AssetUpload(format!(
-                        "make_remote of {}/{} completed but deleting the external source {} failed: {e}",
-                        root.intent.root_table,
-                        root.intent.root_id,
-                        path.display()
-                    ))
-                })?;
-            }
-
+            // A user-provided blob is the user's own file, referenced in place.
+            // make_remote uploads a copy to the cloud and drops the external ref
+            // (`finish_host_provided_make_remote` above), leaving the blob
+            // Remote/CacheLazy — but it NEVER deletes the user's original on disk.
+            // Only host-provided local-store copies, whose bytes coven owns, are
+            // dropped below.
             for uploaded in uploaded {
                 uploaded.drop_local_store(library_dir).await?;
             }
@@ -297,7 +291,6 @@ struct ReadyHostProvidedMakeRemote {
     intent: InlineMakeRemoteIntent,
     gate_column: String,
     user_blob_ids: Vec<String>,
-    user_external_paths: Vec<PathBuf>,
     host_blobs: Vec<BlobRef>,
 }
 
@@ -470,8 +463,6 @@ async fn ready_host_provided_make_remotes(
                 );
                 continue;
             }
-            let user_external_paths =
-                crate::blob::upload::external_source_paths(conn, &user_blob_ids)?;
             let gate_column = gate_columns.get(&root_table).cloned().ok_or_else(|| {
                 crate::database::DbError(format!(
                     "make_remote completion: gated root {root_table} has no gate column"
@@ -485,7 +476,6 @@ async fn ready_host_provided_make_remotes(
                 },
                 gate_column,
                 user_blob_ids,
-                user_external_paths,
                 host_blobs,
             });
         }
