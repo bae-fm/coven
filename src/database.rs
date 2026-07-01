@@ -75,182 +75,51 @@ enum Request {
     ApplyChangeset(Box<dyn FnOnce(&Connection) + Send>),
 }
 
-/// A handle to the owned database. Cloneable; every clone talks to the same
-/// connection thread.
-///
-/// Field drop order is load-bearing: `tx` must drop before `_thread`. The actor
-/// loop exits only once every `Request` sender is gone, and `JoinOnDrop` joins
-/// the thread; if `_thread` dropped first it would block forever waiting on a
-/// loop this handle's `tx` still keeps alive. Rust drops fields top-to-bottom,
-/// so `tx` precedes `_thread` here deliberately.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
-pub struct Database {
-    tx: std::sync::mpsc::Sender<Request>,
+struct DatabaseState {
     hlc: Arc<Hlc>,
-    /// The host's declared synced-table set, owned here so the sync layer reads
-    /// it from one place (the same set the capture session attaches and the
-    /// register-clock seed scanned). See [`Database::synced_tables`].
     synced_tables: Arc<Vec<SyncedTable>>,
-    /// The applied synced-schema version (`PRAGMA user_version`) at open. The
-    /// migration ladder runs only at open, so this is fixed for the handle's life
-    /// and read without re-querying the connection. It is the wire `schema_version`
-    /// every changeset is stamped with. See [`Database::schema_version`].
-    schema_version: u32,
-    _thread: Arc<JoinOnDrop>,
-}
-
-/// A handle to the owned database. Cloneable; every clone shares the one
-/// connection and capture session through the same `Rc`.
-///
-/// The browser is single-threaded (the connection lives on one Worker), so this
-/// holds the connection directly behind `Rc<RefCell<…>>` instead of talking to a
-/// thread. The capture session borrows the connection; the inner `Owned` holds
-/// both so the session's pointer stays valid for the connection's whole life, and
-/// its field order drops the session before the connection.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone)]
-pub struct Database {
-    owned: std::rc::Rc<std::cell::RefCell<Owned>>,
-    hlc: Arc<Hlc>,
-    /// The host's declared synced-table set, owned here so the sync layer reads
-    /// it from one place (the same set the capture session attaches and the
-    /// register-clock seed scanned). See [`Database::synced_tables`].
-    synced_tables: Arc<Vec<SyncedTable>>,
-    /// The applied synced-schema version (`PRAGMA user_version`) at open. See the
-    /// native [`Database`]'s field and [`Database::schema_version`].
     schema_version: u32,
 }
 
-/// The wasm connection and its capture session, kept together.
+/// The SQLite connection plus the capture state that must stay beside it.
 ///
 /// `Session<'conn>` borrows the `Connection`; its `'conn` is a borrow-checker
 /// fiction over a raw `sqlite3_session*` that internally holds the connection's
 /// `sqlite3*`. Keeping both in one struct, with the session declared before the
 /// connection, means the session is dropped first (Rust drops fields
 /// top-to-bottom) and the connection it points at outlives it. The lifetime is
-/// erased to `'static` at construction ([`Owned::new`]); that erasure is sound
-/// precisely because of this co-ownership and drop order.
+/// erased to `'static` at construction ([`DatabaseCore::open`]); that erasure is
+/// sound precisely because of this co-ownership and drop order.
 ///
 /// `session` is `Some` for the connection's whole life, except a transient window
-/// inside [`Database::take_changeset`] where it is dropped and immediately
+/// inside [`DatabaseCore::reset_session`] where it is dropped and immediately
 /// recreated to reset the recorded batch (SQLite cannot clear a session in
 /// place). Capture is never suspended across an `await`: an apply disables
-/// recording on the live session ([`Database::apply_changeset`]) rather than
-/// detaching it. `None` otherwise means a prior attach failed and is reported
-/// loudly, not relied upon.
-#[cfg(target_arch = "wasm32")]
-struct Owned {
+/// recording on the live session rather than detaching it. `None` otherwise means
+/// a prior attach failed and is reported loudly, not relied upon.
+struct DatabaseCore {
     session: Option<rusqlite::session::Session<'static>>,
     conn: Connection,
+    hlc: Arc<Hlc>,
+    synced_tables: Arc<Vec<SyncedTable>>,
+    schema_version: u32,
 }
 
-#[cfg(target_arch = "wasm32")]
-impl Owned {
-    /// Hold `conn` and attach a capture session over `synced_tables`.
-    ///
-    /// The session is created against `&conn` and its lifetime erased to
-    /// `'static`. Sound because `Owned` owns the connection alongside the session
-    /// and drops the session first — the C session object never outlives the
-    /// `sqlite3*` it points at.
-    fn new(conn: Connection, synced_tables: &[SyncedTable]) -> Result<Self, DbError> {
-        let session = Some(attach_erased_session(&conn, synced_tables)?);
-        Ok(Owned { session, conn })
-    }
-}
-
-/// Erase a capture session's connection-borrow lifetime to `'static`.
-///
-/// The lifetime is `PhantomData` over a raw pointer; the cast changes no bytes.
-/// The caller guarantees the borrowed connection outlives the returned session
-/// (here, by co-owning both in [`Owned`] and dropping the session first).
-#[cfg(target_arch = "wasm32")]
-fn erase_session_lifetime(
-    session: rusqlite::session::Session<'_>,
-) -> rusqlite::session::Session<'static> {
-    // Same type but for the lifetime parameter, which is pure `PhantomData`.
-    unsafe {
-        std::mem::transmute::<rusqlite::session::Session<'_>, rusqlite::session::Session<'static>>(
-            session,
-        )
-    }
-}
-
-/// Attach a capture session and erase its connection-borrow lifetime to `'static`
-/// for storage in [`Owned`]. The caller must keep `conn` alive at least as long as
-/// the returned session (see [`erase_session_lifetime`]).
-#[cfg(target_arch = "wasm32")]
-fn attach_erased_session(
-    conn: &Connection,
-    synced_tables: &[SyncedTable],
-) -> Result<rusqlite::session::Session<'static>, DbError> {
-    Ok(erase_session_lifetime(attach_session(conn, synced_tables)?))
-}
-
-/// Joins the actor thread when the last `Database` handle drops, so the
-/// connection is closed cleanly.
+// Native constructs the core before spawning the actor, then moves the whole
+// owned connection/session pair into that thread and never shares it. The erased
+// session lifetime is valid because `DatabaseCore` drops the session before the
+// connection, and no table filter closure is installed.
 #[cfg(not(target_arch = "wasm32"))]
-struct JoinOnDrop {
-    handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
-}
+unsafe impl Send for DatabaseCore {}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for JoinOnDrop {
-    fn drop(&mut self) {
-        if let Some(h) = self.handle.lock().unwrap().take() {
-            // The actor loop exits when every Sender is dropped; the Database's
-            // tx is gone by the time this runs, so the join returns promptly.
-            let _ = h.join();
-        }
-    }
-}
-
-impl Database {
-    /// Open and own the connection at `path`.
-    ///
-    /// Runs coven's bookkeeping migration, then the host's synced-schema migration
-    /// ladder (`migrations`) over `PRAGMA user_version`, seeds the register clock
-    /// off the on-disk rows, and attaches the capture session to `synced_tables`.
-    /// Natively it then spawns the connection thread; on wasm the connection and
-    /// session are held directly on this Worker. Returns the handle plus the
-    /// non-optional `_updated_at` stamper the host binds into every synced-row
-    /// write.
-    ///
-    /// On wasm, `path` is mapped to a flat OPFS filename (see `open_with_hlc`),
-    /// and `coven::wasm::install_browser_storage` must have run once before this
-    /// is called.
-    pub fn open(
-        path: &Path,
-        synced_tables: Vec<SyncedTable>,
-        device_id: String,
-        migrations: &[Migration],
-    ) -> Result<(Database, UpdatedAtStamper), DbError> {
-        Self::open_with_hlc(
-            path,
-            synced_tables,
-            Arc::new(Hlc::new(device_id)),
-            migrations,
-        )
-    }
-
-    /// Open with a caller-supplied register clock instead of a fresh
-    /// system-wall-clock one. Lets a test inject an [`Hlc`] over a controlled
-    /// wall clock to exercise the skew/restart-seeding guarantees, sharing the
-    /// production open path (migration, seed, session, actor) so the test drives
-    /// the real unit.
-    ///
-    /// On wasm, OPFS filenames are flat — the installed opfs-sahpool VFS has no
-    /// directories. So the connection opens against the path's file-name
-    /// component (`name.db` from `/any/dir/name.db`), which is the stable,
-    /// deterministic key a reopen must match. A host that opens two libraries
-    /// must therefore give them distinct file names, not just distinct
-    /// directories.
-    pub(crate) fn open_with_hlc(
+impl DatabaseCore {
+    fn open(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
-    ) -> Result<(Database, UpdatedAtStamper), DbError> {
+    ) -> Result<(Self, DatabaseState, UpdatedAtStamper), DbError> {
         #[cfg(not(target_arch = "wasm32"))]
         let conn = Connection::open(path).map_err(DbError::from)?;
         #[cfg(target_arch = "wasm32")]
@@ -312,22 +181,225 @@ impl Database {
         seed_from(&hlc, on_disk, "`_updated_at` in synced tables")?;
 
         let stamper = UpdatedAtStamper::new(hlc.clone());
-
         let synced_tables = Arc::new(synced_tables);
+        let session = Some(attach_erased_session(&conn, &synced_tables)?);
+        let core = DatabaseCore {
+            session,
+            conn,
+            hlc,
+            synced_tables,
+            schema_version,
+        };
+        let state = core.state();
+
+        Ok((core, state, stamper))
+    }
+
+    fn state(&self) -> DatabaseState {
+        DatabaseState {
+            hlc: self.hlc.clone(),
+            synced_tables: self.synced_tables.clone(),
+            schema_version: self.schema_version,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn with_connection<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<R, DbError>,
+    ) -> Result<R, DbError> {
+        f(&self.conn)
+    }
+
+    fn capture_changeset(&mut self) -> Result<Vec<u8>, DbError> {
+        capture_changeset(self.session.as_mut())
+    }
+
+    fn take_changeset_staged(&mut self, path: &Path) -> Result<Vec<u8>, DbError> {
+        let staged = match self.capture_changeset() {
+            Ok(bytes) if bytes.is_empty() => Ok(bytes),
+            Ok(bytes) => stage_changeset_bytes(path, &bytes).map(|()| bytes),
+            Err(e) => Err(e),
+        };
+        if staged.is_ok() {
+            self.reset_session();
+        }
+        staged
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn apply_changeset<R>(
+        &mut self,
+        f: impl FnOnce(&Connection) -> Result<R, DbError>,
+    ) -> Result<R, DbError> {
+        self.with_capture_disabled(f)
+    }
+
+    fn with_capture_disabled<R>(&mut self, f: impl FnOnce(&Connection) -> R) -> R {
+        let DatabaseCore { session, conn, .. } = self;
+        if let Some(s) = session.as_mut() {
+            s.set_enabled(false);
+        } else {
+            error!("capture session absent at apply; applying with capture off (already not recording)");
+        }
+        let _reenable = CaptureReenable { session };
+        f(conn)
+    }
+
+    fn reset_session(&mut self) {
+        self.session = None;
+        match attach_erased_session(&self.conn, &self.synced_tables) {
+            Ok(s) => self.session = Some(s),
+            Err(e) => error!("failed to recreate capture session after changeset capture: {e}"),
+        }
+    }
+}
+
+struct CaptureReenable<'a> {
+    session: &'a mut Option<rusqlite::session::Session<'static>>,
+}
+
+impl Drop for CaptureReenable<'_> {
+    fn drop(&mut self) {
+        if let Some(s) = self.session.as_mut() {
+            s.set_enabled(true);
+        }
+    }
+}
+
+/// A handle to the owned database. Cloneable; every clone talks to the same
+/// connection thread.
+///
+/// Field drop order is load-bearing: `tx` must drop before `_thread`. The actor
+/// loop exits only once every `Request` sender is gone, and `JoinOnDrop` joins
+/// the thread; if `_thread` dropped first it would block forever waiting on a
+/// loop this handle's `tx` still keeps alive. Rust drops fields top-to-bottom,
+/// so `tx` precedes `_thread` here deliberately.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct Database {
+    tx: std::sync::mpsc::Sender<Request>,
+    state: DatabaseState,
+    _thread: Arc<JoinOnDrop>,
+}
+
+/// A handle to the owned database. Cloneable; every clone shares the one
+/// connection and capture session through the same `Rc`.
+///
+/// The browser is single-threaded (the connection lives on one Worker), so this
+/// holds the core directly behind `Rc<RefCell<…>>` instead of talking to a
+/// thread.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+pub struct Database {
+    core: std::rc::Rc<std::cell::RefCell<DatabaseCore>>,
+    state: DatabaseState,
+}
+
+/// Erase a capture session's connection-borrow lifetime to `'static`.
+///
+/// The lifetime is `PhantomData` over a raw pointer; the cast changes no bytes.
+/// The caller guarantees the borrowed connection outlives the returned session
+/// (here, by co-owning both in [`DatabaseCore`] and dropping the session first).
+fn erase_session_lifetime(
+    session: rusqlite::session::Session<'_>,
+) -> rusqlite::session::Session<'static> {
+    // Same type but for the lifetime parameter, which is pure `PhantomData`.
+    unsafe {
+        std::mem::transmute::<rusqlite::session::Session<'_>, rusqlite::session::Session<'static>>(
+            session,
+        )
+    }
+}
+
+/// Attach a capture session and erase its connection-borrow lifetime to `'static`
+/// for storage in [`DatabaseCore`]. The caller must keep `conn` alive at least as
+/// long as the returned session (see [`erase_session_lifetime`]).
+fn attach_erased_session(
+    conn: &Connection,
+    synced_tables: &[SyncedTable],
+) -> Result<rusqlite::session::Session<'static>, DbError> {
+    Ok(erase_session_lifetime(attach_session(conn, synced_tables)?))
+}
+
+/// Joins the actor thread when the last `Database` handle drops, so the
+/// connection is closed cleanly.
+#[cfg(not(target_arch = "wasm32"))]
+struct JoinOnDrop {
+    handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for JoinOnDrop {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.lock().unwrap().take() {
+            // The actor loop exits when every Sender is dropped; the Database's
+            // tx is gone by the time this runs, so the join returns promptly.
+            let _ = h.join();
+        }
+    }
+}
+
+impl Database {
+    /// Open and own the connection at `path`.
+    ///
+    /// Runs coven's bookkeeping migration, then the host's synced-schema migration
+    /// ladder (`migrations`) over `PRAGMA user_version`, seeds the register clock
+    /// off the on-disk rows, and attaches the capture session to `synced_tables`.
+    /// Natively it then spawns the connection thread; on wasm the connection and
+    /// session are held directly on this Worker. Returns the handle plus the
+    /// non-optional `_updated_at` stamper the host binds into every synced-row
+    /// write.
+    ///
+    /// On wasm, `path` is mapped to a flat OPFS filename (see `open_with_hlc`),
+    /// and `coven::wasm::install_browser_storage` must have run once before this
+    /// is called.
+    pub fn open(
+        path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        device_id: String,
+        migrations: &[Migration],
+    ) -> Result<(Database, UpdatedAtStamper), DbError> {
+        Self::open_with_hlc(
+            path,
+            synced_tables,
+            Arc::new(Hlc::new(device_id)),
+            migrations,
+        )
+    }
+
+    /// Open with a caller-supplied register clock instead of a fresh
+    /// system-wall-clock one. Lets a test inject an [`Hlc`] over a controlled
+    /// wall clock to exercise the skew/restart-seeding guarantees, sharing the
+    /// production open path (migration, seed, session, actor) so the test drives
+    /// the real unit.
+    ///
+    /// On wasm, OPFS filenames are flat — the installed opfs-sahpool VFS has no
+    /// directories. So the connection opens against a hash of the full path,
+    /// which is the stable, deterministic key a reopen must match.
+    pub(crate) fn open_with_hlc(
+        path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        hlc: Arc<Hlc>,
+        migrations: &[Migration],
+    ) -> Result<(Database, UpdatedAtStamper), DbError> {
+        let (core, state, stamper) = DatabaseCore::open(path, synced_tables, hlc, migrations)?;
 
         #[cfg(not(target_arch = "wasm32"))]
         let database = {
             let (tx, rx) = std::sync::mpsc::channel::<Request>();
-            let actor_tables = synced_tables.clone();
             let handle = std::thread::Builder::new()
                 .name("coven-db".to_string())
-                .spawn(move || run_actor(conn, &actor_tables, rx))
+                .spawn(move || run_actor(core, rx))
                 .map_err(|e| DbError(format!("failed to spawn db thread: {e}")))?;
             Database {
                 tx,
-                hlc,
-                synced_tables,
-                schema_version,
+                state,
                 _thread: Arc::new(JoinOnDrop {
                     handle: std::sync::Mutex::new(Some(handle)),
                 }),
@@ -335,14 +407,11 @@ impl Database {
         };
 
         // wasm holds the connection and its capture session directly on this
-        // Worker — no thread, no channel. `Owned::new` attaches the session over
-        // the same `synced_tables` the native actor does.
+        // Worker — no thread, no channel.
         #[cfg(target_arch = "wasm32")]
         let database = Database {
-            owned: std::rc::Rc::new(std::cell::RefCell::new(Owned::new(conn, &synced_tables)?)),
-            hlc,
-            synced_tables,
-            schema_version,
+            core: std::rc::Rc::new(std::cell::RefCell::new(core)),
+            state,
         };
 
         Ok((database, stamper))
@@ -354,7 +423,7 @@ impl Database {
     /// these — so the sync layer reads the set from here instead of carrying a
     /// separately-passed copy that could silently diverge.
     pub fn synced_tables(&self) -> &[SyncedTable] {
-        &self.synced_tables
+        &self.state.synced_tables
     }
 
     /// The applied synced-schema version — `PRAGMA user_version` after the
@@ -365,7 +434,7 @@ impl Database {
     /// migrated to. Cached because migrations run only at open, so the value is
     /// fixed for the handle's life.
     pub fn schema_version(&self) -> u32 {
-        self.schema_version
+        self.state.schema_version
     }
 
     /// The shared register clock. coven's sync layer advances it past pulled rows
@@ -374,12 +443,12 @@ impl Database {
     /// Native-only: the sole consumer is the native-only [`crate::sync::sync_manager::SyncManager`].
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn hlc(&self) -> Arc<Hlc> {
-        self.hlc.clone()
+        self.state.hlc.clone()
     }
 
     #[cfg(test)]
     pub(crate) fn stamper(&self) -> UpdatedAtStamper {
-        UpdatedAtStamper::new(self.hlc.clone())
+        UpdatedAtStamper::new(self.state.hlc.clone())
     }
 
     /// The receiver's current wall-clock millis, read from this database's
@@ -388,7 +457,7 @@ impl Database {
     /// win last-writer-wins or ratchet the clock). Available on both targets — pull
     /// runs on wasm too — unlike [`Self::hlc`], whose only caller is native.
     pub(crate) fn receive_wall_ms(&self) -> u64 {
-        self.hlc.wall_now_ms()
+        self.state.hlc.wall_now_ms()
     }
 
     /// Run `f` against the connection and await the result.
@@ -427,8 +496,8 @@ impl Database {
         F: FnOnce(&Connection) -> Result<R, DbError> + 'static,
         R: 'static,
     {
-        let owned = self.owned.borrow();
-        f(&owned.conn)
+        let core = self.core.borrow();
+        core.with_connection(f)
     }
 
     /// Test-only raw capture path for tests that inspect changeset bytes directly.
@@ -463,9 +532,9 @@ impl Database {
     /// Test-only raw capture path for tests that inspect changeset bytes directly.
     #[cfg(all(test, target_arch = "wasm32"))]
     pub(crate) async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
-        let mut owned = self.owned.borrow_mut();
-        let bytes = capture_changeset(owned.session.as_mut());
-        reset_session(&mut owned, &self.synced_tables);
+        let mut core = self.core.borrow_mut();
+        let bytes = core.capture_changeset();
+        core.reset_session();
         bytes
     }
 
@@ -473,13 +542,8 @@ impl Database {
     /// stage-before-reset ordering inline on the owned connection.
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn take_changeset_staged(&self, path: PathBuf) -> Result<Vec<u8>, DbError> {
-        let mut owned = self.owned.borrow_mut();
-        let bytes = capture_changeset(owned.session.as_mut())?;
-        if !bytes.is_empty() {
-            stage_changeset_bytes(&path, &bytes)?;
-        }
-        reset_session(&mut owned, &self.synced_tables);
-        Ok(bytes)
+        let mut core = self.core.borrow_mut();
+        core.take_changeset_staged(&path)
     }
 
     /// Apply an incoming changeset with capture disabled around just the apply, so
@@ -519,18 +583,8 @@ impl Database {
         F: FnOnce(&Connection) -> Result<R, DbError> + 'static,
         R: 'static,
     {
-        let mut owned = self.owned.borrow_mut();
-        let Owned { session, conn } = &mut *owned;
-        if let Some(s) = session.as_mut() {
-            s.set_enabled(false);
-        } else {
-            error!("capture session absent at apply; applying with capture off (already not recording)");
-        }
-        let result = f(conn);
-        if let Some(s) = session.as_mut() {
-            s.set_enabled(true);
-        }
-        result
+        let mut core = self.core.borrow_mut();
+        core.apply_changeset(f)
     }
 
     // ---- Bookkeeping: sync_state ----
@@ -651,7 +705,7 @@ impl Database {
     pub async fn mint_item_key(&self, item_id: &str) -> Result<[u8; 32], DbError> {
         let item_id = item_id.to_string();
         let new_key = crate::encryption::generate_random_key();
-        let updated_at = self.hlc.now().to_string();
+        let updated_at = self.state.hlc.now().to_string();
         self.call(move |conn| Self::mint_item_key_on(conn, &item_id, new_key, &updated_at))
             .await
     }
@@ -1229,23 +1283,7 @@ fn scan_max_updated_at(
 /// The actor loop: owns the connection and its capture session, processing one
 /// request at a time on this thread.
 #[cfg(not(target_arch = "wasm32"))]
-fn run_actor(
-    conn: Connection,
-    synced_tables: &[SyncedTable],
-    rx: std::sync::mpsc::Receiver<Request>,
-) {
-    // A failure here leaves capture off; the connection still serves reads/writes,
-    // so log it loudly rather than aborting the actor. The next `TakeChangeset`
-    // re-attempts the attach (its reset recreates the session) and surfaces its own
-    // error to the caller.
-    let mut session = match attach_session(&conn, synced_tables) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            error!("capture session not attached at startup: {e}");
-            None
-        }
-    };
-
+fn run_actor(mut core: DatabaseCore, rx: std::sync::mpsc::Receiver<Request>) {
     while let Ok(req) = rx.recv() {
         match req {
             Request::Call(f) => {
@@ -1256,9 +1294,9 @@ fn run_actor(
                 // reply oneshot; a panic drops it un-sent, so the caller already
                 // observes a "dropped the reply" `DbError` — we just don't let the
                 // panic propagate past this thread.
-                if let Err(panic) =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&conn)))
-                {
+                if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(core.connection());
+                })) {
                     error!(
                         panic = %panic_message(&panic),
                         "db closure panicked; the caller's reply was dropped, actor stays alive"
@@ -1267,8 +1305,8 @@ fn run_actor(
             }
             #[cfg(test)]
             Request::TakeChangeset(reply) => {
-                let bytes = capture_changeset(session.as_mut());
-                reset_session(&mut session, &conn, synced_tables);
+                let bytes = core.capture_changeset();
+                core.reset_session();
                 if reply.send(bytes).is_err() {
                     debug!("db actor: changeset-capture caller dropped its reply receiver");
                 }
@@ -1278,14 +1316,7 @@ fn run_actor(
                 // staging fails, the current session remains attached with its
                 // recorded batch still present, so the next cycle can retry the
                 // whole capture rather than publishing from a partial file.
-                let staged = match capture_changeset(session.as_mut()) {
-                    Ok(bytes) if bytes.is_empty() => Ok(bytes),
-                    Ok(bytes) => stage_changeset_bytes(&path, &bytes).map(|()| bytes),
-                    Err(e) => Err(e),
-                };
-                if staged.is_ok() {
-                    reset_session(&mut session, &conn, synced_tables);
-                }
+                let staged = core.take_changeset_staged(&path);
                 if reply.send(staged).is_err() {
                     debug!("db actor: staged changeset-capture caller dropped its reply receiver");
                 }
@@ -1296,15 +1327,9 @@ fn run_actor(
                 // stays attached — host writes before/after (other `Call`s) are
                 // captured. Caught like `Call`: an apply closure panic must not
                 // brick the actor, and must leave capture re-enabled.
-                if let Some(s) = session.as_mut() {
-                    s.set_enabled(false);
-                } else {
-                    error!("capture session absent at apply; applying with capture off (already not recording)");
-                }
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&conn)));
-                if let Some(s) = session.as_mut() {
-                    s.set_enabled(true);
-                }
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    core.with_capture_disabled(f);
+                }));
                 if let Err(panic) = outcome {
                     error!(
                         panic = %panic_message(&panic),
@@ -1434,36 +1459,6 @@ fn staged_temp_path(path: &Path) -> Result<PathBuf, DbError> {
         })?
         .to_string_lossy();
     Ok(path.with_file_name(format!("{file_name}.tmp")))
-}
-
-/// Reset the recorded batch by dropping the session and immediately recreating it,
-/// since SQLite cannot clear a session in place. Leaves a fresh ENABLED session
-/// attached so capture continues uninterrupted — this does NOT suspend. A
-/// recreate failure leaves `session = None`, logged loudly; the next capture then
-/// surfaces an error (host writes went uncaptured) and re-attempts the attach.
-#[cfg(not(target_arch = "wasm32"))]
-fn reset_session<'c>(
-    session: &mut Option<rusqlite::session::Session<'c>>,
-    conn: &'c Connection,
-    synced_tables: &[SyncedTable],
-) {
-    *session = None;
-    match attach_session(conn, synced_tables) {
-        Ok(s) => *session = Some(s),
-        Err(e) => error!("failed to recreate capture session after changeset capture: {e}"),
-    }
-}
-
-/// wasm form of [`reset_session`]: recreates the session against the `Owned`
-/// connection with its lifetime erased to `'static` for storage. Same semantics —
-/// a fresh enabled session, no suspend; a failure leaves `None`, logged loudly.
-#[cfg(target_arch = "wasm32")]
-fn reset_session(owned: &mut Owned, synced_tables: &[SyncedTable]) {
-    owned.session = None;
-    match attach_erased_session(&owned.conn, synced_tables) {
-        Ok(s) => owned.session = Some(s),
-        Err(e) => error!("failed to recreate capture session after changeset capture: {e}"),
-    }
 }
 
 /// Map a library DB `path` to the flat OPFS filename the connection opens
