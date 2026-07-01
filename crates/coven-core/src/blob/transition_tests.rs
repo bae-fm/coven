@@ -174,7 +174,7 @@ async fn seed_release_rows(
         db,
         &format!(
             "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-             VALUES ('{photo_id}', '{note_id}', 'audio', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
+             VALUES ('{photo_id}', '{note_id}', 'image', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
         ),
     )
     .await;
@@ -192,7 +192,7 @@ async fn seed_local_release(
 ) -> PathBuf {
     seed_release_rows(db, note_id, photo_id, cloud_path, 0).await;
     std::fs::create_dir_all(user_dir).unwrap();
-    let src = user_dir.join(format!("{photo_id}.flac"));
+    let src = user_dir.join(format!("{photo_id}.jpg"));
     std::fs::write(&src, bytes).unwrap();
     db.register_external_blob(photo_id, "photos", &src, bytes.len() as u64)
         .await
@@ -215,11 +215,11 @@ async fn add_local_photo(
         db,
         &format!(
             "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-             VALUES ('{photo_id}', '{note_id}', 'audio', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
+             VALUES ('{photo_id}', '{note_id}', 'image', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
         ),
     )
     .await;
-    let src = user_dir.join(format!("{photo_id}.flac"));
+    let src = user_dir.join(format!("{photo_id}.jpg"));
     std::fs::write(&src, bytes).unwrap();
     db.register_external_blob(photo_id, "photos", &src, bytes.len() as u64)
         .await
@@ -285,7 +285,7 @@ async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
 
 /// A imports a Local release and makes it Remote. Device B receives the subtree
 /// ONLY after the blob is up (the gate stays off until the flip), A keeps the blob
-/// pinned and the external source deleted, and B fetches the CacheLazy blob on read.
+/// pinned and the external source left in place, and B fetches the CacheLazy blob on read.
 #[tokio::test]
 async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let storage = MockSyncStorage::new();
@@ -294,14 +294,14 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_blob(photo_decl());
     let (tmp_a, lib_a) = temp_library_dir();
-    let bytes = b"RELEASE-AUDIO-BYTES-one-file".to_vec();
+    let bytes = b"PHOTO-BYTES-one-file".to_vec();
 
     let src = seed_local_release(
         &db_a,
         &tmp_a.path().join("user"),
         "n1",
         "photoaaa",
-        "cv/photoaaa.flac",
+        "cv/photoaaa.jpg",
         &bytes,
     )
     .await;
@@ -335,8 +335,8 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     .await;
 
     // The flip completed this cycle: the gate is on, the intent is gone, the
-    // external ref is dropped, the source file is deleted, the blob is pinned, and
-    // the drain broke to publish.
+    // external ref is dropped, the user's source file is left in place, the blob
+    // is pinned, and the drain broke to publish.
     assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
     assert!(
         !has_intent(&db_a, "notes", "n1").await,
@@ -347,8 +347,8 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         "the external ref is dropped on completion",
     );
     assert!(
-        !src.exists(),
-        "the external source file is deleted post-commit"
+        src.exists(),
+        "the user-provided source file is left in place post-commit"
     );
     let pinned = lib_a.pinned_blob_path("photos", "photoaaa").unwrap();
     assert_eq!(
@@ -376,11 +376,11 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         &db_b,
         &lib_b,
         Some(&storage),
-        &photo_ref("photoaaa", "cv/photoaaa.flac"),
+        &photo_ref("photoaaa", "cv/photoaaa.jpg"),
     )
     .await
     .expect("B fetches the CacheLazy blob");
-    assert_eq!(fetched, bytes, "B reads the original audio from the cloud");
+    assert_eq!(fetched, bytes, "B reads the original photo from the cloud");
 }
 
 /// A makes a Remote release Local. B's subtree is DELETEd (gate retract) and the
@@ -397,17 +397,9 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     let db_b = open_test_db_with_blob(photo_decl());
     let (tmp_a, lib_a) = temp_library_dir();
     let (_tmp_b, lib_b) = temp_library_dir();
-    let bytes = b"MANAGED-AUDIO-going-back-local".to_vec();
+    let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
 
-    seed_remote_release(
-        &storage,
-        &db_a,
-        "n1",
-        "photoaaa",
-        "cv/photoaaa.flac",
-        &bytes,
-    )
-    .await;
+    seed_remote_release(&storage, &db_a, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
     // B is a known peer (it has a head) that has not acked yet, so A's snapshot
     // cycle keeps A's release changeset for B to pull — reclamation is paused until
     // every current device acks. Without a peer head A would be single-device and
@@ -428,7 +420,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 
     // A makes it Local to a chosen folder.
     let dest_dir = tmp_a.path().join("dest");
-    let dest_path = dest_dir.join("photoaaa.flac");
+    let dest_path = dest_dir.join("photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     let recorder = Recorder::default();
@@ -460,7 +452,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     );
     assert_eq!(
         pending_deletes(&db_a).await,
-        vec!["photos/cv/photoaaa.flac".to_string()],
+        vec!["photos/cv/photoaaa.jpg".to_string()],
         "the cloud blob's delete is enqueued in the same commit as the flip",
     );
     assert_eq!(
@@ -478,7 +470,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     assert!(
         storage
-            .exists("blob_tombstones/photos/cv/photoaaa.flac")
+            .exists("blob_tombstones/photos/cv/photoaaa.jpg")
             .await
             .unwrap(),
         "the cloud blob is tombstoned",
@@ -491,12 +483,12 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         "B's subtree is removed by the gate retract",
     );
 
-    // A still reads the audio from its external file (no cloud copy needed).
+    // A still reads the photo from its external file (no cloud copy needed).
     let read = cache::read_blob(
         &db_a,
         &lib_a,
         Some(&storage),
-        &photo_ref("photoaaa", "cv/photoaaa.flac"),
+        &photo_ref("photoaaa", "cv/photoaaa.jpg"),
     )
     .await
     .expect("A reads from its external file");
@@ -507,11 +499,11 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 // Host-provided lifecycle (the cover rides the inline push, not the outbox)
 // ===========================================================================
 
-/// A release with a user-provided audio file AND a host-provided cover, through both
-/// transitions. make_remote: the audio uploads via the outbox and flips the gate;
+/// A release with a user-provided photo file AND a host-provided cover, through both
+/// transitions. make_remote: the photo uploads via the outbox and flips the gate;
 /// the gate flip re-emits the subtree and the cycle's inline push uploads the cover
 /// (host-provided) from the local store and pins that copy. A peer
-/// pulls the cover eagerly (`CacheEager`) into its cache. make_local: the audio goes
+/// pulls the cover eagerly (`CacheEager`) into its cache. make_local: the photo goes
 /// back to its dest (external ref) and the cover back to the local store (NO dest),
 /// both cloud copies tombstoned.
 #[tokio::test]
@@ -522,18 +514,18 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (tmp_a, lib_a) = temp_library_dir();
-    let audio = b"RELEASE-AUDIO".to_vec();
+    let photo = b"PHOTO-BYTES".to_vec();
     let cover = b"RELEASE-COVER".to_vec();
 
-    // Seed a gated-off release: a note + a user-provided audio (external ref) + a
+    // Seed a gated-off release: a note + a user-provided photo (external ref) + a
     // host-provided cover (in the local store).
     let src = seed_local_release(
         &db_a,
         &tmp_a.path().join("user"),
         "n1",
         "photoaaa",
-        "cv/photoaaa.flac",
-        &audio,
+        "cv/photoaaa.jpg",
+        &photo,
     )
     .await;
     exec(
@@ -549,7 +541,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     // A cycle while gated off: nothing reaches a peer.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
 
-    // make_remote: the audio drains, the gate flips, and this cycle's inline push
+    // make_remote: the photo drains, the gate flips, and this cycle's inline push
     // uploads the cover from the local store and keeps the requested pin.
     make_remote(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
         .await
@@ -576,7 +568,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "the cover is no longer in the local store (it is Remote now)",
     );
 
-    // B pulls: the cover (CacheEager) lands in B's cache; the audio (CacheLazy) does not.
+    // B pulls: the cover (CacheEager) lands in B's cache; the photo (CacheLazy) does not.
     let db_b = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp_b, lib_b) = temp_library_dir();
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
@@ -596,7 +588,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
                 .pinned_blob_path("photos", "photoaaa")
                 .unwrap()
                 .exists(),
-        "B does not fetch the CacheLazy audio on pull",
+        "B does not fetch the CacheLazy photo on pull",
     );
     assert_eq!(
         cache::read_blob(
@@ -611,9 +603,9 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "B's cover bytes match",
     );
 
-    // make_local: the audio back to its dest (external ref), the cover back to the
+    // make_local: the photo back to its dest (external ref), the cover back to the
     // local store (no dest), both cloud copies tombstoned.
-    let dest_path = tmp_a.path().join("dest/photoaaa.flac");
+    let dest_path = tmp_a.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     make_local(
@@ -638,13 +630,13 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
     assert_eq!(
         std::fs::read(&dest_path).unwrap(),
-        audio,
-        "the user-provided audio is materialized to its required dest",
+        photo,
+        "the user-provided photo is materialized to its required dest",
     );
     assert_eq!(
         db_a.external_blob("photoaaa").await.unwrap().unwrap().path,
         dest_path,
-        "the audio is registered as an external ref",
+        "the photo is registered as an external ref",
     );
     assert!(
         lib_a
@@ -663,14 +655,15 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         deletes,
         vec![
             "covers/cv/cover.jpg".to_string(),
-            "photos/cv/photoaaa.flac".to_string(),
+            "photos/cv/photoaaa.jpg".to_string(),
         ],
         "both cloud copies are tombstoned in the make_local commit",
     );
-    // The source the user imported from is gone (deleted post make_remote upload).
+    // The source the user provided is untouched: make_remote uploads a copy and
+    // drops the external ref, but never deletes the user's original.
     assert!(
-        !src.exists(),
-        "the original imported audio was deleted on make_remote"
+        src.exists(),
+        "the user-provided source is preserved on make_remote"
     );
 }
 
@@ -791,9 +784,8 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     let user = tmp.path().join("user");
 
     // Two photos under one release.
-    let _src1 =
-        seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.flac", b"first").await;
-    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.flac", b"second").await;
+    let _src1 = seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
+    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
 
     make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
@@ -811,7 +803,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
         "not flipped — photobbb never uploaded"
     );
     assert!(
-        storage.exists("photos/cv/photoaaa.flac").await.unwrap(),
+        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
         "photoaaa is in the cloud"
     );
     assert!(
@@ -832,7 +824,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     assert_eq!(pending_uploads(&db).await, 0, "no uploads remain");
     assert_eq!(
         pending_deletes(&db).await,
-        vec!["photos/cv/photoaaa.flac".to_string()],
+        vec!["photos/cv/photoaaa.jpg".to_string()],
         "the already-uploaded orphan is tombstoned",
     );
     assert!(
@@ -857,7 +849,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
         &tmp.path().join("user"),
         "n1",
         "photoaaa",
-        "cv/photoaaa.flac",
+        "cv/photoaaa.jpg",
         b"orphan-bytes",
     )
     .await;
@@ -865,7 +857,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     // were cancelled, but this blob was already in flight in the drain).
     db.enqueue_upload(
         "photoaaa",
-        "photos/cv/photoaaa.flac",
+        "photos/cv/photoaaa.jpg",
         Some(src.to_str().unwrap()),
         BlobScope::Master,
         true,
@@ -881,7 +873,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     assert_eq!(shared_flag(&db, "n1").await, 0, "no intent ⇒ no flip");
     assert_eq!(
         pending_deletes(&db).await,
-        vec!["photos/cv/photoaaa.flac".to_string()],
+        vec!["photos/cv/photoaaa.jpg".to_string()],
         "the orphan blob is tombstoned",
     );
     assert!(
@@ -900,9 +892,9 @@ async fn cancel_make_local_before_commit_stays_remote() {
     let (tmp, lib) = temp_library_dir();
     let bytes = b"still-managed".to_vec();
 
-    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
 
-    let dest_path = tmp.path().join("dest/photoaaa.flac");
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     // Already cancelled (initial value true) before the first materialize.
     let (_cancel_tx, cancel) = watch::channel(true);
@@ -945,12 +937,12 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let (tmp, lib) = temp_library_dir();
     let bytes = b"managed-bytes".to_vec();
 
-    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
 
     // Block the dest: make the dest's parent dir a FILE, so create_dir_all fails.
     let blocker = tmp.path().join("blocker");
     std::fs::write(&blocker, b"x").unwrap();
-    let dest_path = blocker.join("photoaaa.flac");
+    let dest_path = blocker.join("photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path)].into();
     let (_cancel_tx, cancel) = watch::channel(false);
 
@@ -985,7 +977,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
                 "photos",
                 "photoaaa",
                 ResolvedScope::Master,
-                Some("cv/photoaaa.flac")
+                Some("cv/photoaaa.jpg")
             )
             .await
             .is_ok(),
@@ -1009,12 +1001,12 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     let (tmp, lib) = temp_library_dir();
     let bytes = b"managed-bytes".to_vec();
 
-    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
 
     // A dest whose filename is not valid UTF-8: `to_str()` returns None, so the
     // conversion must fail loud instead of lossily rewriting the path. Kept under the
     // temp dir so the rolled-back partial is contained.
-    let bad = tmp.path().join(OsStr::from_bytes(b"photo-\xff\xfe.flac"));
+    let bad = tmp.path().join(OsStr::from_bytes(b"photo-\xff\xfe.jpg"));
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), bad)].into();
     let (_cancel_tx, cancel) = watch::channel(false);
 
@@ -1049,7 +1041,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
                 "photos",
                 "photoaaa",
                 ResolvedScope::Master,
-                Some("cv/photoaaa.flac")
+                Some("cv/photoaaa.jpg")
             )
             .await
             .is_ok(),
@@ -1073,8 +1065,8 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     let (tmp, lib) = temp_library_dir();
     let user = tmp.path().join("user");
 
-    seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.flac", b"first").await;
-    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.flac", b"second").await;
+    seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
+    let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
 
     make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
         .await
@@ -1126,9 +1118,9 @@ async fn make_local_abort_then_retry_converges() {
     let (tmp, lib) = temp_library_dir();
     let bytes = b"materialize-me".to_vec();
 
-    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.flac", &bytes).await;
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
 
-    let dest_path = tmp.path().join("dest/photoaaa.flac");
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
 
     // First attempt is cancelled before the commit (the "crash"): still Remote.
@@ -1178,7 +1170,7 @@ async fn make_local_abort_then_retry_converges() {
     assert_eq!(std::fs::read(&dest_path).unwrap(), bytes);
     assert_eq!(
         pending_deletes(&db).await,
-        vec!["photos/cv/photoaaa.flac".to_string()],
+        vec!["photos/cv/photoaaa.jpg".to_string()],
     );
 }
 
@@ -1197,7 +1189,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_library_dir();
-    let bytes = b"round-trip-audio".to_vec();
+    let bytes = b"round-trip-photo".to_vec();
 
     // Start Local, make it Remote.
     seed_local_release(
@@ -1205,7 +1197,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         &tmp.path().join("user"),
         "n1",
         "photoaaa",
-        "cv/photoaaa.flac",
+        "cv/photoaaa.jpg",
         &bytes,
     )
     .await;
@@ -1216,7 +1208,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after make_remote");
 
     // Make it Local again.
-    let dest_path = tmp.path().join("dest/photoaaa.flac");
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     make_local(
@@ -1238,7 +1230,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     assert_eq!(shared_flag(&db, "n1").await, 0, "Local after make_local");
     assert!(
         storage
-            .exists("blob_tombstones/photos/cv/photoaaa.flac")
+            .exists("blob_tombstones/photos/cv/photoaaa.jpg")
             .await
             .unwrap(),
         "the make_local tombstoned the cloud blob",
@@ -1261,7 +1253,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     );
     assert!(
         !storage
-            .exists("blob_tombstones/photos/cv/photoaaa.flac")
+            .exists("blob_tombstones/photos/cv/photoaaa.jpg")
             .await
             .unwrap(),
         "the re-upload cancelled the leftover tombstone",
@@ -1272,7 +1264,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
                 "photos",
                 "photoaaa",
                 ResolvedScope::Master,
-                Some("cv/photoaaa.flac")
+                Some("cv/photoaaa.jpg")
             )
             .await
             .is_ok(),

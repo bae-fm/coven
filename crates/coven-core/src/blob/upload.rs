@@ -24,12 +24,12 @@
 //! upload path replays a key already committed to the durable queue.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params_from_iter, Connection};
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
@@ -422,20 +422,11 @@ pub async fn drain_uploads(
                     Ok(PostUpload::MadeRemote {
                         root_table,
                         root_id,
-                        external_paths,
                     }) => {
-                        // Post-commit, best-effort: the bytes are in the cloud (and
-                        // pinned cache) and the gate is flipped, so the user's
-                        // original files are now redundant — delete them. A failure
-                        // leaves a harmless stray file, never wrong durable state.
-                        for path in external_paths {
-                            if let Err(e) = crate::local_blob::remove_file(&path).await {
-                                warn!(
-                                    "make_remote of {root_table}/{root_id} completed but deleting the external source {}: {e}",
-                                    path.display()
-                                );
-                            }
-                        }
+                        // The gate is flipped, the bytes are in the cloud (and pinned
+                        // cache), and the external ref is dropped in the commit above.
+                        // A user-provided blob is the user's own file, referenced in
+                        // place — coven never deletes the user's original on disk.
                         if let Some(obs) = observer {
                             obs.on_root_made_remote(&root_table, &root_id).await;
                         }
@@ -483,13 +474,10 @@ enum PostUpload {
     Orphan,
     /// This upload completed a make_remote: the single atomic commit flipped the gate
     /// true, dropped the root's external refs, removed the final outbox row, and
-    /// deleted the intent. The drain deletes the now-redundant external source files
-    /// and notifies `on_root_made_remote`, then breaks to publish the subtree.
-    MadeRemote {
-        root_table: String,
-        root_id: String,
-        external_paths: Vec<PathBuf>,
-    },
+    /// deleted the intent. The drain notifies `on_root_made_remote`, then breaks to
+    /// publish the subtree. The user's own source files are referenced in place and
+    /// left untouched — only the external ref is dropped, never the file.
+    MadeRemote { root_table: String, root_id: String },
 }
 
 /// Build the gate model, blob declarations, and the root→gate-column map the
@@ -607,7 +595,6 @@ async fn commit_after_upload(
                 "make_remote completion: gated root {root_table} has no gate column"
             ))
         })?;
-        let external_paths = external_source_paths(conn, &blob_ids)?;
         let tx = conn.unchecked_transaction()?;
         finish_outbox_row(&tx, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
         crate::sync::gate::write_gate(&tx, &root_table, gate_col, true, &stamp, &root_id)
@@ -620,7 +607,6 @@ async fn commit_after_upload(
         Ok(PostUpload::MadeRemote {
             root_table,
             root_id,
-            external_paths,
         })
     })
     .await
@@ -688,34 +674,4 @@ fn count_other_pending_uploads(
         .collect::<Vec<_>>();
     stmt.query_row(params_from_iter(params.iter()), |r| r.get::<_, i64>(0))
         .map_err(DbError::from)
-}
-
-/// The external source-file paths registered for the given blob ids (a Local
-/// release's user files). Read before the flip commit clears the refs, so the drain
-/// can delete the now-redundant originals post-commit. These are the make_remote's
-/// user-provided blobs, each registered external at make_remote time, so a missing
-/// ref is unexpected — logged (not silently skipped) so the absence is visible; the
-/// only consequence is a source file left undeleted.
-pub(crate) fn external_source_paths(
-    conn: &Connection,
-    blob_ids: &[String],
-) -> Result<Vec<PathBuf>, DbError> {
-    let mut out = Vec::new();
-    for id in blob_ids {
-        let path: Option<String> = conn
-            .query_row(
-                "SELECT path FROM local_blob_refs WHERE blob_id = ?1",
-                [id],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        match path {
-            Some(path) => out.push(PathBuf::from(path)),
-            None => warn!(
-                "make_remote completion: blob {id} has no external ref to delete (already cleared?)"
-            ),
-        }
-    }
-    Ok(out)
 }
