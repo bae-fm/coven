@@ -232,16 +232,6 @@ pub async fn restore_from_cloud(
     };
     let cipher = match encryption_key_hex {
         Some(key_hex) => {
-            if key_hex.len() != 64 {
-                return Err(RestoreError::Database(
-                    "Encryption key must be 64 hex characters (32 bytes)".to_string(),
-                ));
-            }
-            if hex::decode(key_hex).is_err() {
-                return Err(RestoreError::Database(
-                    "Invalid hex encoding in encryption key".to_string(),
-                ));
-            }
             on_status("Verifying encryption key...");
             CloudCipher::Encrypted(EncryptionService::new(key_hex)?)
         }
