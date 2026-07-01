@@ -85,6 +85,8 @@ pub enum OAuthError {
     Server(String),
     #[error("token exchange error: {0}")]
     TokenExchange(String),
+    #[error("account email fetch error: {0}")]
+    AccountFetch(String),
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
     #[error("authorization denied: {0}")]
     Denied(String),

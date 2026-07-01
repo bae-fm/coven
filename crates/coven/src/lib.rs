@@ -50,6 +50,33 @@ pub mod join_code {
     }
 }
 
+/// Fetch the email of the account `tokens` authenticated, for the given OAuth
+/// provider. The joining device calls this right after authenticating so the
+/// approver can share the OAuth folder to its provider-account email.
+///
+/// Only the OAuth providers are valid here; a non-OAuth provider (S3, CloudKit)
+/// is a programming error and surfaces as an error rather than a silent default.
+#[cfg(feature = "oauth-providers")]
+pub async fn fetch_account_email(
+    provider: crate::config::CloudProvider,
+    tokens: &oauth::OAuthTokens,
+) -> Result<String, oauth::OAuthError> {
+    use crate::config::CloudProvider;
+    use crate::storage::cloud::account_email;
+
+    let result = match provider {
+        CloudProvider::GoogleDrive => account_email::fetch_google(tokens).await,
+        CloudProvider::Dropbox => account_email::fetch_dropbox(tokens).await,
+        CloudProvider::OneDrive => account_email::fetch_onedrive(tokens).await,
+        other => {
+            return Err(oauth::OAuthError::AccountFetch(format!(
+                "{other:?} does not use OAuth; account email is only fetched for OAuth providers"
+            )))
+        }
+    };
+    result.map_err(|e| oauth::OAuthError::AccountFetch(e.to_string()))
+}
+
 pub mod library_dir {
     pub use coven_core::library_dir::*;
 }
@@ -77,6 +104,8 @@ pub mod storage {
             pub use coven_core::storage::cloud::s3_common::*;
         }
 
+        #[cfg(feature = "oauth-providers")]
+        pub mod account_email;
         pub mod cloudkit;
         #[cfg(feature = "oauth-providers")]
         pub mod dropbox;
