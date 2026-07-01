@@ -16,8 +16,15 @@ The host owns its schema and domain; coven owns the data — the SQLite connecti
 and the blob store. A library is local-first: rows and blobs live on the device
 and reach the cloud only when you connect a provider. A native host talks to
 coven through `CovenHandle` and never reaches into coven's storage or sync
-internals directly. The browser facade is experimental; see `site/docs/web.md`
-and build it with the `experimental-wasm` feature.
+internals directly.
+
+This workspace has three crates:
+
+- `coven`: the native Rust package and public API.
+- `coven-core`: the shared engine crate used by platform packages.
+- `coven-wasm`: the browser package. Browser support is isolated there and
+  returns explicit unsupported errors for operations whose browser backend is not
+  implemented.
 
 ## Integration
 

@@ -1,0 +1,57 @@
+[package]
+name = "coven"
+version = "0.0.0-dev"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "coven"
+path = "src/lib.rs"
+
+[dependencies]
+coven-core = { path = "../coven-core", version = "0.0.0-dev" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+serde_urlencoded = "0.7"
+thiserror = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+rand = "0.9"
+uuid = { version = "1.0", features = ["v4", "js"] }
+keyring-core = "0.7"
+bytes = "1.11"
+futures-util = "0.3"
+tracing = "0.1.41"
+tokio = { version = "1.0", features = ["full"] }
+rusqlite = { version = "0.40", features = ["session", "bundled"] }
+libsqlite3-sys = { version = "0.38.0", features = ["session", "bundled"] }
+axum = "0.7"
+open = { version = "5.3", optional = true }
+dirs = "5.0"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
+aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rt-tokio", "sigv4a"] }
+aws-credential-types = "1.2"
+aws-smithy-http-client = { version = "1.1", default-features = false, features = ["default-client", "rustls-ring"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+apple-native-keyring-store = { version = "0.2", features = ["protected"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "0.5"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[features]
+test-utils = ["coven-core/test-utils"]
+oauth-providers = ["coven-core/oauth-providers", "dep:open"]
+share-proxy = ["coven-core/share-proxy"]
+
+[lints]
+workspace = true

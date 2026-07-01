@@ -1,0 +1,80 @@
+[package]
+name = "coven-wasm"
+version = "0.0.0-dev"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "coven_wasm"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+coven-core = { path = "../coven-core", version = "0.0.0-dev" }
+wasm-bindgen = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+async-trait = "0.1"
+bytes = "1.11"
+futures-util = "0.3"
+gloo-timers = { version = "0.4", features = ["futures"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_legacy = { package = "getrandom", version = "0.2", features = ["js"] }
+hex = "0.4"
+http = "1"
+percent-encoding = "2.3"
+quick-xml = "0.40"
+rand = "0.9"
+reqsign-core = "3"
+reqsign-aws-v4 = "3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+rusqlite = { version = "0.40", default-features = false, features = ["cache", "ffi-sqlite-wasm-rs", "session"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlite-wasm-rs = "0.5"
+sqlite-wasm-vfs = "0.2"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["rt", "sync", "macros", "time", "io-util"] }
+tracing = "0.1.41"
+uuid = { version = "1.0", features = ["v4", "js"] }
+wasm-bindgen-futures = "0.4"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "Crypto",
+    "SubtleCrypto",
+    "CryptoKey",
+    "DomException",
+    "File",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemReadWriteOptions",
+    "FileSystemRemoveOptions",
+    "FileSystemSyncAccessHandle",
+    "AesKeyGenParams",
+    "AesGcmParams",
+    "IdbFactory",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbRequestReadyState",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "StorageManager",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+] }
+
+[dev-dependencies]
+coven-core = { path = "../coven-core", version = "0.0.0-dev", features = ["test-utils"] }
+wasm-bindgen-test = "0.3"
+uuid = { version = "1.0", features = ["v4", "js"] }
+
+[lints]
+workspace = true

@@ -1,9 +1,6 @@
 name: wasm
 
-# The experimental browser build (wasm32-unknown-unknown). coven's blob cache and
-# OPFS layer only ever compile here, not under the native CI job, so without this
-# gate a native-only fs call can slip into otherwise-portable code and rot
-# unnoticed.
+# Browser crate build (wasm32-unknown-unknown).
 
 on:
   push:
@@ -15,11 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # sqlite-wasm-rs's build script compiles a C SQLite to wasm, which needs a
-      # clang whose backend can emit wasm objects plus llvm-ar. Ubuntu's packaged
-      # LLVM has the WebAssembly backend built in.
-      - name: Install LLVM (wasm-capable clang for sqlite-wasm-rs's build script)
-        run: sudo apt-get update && sudo apt-get install -y clang llvm
       # Toolchain (1.95.0) comes from rust-toolchain.toml on the first cargo
       # invocation; that file also lists wasm32-unknown-unknown, but add it
       # explicitly so this job is self-describing and survives a toolchain edit.
@@ -27,7 +19,4 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Check (wasm32-unknown-unknown)
-        env:
-          CC_wasm32_unknown_unknown: clang
-          AR_wasm32_unknown_unknown: llvm-ar
         run: scripts/check-wasm.sh

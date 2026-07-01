@@ -243,12 +243,12 @@ installs the keyring service and identity at startup with
 environment-variable or dev-mode key path.
 
 The loop runs on a dedicated OS thread with its own current-thread tokio runtime.
-The connection itself lives on the `Database` actor thread, reached only through
-async calls, so the loop holds nothing tied to a thread; the dedicated thread is
-for stack size (aws-sdk-s3's endpoint resolution recurses deeply enough to
-overflow the default secondary-thread stack in debug builds). After each cycle it
-emits a [`SyncLoopStatus`](rustdoc:struct:coven::sync::sync_loop::SyncLoopStatus)
-over a broadcast channel; the host observes the stream with
+Database access goes through async calls on the `Database` handle, so the loop
+holds nothing tied to a thread; the dedicated thread is for stack size
+(aws-sdk-s3's endpoint resolution recurses deeply enough to overflow the default
+secondary-thread stack in debug builds). After each cycle it emits a
+[`SyncLoopStatus`](rustdoc:struct:coven::sync::sync_loop::SyncLoopStatus) over a
+broadcast channel; the host observes the stream with
 [`SyncLoopHandle::subscribe`](rustdoc:method:coven::sync::sync_loop::SyncLoopHandle::subscribe):
 
 ```rust

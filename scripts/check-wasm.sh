@@ -1,6 +1,5 @@
 #!/usr/bin/env sh
-# Compile coven for wasm32 (the browser/OPFS build) — the gate that catches a
-# native-only fs call sneaking into otherwise-portable code (e.g. the blob cache).
+# Compile the browser crate for wasm32.
 #
 # sqlite-wasm-rs's build script compiles a C SQLite to wasm, which needs a clang
 # whose backend can emit wasm objects. Apple's system clang can't, so on macOS we
@@ -18,4 +17,4 @@ if [ "$(uname -s)" = "Darwin" ]; then
     export CC_wasm32_unknown_unknown AR_wasm32_unknown_unknown
 fi
 
-exec cargo check --target wasm32-unknown-unknown --features experimental-wasm "$@"
+exec cargo check -p coven-wasm --target wasm32-unknown-unknown "$@"
