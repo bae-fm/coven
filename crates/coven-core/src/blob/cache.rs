@@ -35,10 +35,13 @@
 //! [`Gates::root_kept_of`](crate::sync::gate::Gates::root_kept_of)), then dispatches:
 //!
 //! - **Remote** (gate on, or remote root) ⇒ the bytes live in the cloud fronted by
-//!   the device cache, for both provenances. The one legitimate probe runs:
-//!   per-device cache
-//!   materialization — which no shared state records — checks `pinned/` then `cache/`
-//!   and serves a hit, else fetches from the cloud.
+//!   the device cache. The first legitimate probe runs per-device cache
+//!   materialization — which no shared state records — checking `pinned/` then
+//!   `cache/`. For **host-provided** Remote blobs only, a cache miss then checks the
+//!   local store for upload staging: `CovenHandle::write` stores the plaintext there
+//!   before the upload cycle seals it and drops that staging file. A miss there means
+//!   upload staging is already gone, so the read fetches from the cloud. A
+//!   **user-provided** Remote blob never reads the local store.
 //! - **Local** (gate off) ⇒ the bytes are on-device; provenance picks the copy. A
 //!   **user-provided** blob is the user's own external file (`local_blob_refs`), read
 //!   straight from its path and validated by presence + size — its ref MUST exist
@@ -383,14 +386,15 @@ pub async fn is_pinned(
 /// store and taking the first hit.
 ///
 /// [`resolve_source`] reads the locality root first: **Remote** (gate on, or remote
-/// root) ⇒ the bytes live in the cloud fronted by the device cache, so the one
+/// root) ⇒ the bytes live in the cloud fronted by the device cache, so the first
 /// legitimate probe checks `pinned/<id>` then `cache/<id>` for a per-device cache
-/// copy and serves a hit; a miss resolves the blob's scope to its encryption key,
-/// downloads + decrypts it via [`SyncStorage::get_blob`], writes it atomically to
-/// `cache/<id>` (evictable — a fetch-on-read populates the evictable cache, never
-/// the kept folder), and returns the bytes it just fetched (the post-populate
-/// [`evict_to_budget`] sweep is best-effort: a successful fetch returns its bytes
-/// even if eviction then fails).
+/// copy and serves a hit. For host-provided Remote blobs only, a cache miss checks
+/// the local store for upload staging. A miss there resolves the blob's scope to its
+/// encryption key, downloads + decrypts it via [`SyncStorage::get_blob`], writes it
+/// atomically to `cache/<id>` (evictable — a fetch-on-read populates the evictable
+/// cache, never the kept folder), and returns the bytes it just fetched (the
+/// post-populate [`evict_to_budget`] sweep is best-effort: a successful fetch returns
+/// its bytes even if eviction then fails).
 ///
 /// **Local** (gate off) ⇒ the bytes are on-device, and provenance picks which copy:
 /// a **user-provided** blob is the user's own external file (`local_blob_refs` row),
@@ -435,9 +439,10 @@ pub async fn read_blob(
 
 /// Serve a Remote blob whole. The one legitimate probe — per-device cache
 /// materialization, a filesystem fact no shared state holds — checks `pinned/<id>`
-/// then `cache/<id>` (via [`read_staged`]) and serves a hit; a miss fetches from the
-/// cloud, decrypts, and populates the evictable cache. Split from [`read_blob`] so the
-/// whole-blob Remote path reads as one branch of the locality dispatch.
+/// then `cache/<id>` (via [`read_staged`]) and serves a hit. For host-provided Remote
+/// blobs only, a cache miss checks the local store for upload staging before a cloud
+/// read. Split from [`read_blob`] so the whole-blob Remote path reads as one branch
+/// of the locality dispatch.
 async fn read_remote_whole(
     db: &Database,
     library_dir: &LibraryDir,
@@ -450,6 +455,14 @@ async fn read_remote_whole(
     // wasteful and could mask a real fault.
     if let Some(bytes) = read_staged(library_dir, &blob.namespace, &blob.id).await? {
         return Ok(bytes);
+    }
+
+    if blob.provenance == Provenance::HostProvided {
+        if let Some(bytes) =
+            crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id).await?
+        {
+            return Ok(bytes);
+        }
     }
 
     // Miss: fetch from the cloud and populate the evictable cache. A home-less
@@ -497,14 +510,16 @@ async fn read_remote_whole(
 /// The serving paths mirror [`read_blob`], dispatched the same way ([`resolve_source`]
 /// reads the gate, then provenance): **Remote** serves the range off a cache hit
 /// (`pinned/<id>` OR `cache/<id>`) — the whole-plaintext local file read at `offset`,
-/// no decryption, no cloud — else fetches and decrypts just the range from the cloud
-/// via [`SyncStorage::read_blob_range`] and **never writes a cache file** (a
-/// truncated/partial file under `cache/<id>` would be read as the whole blob by
-/// [`read_blob`]; only the whole-file read populates). **Local + user-provided**
-/// reads the range off the user's external file (ref required — [`NoExternalRef`]
-/// otherwise; a vanished/short file is [`ExternalMissing`]). **Local + host-provided**
-/// reads the range off the local store ([`NoLocalCopy`] on a miss, never a cloud
-/// fetch).
+/// no decryption, no cloud. For host-provided Remote blobs only, a cache miss checks
+/// the local store for upload staging and serves the same bounded range from that
+/// whole plaintext file when present. A miss there fetches and decrypts the range
+/// from the cloud via [`SyncStorage::read_blob_range`] and **never writes a cache
+/// file** (a truncated/partial file under `cache/<id>` would be read as the whole
+/// blob by [`read_blob`]; only the whole-file read populates). **Local +
+/// user-provided** reads the range off the user's external file (ref required —
+/// [`NoExternalRef`] otherwise; a vanished/short file is [`ExternalMissing`]).
+/// **Local + host-provided** reads the range off the local store ([`NoLocalCopy`] on
+/// a miss, never a cloud fetch).
 ///
 /// As in [`read_blob`], a failure to even check a file's existence is surfaced,
 /// never collapsed into a miss (which would re-fetch over a present file and could
@@ -575,11 +590,12 @@ pub async fn open_blob_stream(
 }
 
 /// Serve a Remote blob's plaintext range. A cache hit (`pinned/<id>` OR `cache/<id>`)
-/// reads the slice off the whole-plaintext local file; a miss range-reads + decrypts
-/// from the cloud and writes NO cache file (a partial file would be mistaken for the
-/// whole blob by [`read_blob`]). Split from [`open_blob_stream`] so the Remote path
-/// reads as one branch of the locality dispatch; the range was already validated by
-/// the caller against `source_size`.
+/// reads the slice off the whole-plaintext local file. For host-provided Remote
+/// blobs only, a cache miss checks the local store for upload staging. A miss there
+/// range-reads + decrypts from the cloud and writes NO cache file (a partial file
+/// would be mistaken for the whole blob by [`read_blob`]). Split from
+/// [`open_blob_stream`] so the Remote path reads as one branch of the locality
+/// dispatch; the range was already validated by the caller against `source_size`.
 async fn read_remote_range(
     db: &Database,
     library_dir: &LibraryDir,
@@ -605,6 +621,20 @@ async fn read_remote_range(
             }
             Ok(false) => {}
             Err(e) => return Err(BlobCacheError::Io(e)),
+        }
+    }
+
+    if blob.provenance == Provenance::HostProvided {
+        if let Some(bytes) = crate::blob::local_files::read_range(
+            library_dir,
+            &blob.namespace,
+            &blob.id,
+            offset,
+            len,
+        )
+        .await?
+        {
+            return Ok(bytes);
         }
     }
 
@@ -870,7 +900,8 @@ pub async fn evict_to_budget(
 /// intrinsic, is read from the row's declaration, not trusted off the address.
 enum BlobSource {
     /// Remote (gate on, or remote root): the cloud, fronted by the device's evictable
-    /// cache (`pinned/` or `cache/`, else fetched) — for both provenances.
+    /// cache (`pinned/` or `cache/`, else fetched). Host-provided Remote blobs may
+    /// also have a local-store upload staging copy before the cloud read.
     Cache,
     /// Local (gate off) + user-provided: the user's own external file
     /// (`local_blob_refs`).

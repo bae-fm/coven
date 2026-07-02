@@ -15,13 +15,12 @@
 //! (A user-provided Local blob is the user's own file at a path, tracked as an
 //! external ref — see `local_blob_refs` — not in this store.)
 //!
-//! The transitions move a host-provided blob between the local store and the cache:
-//! `make_remote` uploads it and moves its bytes into the cache (now a cache copy of
-//! the cloud blob, so it becomes Remote);
-//! `make_local` restores it from the cache/cloud back into the local store (it
-//! becomes Local). The read path checks the local store before the cache (see
-//! [`cache::read_blob`](super::cache::read_blob)), so a host-provided Local blob is
-//! served from here with no cloud round-trip.
+//! A host-provided Remote blob can also have a short-lived upload staging file here:
+//! `CovenHandle::write` stores newly written bytes in the local store, then the sync
+//! cycle uploads those bytes and drops this file. The Remote read path checks
+//! `pinned/` and `cache/` first, then reads this staging file for host-provided
+//! Remote blobs only, and finally reads the cloud. A host-provided Local blob still
+//! reads this store as its required source.
 //!
 //! See the [blob concept tree](crate::blob) for where the local store sits in the
 //! whole storage model.
@@ -76,9 +75,10 @@ pub async fn store(
 }
 
 /// Read a host-provided blob from the local store, or `None` when no file is stored
-/// there. No cloud fallback — the local store is the blob's home while Local; a
-/// `None` for a blob the gate says is Local is fail-loud corruption to its caller
-/// ([`cache::read_blob`](super::cache::read_blob)), not a cache miss to refetch.
+/// there. For a host-provided Local blob, absence is fail-loud corruption to
+/// [`cache::read_blob`](super::cache::read_blob). For a host-provided Remote blob,
+/// absence means the upload staging file is gone and the Remote read continues to
+/// cloud.
 pub async fn read(
     library_dir: &LibraryDir,
     namespace: &str,
@@ -97,9 +97,8 @@ pub async fn read(
 
 /// Serve `len` plaintext bytes at `offset` from the local store, or `None` when no
 /// file is stored there. The local store holds the whole blob, so a request the
-/// caller has bounded against the blob's length reads
-/// exactly `len`; a short file is torn and fails loud in
-/// [`crate::local_blob::read_range`].
+/// caller has bounded against the blob's length reads exactly `len`; a short file
+/// is torn and fails loud in [`crate::local_blob::read_range`].
 pub async fn read_range(
     library_dir: &LibraryDir,
     namespace: &str,

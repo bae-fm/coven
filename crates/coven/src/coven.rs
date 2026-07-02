@@ -532,14 +532,35 @@ mod tests {
         )
     }
 
+    fn media_files_decl() -> BlobDecl {
+        BlobDecl::new(
+            "media-files",
+            Provenance::HostProvided,
+            CacheFill::CacheLazy,
+        )
+        .with_id_column("blob_id")
+    }
+
     fn files_table() -> SyncedTable {
-        SyncedTable::new("files").carries_blob(
-            BlobDecl::new(
-                "media-files",
-                Provenance::HostProvided,
-                CacheFill::CacheLazy,
-            )
-            .with_id_column("blob_id"),
+        SyncedTable::new("files").carries_blob(media_files_decl())
+    }
+
+    fn remote_root_files_table() -> SyncedTable {
+        SyncedTable::new("files")
+            .remote_root()
+            .carries_blob(media_files_decl())
+    }
+
+    fn files_migration() -> Migration {
+        Migration::sql(
+            1,
+            "test-schema",
+            "CREATE TABLE files (
+                id TEXT PRIMARY KEY,
+                blob_id TEXT,
+                size INTEGER NOT NULL,
+                _updated_at TEXT NOT NULL
+            );",
         )
     }
 
@@ -548,16 +569,18 @@ mod tests {
         let dir = LibraryDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
-            .migrations(vec![Migration::sql(
-                1,
-                "test-schema",
-                "CREATE TABLE files (
-                    id TEXT PRIMARY KEY,
-                    blob_id TEXT,
-                    size INTEGER NOT NULL,
-                    _updated_at TEXT NOT NULL
-                );",
-            )])
+            .migrations(vec![files_migration()])
+            .open()
+            .expect("open handle");
+        (tmp, handle)
+    }
+
+    fn open_remote_root_files_handle() -> (tempfile::TempDir, CovenHandle) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = Coven::builder(config(dir))
+            .synced_tables(vec![remote_root_files_table()])
+            .migrations(vec![files_migration()])
             .open()
             .expect("open handle");
         (tmp, handle)
@@ -641,6 +664,61 @@ mod tests {
         assert_eq!(
             std::fs::read(path).expect("read local blob"),
             b"piece-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_root_host_provided_write_reads_staging_through_handle_before_upload() {
+        let (_tmp, handle) = open_remote_root_files_handle();
+        let expected = b"remote-root-host-provided-staging-bytes".to_vec();
+        let bytes = expected.clone();
+
+        let blob = handle
+            .write(move |w| {
+                let pending = w.put_blob("media-files", "rrhpaaaa", bytes.clone());
+                let blob_id = pending.id().to_string();
+                w.sql(move |sql| {
+                    sql.tx().execute(
+                        "INSERT INTO files (id, blob_id, size, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            "file-remote-root",
+                            blob_id.as_str(),
+                            bytes.len() as i64,
+                            sql.stamp()
+                        ],
+                    )?;
+                    Ok(BlobRef {
+                        namespace: "media-files".to_string(),
+                        id: blob_id,
+                        scope: BlobScope::Master,
+                        cloud_path: None,
+                        provenance: Provenance::HostProvided,
+                        fill: CacheFill::CacheLazy,
+                    })
+                })
+            })
+            .await
+            .expect("write remote-root row and host-provided blob");
+
+        let whole = handle
+            .read_blob(&blob)
+            .await
+            .expect("read_blob serves upload staging before sync upload");
+        assert_eq!(
+            whole, expected,
+            "read_blob returns the bytes written through handle.write",
+        );
+
+        let (offset, len) = (12u64, 19u64);
+        let range = handle
+            .open_blob_stream(&blob, expected.len() as u64, offset, len)
+            .await
+            .expect("open_blob_stream serves upload staging before sync upload");
+        assert_eq!(
+            range,
+            &expected[offset as usize..(offset + len) as usize],
+            "open_blob_stream returns the requested slice of the staged bytes",
         );
     }
 

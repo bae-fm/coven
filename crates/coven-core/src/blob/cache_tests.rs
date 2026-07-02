@@ -905,23 +905,21 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
     );
 }
 
-/// A **Remote** blob reads the cache/cloud — and never the local store. A stale same-id
-/// local-store file sits on disk plus a cloud copy; the read ignores the local store,
-/// fetches from the cloud, and populates the cache (whole and ranged). The mirror of
-/// the Local tests: a Remote blob never reads a Local store.
+/// A **Remote + user-provided** blob reads the cache/cloud — and never the local
+/// store. A stale same-id local-store file sits on disk plus a cloud copy; the read
+/// ignores the local store, fetches from the cloud, and populates the cache (whole
+/// and ranged). Upload staging is only part of Remote + host-provided reads.
 #[tokio::test]
-async fn remote_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
-    let db = read_test_db("photos");
+async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
+    let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_library_dir();
 
-    // Remote, host-provided (the provenance that could plausibly leave a local-store
-    // file behind after a make_remote moved its copy into the cache).
-    let blob = host_blob_ref("rem0cccc", "photos", CacheFill::CacheEager);
+    let blob = blob_ref("rem0cccc", "audio", CacheFill::CacheLazy);
     plant_blob_row(&db, &blob.id, true).await;
 
-    // A stale local-store file (a leftover a Remote read must NOT serve) and the real
-    // cloud copy with distinct bytes.
+    // A stale local-store file (a Remote + user-provided read must NOT serve it) and
+    // the real cloud copy with distinct bytes.
     crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"STALE-LOCAL-STORE")
         .await
         .expect("write a stale local-store file");
@@ -933,7 +931,7 @@ async fn remote_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
         .expect("Remote read fetches from the cloud");
     assert_eq!(
         whole, cloud_bytes,
-        "a Remote read serves the cloud copy, not the stale local-store file",
+        "a Remote + user-provided read serves the cloud copy, not the stale local-store file",
     );
     assert!(
         ld.cache_blob_path(&blob.namespace, &blob.id)
@@ -957,7 +955,35 @@ async fn remote_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
     assert_eq!(
         mid,
         &cloud_bytes[offset as usize..(offset + len) as usize],
-        "the ranged Remote read also ignores the local-store file",
+        "the ranged Remote + user-provided read also ignores the local-store file",
+    );
+}
+
+#[tokio::test]
+async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_cloud() {
+    let db = read_test_db("audio");
+    let (_tmp, ld) = temp_library_dir();
+    let blob = blob_ref("rem0dddd", "audio", CacheFill::CacheLazy);
+
+    plant_blob_row(&db, &blob.id, true).await;
+    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"STALE-LOCAL-STORE")
+        .await
+        .expect("write a stale local-store file");
+
+    let err = read_blob(&db, &ld, None, &blob)
+        .await
+        .expect_err("Remote + user-provided read needs cache or cloud");
+    assert!(
+        matches!(err, BlobCacheError::NoCloudHome),
+        "a stale local-store file does not satisfy a Remote + user-provided read: {err:?}",
+    );
+
+    let range_err = open_blob_stream(&db, &ld, None, &blob, 17, 0, 5)
+        .await
+        .expect_err("Remote + user-provided range read needs cache or cloud");
+    assert!(
+        matches!(range_err, BlobCacheError::NoCloudHome),
+        "a stale local-store file does not satisfy a ranged Remote + user-provided read: {range_err:?}",
     );
 }
 
@@ -973,9 +999,6 @@ async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
     let blob = host_blob_ref("rrrr0001", "photos", CacheFill::CacheEager);
 
     plant_blob_row(&db, &blob.id, false).await;
-    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"LOCAL-DECOY")
-        .await
-        .expect("write local decoy");
     put_cloud_blob(&storage, &blob.id, &blob.namespace, b"REMOTE-ROOT-CLOUD").await;
 
     let got = read_blob(&db, &ld, Some(&storage), &blob)
