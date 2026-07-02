@@ -45,7 +45,9 @@ use tracing::warn;
 use super::s3_common::{
     apply_prefix, list_strip_prefix, normalize_prefix, probe_error, s3_join_info,
 };
-use super::{range_header, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{
+    range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+};
 
 /// S3-backed cloud home that signs requests and sends them over `fetch`.
 pub struct S3WasmCloudHome {
@@ -751,7 +753,10 @@ impl CloudHome for S3WasmCloudHome {
         }
     }
 
-    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        _grant: CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
         Ok(s3_join_info(
             self.bucket.clone(),
             self.region.clone(),
@@ -762,10 +767,13 @@ impl CloudHome for S3WasmCloudHome {
         ))
     }
 
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
         // Access is controlled externally; nothing to revoke. Logged so a caller
         // expecting revocation sees that S3 cannot enforce it here.
-        warn!("S3 access is managed externally; revoke for {member_id} is a no-op");
+        warn!(
+            "S3 access is managed externally; revoke for {} is a no-op",
+            revoke.member_pubkey
+        );
         Ok(())
     }
 }

@@ -407,9 +407,21 @@ pub async fn create_sync_storage(
     cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, String> {
-    let cloud_home = super::create_cloud_home(config, key_service, clock)
-        .await
-        .map_err(|e| format!("{e}"))?;
+    create_sync_storage_with_cloudkit(config, key_service, cipher, clock, None).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn create_sync_storage_with_cloudkit(
+    config: &Config,
+    key_service: &KeyService,
+    cipher: Option<CloudCipher>,
+    clock: crate::clock::ClockRef,
+    cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
+) -> Result<crate::sync::cloud_storage::CloudSyncStorage, String> {
+    let cloud_home =
+        super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops)
+            .await
+            .map_err(|e| format!("{e}"))?;
 
     let cipher = match cipher {
         Some(c) => c,

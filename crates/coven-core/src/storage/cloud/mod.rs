@@ -30,7 +30,7 @@ pub enum CloudHomeError {
 }
 
 /// Information needed to join a cloud home from another device.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CloudHomeJoinInfo {
     S3 {
         bucket: String,
@@ -52,6 +52,11 @@ pub enum CloudHomeJoinInfo {
         folder_id: String,
     },
     CloudKit,
+    CloudKitShare {
+        share_url: String,
+        owner_name: String,
+        zone_name: String,
+    },
 }
 
 impl CloudHomeJoinInfo {
@@ -62,8 +67,46 @@ impl CloudHomeJoinInfo {
             CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
             CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
             CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
-            CloudHomeJoinInfo::CloudKit => CloudProvider::CloudKit,
+            CloudHomeJoinInfo::CloudKit | CloudHomeJoinInfo::CloudKitShare { .. } => {
+                CloudProvider::CloudKit
+            }
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudAccessGrant {
+    pub member_pubkey: String,
+    pub provider_account_email: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudAccessRevoke {
+    pub member_pubkey: String,
+    pub provider_account_email: Option<String>,
+}
+
+impl CloudAccessGrant {
+    pub fn require_provider_email(&self, provider: &str) -> Result<&str, CloudHomeError> {
+        require_provider_email(provider, self.provider_account_email.as_deref())
+    }
+}
+
+impl CloudAccessRevoke {
+    pub fn require_provider_email(&self, provider: &str) -> Result<&str, CloudHomeError> {
+        require_provider_email(provider, self.provider_account_email.as_deref())
+    }
+}
+
+fn require_provider_email<'a>(
+    provider: &str,
+    email: Option<&'a str>,
+) -> Result<&'a str, CloudHomeError> {
+    match email {
+        Some(email) if !email.is_empty() => Ok(email),
+        _ => Err(CloudHomeError::Storage(format!(
+            "{provider} sharing requires the invitee's provider account email"
+        ))),
     }
 }
 
@@ -412,11 +455,14 @@ pub trait CloudHome: crate::MaybeThreadSafe {
     /// For S3 this ignores `member_id` and returns bucket/region/endpoint
     /// (access is managed externally via IAM/pre-shared credentials).
     /// For consumer clouds this shares the folder with the member's account.
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError>;
+    async fn grant_access(
+        &self,
+        grant: CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError>;
 
     /// Revoke a previously granted access. No-op for backends where access
     /// is controlled externally (e.g. S3 with pre-shared credentials).
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError>;
+    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError>;
 }
 
 #[cfg(test)]
@@ -635,10 +681,13 @@ mod streaming_tests {
         async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
             unimplemented!()
         }
-        async fn grant_access(&self, _m: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        async fn grant_access(
+            &self,
+            _grant: CloudAccessGrant,
+        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
             unimplemented!()
         }
-        async fn revoke_access(&self, _m: &str) -> Result<(), CloudHomeError> {
+        async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
             unimplemented!()
         }
     }

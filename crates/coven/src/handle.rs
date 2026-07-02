@@ -44,7 +44,6 @@ use crate::encryption::EncryptionService;
 use crate::id_provider::IdRef;
 use crate::keys::KeyService;
 use crate::library_dir::LibraryDir;
-use crate::storage::cloud::setup::create_sync_storage;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 #[cfg(any(test, feature = "test-utils"))]
@@ -107,6 +106,7 @@ pub struct CovenHandle {
     config_provider: ConfigProvider,
     key_service: KeyService,
     clock: ClockRef,
+    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     stage_blob_ids: IdRef,
 
     /// Host bookkeeping for blob transitions (upload progress, materialize
@@ -137,6 +137,7 @@ impl CovenHandle {
         config_provider: ConfigProvider,
         key_service: KeyService,
         clock: ClockRef,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         stage_blob_ids: IdRef,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
@@ -147,6 +148,7 @@ impl CovenHandle {
             config_provider,
             key_service,
             clock,
+            cloudkit_ops,
             stage_blob_ids,
             observer,
             sync: Arc::new(RwLock::new(None)),
@@ -225,6 +227,26 @@ impl CovenHandle {
         Ok(())
     }
 
+    pub async fn connect_sync_with_cloudkit(
+        &self,
+        encryption_service: Option<EncryptionService>,
+        cloudkit_ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
+    ) -> Result<(), String> {
+        let manager = Arc::new(SyncManager::new(
+            self.config_provider.clone(),
+            self.key_service.clone(),
+            encryption_service,
+            self.db.clone(),
+            self.clock.clone(),
+            Some(cloudkit_ops),
+            self.observer.clone(),
+        ));
+        manager.start_sync().await?;
+        *self.sync.write().unwrap() = Some(manager);
+        info!("coven handle: sync manager connected with CloudKit driver");
+        Ok(())
+    }
+
     /// Build a [`SyncManager`], start its loop via `start`, and install it — the
     /// shared construct-and-install both [`connect_sync`](Self::connect_sync) and
     /// the test-only
@@ -251,6 +273,7 @@ impl CovenHandle {
             encryption_service,
             self.db.clone(),
             self.clock.clone(),
+            self.cloudkit_ops.clone(),
             self.observer.clone(),
         ));
         start(manager.clone()).await?;
@@ -399,8 +422,14 @@ impl CovenHandle {
         if config.cloud_home.provider.is_none() {
             return Ok(None);
         }
-        let storage =
-            create_sync_storage(&config, &self.key_service, None, self.clock.clone()).await?;
+        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
+            &config,
+            &self.key_service,
+            None,
+            self.clock.clone(),
+            self.cloudkit_ops.clone(),
+        )
+        .await?;
         Ok(Some(Arc::new(storage)))
     }
 
@@ -713,6 +742,7 @@ mod tests {
             config_provider,
             KeyService::new("lib-test".to_string()),
             Arc::new(SystemClock),
+            None,
             Arc::new(crate::id_provider::UuidProvider),
             None,
         );

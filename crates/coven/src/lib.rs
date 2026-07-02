@@ -158,6 +158,15 @@ pub mod storage {
             key_service: &crate::keys::KeyService,
             clock: crate::clock::ClockRef,
         ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
+            create_cloud_home_with_cloudkit(config, key_service, clock, None).await
+        }
+
+        pub async fn create_cloud_home_with_cloudkit(
+            config: &crate::config::Config,
+            key_service: &crate::keys::KeyService,
+            clock: crate::clock::ClockRef,
+            cloudkit_ops: Option<std::sync::Arc<dyn cloudkit::CloudKitOps>>,
+        ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
             use crate::config::CloudProvider;
 
             #[cfg(not(feature = "oauth-providers"))]
@@ -173,20 +182,20 @@ pub mod storage {
                     })?;
                     let endpoint = config.cloud_home.s3_endpoint.clone();
 
-                    let (access_key, secret_key) = match key_service
-                        .get_cloud_home_credentials()
-                        .map_err(|e| CloudHomeError::Storage(format!("S3 credentials error: {e}")))?
-                    {
-                        Some(crate::keys::CloudHomeCredentials::S3 {
-                            access_key,
-                            secret_key,
-                        }) => (access_key, secret_key),
-                        _ => {
-                            return Err(CloudHomeError::Storage(
-                                "S3 credentials not in keyring".to_string(),
-                            ))
-                        }
-                    };
+                    let (access_key, secret_key) =
+                        match key_service.get_cloud_home_credentials().map_err(|e| {
+                            CloudHomeError::Storage(format!("S3 credentials error: {e}"))
+                        })? {
+                            Some(crate::keys::CloudHomeCredentials::S3 {
+                                access_key,
+                                secret_key,
+                            }) => (access_key, secret_key),
+                            _ => {
+                                return Err(CloudHomeError::Storage(
+                                    "S3 credentials not in keyring".to_string(),
+                                ))
+                            }
+                        };
 
                     let s3 = s3::S3CloudHome::new(
                         bucket,
@@ -201,16 +210,15 @@ pub mod storage {
                 }
                 #[cfg(feature = "oauth-providers")]
                 Some(CloudProvider::GoogleDrive) => {
-                    let folder_id =
-                        config
-                            .cloud_home
-                            .google_drive_folder_id
-                            .clone()
-                            .ok_or_else(|| {
-                                CloudHomeError::Storage(
-                                    "Google Drive folder ID not configured".to_string(),
-                                )
-                            })?;
+                    let folder_id = config
+                        .cloud_home
+                        .google_drive_folder_id
+                        .clone()
+                        .ok_or_else(|| {
+                            CloudHomeError::Storage(
+                                "Google Drive folder ID not configured".to_string(),
+                            )
+                        })?;
                     let tokens = parse_oauth_tokens(key_service, "Google Drive")?;
                     Ok(Box::new(google_drive::GoogleDriveCloudHome::new(
                         folder_id,
@@ -242,15 +250,9 @@ pub mod storage {
                 #[cfg(feature = "oauth-providers")]
                 Some(CloudProvider::OneDrive) => {
                     let drive_id =
-                        config
-                            .cloud_home
-                            .onedrive_drive_id
-                            .clone()
-                            .ok_or_else(|| {
-                                CloudHomeError::Storage(
-                                    "OneDrive drive ID not configured".to_string(),
-                                )
-                            })?;
+                        config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
+                            CloudHomeError::Storage("OneDrive drive ID not configured".to_string())
+                        })?;
                     let folder_id =
                         config
                             .cloud_home
@@ -271,15 +273,36 @@ pub mod storage {
                     )))
                 }
                 #[cfg(not(feature = "oauth-providers"))]
-                Some(CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive) => {
-                    Err(CloudHomeError::Storage(
-                        "OAuth cloud providers are not supported in this build".to_string(),
-                    ))
-                }
-                Some(CloudProvider::CloudKit) => Err(CloudHomeError::Storage(
-                    "CloudKit requires the native Swift driver; construct via the host's Swift layer"
-                        .to_string(),
+                Some(
+                    CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive,
+                ) => Err(CloudHomeError::Storage(
+                    "OAuth cloud providers are not supported in this build".to_string(),
                 )),
+                Some(CloudProvider::CloudKit) => {
+                    let ops = cloudkit_ops.ok_or_else(|| {
+                        CloudHomeError::Storage("CloudKit driver not provided".to_string())
+                    })?;
+                    match (
+                        config.cloud_home.cloudkit_share_url.as_ref(),
+                        config.cloud_home.cloudkit_owner_name.as_ref(),
+                        config.cloud_home.cloudkit_zone_name.as_ref(),
+                    ) {
+                        (None, None, None) => {
+                            Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(ops)))
+                        }
+                        (Some(_), Some(owner_name), Some(zone_name)) => {
+                            Ok(Box::new(cloudkit::CloudKitCloudHome::new_shared(
+                                ops,
+                                owner_name.clone(),
+                                zone_name.clone(),
+                            )))
+                        }
+                        _ => Err(CloudHomeError::Storage(
+                            "CloudKit share config requires share URL, owner name, and zone name"
+                                .to_string(),
+                        )),
+                    }
+                }
             }
         }
     }
@@ -323,7 +346,10 @@ pub use keys::{
 };
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;
-pub use storage::cloud::{cloudkit::CloudKitOps, s3::S3CloudHome};
+pub use storage::cloud::{
+    cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare},
+    s3::S3CloudHome,
+};
 pub use storage::local::BlobStore;
 pub use sync::join::join_from_invite_code;
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};

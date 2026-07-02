@@ -165,13 +165,16 @@ impl CloudHome for InMemoryCloudHome {
         Ok(self.writes.lock().unwrap().contains_key(key))
     }
 
-    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        _grant: super::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
         Err(CloudHomeError::Storage(
             "InMemoryCloudHome does not grant access".into(),
         ))
     }
 
-    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(&self, _revoke: super::CloudAccessRevoke) -> Result<(), CloudHomeError> {
         Ok(())
     }
 }

@@ -88,6 +88,12 @@ pub struct CloudHomeConfig {
     pub onedrive_drive_id: Option<String>,
     #[serde(default)]
     pub onedrive_folder_id: Option<String>,
+    #[serde(default)]
+    pub cloudkit_share_url: Option<String>,
+    #[serde(default)]
+    pub cloudkit_owner_name: Option<String>,
+    #[serde(default)]
+    pub cloudkit_zone_name: Option<String>,
     /// How this home stores its objects: opaque ([`HomeStorage::Opaque`]) or
     /// browsable ([`HomeStorage::Browsable`]). Drives both the at-rest cipher and
     /// the blob-path scheme — see [`HomeStorage`].
@@ -117,6 +123,9 @@ impl Default for CloudHomeConfig {
             dropbox_folder_path: None,
             onedrive_drive_id: None,
             onedrive_folder_id: None,
+            cloudkit_share_url: None,
+            cloudkit_owner_name: None,
+            cloudkit_zone_name: None,
             storage: default_storage(),
         }
     }

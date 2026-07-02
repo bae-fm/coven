@@ -106,6 +106,7 @@ impl Coven {
             migrations: None,
             clock: Arc::new(SystemClock),
             key_service: KeyService::new(current.library_id),
+            cloudkit_ops: None,
             observer: None,
             stage_blob_ids: Arc::new(UuidProvider),
         }
@@ -118,6 +119,7 @@ pub struct CovenBuilder {
     migrations: Option<Vec<Migration>>,
     clock: ClockRef,
     key_service: KeyService,
+    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
     stage_blob_ids: IdRef,
 }
@@ -143,6 +145,22 @@ impl CovenBuilder {
 
     pub fn key_service(mut self, key_service: KeyService) -> Self {
         self.key_service = key_service;
+        self
+    }
+
+    pub fn cloudkit_ops(
+        mut self,
+        ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
+    ) -> Self {
+        self.cloudkit_ops = Some(ops);
+        self
+    }
+
+    pub fn apply_cloudkit_ops(
+        mut self,
+        ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    ) -> Self {
+        self.cloudkit_ops = ops;
         self
     }
 
@@ -173,6 +191,7 @@ impl CovenBuilder {
             provider,
             self.key_service,
             self.clock,
+            self.cloudkit_ops,
             self.stage_blob_ids,
             self.observer,
         ))

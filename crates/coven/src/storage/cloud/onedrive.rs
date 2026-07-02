@@ -15,7 +15,10 @@ use super::oauth_rest::{
 };
 use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
-use super::{sharing, BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{
+    sharing, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo,
+};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
 use crate::oauth::{OAuthConfig, OAuthTokens};
@@ -290,13 +293,17 @@ impl CloudHome for OneDriveCloudHome {
         exists_from_response(resp, &format!("exists {key}"), NotFound::Status).await
     }
 
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        grant: CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        let email = grant.require_provider_email("OneDrive")?;
         let url = format!(
             "{}/drives/{}/items/{}/invite",
             GRAPH_API, self.drive_id, self.folder_id
         );
         let invite = serde_json::json!({
-            "recipients": [{"email": member_id}],
+            "recipients": [{"email": email}],
             "roles": ["write"],
             "requireSignIn": true,
         });
@@ -304,19 +311,15 @@ impl CloudHome for OneDriveCloudHome {
             .session
             .api_call(|token| self.client().post(&url).bearer_auth(token).json(&invite))
             .await?;
-        ensure_ok(
-            resp,
-            &format!("grant access to {member_id}"),
-            NotFound::Status,
-        )
-        .await?;
+        ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
         Ok(CloudHomeJoinInfo::OneDrive {
             drive_id: self.drive_id.clone(),
             folder_id: self.folder_id.clone(),
         })
     }
 
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+        let email = revoke.require_provider_email("OneDrive")?;
         let perms_url = format!(
             "{}/drives/{}/items/{}/permissions",
             GRAPH_API, self.drive_id, self.folder_id
@@ -324,7 +327,7 @@ impl CloudHome for OneDriveCloudHome {
         let delete_base = perms_url.clone();
         sharing::revoke_by_email(
             &self.session,
-            member_id,
+            email,
             &perms_url,
             "value",
             |p| {

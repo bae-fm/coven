@@ -150,7 +150,27 @@ async fn build_cloud_home_for_join(
         CloudHomeJoinInfo::CloudKit => {
             let ops = cloudkit_ops
                 .ok_or_else(|| JoinError::Database("CloudKit driver not provided".to_string()))?;
-            Ok(Box::new(cloudkit::CloudKitCloudHome::new(ops)))
+            Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(ops)))
+        }
+        CloudHomeJoinInfo::CloudKitShare {
+            share_url,
+            owner_name,
+            zone_name,
+        } => {
+            let ops = cloudkit_ops
+                .ok_or_else(|| JoinError::Database("CloudKit driver not provided".to_string()))?;
+            let accepted = cloudkit::accept_share(ops.clone(), share_url.clone()).await?;
+            if accepted.owner_name != *owner_name || accepted.zone_name != *zone_name {
+                return Err(JoinError::Database(format!(
+                    "CloudKit accepted share zone mismatch: invite owner/zone {owner_name}/{zone_name}, accepted {}/{}",
+                    accepted.owner_name, accepted.zone_name
+                )));
+            }
+            Ok(Box::new(cloudkit::CloudKitCloudHome::new_shared(
+                ops,
+                owner_name.clone(),
+                zone_name.clone(),
+            )))
         }
     }
 }
@@ -567,7 +587,9 @@ pub(crate) fn build_config(
         CloudHomeJoinInfo::GoogleDrive { .. } => CloudProvider::GoogleDrive,
         CloudHomeJoinInfo::Dropbox { .. } => CloudProvider::Dropbox,
         CloudHomeJoinInfo::OneDrive { .. } => CloudProvider::OneDrive,
-        CloudHomeJoinInfo::CloudKit => CloudProvider::CloudKit,
+        CloudHomeJoinInfo::CloudKit | CloudHomeJoinInfo::CloudKitShare { .. } => {
+            CloudProvider::CloudKit
+        }
     });
 
     match join_info {
@@ -597,6 +619,15 @@ pub(crate) fn build_config(
             config.cloud_home.onedrive_folder_id = Some(folder_id.clone());
         }
         CloudHomeJoinInfo::CloudKit => {}
+        CloudHomeJoinInfo::CloudKitShare {
+            share_url,
+            owner_name,
+            zone_name,
+        } => {
+            config.cloud_home.cloudkit_share_url = Some(share_url.clone());
+            config.cloud_home.cloudkit_owner_name = Some(owner_name.clone());
+            config.cloud_home.cloudkit_zone_name = Some(zone_name.clone());
+        }
     }
 
     config

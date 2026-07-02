@@ -162,12 +162,18 @@ impl CloudHome for CancelTombstoneOnExists<'_> {
         self.inner.exists(key).await
     }
 
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        self.inner.grant_access(member_id).await
+    async fn grant_access(
+        &self,
+        grant: crate::storage::cloud::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        self.inner.grant_access(grant).await
     }
 
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
-        self.inner.revoke_access(member_id).await
+    async fn revoke_access(
+        &self,
+        revoke: crate::storage::cloud::CloudAccessRevoke,
+    ) -> Result<(), CloudHomeError> {
+        self.inner.revoke_access(revoke).await
     }
 }
 
@@ -240,12 +246,18 @@ impl CloudHome for FailDeleteOnKey<'_> {
         self.inner.exists(key).await
     }
 
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        self.inner.grant_access(member_id).await
+    async fn grant_access(
+        &self,
+        grant: crate::storage::cloud::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        self.inner.grant_access(grant).await
     }
 
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
-        self.inner.revoke_access(member_id).await
+    async fn revoke_access(
+        &self,
+        revoke: crate::storage::cloud::CloudAccessRevoke,
+    ) -> Result<(), CloudHomeError> {
+        self.inner.revoke_access(revoke).await
     }
 }
 

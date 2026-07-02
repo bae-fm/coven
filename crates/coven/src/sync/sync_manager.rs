@@ -86,6 +86,7 @@ pub struct SyncManager {
     encryption_service: Option<EncryptionService>,
     db: Database,
     clock: ClockRef,
+    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// coven's `_updated_at` register, the same `Arc<Hlc>` the owned [`Database`]
@@ -113,6 +114,7 @@ impl SyncManager {
         encryption_service: Option<EncryptionService>,
         db: Database,
         clock: ClockRef,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
         let hlc = db.hlc();
@@ -122,6 +124,7 @@ impl SyncManager {
             encryption_service,
             db,
             clock,
+            cloudkit_ops,
             observer,
             hlc,
             sync_loop_handle: RwLock::new(None),
@@ -175,10 +178,11 @@ impl SyncManager {
 
         // Build the cloud home. A failure here is a real fault — surface it so the
         // caller never installs a manager that started nothing.
-        let cloud_home = crate::storage::cloud::create_cloud_home(
+        let cloud_home = crate::storage::cloud::create_cloud_home_with_cloudkit(
             &config,
             &self.key_service,
             self.clock.clone(),
+            self.cloudkit_ops.clone(),
         )
         .await
         .map_err(|e| format!("failed to build cloud home: {e}"))?;
@@ -210,11 +214,12 @@ impl SyncManager {
             .key_service
             .get_or_create_user_keypair()
             .map_err(|e| format!("failed to load user keypair for sync: {e}"))?;
-        let storage = crate::storage::cloud::setup::create_sync_storage(
+        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
             &config,
             &self.key_service,
             Some(cipher.clone()),
             self.clock.clone(),
+            self.cloudkit_ops.clone(),
         )
         .await
         .map_err(|e| format!("failed to create sync storage: {e}"))?;
@@ -469,11 +474,12 @@ impl SyncManager {
             return Ok(Vec::new());
         }
 
-        let storage = crate::storage::cloud::setup::create_sync_storage(
+        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
             &config,
             &self.key_service,
             None,
             self.clock.clone(),
+            self.cloudkit_ops.clone(),
         )
         .await
         .map_err(|e| format!("Failed to create storage client: {e}"))?;

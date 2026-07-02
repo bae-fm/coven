@@ -223,10 +223,16 @@ impl CloudHome for FailingCloudHome {
     async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
-    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        _grant: crate::storage::cloud::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
-    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(
+        &self,
+        _revoke: crate::storage::cloud::CloudAccessRevoke,
+    ) -> Result<(), CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
 }
@@ -309,10 +315,16 @@ impl CloudHome for SlowChunkedCloudHome {
     async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
-    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        _grant: crate::storage::cloud::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
-    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(
+        &self,
+        _revoke: crate::storage::cloud::CloudAccessRevoke,
+    ) -> Result<(), CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
 }

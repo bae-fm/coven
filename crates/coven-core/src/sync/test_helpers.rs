@@ -346,6 +346,7 @@ pub fn make_entry(
     let mut entry = MembershipEntry {
         action,
         user_pubkey: pubkey_hex(subject),
+        provider_account_email: None,
         role,
         timestamp: timestamp.to_string(),
         author_pubkey: pubkey_hex(author),
@@ -1029,7 +1030,10 @@ impl CloudHome for MockSyncStorage {
         Ok(self.objects.lock().unwrap().contains_key(key))
     }
 
-    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        _grant: crate::storage::cloud::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
         Ok(CloudHomeJoinInfo::S3 {
             bucket: "test-bucket".to_string(),
             region: "us-east-1".to_string(),
@@ -1040,7 +1044,10 @@ impl CloudHome for MockSyncStorage {
         })
     }
 
-    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(
+        &self,
+        _revoke: crate::storage::cloud::CloudAccessRevoke,
+    ) -> Result<(), CloudHomeError> {
         Ok(())
     }
 }

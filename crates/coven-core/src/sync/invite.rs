@@ -5,7 +5,9 @@ use crate::keys::{self, KeyError, UserKeypair};
 /// `create_invitation()` is called by the library owner to invite a new member.
 /// `unwrap_library_key()` is called by the invitee to unwrap the library key.
 /// `revoke_member()` is called by the library owner to remove a member and rotate the key.
-use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::storage::cloud::{
+    CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+};
 
 use super::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
@@ -26,6 +28,12 @@ pub enum InviteError {
     CloudHome(#[from] CloudHomeError),
     #[error("Crypto error: {0}")]
     Crypto(String),
+    #[error("{operation} failed: {original}; rollback failed: {rollback}")]
+    Rollback {
+        operation: &'static str,
+        original: String,
+        rollback: String,
+    },
     #[error("User {0} is not a current member")]
     NotAMember(String),
     #[error("Cannot revoke the last owner of a library")]
@@ -131,11 +139,6 @@ pub async fn create_invitation(
     library_id: &str,
     timestamp: &str,
 ) -> Result<CloudHomeJoinInfo, InviteError> {
-    // OAuth homes share the folder with the invitee's provider-account email
-    // (from the join-request); S3 ignores member_id, so the pubkey feeds it there.
-    let share_id = invitee_email.unwrap_or(invitee_ed25519_pubkey);
-    let join_info = cloud_home.grant_access(share_id).await?;
-
     // Convert Ed25519 -> X25519 for sealed box encryption.
     let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
 
@@ -156,6 +159,7 @@ pub async fn create_invitation(
     let mut entry = MembershipEntry {
         action: MembershipAction::Add,
         user_pubkey: invitee_ed25519_pubkey.to_string(),
+        provider_account_email: invitee_email.map(str::to_string),
         role,
         timestamp: timestamp.to_string(),
         author_pubkey: String::new(),
@@ -163,16 +167,55 @@ pub async fn create_invitation(
     };
     sign_membership_entry(&mut entry, owner_keypair);
 
-    // Validate against the local chain BEFORE any storage writes.
-    chain.add_entry(entry.clone())?;
+    // Validate against the local chain before any provider or storage mutation.
+    let mut validated_chain = chain.clone();
+    validated_chain.add_entry(entry.clone())?;
+
+    let grant = CloudAccessGrant {
+        member_pubkey: invitee_ed25519_pubkey.to_string(),
+        provider_account_email: invitee_email.map(str::to_string),
+    };
+    let revoke = CloudAccessRevoke {
+        member_pubkey: grant.member_pubkey.clone(),
+        provider_account_email: grant.provider_account_email.clone(),
+    };
+    let join_info = cloud_home.grant_access(grant).await?;
 
     // Upload wrapped key and membership entry.
-    storage
+    if let Err(original) = storage
         .put_wrapped_key(invitee_ed25519_pubkey, wrapped_key)
-        .await?;
+        .await
+    {
+        if let Err(rollback) = cloud_home.revoke_access(revoke).await {
+            return Err(InviteError::Rollback {
+                operation: "upload wrapped key",
+                original: original.to_string(),
+                rollback: rollback.to_string(),
+            });
+        }
+        return Err(original.into());
+    }
 
     let author_pubkey_hex = hex::encode(owner_keypair.public_key);
-    upload_membership_entry(storage, &entry, &author_pubkey_hex).await?;
+    if let Err(original) = upload_membership_entry(storage, &entry, &author_pubkey_hex).await {
+        let mut rollback_errors = Vec::new();
+        if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await {
+            rollback_errors.push(rollback.to_string());
+        }
+        if let Err(rollback) = cloud_home.revoke_access(revoke).await {
+            rollback_errors.push(rollback.to_string());
+        }
+        if !rollback_errors.is_empty() {
+            return Err(InviteError::Rollback {
+                operation: "upload membership entry",
+                original: original.to_string(),
+                rollback: rollback_errors.join("; "),
+            });
+        }
+        return Err(original);
+    }
+
+    *chain = validated_chain;
 
     Ok(join_info)
 }
@@ -265,12 +308,21 @@ pub async fn revoke_member(
     }
 
     // Revoke access on the cloud home (no-op for S3, removes share for consumer clouds).
-    cloud_home.revoke_access(revokee_pubkey).await?;
+    let provider_account_email = chain
+        .current_member_provider_email(revokee_pubkey)
+        .map(str::to_string);
+    cloud_home
+        .revoke_access(CloudAccessRevoke {
+            member_pubkey: revokee_pubkey.to_string(),
+            provider_account_email,
+        })
+        .await?;
 
     // Create and sign a Remove entry.
     let mut entry = MembershipEntry {
         action: MembershipAction::Remove,
         user_pubkey: revokee_pubkey.to_string(),
+        provider_account_email: None,
         role: MemberRole::Member, // role field is not meaningful for Remove, but required
         timestamp: timestamp.to_string(),
         author_pubkey: String::new(),
@@ -362,7 +414,7 @@ mod tests {
         }
         async fn grant_access(
             &self,
-            _member_id: &str,
+            _grant: CloudAccessGrant,
         ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
             Ok(CloudHomeJoinInfo::S3 {
                 bucket: "test-bucket".to_string(),
@@ -373,25 +425,29 @@ mod tests {
                 key_prefix: None,
             })
         }
-        async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+        async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
             Ok(())
         }
     }
 
-    /// CloudHome mock that records the `member_id` passed to `grant_access`, so a
-    /// test can assert which identity the folder share was keyed on.
+    /// CloudHome mock that records grant/revoke identities.
     struct RecordingCloudHome {
-        granted: std::sync::Mutex<Vec<String>>,
+        grants: std::sync::Mutex<Vec<CloudAccessGrant>>,
+        revokes: std::sync::Mutex<Vec<CloudAccessRevoke>>,
     }
 
     impl RecordingCloudHome {
         fn new() -> Self {
             Self {
-                granted: std::sync::Mutex::new(Vec::new()),
+                grants: std::sync::Mutex::new(Vec::new()),
+                revokes: std::sync::Mutex::new(Vec::new()),
             }
         }
-        fn last_granted(&self) -> Option<String> {
-            self.granted.lock().unwrap().last().cloned()
+        fn last_grant(&self) -> Option<CloudAccessGrant> {
+            self.grants.lock().unwrap().last().cloned()
+        }
+        fn last_revoke(&self) -> Option<CloudAccessRevoke> {
+            self.revokes.lock().unwrap().last().cloned()
         }
     }
 
@@ -431,8 +487,11 @@ mod tests {
         async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
             Ok(false)
         }
-        async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-            self.granted.lock().unwrap().push(member_id.to_string());
+        async fn grant_access(
+            &self,
+            grant: CloudAccessGrant,
+        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+            self.grants.lock().unwrap().push(grant);
             Ok(CloudHomeJoinInfo::S3 {
                 bucket: "test-bucket".to_string(),
                 region: "us-east-1".to_string(),
@@ -442,7 +501,8 @@ mod tests {
                 key_prefix: None,
             })
         }
-        async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+        async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+            self.revokes.lock().unwrap().push(revoke);
             Ok(())
         }
     }
@@ -503,17 +563,15 @@ mod tests {
         assert_eq!(unwrapped, encryption_key);
     }
 
-    /// The folder share is keyed on the invitee's email when the join-request
-    /// carried one (OAuth homes), and falls back to the pubkey when it did not
-    /// (S3, which ignores `member_id` anyway). This is what makes OAuth sharing
-    /// reach the right account.
+    /// The grant identity carries both the cryptographic member pubkey and the
+    /// provider account email from the join request.
     #[tokio::test]
-    async fn grant_access_uses_email_when_present_else_pubkey() {
+    async fn grant_access_receives_pubkey_and_provider_email() {
         let owner = gen_keypair();
         let invitee = gen_keypair();
+        let invitee_pubkey = pubkey_hex(&invitee);
         let encryption_key: [u8; 32] = [5u8; 32];
 
-        // With an email: the share is keyed on it.
         let cloud = RecordingCloudHome::new();
         let storage = MockSyncStorage::new();
         let mut chain = bootstrap_chain(&owner);
@@ -522,7 +580,7 @@ mod tests {
             &cloud,
             &mut chain,
             &owner,
-            &pubkey_hex(&invitee),
+            &invitee_pubkey,
             Some("a@b.com"),
             MemberRole::Member,
             &encryption_key,
@@ -531,9 +589,22 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(cloud.last_granted().as_deref(), Some("a@b.com"));
+        assert_eq!(
+            cloud.last_grant(),
+            Some(CloudAccessGrant {
+                member_pubkey: invitee_pubkey,
+                provider_account_email: Some("a@b.com".to_string()),
+            })
+        );
+    }
 
-        // Without one: the share falls through to the pubkey.
+    #[tokio::test]
+    async fn grant_access_allows_absent_provider_email_for_s3_like_homes() {
+        let owner = gen_keypair();
+        let invitee = gen_keypair();
+        let invitee_pubkey = pubkey_hex(&invitee);
+        let encryption_key: [u8; 32] = [5u8; 32];
+
         let cloud = RecordingCloudHome::new();
         let storage = MockSyncStorage::new();
         let mut chain = bootstrap_chain(&owner);
@@ -542,7 +613,7 @@ mod tests {
             &cloud,
             &mut chain,
             &owner,
-            &pubkey_hex(&invitee),
+            &invitee_pubkey,
             None,
             MemberRole::Member,
             &encryption_key,
@@ -552,8 +623,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            cloud.last_granted().as_deref(),
-            Some(pubkey_hex(&invitee).as_str())
+            cloud.last_grant(),
+            Some(CloudAccessGrant {
+                member_pubkey: invitee_pubkey,
+                provider_account_email: None,
+            })
         );
     }
 
@@ -1030,6 +1104,68 @@ mod tests {
         // member1 cannot get a wrapped key.
         let result = storage.get_wrapped_key(&pubkey_hex(&member1)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn revoke_member_uses_latest_active_provider_email() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let member_pubkey = pubkey_hex(&member);
+        let old_key: [u8; 32] = [42u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &member_pubkey,
+            Some("first@example.com"),
+            MemberRole::Member,
+            &old_key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .unwrap();
+
+        create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &member_pubkey,
+            Some("second@example.com"),
+            MemberRole::Member,
+            &old_key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await
+        .unwrap();
+
+        revoke_member(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &member_pubkey,
+            LIB_ID,
+            "0000000004000-0000-dev1",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            cloud.last_revoke(),
+            Some(CloudAccessRevoke {
+                member_pubkey,
+                provider_account_email: Some("second@example.com".to_string()),
+            })
+        );
     }
 
     #[tokio::test]

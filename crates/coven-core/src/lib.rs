@@ -164,7 +164,8 @@ pub use id_provider::{IdProvider, IdRef, UuidProvider};
 
 // Managed local blob store: the host constructs it, coven never does (native-only).
 pub use storage::cloud::{
-    BlobBody, BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink, UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, PartSink, UploadProgress,
 };
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through

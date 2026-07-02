@@ -53,6 +53,8 @@ pub struct MemberInfo {
 pub struct MembershipEntry {
     pub action: MembershipAction,
     pub user_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account_email: Option<String>,
     pub role: MemberRole,
     pub timestamp: String,
     pub author_pubkey: String,
@@ -118,6 +120,8 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
     struct Signed<'a> {
         action: &'a MembershipAction,
         author_pubkey: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_account_email: Option<&'a str>,
         role: &'a MemberRole,
         timestamp: &'a str,
         user_pubkey: &'a str,
@@ -125,6 +129,7 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
     let signed = Signed {
         action: &entry.action,
         author_pubkey: &entry.author_pubkey,
+        provider_account_email: entry.provider_account_email.as_deref(),
         role: &entry.role,
         timestamp: &entry.timestamp,
         user_pubkey: &entry.user_pubkey,
@@ -141,6 +146,7 @@ pub fn founder_entry(owner: &UserKeypair, timestamp: &str) -> MembershipEntry {
     let mut entry = MembershipEntry {
         action: MembershipAction::Add,
         user_pubkey: pk_hex.clone(),
+        provider_account_email: None,
         role: MemberRole::Owner,
         timestamp: timestamp.to_string(),
         author_pubkey: pk_hex,
@@ -308,6 +314,24 @@ impl MembershipChain {
         }
 
         active
+    }
+
+    pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
+        let mut email = None;
+        for entry in &self.entries {
+            if entry.user_pubkey != pubkey {
+                continue;
+            }
+            match entry.action {
+                MembershipAction::Add => {
+                    email = entry.provider_account_email.as_deref();
+                }
+                MembershipAction::Remove => {
+                    email = None;
+                }
+            }
+        }
+        email
     }
 
     /// Validate and append an entry to the chain.
@@ -850,6 +874,7 @@ mod tests {
         let mut entry = MembershipEntry {
             action: MembershipAction::Add,
             user_pubkey: pk_hex.clone(),
+            provider_account_email: None,
             role: MemberRole::Member,
             timestamp: "0000000001000-0000-dev1".to_string(),
             author_pubkey: pk_hex,
@@ -956,6 +981,7 @@ mod tests {
         let entry = MembershipEntry {
             action: MembershipAction::Add,
             user_pubkey: pubkey_hex(&kp),
+            provider_account_email: None,
             role: MemberRole::Owner,
             timestamp: "0000000001000-0000-dev1".to_string(),
             author_pubkey: pubkey_hex(&kp),
@@ -980,6 +1006,7 @@ mod tests {
         let entry = MembershipEntry {
             action: MembershipAction::Add,
             user_pubkey: "bbbb".to_string(),
+            provider_account_email: None,
             role: MemberRole::Owner,
             timestamp: "0000000001000-0000-dev1".to_string(),
             author_pubkey: "aaaa".to_string(),
@@ -987,5 +1014,81 @@ mod tests {
         };
         let expected = r#"{"action":"Add","author_pubkey":"aaaa","role":"Owner","timestamp":"0000000001000-0000-dev1","user_pubkey":"bbbb"}"#;
         assert_eq!(canonical_bytes(&entry), expected.as_bytes());
+    }
+
+    #[test]
+    fn provider_email_is_signed_when_present() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let mut entry = make_entry(
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-dev1",
+        );
+        entry.provider_account_email = Some("member@example.com".to_string());
+        sign_membership_entry(&mut entry, &owner);
+
+        assert!(verify_membership_entry(&entry));
+        let bytes = canonical_bytes(&entry);
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.contains(r#""provider_account_email":"member@example.com""#));
+
+        entry.provider_account_email = Some("other@example.com".to_string());
+        assert!(!verify_membership_entry(&entry));
+    }
+
+    #[test]
+    fn current_member_provider_email_tracks_latest_active_add() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let member_pk = pubkey_hex(&member);
+
+        let mut chain = MembershipChain::new();
+        chain
+            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
+            .unwrap();
+
+        let mut first = make_entry(
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-dev1",
+        );
+        first.provider_account_email = Some("first@example.com".to_string());
+        sign_membership_entry(&mut first, &owner);
+        chain.add_entry(first).unwrap();
+        assert_eq!(
+            chain.current_member_provider_email(&member_pk),
+            Some("first@example.com")
+        );
+
+        let mut second = make_entry(
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000003000-0000-dev1",
+        );
+        second.provider_account_email = Some("second@example.com".to_string());
+        sign_membership_entry(&mut second, &owner);
+        chain.add_entry(second).unwrap();
+        assert_eq!(
+            chain.current_member_provider_email(&member_pk),
+            Some("second@example.com")
+        );
+
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Remove,
+                &member,
+                MemberRole::Member,
+                "0000000004000-0000-dev1",
+            ))
+            .unwrap();
+        assert_eq!(chain.current_member_provider_email(&member_pk), None);
     }
 }

@@ -14,7 +14,9 @@ use tracing::warn;
 use super::s3_common::{
     apply_prefix, is_not_found_code, list_strip_prefix, normalize_prefix, probe_error, s3_join_info,
 };
-use super::{range_header, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{
+    range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+};
 
 /// A coven-owned tokio runtime whose worker threads have a large stack, used to
 /// run every aws-sdk call.
@@ -613,7 +615,10 @@ impl CloudHome for S3CloudHome {
         .await
     }
 
-    async fn grant_access(&self, _member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        _grant: CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
         Ok(s3_join_info(
             self.bucket.clone(),
             self.region.clone(),
@@ -624,7 +629,7 @@ impl CloudHome for S3CloudHome {
         ))
     }
 
-    async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
         // S3 access is managed externally (IAM/pre-shared credentials).
         Ok(())
     }

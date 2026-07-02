@@ -114,7 +114,7 @@ async fn build_cloud_home(
         }
 
         RestoreSource::CloudKit { ops } => {
-            let home = cloudkit::CloudKitCloudHome::new(ops);
+            let home = cloudkit::CloudKitCloudHome::new_private(ops);
             let info = CloudHomeJoinInfo::CloudKit;
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }

@@ -14,7 +14,9 @@ use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
 use super::oauth_session::OAuthSession;
-use super::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{
+    BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
 use crate::oauth::{OAuthConfig, OAuthTokens};
@@ -488,12 +490,16 @@ impl CloudHome for DropboxCloudHome {
         exists_from_response(resp, &format!("exists {key}"), self.not_found()).await
     }
 
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        grant: CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        let email = grant.require_provider_email("Dropbox")?;
         let shared_folder_id = self.get_or_create_shared_folder_id().await?;
         let add_body = serde_json::json!({
             "shared_folder_id": shared_folder_id,
             "members": [{
-                "member": { ".tag": "email", "email": member_id },
+                "member": { ".tag": "email", "email": email },
                 "access_level": { ".tag": "editor" },
             }],
             "quiet": false,
@@ -507,20 +513,16 @@ impl CloudHome for DropboxCloudHome {
                     .json(&add_body)
             })
             .await?;
-        ensure_ok(
-            resp,
-            &format!("grant access to {member_id}"),
-            self.not_found(),
-        )
-        .await?;
+        ensure_ok(resp, &format!("grant access to {email}"), self.not_found()).await?;
         Ok(CloudHomeJoinInfo::Dropbox { shared_folder_id })
     }
 
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+        let email = revoke.require_provider_email("Dropbox")?;
         let shared_folder_id = self.get_or_create_shared_folder_id().await?;
         let remove_body = serde_json::json!({
             "shared_folder_id": shared_folder_id,
-            "member": { ".tag": "email", "email": member_id },
+            "member": { ".tag": "email", "email": email },
             "leave_a_copy": false,
         });
         let resp = self
@@ -540,7 +542,7 @@ impl CloudHome for DropboxCloudHome {
                 return Ok(());
             }
             return Err(CloudHomeError::Storage(format!(
-                "revoke access for {member_id} (HTTP {status}): {body}"
+                "revoke access for {email} (HTTP {status}): {body}"
             )));
         }
         Ok(())

@@ -15,7 +15,10 @@ use super::oauth_rest::{
 };
 use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
-use super::{sharing, BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{
+    sharing, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo,
+};
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
 use crate::oauth::{OAuthConfig, OAuthTokens};
@@ -432,12 +435,16 @@ impl CloudHome for GoogleDriveCloudHome {
         Ok(self.find_file_id(&encode_key(key)).await?.is_some())
     }
 
-    async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+    async fn grant_access(
+        &self,
+        grant: CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        let email = grant.require_provider_email("Google Drive")?;
         // Share the folder with the member's Google account.
         let permission = serde_json::json!({
             "type": "user",
             "role": "writer",
-            "emailAddress": member_id,
+            "emailAddress": email,
         });
         let resp = self
             .session
@@ -451,18 +458,14 @@ impl CloudHome for GoogleDriveCloudHome {
                     .json(&permission)
             })
             .await?;
-        ensure_ok(
-            resp,
-            &format!("grant access to {member_id}"),
-            NotFound::Status,
-        )
-        .await?;
+        ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
         Ok(CloudHomeJoinInfo::GoogleDrive {
             folder_id: self.folder_id.clone(),
         })
     }
 
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError> {
+    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+        let email = revoke.require_provider_email("Google Drive")?;
         let list_url = format!(
             "{}/files/{}/permissions?fields=permissions(id,emailAddress)",
             DRIVE_API, self.folder_id
@@ -470,7 +473,7 @@ impl CloudHome for GoogleDriveCloudHome {
         let folder_id = self.folder_id.clone();
         sharing::revoke_by_email(
             &self.session,
-            member_id,
+            email,
             &list_url,
             "permissions",
             |p| p["emailAddress"].as_str().map(String::from),

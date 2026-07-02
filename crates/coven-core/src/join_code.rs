@@ -230,6 +230,33 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_cloudkit_share() {
+        let code = InviteCode {
+            library_id: "lib-ck-share".into(),
+            library_name: "CloudKit Library".into(),
+            join_info: CloudHomeJoinInfo::CloudKitShare {
+                share_url: "https://www.icloud.com/share/example".into(),
+                owner_name: "_owner".into(),
+                zone_name: "bae-library".into(),
+            },
+            owner_pubkey: "aabbccdd".into(),
+        };
+        let encoded = encode(&code);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded.library_id, "lib-ck-share");
+        assert!(matches!(
+            decoded.join_info,
+            CloudHomeJoinInfo::CloudKitShare {
+                share_url,
+                owner_name,
+                zone_name
+            } if share_url == "https://www.icloud.com/share/example"
+                && owner_name == "_owner"
+                && zone_name == "bae-library"
+        ));
+    }
+
+    #[test]
     fn decode_trims_whitespace() {
         let code = InviteCode {
             library_id: "lib-ws".into(),
