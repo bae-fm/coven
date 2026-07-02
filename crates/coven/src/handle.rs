@@ -638,12 +638,15 @@ impl CovenHandle {
     pub async fn invite_member(
         &self,
         public_key_hex: &str,
+        invitee_email: Option<&str>,
         role: MemberRole,
     ) -> Result<String, String> {
         let manager = self
             .sync_manager()
             .ok_or_else(|| "sync is not configured".to_string())?;
-        manager.invite_member(public_key_hex, role).await
+        manager
+            .invite_member(public_key_hex, invitee_email, role)
+            .await
     }
 
     pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, String> {

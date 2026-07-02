@@ -125,13 +125,16 @@ pub async fn create_invitation(
     chain: &mut MembershipChain,
     owner_keypair: &UserKeypair,
     invitee_ed25519_pubkey: &str,
+    invitee_email: Option<&str>,
     role: MemberRole,
     encryption_key: &[u8; 32],
     library_id: &str,
     timestamp: &str,
 ) -> Result<CloudHomeJoinInfo, InviteError> {
-    // Grant access on the cloud home (no-op for S3, shares folder for consumer clouds).
-    let join_info = cloud_home.grant_access(invitee_ed25519_pubkey).await?;
+    // OAuth homes share the folder with the invitee's provider-account email
+    // (from the join-request); S3 ignores member_id, so the pubkey feeds it there.
+    let share_id = invitee_email.unwrap_or(invitee_ed25519_pubkey);
+    let join_info = cloud_home.grant_access(share_id).await?;
 
     // Convert Ed25519 -> X25519 for sealed box encryption.
     let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
@@ -375,6 +378,75 @@ mod tests {
         }
     }
 
+    /// CloudHome mock that records the `member_id` passed to `grant_access`, so a
+    /// test can assert which identity the folder share was keyed on.
+    struct RecordingCloudHome {
+        granted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingCloudHome {
+        fn new() -> Self {
+            Self {
+                granted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn last_granted(&self) -> Option<String> {
+            self.granted.lock().unwrap().last().cloned()
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl CloudHome for RecordingCloudHome {
+        async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
+            Ok(())
+        }
+        async fn open_multipart<'a>(
+            &'a self,
+            _key: &str,
+            _total_len: u64,
+        ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
+            Err(CloudHomeError::Storage("mock has no multipart".to_string()))
+        }
+        fn multipart_threshold(&self) -> u64 {
+            u64::MAX
+        }
+        async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            Err(CloudHomeError::NotFound("mock".to_string()))
+        }
+        async fn read_range(
+            &self,
+            _key: &str,
+            _start: u64,
+            _end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            Err(CloudHomeError::NotFound("mock".to_string()))
+        }
+        async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+            Ok(vec![])
+        }
+        async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
+            Ok(())
+        }
+        async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
+            Ok(false)
+        }
+        async fn grant_access(&self, member_id: &str) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+            self.granted.lock().unwrap().push(member_id.to_string());
+            Ok(CloudHomeJoinInfo::S3 {
+                bucket: "test-bucket".to_string(),
+                region: "us-east-1".to_string(),
+                endpoint: None,
+                access_key: "test-access-key".to_string(),
+                secret_key: "test-secret-key".to_string(),
+                key_prefix: None,
+            })
+        }
+        async fn revoke_access(&self, _member_id: &str) -> Result<(), CloudHomeError> {
+            Ok(())
+        }
+    }
+
     fn gen_keypair() -> UserKeypair {
         UserKeypair::generate()
     }
@@ -399,6 +471,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&invitee),
+            None,
             MemberRole::Member,
             &encryption_key,
             LIB_ID,
@@ -428,6 +501,60 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(unwrapped, encryption_key);
+    }
+
+    /// The folder share is keyed on the invitee's email when the join-request
+    /// carried one (OAuth homes), and falls back to the pubkey when it did not
+    /// (S3, which ignores `member_id` anyway). This is what makes OAuth sharing
+    /// reach the right account.
+    #[tokio::test]
+    async fn grant_access_uses_email_when_present_else_pubkey() {
+        let owner = gen_keypair();
+        let invitee = gen_keypair();
+        let encryption_key: [u8; 32] = [5u8; 32];
+
+        // With an email: the share is keyed on it.
+        let cloud = RecordingCloudHome::new();
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+        create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&invitee),
+            Some("a@b.com"),
+            MemberRole::Member,
+            &encryption_key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(cloud.last_granted().as_deref(), Some("a@b.com"));
+
+        // Without one: the share falls through to the pubkey.
+        let cloud = RecordingCloudHome::new();
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+        create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&invitee),
+            None,
+            MemberRole::Member,
+            &encryption_key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cloud.last_granted().as_deref(),
+            Some(pubkey_hex(&invitee).as_str())
+        );
     }
 
     /// A joiner adopts only a library key the owner it pins signed; a key signed
@@ -556,6 +683,7 @@ mod tests {
             &mut chain,
             &second_owner,
             &pubkey_hex(&invitee),
+            None,
             MemberRole::Member,
             &encryption_key,
             LIB_ID,
@@ -610,6 +738,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&invitee),
+            None,
             MemberRole::Member,
             &encryption_key,
             LIB_ID,
@@ -643,6 +772,7 @@ mod tests {
             &mut chain,
             &owner,
             "not-valid-hex",
+            None,
             MemberRole::Member,
             &encryption_key,
             LIB_ID,
@@ -670,6 +800,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member),
+            None,
             MemberRole::Member,
             &encryption_key,
             LIB_ID,
@@ -685,6 +816,7 @@ mod tests {
             &mut chain,
             &member,
             &pubkey_hex(&invitee),
+            None,
             MemberRole::Member,
             &encryption_key,
             LIB_ID,
@@ -710,6 +842,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&invitee),
+            None,
             MemberRole::Member,
             &encryption_key,
             LIB_ID,
@@ -750,6 +883,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member),
+            None,
             MemberRole::Member,
             &old_key,
             LIB_ID,
@@ -835,6 +969,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member1),
+            None,
             MemberRole::Member,
             &old_key,
             LIB_ID,
@@ -849,6 +984,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member2),
+            None,
             MemberRole::Member,
             &old_key,
             LIB_ID,
@@ -933,6 +1069,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member),
+            None,
             MemberRole::Member,
             &[42u8; 32],
             LIB_ID,
@@ -972,6 +1109,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member1),
+            None,
             MemberRole::Member,
             &[42u8; 32],
             LIB_ID,
@@ -986,6 +1124,7 @@ mod tests {
             &mut chain,
             &owner,
             &pubkey_hex(&member2),
+            None,
             MemberRole::Member,
             &[42u8; 32],
             LIB_ID,

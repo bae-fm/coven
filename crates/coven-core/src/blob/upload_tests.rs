@@ -648,6 +648,7 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         &mut chain,
         &owner,
         &pubkey_hex(&joiner),
+        None,
         MemberRole::Member,
         &master_key,
         "lib-outbox",

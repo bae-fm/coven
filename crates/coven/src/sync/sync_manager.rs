@@ -492,6 +492,7 @@ impl SyncManager {
     pub async fn invite_member(
         &self,
         public_key_hex: &str,
+        invitee_email: Option<&str>,
         role: MemberRole,
     ) -> Result<String, String> {
         let sync_loop = self
@@ -530,6 +531,7 @@ impl SyncManager {
             sync_loop.user_keypair(),
             sync_loop.hlc(),
             public_key_hex,
+            invitee_email,
             role,
             &key_bytes,
             &library_id,
