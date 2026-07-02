@@ -33,12 +33,8 @@ pub trait CloudKitOps: Send + Sync {
     ) -> Result<Vec<String>, CloudHomeError>;
     fn delete_record(&self, scope: &CloudKitScope, key: &str) -> Result<(), CloudHomeError>;
     fn record_exists(&self, scope: &CloudKitScope, key: &str) -> Result<bool, CloudHomeError>;
-    fn grant_share(
-        &self,
-        member_pubkey: &str,
-        email: &str,
-    ) -> Result<CloudKitShare, CloudHomeError>;
-    fn revoke_share(&self, member_pubkey: &str, email: &str) -> Result<(), CloudHomeError>;
+    fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError>;
+    fn revoke_share(&self, member_pubkey: &str) -> Result<(), CloudHomeError>;
     fn accept_share(&self, share_url: &str) -> Result<CloudKitShare, CloudHomeError>;
 }
 
@@ -358,10 +354,11 @@ impl CloudHome for CloudKitCloudHome {
         &self,
         grant: CloudAccessGrant,
     ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        let email = grant.require_provider_email("CloudKit")?.to_string();
+        // provider_account_email is ignored for CloudKit: shares bind the joiner's
+        // identity at URL-accept time, so no invitee email is required.
         let ops = self.ops.clone();
         let member_pubkey = grant.member_pubkey;
-        let share = blocking(move || ops.grant_share(&member_pubkey, &email)).await?;
+        let share = blocking(move || ops.grant_share(&member_pubkey)).await?;
         Ok(CloudHomeJoinInfo::CloudKitShare {
             share_url: share.share_url,
             owner_name: share.owner_name,
@@ -370,10 +367,9 @@ impl CloudHome for CloudKitCloudHome {
     }
 
     async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
-        let email = revoke.require_provider_email("CloudKit")?.to_string();
         let ops = self.ops.clone();
         let member_pubkey = revoke.member_pubkey;
-        blocking(move || ops.revoke_share(&member_pubkey, &email)).await
+        blocking(move || ops.revoke_share(&member_pubkey)).await
     }
 }
 
@@ -472,19 +468,15 @@ mod tests {
                 .contains_key(&(scope.clone(), key.to_string())))
         }
 
-        fn grant_share(
-            &self,
-            member_pubkey: &str,
-            email: &str,
-        ) -> Result<CloudKitShare, CloudHomeError> {
+        fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {
             Ok(CloudKitShare {
-                share_url: format!("https://share.example/{member_pubkey}/{email}"),
+                share_url: format!("https://share.example/{member_pubkey}"),
                 owner_name: "owner-name".to_string(),
                 zone_name: "bae-library".to_string(),
             })
         }
 
-        fn revoke_share(&self, _member_pubkey: &str, _email: &str) -> Result<(), CloudHomeError> {
+        fn revoke_share(&self, _member_pubkey: &str) -> Result<(), CloudHomeError> {
             Ok(())
         }
 
@@ -758,36 +750,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grant_access_returns_share_join_info() {
+    async fn grant_access_returns_share_join_info_without_email() {
         let ch = make_cloud_home();
+        // CloudKit shares bind identity at URL-accept time, so no invitee email
+        // is supplied and the grant still succeeds.
         let join_info = ch
             .grant_access(CloudAccessGrant {
                 member_pubkey: "member-pubkey".to_string(),
-                provider_account_email: Some("member@example.com".to_string()),
+                provider_account_email: None,
             })
             .await
             .unwrap();
         assert_eq!(
             join_info,
             CloudHomeJoinInfo::CloudKitShare {
-                share_url: "https://share.example/member-pubkey/member@example.com".to_string(),
+                share_url: "https://share.example/member-pubkey".to_string(),
                 owner_name: "owner-name".to_string(),
                 zone_name: "bae-library".to_string(),
             }
         );
-    }
-
-    #[tokio::test]
-    async fn grant_access_requires_provider_email() {
-        let ch = make_cloud_home();
-        let err = ch
-            .grant_access(CloudAccessGrant {
-                member_pubkey: "member-pubkey".to_string(),
-                provider_account_email: None,
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, CloudHomeError::Storage(_)));
     }
 
     #[test]
