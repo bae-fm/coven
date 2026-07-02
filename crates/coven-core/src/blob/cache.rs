@@ -28,14 +28,15 @@
 //! mid-move.
 //!
 //! Both reads **dispatch on coven's own authoritative state** — they never probe
-//! every store and take the first hit. The discriminator is the **gate** plus the
-//! blob's intrinsic **provenance**, not "is there a local file here." Coven resolves
-//! the blob's backing row (found in the table its `namespace` declares) up to its
-//! gated root and reads that root's gate (see
+//! every store and take the first hit. The discriminator is the **locality root**
+//! plus the blob's intrinsic **provenance**, not "is there a local file here." Coven
+//! resolves the blob's backing row (found in the table its `namespace` declares) up
+//! to its gated root or remote root (see
 //! [`Gates::root_kept_of`](crate::sync::gate::Gates::root_kept_of)), then dispatches:
 //!
-//! - **Remote** (gate on) ⇒ the bytes live in the cloud fronted by the device cache,
-//!   for both provenances. The one legitimate probe runs: per-device cache
+//! - **Remote** (gate on, or remote root) ⇒ the bytes live in the cloud fronted by
+//!   the device cache, for both provenances. The one legitimate probe runs:
+//!   per-device cache
 //!   materialization — which no shared state records — checks `pinned/` then `cache/`
 //!   and serves a hit, else fetches from the cloud.
 //! - **Local** (gate off) ⇒ the bytes are on-device; provenance picks the copy. A
@@ -133,18 +134,18 @@ pub enum BlobCacheError {
         id: String,
         path: std::path::PathBuf,
     },
-    /// A **Local** blob (its gated root's gate is off) has no copy in the local store.
-    /// A Local blob has no cloud copy, so there is nothing to fall back to: the state
-    /// is broken, not a cache miss. Surfaced loud rather than silently fetching from
-    /// the cloud — a make_local rollback leftover, an interrupted materialize, or a
-    /// lost local file would otherwise be papered over. The host re-materializes or
-    /// repairs.
+    /// A **Local** blob (its gated locality root's gate is off) has no copy in the
+    /// local store. A Local blob has no cloud copy, so there is nothing to fall back
+    /// to: the state is broken, not a cache miss. Surfaced loud rather than silently
+    /// fetching from the cloud — a make_local rollback leftover, an interrupted
+    /// materialize, or a lost local file would otherwise be papered over. The host
+    /// re-materializes or repairs.
     NoLocalCopy { namespace: String, id: String },
     /// A blob could not be resolved to a locality: its namespace declares no
     /// blob-bearing table, or that table has no row with the id, or the row reaches no
-    /// gated root — so the gate that owns Local-vs-Remote can't be read. In a
-    /// consistent library every readable blob has a gated row, so this is a real fault
-    /// — surfaced rather than guessing a source by probing.
+    /// gated root or remote root — so the source of Local-vs-Remote truth can't be
+    /// read. In a consistent library every readable blob has a locality root, so this
+    /// is a real fault — surfaced rather than guessing a source by probing.
     LocalityUnresolved { id: String },
     /// The gate resolved a blob to **Local + user-provided**, but no external-ref row
     /// is registered for it. A user-provided Local blob's bytes live only at the user's
@@ -186,7 +187,7 @@ impl std::fmt::Display for BlobCacheError {
             ),
             BlobCacheError::LocalityUnresolved { id } => write!(
                 f,
-                "cannot resolve locality for blob {id}: no gated row determines where it lives"
+                "cannot resolve locality for blob {id}: no locality root determines where it lives"
             ),
             BlobCacheError::NoExternalRef { id } => write!(
                 f,
@@ -378,17 +379,18 @@ pub async fn is_pinned(
 }
 
 /// Read a blob's whole contents, dispatching on coven's authoritative state — the
-/// gate (locality) on the blob's gated root, then its intrinsic provenance — rather
-/// than probing every store and taking the first hit.
+/// blob's locality root, then its intrinsic provenance — rather than probing every
+/// store and taking the first hit.
 ///
-/// [`resolve_source`] reads the gate first: **Remote** (gate on) ⇒ the bytes live in
-/// the cloud fronted by the device cache, so the one legitimate probe checks
-/// `pinned/<id>` then `cache/<id>` for a per-device cache copy and serves a hit; a
-/// miss resolves the blob's scope to its encryption key, downloads + decrypts it via
-/// [`SyncStorage::get_blob`], writes it atomically to `cache/<id>` (evictable — a
-/// fetch-on-read populates the evictable cache, never the kept folder), and returns
-/// the bytes it just fetched (the post-populate [`evict_to_budget`] sweep is
-/// best-effort: a successful fetch returns its bytes even if eviction then fails).
+/// [`resolve_source`] reads the locality root first: **Remote** (gate on, or remote
+/// root) ⇒ the bytes live in the cloud fronted by the device cache, so the one
+/// legitimate probe checks `pinned/<id>` then `cache/<id>` for a per-device cache
+/// copy and serves a hit; a miss resolves the blob's scope to its encryption key,
+/// downloads + decrypts it via [`SyncStorage::get_blob`], writes it atomically to
+/// `cache/<id>` (evictable — a fetch-on-read populates the evictable cache, never
+/// the kept folder), and returns the bytes it just fetched (the post-populate
+/// [`evict_to_budget`] sweep is best-effort: a successful fetch returns its bytes
+/// even if eviction then fails).
 ///
 /// **Local** (gate off) ⇒ the bytes are on-device, and provenance picks which copy:
 /// a **user-provided** blob is the user's own external file (`local_blob_refs` row),
@@ -861,14 +863,14 @@ pub async fn evict_to_budget(
 }
 
 /// The single store a blob's bytes live in, resolved from coven's authoritative
-/// state — the gate (locality) on the blob's gated root, then the blob's intrinsic
-/// provenance — the [`read_blob`] / [`open_blob_stream`] dispatch key. Neither
-/// component is stored on the [`BlobRef`]: locality is mutable shared state (a
-/// make_remote/make_local flips it), and provenance, though intrinsic, is read from
-/// the row's declaration, not trusted off the address.
+/// state — the blob's locality root, then the blob's intrinsic provenance — the
+/// [`read_blob`] / [`open_blob_stream`] dispatch key. Neither component is stored on
+/// the [`BlobRef`]: gated locality is mutable shared state (a make_remote/make_local
+/// flips it), remote-root locality is declared by the table, and provenance, though
+/// intrinsic, is read from the row's declaration, not trusted off the address.
 enum BlobSource {
-    /// Remote (gate on): the cloud, fronted by the device's evictable cache (`pinned/`
-    /// or `cache/`, else fetched) — for both provenances.
+    /// Remote (gate on, or remote root): the cloud, fronted by the device's evictable
+    /// cache (`pinned/` or `cache/`, else fetched) — for both provenances.
     Cache,
     /// Local (gate off) + user-provided: the user's own external file
     /// (`local_blob_refs`).
@@ -879,16 +881,16 @@ enum BlobSource {
 }
 
 /// Resolve the single store a blob's bytes live in from coven's own authoritative
-/// state — never a probe. Reads the **gate** first: the carrying row is found in the
+/// state — never a probe. Reads the **locality root** first: the carrying row is found in the
 /// table the blob's `namespace` declares ([`BlobDecls::row_for_blob_in_namespace`] —
 /// the namespace is the blob's address, so an id colliding across namespaces still
-/// reads the right table), then walked up to its gated root's gate truth
+/// reads the right table), then walked up to its gated root or remote root
 /// ([`Gates::root_kept_of`]) — the same row→root→gate resolution the make_remote drain
 /// runs ([`crate::blob::upload`]), built once here from the declared synced set + the
-/// live schema. Gate on ⇒ [`BlobSource::Cache`] (Remote); gate off ⇒ provenance picks
-/// the Local copy: user-provided ⇒ [`BlobSource::External`], host-provided ⇒
-/// [`BlobSource::LocalStore`]. A blob whose namespace declares no table, or whose row
-/// reaches no gated root, has no determinable source —
+/// live schema. Gate on, or a remote root, ⇒ [`BlobSource::Cache`] (Remote); gate off
+/// ⇒ provenance picks the Local copy: user-provided ⇒ [`BlobSource::External`],
+/// host-provided ⇒ [`BlobSource::LocalStore`]. A blob whose namespace declares no
+/// table, or whose row reaches no locality root, has no determinable source —
 /// [`BlobCacheError::LocalityUnresolved`], surfaced rather than guessed.
 async fn resolve_source(db: &Database, blob: &BlobRef) -> Result<BlobSource, BlobCacheError> {
     let tables = db.synced_tables().to_vec();

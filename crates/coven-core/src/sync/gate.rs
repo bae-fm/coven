@@ -4,8 +4,11 @@
 //! [`SyncedTable::gated_by`](super::session::SyncedTable::gated_by)). A root row
 //! is shared — i.e. it syncs to peers — iff its gate column is true. The gate
 //! flows down *declared foreign keys*: a child row is shared iff the row at the
-//! top of its FK chain (its gated-ancestor root) is shared. Rows that are not
-//! gated and not FK-descendants of a gated root always sync.
+//! top of its FK chain (its gated-ancestor root) is shared. A
+//! [`SyncedTable::remote_root`](super::session::SyncedTable::remote_root) is a
+//! root whose rows and FK descendants always sync, and whose blobs are always
+//! Remote. Rows that are not gated and not FK-descendants of a gated or remote root
+//! always sync.
 //!
 //! The gate also flows **up** for declared *ancestors*
 //! ([`SyncedTable::gated_by_descendants`](super::session::SyncedTable::gated_by_descendants)).
@@ -266,6 +269,9 @@ impl Drop for DiffSession {
 enum TableGate {
     /// A gated root: the boolean gate lives at this column index.
     Root { gate_col: usize },
+    /// A root whose rows sync unconditionally and whose blob subtree is always
+    /// Remote.
+    RemoteRoot,
     /// A child whose gate is inherited from `parent` via the FK column at
     /// `fk_col` (column index in *this* table), holding the parent's id.
     Child { fk_col: usize, parent: String },
@@ -329,6 +335,11 @@ impl Gates {
             }
 
             let cols = column_names(db, t.name())?;
+
+            if t.is_remote_root() {
+                gate_map.insert(t.name().to_string(), TableGate::RemoteRoot);
+                continue;
+            }
 
             if let Some(gate) = t.gate_column() {
                 let idx = cols.iter().position(|c| c == gate).ok_or_else(|| {
@@ -401,7 +412,7 @@ impl Gates {
             .cloned()
             .collect();
         gate_map.retain(|name, tg| match tg {
-            TableGate::Root { .. } | TableGate::Parent { .. } => true,
+            TableGate::Root { .. } | TableGate::RemoteRoot | TableGate::Parent { .. } => true,
             TableGate::Child { .. } => reaches_gate.contains(name),
         });
 
@@ -519,6 +530,7 @@ impl Gates {
                 let gate = nth_column_name(db, tbl, *gate_col)?;
                 truthy_sql(&format!("{}.{}", quote_ident(tbl), quote_ident(&gate)))
             }
+            Some(TableGate::RemoteRoot) => "TRUE".to_string(),
             Some(TableGate::Child { fk_col, parent }) => {
                 let fk = nth_column_name(db, tbl, *fk_col)?;
                 let inner = self.keep_clause_guarded(db, parent, visiting)?;
@@ -578,11 +590,11 @@ impl Gates {
         Ok(present)
     }
 
-    /// The gate terminus the live row `(table, id)` resolves to by walking up its
-    /// declared-FK chain — the gated root (or inheriting ancestor) at the top — as
-    /// `(terminus_table, terminus_id)`, regardless of whether the gate currently
-    /// keeps it. `None` if the row is ungated/unrooted, or a row along the chain is
-    /// absent from the live db.
+    /// The locality terminus the live row `(table, id)` resolves to by walking up
+    /// its declared-FK chain — the gated root, remote root, or inheriting ancestor at
+    /// the top — as `(terminus_table, terminus_id)`, regardless of whether a gated
+    /// terminus currently keeps it. `None` if the row is ungated/unrooted, or a row
+    /// along the chain is absent from the live db.
     ///
     /// The blob-transition drain uses this to map a just-uploaded blob's row to the
     /// gated root a make_remote tracks: a `release_files` row resolves up to its
@@ -599,15 +611,16 @@ impl Gates {
         }
     }
 
-    /// Whether the blob-bearing row `(table, id)` resolves to a gated root whose gate
-    /// is currently **on** — the row's locality: `Some(true)` is Remote (shared, bytes
-    /// in the cloud), `Some(false)` is Local (bytes on-device). The same FK up-walk as
-    /// [`resolve_root_of`](Self::resolve_root_of), returning the gate truth that walk
-    /// already reads (a gated root's own column, or a `gated_by_descendants` ancestor's
-    /// keep), so the read path dispatches on this rather than probing every store.
-    /// `None` when the chain reaches no gate terminus (the row is ungated/unrooted) or
-    /// a row along it is missing — an unresolvable locality the read path fails loud on
-    /// rather than guessing a source.
+    /// Whether the blob-bearing row `(table, id)` resolves to Remote locality:
+    /// `Some(true)` is Remote (shared, bytes in the cloud), `Some(false)` is Local
+    /// (bytes on-device). The same FK up-walk as
+    /// [`resolve_root_of`](Self::resolve_root_of), returning the locality truth that
+    /// walk already reads (a gated root's own column, a remote root's declared Remote
+    /// state, or a `gated_by_descendants` ancestor's keep), so the read path dispatches
+    /// on this rather than probing every store. `None` when the chain reaches no
+    /// locality terminus (the row is ungated/unrooted) or a row along it is missing —
+    /// an unresolvable locality the read path fails loud on rather than guessing a
+    /// source.
     pub(crate) fn root_kept_of(
         &self,
         conn: &Connection,
@@ -737,7 +750,9 @@ fn chain_to_gate_depth(gate_map: &HashMap<String, TableGate>, name: &str) -> Opt
             return None; // cycle, defensive
         }
         match gate_map.get(cur) {
-            Some(TableGate::Root { .. }) | Some(TableGate::Parent { .. }) => return Some(depth),
+            Some(TableGate::Root { .. })
+            | Some(TableGate::RemoteRoot)
+            | Some(TableGate::Parent { .. }) => return Some(depth),
             Some(TableGate::Child { parent, .. }) => {
                 depth += 1;
                 cur = parent.as_str();
@@ -1374,6 +1389,7 @@ unsafe fn effective_gate(
                 }
             },
         },
+        Some(TableGate::RemoteRoot) => Ok(true),
         Some(TableGate::Child { fk_col, parent }) => {
             let parent_id = match row.fk_value(*fk_col) {
                 Some(id) => id.to_string(),
@@ -1571,6 +1587,7 @@ unsafe fn was_shared(
                 }
             }
         },
+        Some(TableGate::RemoteRoot) => true,
         Some(TableGate::Child { fk_col, parent }) => {
             let parent_id = match deleted.get(&key) {
                 Some(row) => row.fk_value(*fk_col).map(str::to_string),
@@ -1631,6 +1648,7 @@ unsafe fn gated_root_id(
                 Ok(None)
             }
         }
+        Some(TableGate::RemoteRoot) => Ok(row.pk().map(|pk| (row.table.clone(), pk.to_string()))),
         Some(TableGate::Child { fk_col, parent }) => {
             let parent_id = match row.fk_value(*fk_col) {
                 Some(id) => id.to_string(),
@@ -1666,19 +1684,19 @@ unsafe fn gated_root_id(
     }
 }
 
-/// The gate terminus a row resolves to: the gated table at the top of its FK
-/// chain (a gated root, or an ancestor when the chain inherits upward from one),
-/// its id, and whether the gate keeps it.
+/// The locality terminus a row resolves to: the table at the top of its FK chain
+/// (a gated root, a remote root, or an ancestor when the chain inherits upward from
+/// one), its id, and whether it gives the row Remote locality.
 struct ResolvedGate {
     terminus_table: String,
     terminus_id: String,
     kept: bool,
 }
 
-/// Walk the live-db FK chain from (`table`, `id`) up to its gate terminus,
-/// returning that terminus and its keep truth. `None` if the chain never reaches
-/// a terminus, or a row along it is missing from the live db (an anomaly the
-/// caller treats as not-shared).
+/// Walk the live-db FK chain from (`table`, `id`) up to its locality terminus,
+/// returning that terminus and its keep truth. `None` if the chain never reaches a
+/// terminus, or a row along it is missing from the live db (an anomaly the caller
+/// treats as not-shared).
 unsafe fn resolve_root(
     db: *mut ffi::sqlite3,
     gates: &Gates,
@@ -1700,6 +1718,17 @@ unsafe fn resolve_root(
                 }
             }
         }
+        Some(TableGate::RemoteRoot) => match query_column_text(db, table, "id", id)? {
+            Some(_) => Ok(Some(ResolvedGate {
+                terminus_table: table.to_string(),
+                terminus_id: id.to_string(),
+                kept: true,
+            })),
+            None => {
+                warn!("gate: remote root {table}.{id} absent from live db; cannot resolve gate");
+                Ok(None)
+            }
+        },
         Some(TableGate::Child { fk_col, parent }) => {
             let col = nth_column_name(db, table, *fk_col)?;
             match query_column_text(db, table, &col, id)? {
@@ -1983,11 +2012,11 @@ unsafe fn select_parent_fk(
     Ok(keyed.into_iter().next().map(|(_, candidate)| candidate))
 }
 
-/// Whether `parent`'s own gate eventually reaches a gated *root* downward, so a
+/// Whether `parent`'s own gate eventually reaches a locality root downward, so a
 /// child inheriting from it lands on a real root rather than on an ancestor or
-/// nothing. A gated root is the terminus; a plain table reaches one iff its own
-/// selected parent FK does; an ancestor is NOT a downward root path (its keep is
-/// the separate upward relation). Cycle-guarded by `visiting`.
+/// nothing. A gated root or remote root is the terminus; a plain table reaches one
+/// iff its own selected parent FK does; an ancestor is NOT a downward root path (its
+/// keep is the separate upward relation). Cycle-guarded by `visiting`.
 fn parent_reaches_root(
     db: *mut ffi::sqlite3,
     tables: &[SyncedTable],
@@ -2000,7 +2029,7 @@ fn parent_reaches_root(
     }
     let decl = tables.iter().find(|t| t.name() == parent);
     let reaches = match decl {
-        Some(t) if t.gate_column().is_some() => true,
+        Some(t) if t.gate_column().is_some() || t.is_remote_root() => true,
         // An ancestor is not a downward root path.
         Some(t) if t.is_gated_by_descendants() => false,
         // A plain (or unknown) parent reaches a root iff its own chain does.
@@ -2340,6 +2369,23 @@ mod tests {
         );
     }
 
+    fn create_remote_root_schema(c: &Connection) {
+        exec(
+            c,
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                _updated_at TEXT NOT NULL
+            );
+            CREATE TABLE note_photos (
+                id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
+            );",
+        );
+    }
+
     fn has_row(changes: &[crate::changeset::RowChange], table: &str, pk: &str) -> bool {
         changes
             .iter()
@@ -2463,6 +2509,62 @@ mod tests {
         assert!(
             has_row(&changes, "settings", "s1"),
             "ungated table always passes through"
+        );
+    }
+
+    #[test]
+    fn remote_root_table_passes_rows_without_gate_column() {
+        let c = conn();
+        create_remote_root_schema(&c);
+        let tables = vec![SyncedTable::new("notes").remote_root()];
+        let out = capture_and_gate(
+            &c,
+            &tables,
+            &["INSERT INTO notes (id, title, _updated_at) \
+              VALUES ('n1', 'Remote Root', '0000000001000-0000-dev1')"],
+        );
+        let changes = walk(&out).expect("walk");
+        assert!(
+            has_row(&changes, "notes", "n1"),
+            "a remote-root row syncs without a gate column"
+        );
+    }
+
+    #[test]
+    fn remote_root_child_resolves_as_remote_and_belongs_to_root_subtree() {
+        let c = conn();
+        create_remote_root_schema(&c);
+        exec(
+            &c,
+            "INSERT INTO notes (id, title, _updated_at) \
+             VALUES ('n1', 'Remote Root', '0000000001000-0000-dev1')",
+        );
+        exec(
+            &c,
+            "INSERT INTO note_photos (id, note_id, _updated_at) \
+             VALUES ('p1', 'n1', '0000000001000-0000-dev1')",
+        );
+        let tables = vec![
+            SyncedTable::new("notes").remote_root(),
+            SyncedTable::new("note_photos"),
+        ];
+        let gates = Gates::from_tables(&c, &tables).expect("gates");
+
+        assert_eq!(
+            gates.resolve_root_of(&c, "note_photos", "p1").unwrap(),
+            Some(("notes".to_string(), "n1".to_string())),
+            "a child resolves to its remote root"
+        );
+        assert_eq!(
+            gates.root_kept_of(&c, "note_photos", "p1").unwrap(),
+            Some(true),
+            "a child under a remote root is always Remote"
+        );
+        let rows = gates.subtree_rows(&c, "notes", "n1").unwrap();
+        assert!(
+            rows.contains(&("notes".to_string(), "n1".to_string()))
+                && rows.contains(&("note_photos".to_string(), "p1".to_string())),
+            "remote-root subtrees include the root and descendants"
         );
     }
 

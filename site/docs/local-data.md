@@ -15,10 +15,11 @@ under it, should stay on the device that made it.
 
 ## Declaring a gate
 
-[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has three forms:
+[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has four forms:
 
 ```rust
 SyncedTable::new("todos")                              // no gate of its own
+SyncedTable::new("attachments").remote_root()          // always-Remote blob root
 SyncedTable::new("lists").gated_by("shared")           // gated root
 SyncedTable::new("workspaces").gated_by_descendants()  // ancestor
 ```
@@ -26,12 +27,14 @@ SyncedTable::new("workspaces").gated_by_descendants()  // ancestor
 - `new(name)` declares the table synced with no gate of its own. With a foreign
   key into a gated root it inherits that gate; without one it syncs
   unconditionally.
+- `remote_root()` keeps whole-table row sync and makes blobs on those rows and
+  their descendants Remote by construction.
 - `gated_by(column)` makes the table a *gated root*: a row syncs only while its
   boolean `column` is true.
 - `gated_by_descendants()` marks an *ancestor* that should sync only while a
   gated descendant of it survives.
 
-A table is one of the three, never two at once.
+A table is one of the four, never two at once.
 
 ## Gated roots
 
@@ -44,6 +47,19 @@ its foreign-key chain, the gated root, syncs. `todos` reference `lists`, so a
 todo is shared exactly while its list is. The host declares the gate once, on
 the root; coven follows the schema's foreign keys to every descendant, so the
 children need no declaration of their own.
+
+## Remote roots
+
+A remote root has no gate column. Every row syncs, like `new(name)`, but the row
+also anchors blob locality: blobs carried by that row or by descendants are
+Remote. Host-provided blobs upload before the row changeset is pushed, and a peer
+reads them from the cache or cloud. `make_remote`, `make_local`, and
+`cancel_make_remote` reject a remote root because there is no Local state to
+enter or leave.
+
+A plain table that carries blobs but is not under a gated root or remote root is
+not a blob locality root. Rows still sync, but blob reads fail because coven has
+no authoritative Local/Remote answer for the bytes.
 
 ## Ancestors
 

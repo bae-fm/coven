@@ -41,6 +41,7 @@ libsqlite3-sys = { version = "0.38.0", features = ["session", "bundled"] }
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
 serial_test = "3.4.0"
+tempfile = "3.27.0"
 
 [features]
 test-utils = ["dep:tempfile"]

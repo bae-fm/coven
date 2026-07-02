@@ -32,6 +32,10 @@
 //! outbox. make_local, by contrast, brings back **every** blob of the root,
 //! branching per provenance.
 //!
+//! A [`SyncedTable::remote_root`](crate::sync::session::SyncedTable::remote_root)
+//! has no Local state in this model: its rows sync normally and its blobs are
+//! Remote by construction, so these transition APIs reject it.
+//!
 //! Every destructive step is enqueued durably *inside* the one commit, and nothing
 //! destructive happens before it, so there is no representable half-state and retry
 //! after a crash is idempotent.
@@ -69,6 +73,8 @@ pub enum MakeRemoteError {
     SyncNotReady,
     #[error("table {0:?} is not a gated root, so it has no Local/Remote state")]
     NotGated(String),
+    #[error("table {0:?} is a remote root, so its blobs are already Remote")]
+    RemoteRoot(String),
     #[error("nothing to make Remote: root {0:?}/{1:?} has no blobs")]
     NothingToMakeRemote(String, String),
     #[error("blob {0:?} is not a user-provided (external) file, so it cannot be made Remote")]
@@ -93,6 +99,8 @@ pub enum MakeLocalError {
     SyncNotReady,
     #[error("table {0:?} is not a gated root, so it has no Local/Remote state")]
     NotGated(String),
+    #[error("table {0:?} is a remote root, so its blobs have no Local state")]
+    RemoteRoot(String),
     #[error("no destination path supplied for user-provided blob {0:?}")]
     MissingDest(String),
     #[error("destination path for user-provided blob {blob_id:?} is not valid UTF-8: {path}")]
@@ -128,6 +136,12 @@ fn gate_column<'a>(tables: &'a [SyncedTable], root_table: &str) -> Option<&'a st
         .and_then(|t| t.gate_column())
 }
 
+fn is_remote_root(tables: &[SyncedTable], root_table: &str) -> bool {
+    tables
+        .iter()
+        .any(|t| t.name() == root_table && t.is_remote_root())
+}
+
 /// Resolve the blobs of the gated root's subtree, building the gate + blob-decl
 /// models from the declared set + live schema in one DB call.
 async fn refs_for_root(
@@ -155,6 +169,9 @@ async fn root_refs(
     root_id: &str,
 ) -> Result<Vec<BlobRef>, MakeRemoteError> {
     let tables = db.synced_tables().to_vec();
+    if is_remote_root(&tables, root_table) {
+        return Err(MakeRemoteError::RemoteRoot(root_table.to_string()));
+    }
     if gate_column(&tables, root_table).is_none() {
         return Err(MakeRemoteError::NotGated(root_table.to_string()));
     }
@@ -470,6 +487,9 @@ pub async fn make_local(
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), MakeLocalError> {
     let tables = db.synced_tables().to_vec();
+    if is_remote_root(&tables, root_table) {
+        return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
+    }
     let gate_col = gate_column(&tables, root_table)
         .ok_or_else(|| MakeLocalError::NotGated(root_table.to_string()))?
         .to_string();

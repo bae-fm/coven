@@ -30,8 +30,9 @@ This workspace has three crates:
 
 - Declare your synced tables on `Coven::builder(config).synced_tables(...)`, at
   startup, before sync starts. Each synced table has an `id` text primary key at
-  column 0 and an `_updated_at TEXT NOT NULL` column. Tables you don't list stay
-  local-only.
+  column 0 and an `_updated_at TEXT NOT NULL` column. `SyncedTable::new` syncs
+  rows; `remote_root()` also makes blobs on those rows and descendants always
+  Remote. Tables you don't list stay local-only.
 - Open one native handle with `Coven::builder(config).open(|conn| ...)`; coven
   opens SQLite, runs its bookkeeping migration, then runs your schema migration.
 - Declare which rows carry blobs per table with `SyncedTable::carries_blob` (a
@@ -92,6 +93,7 @@ Each blob declares two orthogonal properties and has one runtime state:
 - **Locality** — *Local* (bytes on-device) or *Remote* (bytes in the cloud, each
   device's copy a cache copy). `make_remote` uploads the bytes and turns a gated
   root's gate on; `make_local` brings them back to a local file and turns it off.
+  A `remote_root()` table is already Remote and rejects those transitions.
 
 The **cache** is a Remote-only mechanism: re-fetchable copies of Remote blobs under
 `storage/cache/<namespace>/…` (evictable, against a per-namespace budget) and

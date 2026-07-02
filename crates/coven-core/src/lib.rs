@@ -21,6 +21,8 @@
 //!   `_updated_at TEXT NOT NULL` column, and is declared as a
 //!   [`SyncedTable`] in the builder's `synced_tables` set. A plain
 //!   [`sync::session::SyncedTable::new`] table syncs unconditionally;
+//!   [`sync::session::SyncedTable::remote_root`] also syncs the whole table and
+//!   makes blobs on the row or its FK-descendants always Remote;
 //!   [`sync::session::SyncedTable::gated_by`] marks a *gated root* whose boolean
 //!   gate column decides, per row, whether that row and its declared
 //!   FK-descendants are shared. See [`sync::gate`] for the gating semantics.
@@ -54,7 +56,8 @@
 //!   coven's local store) or *Remote* (bytes in the cloud, each device's copy a
 //!   cache copy). `make_remote` uploads the bytes and flips a gated root's gate on;
 //!   `make_local` brings them back to a local file and flips it off (see
-//!   [`blob::transition`]).
+//!   [`blob::transition`]). A remote root starts Remote and rejects those
+//!   transitions.
 //!
 //! The **cache** ([`blob::cache`]) is a Remote-only mechanism: it holds
 //! re-fetchable copies of Remote blobs under `storage/cache/<namespace>/…`

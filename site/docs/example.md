@@ -60,6 +60,8 @@ Every synced table carries an `id` text primary key at column 0 and an
 [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values declare how
 each table is gated:
 [`new`](rustdoc:method:coven::sync::session::SyncedTable::new) syncs every row,
+[`remote_root`](rustdoc:method:coven::sync::session::SyncedTable::remote_root)
+syncs every row and makes blobs on those rows and descendants always Remote,
 [`gated_by`](rustdoc:method:coven::sync::session::SyncedTable::gated_by) makes a
 row sync only while its boolean column is true, and
 [`gated_by_descendants`](rustdoc:method:coven::sync::session::SyncedTable::gated_by_descendants)
@@ -217,8 +219,10 @@ It encrypts the file on upload; on pull it downloads, decrypts, and writes the
 plaintext into its own [cache](/docs/cache), which the host reads back through
 `handle.read_blob`. Where the bytes come from is the blob's provenance — the
 user's own file (user-provided) or coven's local store (host-provided). Use
-`handle.write(...)` when writing a row together with host-provided bytes. The
-[Blobs](/docs/blobs) page covers the declaration, the outbox, and the cloud
+`handle.write(...)` when writing a row together with host-provided bytes. A blob
+table under `remote_root()` has no Local state: rows sync normally, host-provided
+blobs upload before the row is pushed, and reads resolve through the cache/cloud.
+The [Blobs](/docs/blobs) page covers the declaration, the outbox, and the cloud
 layout, and the [Cache](/docs/cache) page covers the device-local read side.
 
 ## Share with a teammate

@@ -1150,6 +1150,14 @@ mod tests {
         ]
     }
 
+    fn remote_root_tables() -> Vec<SyncedTable> {
+        vec![
+            SyncedTable::new("notes").remote_root(),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos"),
+        ]
+    }
+
     /// A fresh in-memory connection with `foreign_keys=ON` and the synthetic
     /// notes/note_tags/note_photos schema.
     fn synced_conn() -> Connection {
@@ -1942,6 +1950,39 @@ mod tests {
         assert!(
             !row_exists(&db_b, "SELECT 1 FROM note_tags WHERE id = 'priv_t'"),
             "a gated-false note's FK-descendant leaked to a peer via the snapshot",
+        );
+    }
+
+    #[test]
+    fn snapshot_carries_remote_root_rows_without_gate_truth() {
+        let db_a = synced_conn();
+        exec(
+            &db_a,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+             VALUES ('remote', 'Remote Root', 0, '0000000001000-0000-devA', '2026-01-01')",
+        );
+        exec(
+            &db_a,
+            "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+             VALUES ('remote_t', 'remote', 'blue', '0000000001000-0000-devA', '2026-01-01')",
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let enc = test_encryption();
+        let encrypted =
+            create_snapshot(&db_a, temp.path(), &remote_root_tables(), &enc).expect("snapshot");
+        let plaintext = enc.open(&encrypted).expect("open");
+        let db_path = temp.path().join("remote_root_snapshot.db");
+        std::fs::write(&db_path, &plaintext).unwrap();
+        let db_b = open_db_at(&db_path);
+
+        assert!(
+            row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'remote'"),
+            "a remote-root row must survive snapshot scoping",
+        );
+        assert!(
+            row_exists(&db_b, "SELECT 1 FROM note_tags WHERE id = 'remote_t'"),
+            "a remote-root descendant must survive snapshot scoping",
         );
     }
 

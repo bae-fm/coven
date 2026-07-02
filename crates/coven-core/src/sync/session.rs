@@ -9,12 +9,14 @@
 /// and passed to [`crate::CovenBuilder::synced_tables`].
 ///
 /// A plain [`SyncedTable::new`] table syncs unconditionally — every row goes to
-/// peers. [`SyncedTable::gated_by`] makes it a *gated root*: a boolean column
-/// whose truth decides, per row, whether that row (and its declared
-/// FK-descendants) is shared. A gated-false root and its subtree stay local;
-/// flipping the gate true re-emits the whole now-visible subtree to peers, and
-/// flipping it false again retracts that subtree from peers (emitting deletes for
-/// the rows leaving the shared set) while the rows stay local.
+/// peers. [`SyncedTable::remote_root`] keeps that whole-table row sync and also
+/// makes the row a blob-locality root whose blobs are always Remote.
+/// [`SyncedTable::gated_by`] makes it a *gated root*: a boolean column whose
+/// truth decides, per row, whether that row (and its declared FK-descendants) is
+/// shared. A gated-false root and its subtree stay local; flipping the gate true
+/// re-emits the whole now-visible subtree to peers, and flipping it false again
+/// retracts that subtree from peers (emitting deletes for the rows leaving the
+/// shared set) while the rows stay local.
 ///
 /// [`SyncedTable::gated_by_descendants`] is the upward complement: an
 /// always-shared *ancestor* that should sync only while at least one gated
@@ -27,8 +29,9 @@
 /// foreign-key graph, not declared — listing them by hand would restate the
 /// schema and drift the moment a new foreign key is added.
 ///
-/// A table is *either* a gated root *or* a gated-by-descendants ancestor *or*
-/// plain — never two of these. See [`super::gate`] for the gating mechanics.
+/// A table is *either* a remote root, a gated root, a gated-by-descendants
+/// ancestor, or plain — never two of these. See [`super::gate`] for the gating
+/// mechanics.
 /// Orthogonally, any table may *carry a blob* ([`SyncedTable::carries_blob`]):
 /// blob-bearing-ness is a property of the row's columns, not of its gate role.
 /// A table may also be marked an *asset* ([`SyncedTable::asset`]): a decoration
@@ -59,6 +62,9 @@ pub struct SyncedTable {
 enum GateRole {
     /// Every row syncs unconditionally.
     Plain,
+    /// Every row syncs unconditionally, and blobs on the row or its descendants
+    /// are Remote by construction.
+    RemoteRoot,
     /// A gated root: a row syncs iff its boolean `gate_column` is true, and the
     /// gate flows down declared foreign keys to descendant rows.
     GatedRoot { gate_column: String },
@@ -85,6 +91,15 @@ impl SyncedTable {
         self.role = GateRole::GatedRoot {
             gate_column: column.into(),
         };
+        self
+    }
+
+    /// Make this a remote root: every row syncs, and blobs on the row or its
+    /// foreign-key descendants are always Remote. There is no Local state for
+    /// [`crate::blob::transition::make_remote`] or
+    /// [`crate::blob::transition::make_local`] to transition.
+    pub fn remote_root(mut self) -> Self {
+        self.role = GateRole::RemoteRoot;
         self
     }
 
@@ -128,8 +143,14 @@ impl SyncedTable {
     pub fn gate_column(&self) -> Option<&str> {
         match &self.role {
             GateRole::GatedRoot { gate_column } => Some(gate_column),
-            GateRole::Plain | GateRole::GatedByDescendants => None,
+            GateRole::Plain | GateRole::RemoteRoot | GateRole::GatedByDescendants => None,
         }
+    }
+
+    /// Whether this is a remote root: rows sync unconditionally, and blob
+    /// locality for the row and descendants is always Remote.
+    pub fn is_remote_root(&self) -> bool {
+        matches!(self.role, GateRole::RemoteRoot)
     }
 
     /// Whether this is a gated-by-descendants ancestor (kept alive by its gated

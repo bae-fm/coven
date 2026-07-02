@@ -16,10 +16,12 @@ use super::cache::{
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance, ResolvedScope};
 use crate::database::Database;
 use crate::sync::session::BlobDecl;
+use crate::sync::session::SyncedTable;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    capture_bytes, open_test_db, open_test_db_with_blob, open_test_db_with_user_and_host_blobs,
-    plant_blob_row, pull_into, read_test_db, set_blob_remote, temp_library_dir, MockSyncStorage,
+    capture_bytes, open_test_db, open_test_db_schema, open_test_db_with_blob,
+    open_test_db_with_user_and_host_blobs, plant_blob_row, pull_into, read_test_db,
+    set_blob_remote, temp_library_dir, test_migrations, MockSyncStorage,
 };
 
 /// The synthetic test db opens with a single migration, so its
@@ -59,6 +61,28 @@ fn host_blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
 /// scope, host-provided · `CacheEager` (fetched into the cache on pull).
 fn photo_decl() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
+}
+
+fn remote_root_db(decl: BlobDecl) -> Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("notes").remote_root(),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos").carries_blob(decl),
+        ],
+        test_migrations(),
+    )
+}
+
+fn plain_blob_db(decl: BlobDecl) -> Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("notes"),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos").carries_blob(decl),
+        ],
+        test_migrations(),
+    )
 }
 
 /// Put `bytes` into the mock cloud under the flat `{namespace}/{id}` key the mock's
@@ -934,6 +958,99 @@ async fn remote_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
         mid,
         &cloud_bytes[offset as usize..(offset + len) as usize],
         "the ranged Remote read also ignores the local-store file",
+    );
+}
+
+#[tokio::test]
+async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
+    let db = remote_root_db(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+    let blob = host_blob_ref("rrrr0001", "photos", CacheFill::CacheEager);
+
+    plant_blob_row(&db, &blob.id, false).await;
+    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"LOCAL-DECOY")
+        .await
+        .expect("write local decoy");
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, b"REMOTE-ROOT-CLOUD").await;
+
+    let got = read_blob(&db, &ld, Some(&storage), &blob)
+        .await
+        .expect("remote-root blob reads through cache/cloud");
+    assert_eq!(
+        got, b"REMOTE-ROOT-CLOUD",
+        "a remote-root blob is Remote even when the table has no gate column"
+    );
+}
+
+#[tokio::test]
+async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
+    let storage = MockSyncStorage::new();
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'RemoteRoot', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+             VALUES ('lazy0001', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    put_cloud_blob(&storage, "lazy0001", "photos", b"LAZY-REMOTE-ROOT").await;
+
+    let db2 = remote_root_db(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheLazy,
+    ));
+    let (_tmp, ld) = temp_library_dir();
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(
+        !ld.cache_blob_path("photos", "lazy0001").unwrap().exists()
+            && !ld.pinned_blob_path("photos", "lazy0001").unwrap().exists()
+            && !ld.local_blob_path("photos", "lazy0001").unwrap().exists(),
+        "CacheLazy host-provided blobs under a remote root are not downloaded on pull"
+    );
+
+    let blob = host_blob_ref("lazy0001", "photos", CacheFill::CacheLazy);
+    let got = read_blob(&db2, &ld, Some(&storage), &blob)
+        .await
+        .expect("CacheLazy remote-root blob reads on demand");
+    assert_eq!(got, b"LAZY-REMOTE-ROOT");
+    assert!(
+        ld.cache_blob_path("photos", "lazy0001").unwrap().exists(),
+        "the on-demand read populates the evictable cache"
+    );
+}
+
+#[tokio::test]
+async fn plain_blob_table_without_gate_or_remote_root_fails_locality_resolution() {
+    let db = plain_blob_db(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+    let blob = host_blob_ref("plain001", "photos", CacheFill::CacheEager);
+
+    plant_blob_row(&db, &blob.id, true).await;
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, b"PLAIN-CLOUD").await;
+
+    let err = read_blob(&db, &ld, Some(&storage), &blob)
+        .await
+        .expect_err("plain blob table has no authoritative locality");
+    assert!(
+        matches!(err, BlobCacheError::LocalityUnresolved { .. }),
+        "plain blob table maps to LocalityUnresolved: {err:?}"
     );
 }
 

@@ -34,11 +34,11 @@ use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
-use crate::sync::session::BlobDecl;
+use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    exec, open_test_db_with_blob, open_test_db_with_user_and_host_blobs, query_text, row_exists,
-    temp_library_dir, MockSyncStorage,
+    exec, open_test_db_schema, open_test_db_with_blob, open_test_db_with_user_and_host_blobs,
+    query_text, row_exists, temp_library_dir, test_migrations, MockSyncStorage,
 };
 
 /// The blob declaration for `note_photos`: a release file — user-provided ·
@@ -53,6 +53,17 @@ fn photo_decl() -> BlobDecl {
 fn cover_decl() -> BlobDecl {
     BlobDecl::new("covers", Provenance::HostProvided, CacheFill::CacheEager)
         .with_cloud_path_column("cloud_path")
+}
+
+fn remote_root_db(decl: BlobDecl) -> Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("notes").remote_root(),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos").carries_blob(decl),
+        ],
+        test_migrations(),
+    )
 }
 
 fn plaintext() -> RwLock<CloudCipher> {
@@ -766,6 +777,178 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     .await
     .expect("read Remote host-provided cover");
     assert_eq!(after, cover);
+}
+
+#[tokio::test]
+async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp_a = UserKeypair::generate();
+    let hlc_a = Hlc::new("A".to_string());
+    let db_a = remote_root_db(cover_decl());
+    let (_tmp_a, lib_a) = temp_library_dir();
+    let cover = b"REMOTE-ROOT-HOST-BLOB".to_vec();
+
+    exec(
+        &db_a,
+        "INSERT INTO notes (id, title, _updated_at, created_at) \
+         VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db_a,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
+         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+    )
+    .await;
+    local_files::store(&lib_a, "covers", "coverrrr", &cover)
+        .await
+        .expect("store host-provided blob");
+
+    storage
+        .put_head("B", 0, None, "2024-01-01T00:00:00Z")
+        .await
+        .expect("seed peer head");
+    run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
+    assert!(
+        storage.exists("covers/cv/remote-root.jpg").await.unwrap(),
+        "the host-provided blob is uploaded before the row changeset is pushed"
+    );
+
+    let db_b = remote_root_db(cover_decl());
+    let (_tmp_b, lib_b) = temp_library_dir();
+    crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
+    assert!(
+        row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n-remote-root'").await,
+        "the peer receives the remote-root row"
+    );
+    assert!(
+        lib_b
+            .cache_blob_path("covers", "coverrrr")
+            .unwrap()
+            .exists(),
+        "the peer eagerly caches the host-provided blob"
+    );
+    let got = cache::read_blob(
+        &db_b,
+        &lib_b,
+        Some(&storage),
+        &cover_ref("coverrrr", "cv/remote-root.jpg"),
+    )
+    .await
+    .expect("peer reads the remote-root blob");
+    assert_eq!(got, cover);
+}
+
+#[tokio::test]
+async fn make_remote_rejects_remote_root() {
+    let hlc = Hlc::new("A".to_string());
+    let db = remote_root_db(cover_decl());
+    let (_tmp, lib) = temp_library_dir();
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, _updated_at, created_at) \
+         VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
+         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+    )
+    .await;
+    local_files::store(&lib, "covers", "coverrrr", b"REMOTE-ROOT")
+        .await
+        .expect("store host-provided blob");
+
+    let err = make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        &hlc,
+        "notes",
+        "n-remote-root",
+        true,
+    )
+    .await
+    .expect_err("remote roots have no make_remote transition");
+    assert!(
+        matches!(err, crate::blob::transition::MakeRemoteError::RemoteRoot(_)),
+        "make_remote rejects a remote root specifically: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn make_local_rejects_remote_root() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = remote_root_db(cover_decl());
+    let (tmp, lib) = temp_library_dir();
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, _updated_at, created_at) \
+         VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
+         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+    )
+    .await;
+    storage
+        .put_blob(
+            "covers",
+            "coverrrr",
+            ResolvedScope::Master,
+            Some("cv/remote-root.jpg"),
+            b"REMOTE-ROOT".to_vec(),
+        )
+        .await
+        .expect("seed remote blob");
+    let dest: HashMap<String, PathBuf> =
+        [("coverrrr".to_string(), tmp.path().join("dest/coverrrr.jpg"))].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+
+    let err = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n-remote-root",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("remote roots have no make_local transition");
+    assert!(
+        matches!(err, crate::blob::transition::MakeLocalError::RemoteRoot(_)),
+        "make_local rejects a remote root specifically: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_make_remote_rejects_remote_root() {
+    let hlc = Hlc::new("A".to_string());
+    let db = remote_root_db(cover_decl());
+    let (_tmp, lib) = temp_library_dir();
+
+    let err = cancel_make_remote(
+        &db,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        "notes",
+        "n-remote-root",
+    )
+    .await
+    .expect_err("remote roots have no cancelable make_remote transition");
+    assert!(
+        matches!(err, crate::blob::transition::MakeRemoteError::RemoteRoot(_)),
+        "cancel_make_remote rejects a remote root specifically: {err:?}"
+    );
 }
 
 // ===========================================================================
