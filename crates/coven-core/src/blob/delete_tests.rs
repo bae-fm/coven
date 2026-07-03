@@ -67,6 +67,23 @@ async fn get_delete(db: &Database, id: i64) -> Option<(i64, Option<String>, Opti
     .expect("query delete outbox entry")
 }
 
+/// Read back `(attempt_count, last_error, last_attempt_at)` for a cancel entry,
+/// or `None` if it was removed.
+async fn get_cancel(db: &Database, id: i64) -> Option<(i64, Option<String>, Option<String>)> {
+    db.call(move |conn| {
+        conn.query_row(
+            "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox \
+             WHERE id = ?1 AND operation = 'cancel'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("query cancel outbox entry")
+}
+
 /// A plaintext cipher (tests don't encrypt) behind the lock the drain/GC take.
 fn plaintext_cipher() -> RwLock<CloudCipher> {
     RwLock::new(CloudCipher::Plaintext)
@@ -1222,7 +1239,7 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
         &storage,
         FailingCloudOp::Delete,
         "blob_tombstones/blob-key",
-        1,
+        2,
     );
     let clock = FixedClock(at("2024-06-01T01:00:00Z"));
     let n = drain_uploads(
@@ -1254,12 +1271,59 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
     assert_eq!(cancels.len(), 1, "a durable cancel row is queued for retry");
     assert_eq!(cancels[0].cloud_key, "blob-key");
 
-    // The tombstone-cancel drain retries (the injected failure is spent), removing
-    // the tombstone and clearing the cancel row.
-    let done = drain_tombstone_cancels(&db, &failing, &cipher)
+    // The first tombstone-cancel drain records durable retry state and leaves the
+    // row queued.
+    let first_cancel = FixedClock(at("2024-06-01T01:01:00Z"));
+    let done = drain_tombstone_cancels(&db, &failing, &cipher, &first_cancel)
         .await
-        .expect("cancel drain");
+        .expect("first cancel drain");
+    assert_eq!(done, 0, "the failed retry completes no cancel");
+    assert!(
+        storage.read("blob_tombstones/blob-key").await.is_ok(),
+        "the tombstone remains after the failed retry",
+    );
+    let first_row = get_cancel(&db, cancels[0].id)
+        .await
+        .expect("cancel row remains");
+    assert_eq!(first_row.0, 1, "the failed retry is counted");
+    assert!(
+        first_row
+            .1
+            .as_deref()
+            .unwrap()
+            .contains("failed to cancel tombstone"),
+        "the cancel failure reason is recorded",
+    );
+    let recorded = chrono::DateTime::parse_from_rfc3339(first_row.2.as_deref().unwrap()).unwrap();
+    assert_eq!(recorded.with_timezone(&chrono::Utc), first_cancel.0);
+
+    // Inside the retry window the drain does not make another cloud delete call.
+    let inside = FixedClock(at("2024-06-01T01:01:10Z"));
+    let done = drain_tombstone_cancels(&db, &failing, &cipher, &inside)
+        .await
+        .expect("inside backoff cancel drain");
+    assert_eq!(done, 0, "inside backoff no cancel completes");
+    assert_eq!(
+        failing.matching_calls(),
+        2,
+        "inside backoff no cloud tombstone delete runs",
+    );
+    assert_eq!(
+        get_cancel(&db, cancels[0].id)
+            .await
+            .expect("cancel row remains"),
+        first_row,
+        "the skipped cancel row is unchanged",
+    );
+
+    // After the retry window, the injected failure is spent; the drain removes the
+    // tombstone and clears the cancel row.
+    let after = FixedClock(at("2024-06-01T01:01:31Z"));
+    let done = drain_tombstone_cancels(&db, &failing, &cipher, &after)
+        .await
+        .expect("after backoff cancel drain");
     assert_eq!(done, 1, "the retried cancel completes");
+    assert_eq!(failing.matching_calls(), 3);
     assert!(
         storage.read("blob_tombstones/blob-key").await.is_err(),
         "the retry removed the tombstone",
@@ -1281,6 +1345,94 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
     assert!(
         storage.read("blob-key").await.is_ok(),
         "the re-uploaded blob survives across the cancel failure and its retry",
+    );
+}
+
+/// Corrupt local retry metadata must not strand a tombstone-cancel row. The drain
+/// logs the timestamp parse failure and retries the row.
+#[tokio::test]
+async fn corrupt_cancel_backoff_timestamp_does_not_strand_the_row() {
+    use crate::blob::upload::drain_uploads;
+
+    let (storage, _founder, member) = storage_with_chain().await;
+    let cipher = plaintext_cipher();
+    let tmp = tempfile::tempdir().unwrap();
+
+    let tombstone = BlobTombstoneJson::signed(
+        "test-lib",
+        "blob-key".to_string(),
+        "2024-06-01T00:00:00+00:00".to_string(),
+        &member,
+    );
+    plant_tombstone(&storage, &tombstone).await;
+
+    let src = tmp.path().join("blob.bin");
+    std::fs::write(&src, b"fresh contents").unwrap();
+    let db = open_outbox_db();
+    db.enqueue_upload(
+        "blob-file",
+        "blob-key",
+        Some(&src.to_string_lossy()),
+        BlobScope::Master,
+        false,
+        T0,
+    )
+    .await
+    .expect("enqueue upload");
+
+    let failing = FailCloudOpOnKey::new(
+        &storage,
+        FailingCloudOp::Delete,
+        "blob_tombstones/blob-key",
+        2,
+    );
+    let clock = FixedClock(at("2024-06-01T01:00:00Z"));
+    drain_uploads(
+        &db,
+        &failing,
+        &cipher,
+        &LibraryDir::new(tmp.path()),
+        &clock,
+        &crate::sync::hlc::Hlc::new("test-device".to_string()),
+        None,
+    )
+    .await
+    .expect("upload drain");
+
+    let cancels = db.get_pending_cloud_cancels().await.unwrap();
+    assert_eq!(cancels.len(), 1, "a cancel row is queued");
+
+    let first_cancel = FixedClock(at("2024-06-01T01:01:00Z"));
+    drain_tombstone_cancels(&db, &failing, &cipher, &first_cancel)
+        .await
+        .expect("first cancel drain");
+
+    let cancel_id = cancels[0].id;
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp' \
+             WHERE id = ?1 AND operation = 'cancel'",
+            [cancel_id],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("corrupt last_attempt_at");
+
+    let inside = FixedClock(at("2024-06-01T01:01:10Z"));
+    let done = drain_tombstone_cancels(&db, &failing, &cipher, &inside)
+        .await
+        .expect("corrupt timestamp cancel drain");
+    assert_eq!(done, 1, "the corrupt timestamp does not suppress the retry");
+    assert_eq!(failing.matching_calls(), 3);
+    assert!(
+        storage.read("blob_tombstones/blob-key").await.is_err(),
+        "the retry removed the tombstone",
+    );
+    assert!(
+        get_cancel(&db, cancels[0].id).await.is_none(),
+        "the retried cancel row clears after the tombstone is gone",
     );
 }
 
