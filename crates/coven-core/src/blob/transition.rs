@@ -240,7 +240,7 @@ pub async fn make_remote(
             .external_blob(&blob.id)
             .await?
             .ok_or_else(|| MakeRemoteError::NotExternal(blob.id.clone()))?;
-        let len = file_len(&ext.path)
+        let len = crate::local_blob::file_len(&ext.path)
             .await
             .map_err(|detail| MakeRemoteError::Source {
                 blob_id: blob.id.clone(),
@@ -385,59 +385,20 @@ pub async fn cancel_make_remote(
     Ok(())
 }
 
-/// The length of the file at `path`, or an error describing why it can't be read.
-async fn file_len(path: &std::path::Path) -> Result<u64, String> {
-    crate::local_blob::file_len(path).await
-}
-
 // ===========================================================================
 // make_local — native-only (foreground op with a cancel signal)
 // ===========================================================================
 
 /// One blob materialized back to a local file by [`make_local`], carrying what the
-/// single commit needs, split by provenance — a type distinction rather than an
-/// `Option`, because provenance decides the whole materialization shape. Both
-/// variants carry the [`BlobRef`] (its id + namespace) and the cloud key to
-/// tombstone; only a user-provided blob carries a `dest` to register as an external
-/// ref (a host-provided blob's bytes live in the local store, tracked by file
-/// presence, not a DB row).
+/// single commit needs. `dest` is present for a user-provided blob whose local
+/// home is the user's path; absent for a host-provided blob whose local home is
+/// coven's local store.
 #[cfg(not(target_arch = "wasm32"))]
-enum Materialized {
-    UserProvided {
-        blob: BlobRef,
-        dest: PathBuf,
-        size: u64,
-        cloud_key: String,
-    },
-    HostProvided {
-        blob: BlobRef,
-        size: u64,
-        cloud_key: String,
-    },
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Materialized {
-    /// The materialized blob, carried by both variants. The single match the other
-    /// accessors read through.
-    fn blob(&self) -> &BlobRef {
-        match self {
-            Materialized::UserProvided { blob, .. } | Materialized::HostProvided { blob, .. } => {
-                blob
-            }
-        }
-    }
-
-    /// The blob id, for the post-commit cache drop.
-    fn blob_id(&self) -> &str {
-        &self.blob().id
-    }
-
-    /// The blob's cache namespace, for the post-commit cache drop: the cache copy
-    /// lives under the segmented `storage/cache/<namespace>/<id>`.
-    fn namespace(&self) -> &str {
-        &self.blob().namespace
-    }
+struct Materialized {
+    blob: BlobRef,
+    dest: Option<PathBuf>,
+    size: u64,
+    cloud_key: String,
 }
 
 /// A local copy a make_local has written, tracked so an abort can roll it back. The
@@ -547,37 +508,29 @@ pub async fn make_local(
     let commit: Vec<(String, String, Option<String>, u64, String)> = match materialized
         .iter()
         .map(|m| -> Result<_, MakeLocalError> {
-            Ok(match m {
-                Materialized::UserProvided {
-                    blob,
-                    dest,
-                    size,
-                    cloud_key,
-                } => {
+            Ok({
+                if let Some(dest) = &m.dest {
                     let external_path =
                         dest.to_str().ok_or_else(|| MakeLocalError::NonUtf8Dest {
-                            blob_id: blob.id.clone(),
+                            blob_id: m.blob.id.clone(),
                             path: dest.display().to_string(),
                         })?;
                     (
-                        blob.id.clone(),
-                        blob.namespace.clone(),
+                        m.blob.id.clone(),
+                        m.blob.namespace.clone(),
                         Some(external_path.to_string()),
-                        *size,
-                        cloud_key.clone(),
+                        m.size,
+                        m.cloud_key.clone(),
+                    )
+                } else {
+                    (
+                        m.blob.id.clone(),
+                        m.blob.namespace.clone(),
+                        None,
+                        m.size,
+                        m.cloud_key.clone(),
                     )
                 }
-                Materialized::HostProvided {
-                    blob,
-                    size,
-                    cloud_key,
-                } => (
-                    blob.id.clone(),
-                    blob.namespace.clone(),
-                    None,
-                    *size,
-                    cloud_key.clone(),
-                ),
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -625,11 +578,11 @@ pub async fn make_local(
     // pure redundancy — drop them. A failure leaves only stray cache space; a read
     // serves the local file. Log and go on.
     for m in &materialized {
-        if let Err(e) = cache::drop_cached_blob(library_dir, m.namespace(), m.blob_id()).await {
+        if let Err(e) = cache::drop_cached_blob(library_dir, &m.blob.namespace, &m.blob.id).await {
             tracing::warn!(
                 "make_local: failed to drop cache copy of {}/{}: {e}",
-                m.namespace(),
-                m.blob_id()
+                m.blob.namespace,
+                m.blob.id
             );
         }
     }
@@ -694,9 +647,9 @@ async fn materialize_blobs(
                     }
                 })?;
                 written.push(WrittenFile::UserPath(dest_path.clone()));
-                Materialized::UserProvided {
+                Materialized {
                     blob: blob.clone(),
-                    dest: dest_path,
+                    dest: Some(dest_path),
                     size: bytes.len() as u64,
                     cloud_key,
                 }
@@ -717,8 +670,9 @@ async fn materialize_blobs(
                     }
                 })?;
                 written.push(WrittenFile::LocalStore(store_path));
-                Materialized::HostProvided {
+                Materialized {
                     blob: blob.clone(),
+                    dest: None,
                     size: bytes.len() as u64,
                     cloud_key,
                 }
