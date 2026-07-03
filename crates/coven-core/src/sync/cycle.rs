@@ -726,9 +726,6 @@ pub async fn run_single_sync_cycle(
                     Err(e) => warn!("Failed to push snapshot: {e}"),
                 }
             }
-            Err(e) if e.0.starts_with("unsupported snapshot file operation:") => {
-                return Err(format!("Snapshot file backend unsupported: {}", e.0));
-            }
             Err(e) => warn!("Failed to create snapshot: {e}"),
         }
     }

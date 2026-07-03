@@ -108,103 +108,38 @@ pub enum SnapshotError {
         snapshot_version: u32,
         supported: u32,
     },
-    #[error("unsupported snapshot file operation: {0}")]
-    Unsupported(String),
 }
 
-pub trait SnapshotFiles: crate::MaybeThreadSafe {
-    fn prepare_snapshot_path(&self, temp_dir: &Path) -> Result<std::path::PathBuf, SnapshotError>;
-    fn cleanup_snapshot_path(&self, path: &Path);
-    fn read_and_remove_snapshot(&self, path: &Path) -> Result<Vec<u8>, SnapshotError>;
-    fn write_snapshot_db(&self, target_path: &Path, plaintext: &[u8]) -> Result<(), SnapshotError>;
+fn prepare_snapshot_path(temp_dir: &Path) -> Result<std::path::PathBuf, SnapshotError> {
+    let snapshot_path = temp_dir.join("snapshot.db");
+    match std::fs::remove_file(&snapshot_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(SnapshotError::Io(e)),
+    }
+    Ok(snapshot_path)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-static SNAPSHOT_FILES: std::sync::OnceLock<&'static dyn SnapshotFiles> = std::sync::OnceLock::new();
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static SNAPSHOT_FILES: std::cell::Cell<Option<&'static dyn SnapshotFiles>> =
-        std::cell::Cell::new(None);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn register_snapshot_files(files: &'static dyn SnapshotFiles) {
-    let _ = SNAPSHOT_FILES.set(files);
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn register_snapshot_files(files: &'static dyn SnapshotFiles) {
-    SNAPSHOT_FILES.with(|slot| slot.set(Some(files)));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn snapshot_files() -> Result<&'static dyn SnapshotFiles, SnapshotError> {
-    if let Some(files) = SNAPSHOT_FILES.get().copied() {
-        Ok(files)
-    } else {
-        #[cfg(test)]
-        {
-            Ok(&test_snapshot_files::TEST_SNAPSHOT_FILES)
-        }
-        #[cfg(not(test))]
-        {
-            Err(SnapshotError::Unsupported(
-                "snapshot file backend is not registered".to_string(),
-            ))
+fn cleanup_snapshot_path(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(error = %e, path = %path.display(), "failed to remove temp snapshot");
         }
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn snapshot_files() -> Result<&'static dyn SnapshotFiles, SnapshotError> {
-    SNAPSHOT_FILES.with(|slot| slot.get()).ok_or_else(|| {
-        SnapshotError::Unsupported("snapshot file backend is not registered".to_string())
-    })
+fn read_and_remove_snapshot(path: &Path) -> Result<Vec<u8>, SnapshotError> {
+    let bytes = std::fs::read(path)?;
+    cleanup_snapshot_path(path);
+    Ok(bytes)
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod test_snapshot_files {
-    use super::{SnapshotError, SnapshotFiles};
-    use std::path::{Path, PathBuf};
-
-    pub(super) static TEST_SNAPSHOT_FILES: TestSnapshotFiles = TestSnapshotFiles;
-
-    pub(super) struct TestSnapshotFiles;
-
-    impl SnapshotFiles for TestSnapshotFiles {
-        fn prepare_snapshot_path(&self, temp_dir: &Path) -> Result<PathBuf, SnapshotError> {
-            let snapshot_path = temp_dir.join("snapshot.db");
-            match std::fs::remove_file(&snapshot_path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(SnapshotError::Io(e)),
-            }
-            Ok(snapshot_path)
-        }
-
-        fn cleanup_snapshot_path(&self, path: &Path) {
-            let _ = std::fs::remove_file(path);
-        }
-
-        fn read_and_remove_snapshot(&self, path: &Path) -> Result<Vec<u8>, SnapshotError> {
-            let bytes = std::fs::read(path)?;
-            self.cleanup_snapshot_path(path);
-            Ok(bytes)
-        }
-
-        fn write_snapshot_db(
-            &self,
-            target_path: &Path,
-            plaintext: &[u8],
-        ) -> Result<(), SnapshotError> {
-            if let Some(parent) = target_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(target_path, plaintext)?;
-            Ok(())
-        }
+fn write_snapshot_db(target_path: &Path, plaintext: &[u8]) -> Result<(), SnapshotError> {
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    std::fs::write(target_path, plaintext)?;
+    Ok(())
 }
 
 /// SHA-256 of a snapshot's stored (sealed) bytes, hex-encoded. The hash the
@@ -249,8 +184,7 @@ pub fn create_snapshot(
         return Err(SnapshotError::NoSyncedTables);
     }
 
-    let files = snapshot_files()?;
-    let snapshot_path = files.prepare_snapshot_path(temp_dir)?;
+    let snapshot_path = prepare_snapshot_path(temp_dir)?;
     let path_str = snapshot_path
         .to_str()
         .expect("temp path should be valid UTF-8");
@@ -258,7 +192,7 @@ pub fn create_snapshot(
     // VACUUM INTO creates a clean, defragmented copy of the live database.
     let vacuum = format!("VACUUM INTO '{}'", path_str.replace('\'', "''"));
     if let Err(e) = conn.execute_batch(&vacuum) {
-        files.cleanup_snapshot_path(&snapshot_path);
+        cleanup_snapshot_path(&snapshot_path);
         return Err(SnapshotError::VacuumFailed(e.to_string()));
     }
 
@@ -266,12 +200,12 @@ pub fn create_snapshot(
     // table's data. Strip those before reading: open the copy as its own
     // connection and DELETE from every table outside the synced set.
     if let Err(e) = clear_local_only_tables(&snapshot_path, tables) {
-        files.cleanup_snapshot_path(&snapshot_path);
+        cleanup_snapshot_path(&snapshot_path);
         return Err(e);
     }
 
     // Read the cleared snapshot file and seal it for storage.
-    let plaintext = files.read_and_remove_snapshot(&snapshot_path)?;
+    let plaintext = read_and_remove_snapshot(&snapshot_path)?;
     let plaintext_size = plaintext.len();
 
     let sealed = cipher.seal(plaintext);
@@ -1017,7 +951,7 @@ pub async fn bootstrap_from_snapshot(
         .open(sealed)
         .map_err(|e| SnapshotError::Decryption(e.to_string()))?;
 
-    snapshot_files()?.write_snapshot_db(target_path, &plaintext)?;
+    write_snapshot_db(target_path, &plaintext)?;
 
     let cursors: HashMap<String, u64> = meta.cursors.into_iter().collect();
     info!(

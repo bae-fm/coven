@@ -326,12 +326,10 @@ pub mod sync {
 mod coven;
 mod database_backend;
 mod handle;
-mod snapshot_files;
 
 pub(crate) fn install_platform() {
     database_backend::install_platform_connection_opener();
     local_blob_backend::install_platform_backend();
-    snapshot_files::install_snapshot_files();
 }
 
 pub use coven::{
