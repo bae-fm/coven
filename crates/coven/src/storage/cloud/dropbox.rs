@@ -274,7 +274,7 @@ const DROPBOX_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 #[async_trait]
 impl OAuthRestHome for DropboxCloudHome {
-    fn not_found(&self) -> NotFound<'_> {
+    fn not_found(&self) -> NotFound {
         // Dropbox signals an absent path with 409 + `not_found` in the body.
         NotFound::BodyContains {
             status: StatusCode::CONFLICT,

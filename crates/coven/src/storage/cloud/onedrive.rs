@@ -127,7 +127,7 @@ const ONEDRIVE_CHUNK_SIZE: usize = 24 * 320 * 1024;
 
 #[async_trait]
 impl OAuthRestHome for OneDriveCloudHome {
-    fn not_found(&self) -> NotFound<'_> {
+    fn not_found(&self) -> NotFound {
         NotFound::Status
     }
 

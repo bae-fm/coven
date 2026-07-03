@@ -27,7 +27,7 @@ pub struct ListPage {
 pub trait OAuthRestHome: Send + Sync {
     /// How this provider signals an absent key (HTTP 404, or Dropbox's 409 +
     /// `not_found` body).
-    fn not_found(&self) -> NotFound<'_>;
+    fn not_found(&self) -> NotFound;
 
     /// Download `key`, optionally a byte range. A provider whose download needs a
     /// prior lookup (Google Drive resolves a flat name to a file id) does it here

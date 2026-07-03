@@ -212,7 +212,7 @@ const GDRIVE_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 #[async_trait]
 impl OAuthRestHome for GoogleDriveCloudHome {
-    fn not_found(&self) -> NotFound<'_> {
+    fn not_found(&self) -> NotFound {
         NotFound::Status
     }
 

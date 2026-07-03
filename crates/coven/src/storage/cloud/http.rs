@@ -11,12 +11,15 @@ use serde::de::DeserializeOwned;
 use super::CloudHomeError;
 
 /// How a provider signals "absent key" on a non-success response.
-pub enum NotFound<'a> {
+pub enum NotFound {
     /// HTTP 404 (Google Drive, OneDrive, S3).
     Status,
     /// A specific status whose body contains a marker — Dropbox returns 409 with
     /// `not_found` in the body.
-    BodyContains { status: StatusCode, needle: &'a str },
+    BodyContains {
+        status: StatusCode,
+        needle: &'static str,
+    },
 }
 
 /// Send-and-check: return the response on 2xx, else a `CloudHomeError`. A response
@@ -28,7 +31,7 @@ pub enum NotFound<'a> {
 pub async fn ensure_ok(
     resp: Response,
     ctx: &str,
-    not_found: NotFound<'_>,
+    not_found: NotFound,
 ) -> Result<Response, CloudHomeError> {
     let status = resp.status();
     if status.is_success() {
@@ -111,7 +114,7 @@ pub async fn body_text(resp: Response) -> String {
 pub async fn exists_from_response(
     resp: Response,
     ctx: &str,
-    not_found: NotFound<'_>,
+    not_found: NotFound,
 ) -> Result<bool, CloudHomeError> {
     match ensure_ok(resp, ctx, not_found).await {
         Ok(_) => Ok(true),
