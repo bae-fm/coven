@@ -53,6 +53,43 @@ pub enum JoinError {
     Database(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BootstrapSaveError {
+    #[error("snapshot: {0}")]
+    Snapshot(#[from] SnapshotError),
+    #[error("join: {0}")]
+    Join(#[from] JoinError),
+    #[error("config: {0}")]
+    Config(#[from] ConfigError),
+    #[error("keyring: {0}")]
+    Key(#[from] KeyError),
+}
+
+impl From<BootstrapSaveError> for JoinError {
+    fn from(error: BootstrapSaveError) -> Self {
+        match error {
+            BootstrapSaveError::Snapshot(error) => JoinError::Snapshot(error),
+            BootstrapSaveError::Join(error) => error,
+            BootstrapSaveError::Config(error) => JoinError::Config(error),
+            BootstrapSaveError::Key(error) => JoinError::Key(error),
+        }
+    }
+}
+
+pub(crate) enum BootstrapContext<'a> {
+    Join { owner_pubkey: &'a str },
+    Restore,
+}
+
+impl BootstrapContext<'_> {
+    fn owner_pubkey(&self) -> Option<&str> {
+        match self {
+            BootstrapContext::Join { owner_pubkey } => Some(*owner_pubkey),
+            BootstrapContext::Restore => None,
+        }
+    }
+}
+
 /// The invite names an OAuth provider, so joining needs a token the caller
 /// fetched via the host OAuth flow first — the same precondition restore has.
 #[cfg(feature = "oauth-providers")]
@@ -268,7 +305,6 @@ pub async fn join_library(
     // library only makes sense over an opaque home — the invite wraps the library
     // key — so the home is always opaque here: the cipher is `Encrypted` and the
     // blob-path scheme is `Hashed`, matching what the owner writes.
-    on_status("Downloading library snapshot...");
     let encryption = EncryptionService::new(&encryption_key_hex)?;
     let cipher = CloudCipher::Encrypted(encryption);
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
@@ -290,14 +326,16 @@ pub async fn join_library(
     // All steps after directory creation are wrapped so we can clean up on failure.
     let new_key_service = KeyService::new(library_id.clone());
 
-    let result = bootstrap_and_save(
+    let result = bootstrap_and_save_library(
         &storage,
         &cipher,
-        &encryption_key_hex,
+        Some(&encryption_key_hex),
         &library_dir,
         &library_id,
         &device_id,
-        &code.owner_pubkey,
+        BootstrapContext::Join {
+            owner_pubkey: &code.owner_pubkey,
+        },
         synced_tables,
         migrations,
         &code.join_info,
@@ -307,44 +345,54 @@ pub async fn join_library(
     )
     .await;
 
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&*library_dir);
+    match result {
+        Ok(config) => {
+            info!("Joined library {} at {}", library_id, library_dir.display());
+            Ok(config)
+        }
+        Err(err) => {
+            let join_error = JoinError::from(err);
+            if let Err(cleanup_error) = std::fs::remove_dir_all(&*library_dir) {
+                return Err(JoinError::Database(format!(
+                    "failed to remove library directory after join failed: {cleanup_error}; original error: {join_error}"
+                )));
+            }
+            Err(join_error)
+        }
     }
-
-    result
 }
 
-/// Inner bootstrap + save logic, separated so the caller can clean up on failure.
+/// Inner bootstrap + save logic for join and restore, separated so callers can
+/// clean up the library directory on failure.
 #[allow(clippy::too_many_arguments)]
-async fn bootstrap_and_save(
+pub(crate) async fn bootstrap_and_save_library(
     storage: &CloudSyncStorage,
     cipher: &CloudCipher,
-    encryption_key_hex: &str,
+    encryption_key_hex: Option<&str>,
     library_dir: &LibraryDir,
     library_id: &str,
     device_id: &str,
-    owner_pubkey: &str,
+    context: BootstrapContext<'_>,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     join_info: &CloudHomeJoinInfo,
     library_name: &str,
     key_service: &KeyService,
     on_status: &impl Fn(&str),
-) -> Result<Config, JoinError> {
-    // Bootstrap from the snapshot. The snapshot is authenticated against the
-    // membership chain anchored to the founder the invite pins (`owner_pubkey`),
-    // exactly as the changeset pull is: a snapshot that is unsigned, signed by a
-    // non-member, or whose DB image was tampered with is refused, never adopted.
-    // A snapshot whose synced-schema version is newer than this binary's top
-    // migration is refused before download (`SchemaTooNew`).
+) -> Result<Config, BootstrapSaveError> {
+    // Join pins the library owner from the invite. Restore adopts the owner
+    // from the chain founder during `open_db_and_pull`, because the restore code
+    // carries the bucket credentials rather than an inviter assertion.
+    on_status("Downloading library snapshot...");
     let db_path = library_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
     let binary_schema_version = supported_version(migrations);
+    let owner_pubkey = context.owner_pubkey();
     let bootstrap_result = bootstrap_from_snapshot(
         bucket_dyn,
         library_id,
         cipher,
-        Some(owner_pubkey),
+        owner_pubkey,
         binary_schema_version,
         &db_path,
     )
@@ -364,7 +412,7 @@ async fn bootstrap_and_save(
         synced_tables,
         migrations,
         device_id,
-        Some(owner_pubkey),
+        owner_pubkey,
         bucket_dyn,
         &cursors,
         library_dir,
@@ -377,7 +425,9 @@ async fn bootstrap_and_save(
 
     // Step 7: Save encryption key to keyring.
     on_status("Saving configuration...");
-    key_service.set_encryption_key(encryption_key_hex)?;
+    if let Some(key_hex) = encryption_key_hex {
+        key_service.set_encryption_key(key_hex)?;
+    }
 
     // Step 8: Save cloud credentials to keyring.
     if let Some(credentials) = derive_credentials(join_info) {
@@ -396,7 +446,6 @@ async fn bootstrap_and_save(
 
     config.save_to_config_yaml()?;
 
-    info!("Joined library {} at {}", library_id, library_dir.display());
     Ok(config)
 }
 
@@ -429,8 +478,8 @@ pub(crate) async fn open_db_and_pull(
     // Pin the library owner from the invite BEFORE the pull below loads and anchors
     // the membership chain (issue #102). The pull then refuses a chain whose founder
     // isn't this owner, so a tampered chain can't be adopted during join. `None`
-    // (restore, or a chain-less test) leaves the owner unpinned — restore pins it
-    // from the chain founder on first sync connect.
+    // means restore or a chain-less test; restore pins the chain founder below
+    // after loading membership entries from the bootstrapped storage.
     if let Some(owner) = owner_pubkey {
         db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner)
             .await

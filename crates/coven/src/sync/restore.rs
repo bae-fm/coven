@@ -13,15 +13,14 @@ use crate::config::{Config, ConfigError, HomeStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::keys::{KeyError, KeyService, UserKeypair};
 use crate::library_dir::LibraryDir;
-use crate::migration::{supported_version, Migration};
+use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::join::{build_config, derive_credentials, open_db_and_pull, JoinError};
+use crate::sync::join::{bootstrap_and_save_library, BootstrapSaveError, JoinError};
 use crate::sync::pull::PullError;
 use crate::sync::session::SyncedTable;
-use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
-use crate::sync::storage::SyncStorage;
+use crate::sync::snapshot::SnapshotError;
 
 /// Cloud provider source for restore. Carries all connection details including
 /// OAuth tokens (unlike RestoreProvider which omits them for serialization).
@@ -69,12 +68,25 @@ pub enum RestoreError {
     Join(#[from] JoinError),
     #[error("cloud home: {0}")]
     CloudHome(#[from] CloudHomeError),
+    #[error("cleanup: {0}")]
+    Cleanup(String),
     #[error("invalid restore code: {0}")]
     InvalidCode(String),
     #[error("invalid signing key: {0}")]
     InvalidSigningKey(String),
     #[error("provider: {0}")]
     Provider(String),
+}
+
+impl From<BootstrapSaveError> for RestoreError {
+    fn from(error: BootstrapSaveError) -> Self {
+        match error {
+            BootstrapSaveError::Snapshot(error) => RestoreError::Snapshot(error),
+            BootstrapSaveError::Join(error) => RestoreError::Join(error),
+            BootstrapSaveError::Config(error) => RestoreError::Config(error),
+            BootstrapSaveError::Key(error) => RestoreError::Key(error),
+        }
+    }
 }
 
 /// Build a `(JoinInfo, Box<dyn CloudHome>)` from a `RestoreSource`.
@@ -239,13 +251,14 @@ pub async fn restore_from_cloud(
 
     let key_service = KeyService::new(library_id.to_string());
 
-    let result = bootstrap_and_save(
+    let result = bootstrap_and_save_library(
         &storage,
         &cipher,
         encryption_key_hex,
         &library_dir,
         library_id,
         &device_id,
+        crate::sync::join::BootstrapContext::Restore,
         synced_tables,
         migrations,
         &join_info,
@@ -255,20 +268,25 @@ pub async fn restore_from_cloud(
     )
     .await;
 
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&*library_dir);
-        return result;
+    match result {
+        Ok(config) => {
+            // The host records this as the active library after this returns.
+            info!(
+                "Cloud restore complete: library at {}",
+                config.library_dir.display()
+            );
+            Ok(config)
+        }
+        Err(err) => {
+            let restore_error = RestoreError::from(err);
+            if let Err(cleanup_error) = std::fs::remove_dir_all(&*library_dir) {
+                return Err(RestoreError::Cleanup(format!(
+                    "failed to remove library directory after restore failed: {cleanup_error}; original error: {restore_error}"
+                )));
+            }
+            Err(restore_error)
+        }
     }
-
-    let config = result?;
-    // The host records this as the active library after this returns.
-
-    info!(
-        "Cloud restore complete: library at {}",
-        config.library_dir.display()
-    );
-
-    Ok(config)
 }
 
 /// Restore a library from a restore code string.
@@ -376,103 +394,5 @@ pub async fn restore_from_code(
         .import_user_keypair(&signing_key_bytes)
         .map_err(RestoreError::Key)?;
 
-    Ok(config)
-}
-
-/// Inner bootstrap + save logic, separated so the caller can clean up on failure.
-#[allow(clippy::too_many_arguments)]
-async fn bootstrap_and_save(
-    storage: &CloudSyncStorage,
-    cipher: &CloudCipher,
-    encryption_key_hex: Option<&str>,
-    library_dir: &LibraryDir,
-    library_id: &str,
-    device_id: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    join_info: &CloudHomeJoinInfo,
-    library_name: &str,
-    key_service: &KeyService,
-    on_status: &impl Fn(&str),
-) -> Result<Config, RestoreError> {
-    // Bootstrap from the snapshot. Restore pins no owner up front (it recovers a
-    // library this device may not have founded — the owner is adopted from the
-    // chain's founder after the pull, trust-on-first-use, since the restore code
-    // already carries the bucket's own credentials). So the snapshot is
-    // authenticated against the membership chain anchored to its own founder: the
-    // author must still be a current write-capable member, and an unsigned or
-    // tampered snapshot is refused.
-    on_status("Downloading library snapshot...");
-    let db_path = library_dir.db_path();
-    let bucket_dyn: &dyn SyncStorage = storage;
-    let binary_schema_version = supported_version(migrations);
-    let bootstrap_result = bootstrap_from_snapshot(
-        bucket_dyn,
-        library_id,
-        cipher,
-        None,
-        binary_schema_version,
-        &db_path,
-    )
-    .await?;
-
-    info!(
-        "Bootstrapped from snapshot ({} device cursors)",
-        bootstrap_result.cursors.len()
-    );
-
-    // Pull changesets since the snapshot.
-    on_status("Applying recent changes...");
-    let cursors = bootstrap_result.cursors;
-
-    // Restore leaves the owner unpinned: this is the user's own library and bucket,
-    // so the owner is adopted from the chain founder on first sync connect (issue
-    // #102), rather than asserted from the restore code.
-    let changesets_applied = open_db_and_pull(
-        &db_path,
-        synced_tables,
-        migrations,
-        device_id,
-        None,
-        bucket_dyn,
-        &cursors,
-        library_dir,
-    )
-    .await?;
-
-    if changesets_applied > 0 {
-        info!("Applied {changesets_applied} changesets since snapshot");
-    }
-
-    // Save the encryption key to the keyring — only for a private home.
-    // A public home has no key to store.
-    on_status("Saving configuration...");
-    if let Some(key_hex) = encryption_key_hex {
-        key_service.set_encryption_key(key_hex)?;
-    }
-
-    // Save cloud credentials to keyring.
-    if let Some(credentials) = derive_credentials(join_info) {
-        key_service.set_cloud_home_credentials(&credentials)?;
-    }
-
-    // Create and save config. The cipher records the home's storage mode:
-    // opaque (key stored + fingerprint) or browsable (no key).
-    let config = build_config(
-        library_id,
-        device_id,
-        library_dir,
-        library_name,
-        join_info,
-        cipher,
-    );
-
-    config.save_to_config_yaml()?;
-
-    info!(
-        "Restored library {} at {}",
-        library_id,
-        library_dir.display()
-    );
     Ok(config)
 }
