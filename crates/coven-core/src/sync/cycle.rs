@@ -279,9 +279,10 @@ pub async fn run_single_sync_cycle(
         // Retry any tombstone-cancel an upload's inline cancel could not complete.
         // Runs right after the upload drain (and before the tombstone GC below), so
         // a blob re-uploaded this cycle has its tombstone removed before the GC
-        // could reclaim it. A cancel that still fails stays queued for the next
-        // cycle — the live re-uploaded blob must never lose its tombstone-cancel.
-        match crate::blob::delete::drain_tombstone_cancels(db, ch, cipher).await {
+        // could reclaim it. A cancel that still fails stays queued with durable
+        // retry state — the live re-uploaded blob must never lose its
+        // tombstone-cancel.
+        match crate::blob::delete::drain_tombstone_cancels(db, ch, cipher, clock).await {
             Ok(n) if n > 0 => info!(count = n, "Completed pending tombstone cancels"),
             Err(e) => warn!("Tombstone cancel drain error: {e}"),
             _ => {}
@@ -512,7 +513,7 @@ pub async fn run_single_sync_cycle(
         // cycle (or earlier) but its cancel couldn't reach the cloud, so the
         // tombstone is still present though the blob is live. Reclaiming now would
         // delete that re-upload, so skip the GC entirely while any cancel is
-        // pending — the next cycle retries the cancels (above) before reclaiming.
+        // pending; eligible cancel drains run above before reclaiming.
         let cancels_pending = match db.get_pending_cloud_cancels().await {
             Ok(cancels) => !cancels.is_empty(),
             Err(e) => {
