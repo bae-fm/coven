@@ -247,7 +247,7 @@ pub async fn drain_tombstones(
                 // object, so an encrypted home holds no plaintext tombstone at
                 // rest. The suffix the key carries matches the seal (plaintext
                 // home: passthrough + empty suffix).
-                let sealed = cipher.read().unwrap().seal(&bytes);
+                let sealed = cipher.read().unwrap().seal(bytes);
                 if let Err(e) = cloud_home
                     .write(
                         &key,
@@ -359,7 +359,7 @@ pub async fn gc_tombstones(
                 continue;
             }
         };
-        let decoded = match cipher.read().unwrap().open(&stored) {
+        let decoded = match cipher.read().unwrap().open(stored) {
             Ok(d) => d,
             Err(e) => {
                 // A tombstone we can't decrypt is a foreign library's object in a

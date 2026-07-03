@@ -272,11 +272,12 @@ pub fn create_snapshot(
 
     // Read the cleared snapshot file and seal it for storage.
     let plaintext = files.read_and_remove_snapshot(&snapshot_path)?;
+    let plaintext_size = plaintext.len();
 
-    let sealed = cipher.seal(&plaintext);
+    let sealed = cipher.seal(plaintext);
 
     info!(
-        plaintext_size = plaintext.len(),
+        plaintext_size,
         sealed_size = sealed.len(),
         "created snapshot"
     );
@@ -1013,7 +1014,7 @@ pub async fn bootstrap_from_snapshot(
     }
 
     let plaintext = cipher
-        .open(&sealed)
+        .open(sealed)
         .map_err(|e| SnapshotError::Decryption(e.to_string()))?;
 
     snapshot_files()?.write_snapshot_db(target_path, &plaintext)?;
@@ -1691,7 +1692,7 @@ mod tests {
             create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("create_snapshot");
 
         assert!(!encrypted.is_empty());
-        let plaintext = enc.open(&encrypted).expect("open should succeed");
+        let plaintext = enc.open(encrypted).expect("open should succeed");
         assert!(!plaintext.is_empty());
         assert!(
             plaintext.starts_with(b"SQLite format 3\0"),
@@ -1716,7 +1717,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let enc = test_encryption();
         let encrypted = create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("snapshot");
-        let plaintext = enc.open(&encrypted).expect("open");
+        let plaintext = enc.open(encrypted).expect("open");
 
         let db_path = temp.path().join("verify.db");
         std::fs::write(&db_path, &plaintext).unwrap();
@@ -1971,7 +1972,7 @@ mod tests {
         let enc = test_encryption();
         let encrypted =
             create_snapshot(&db_a, temp.path(), &remote_root_tables(), &enc).expect("snapshot");
-        let plaintext = enc.open(&encrypted).expect("open");
+        let plaintext = enc.open(encrypted).expect("open");
         let db_path = temp.path().join("remote_root_snapshot.db");
         std::fs::write(&db_path, &plaintext).unwrap();
         let db_b = open_db_at(&db_path);
@@ -2292,7 +2293,7 @@ mod tests {
         drop(session2);
 
         // --- Path A: bootstrap from snapshot + apply cs2 ---
-        let snapshot_plain = enc.open(&snapshot_encrypted).unwrap();
+        let snapshot_plain = enc.open(snapshot_encrypted).unwrap();
         let path_a = temp.path().join("path_a.db");
         std::fs::write(&path_a, &snapshot_plain).unwrap();
         let db_a = open_db_at(&path_a);
@@ -3123,7 +3124,7 @@ mod authorization_tests {
     /// (The full create→push→bootstrap DB round-trip is covered in the sibling
     /// `tests` module; here the blob is just the thing the signature commits to.)
     fn fake_snapshot() -> Vec<u8> {
-        cipher().seal(b"catalog-image-bytes")
+        cipher().seal(b"catalog-image-bytes".to_vec())
     }
 
     /// Seed a one-owner founder chain into the mock and return the owner keypair.
@@ -3526,7 +3527,7 @@ mod authorization_tests {
             .put_snapshot(
                 &pubkey_hex(&owner),
                 1,
-                cipher().seal(b"a-different-forged-catalog"),
+                cipher().seal(b"a-different-forged-catalog".to_vec()),
             )
             .await
             .unwrap();
@@ -3583,7 +3584,7 @@ mod authorization_tests {
         // re-sign over a DIFFERENT db image's hash, naming the same `{owner, seq 1}`.
         // The bucket now holds a pointer and a meta naming generation 1 but committing
         // to different hashes — a spliced generation a reader must refuse.
-        let other_hash = snapshot_db_hash(&cipher().seal(b"a-different-devices-catalog"));
+        let other_hash = snapshot_db_hash(&cipher().seal(b"a-different-devices-catalog".to_vec()));
         let spliced_pointer = SnapshotPointerJson::signed(test_library_id(), 1, other_hash, &owner);
         storage
             .put_snapshot_pointer(serde_json::to_vec(&spliced_pointer).unwrap())

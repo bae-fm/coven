@@ -79,7 +79,7 @@ impl CloudCipher {
     /// Protect a control object (heads, changesets, snapshot, snapshot_meta,
     /// min_schema, membership) for storage. Encrypted seals under the library
     /// key; plaintext returns the bytes unchanged.
-    pub fn seal(&self, plaintext: &[u8]) -> Vec<u8> {
+    pub fn seal(&self, plaintext: Vec<u8>) -> Vec<u8> {
         // A control object is always whole-home scoped; only blobs carry a scope.
         // This is exactly the master-scoped blob path: `encryption_for_scope`
         // maps `Master` to the library key itself.
@@ -87,7 +87,7 @@ impl CloudCipher {
     }
 
     /// Recover a control object read from storage. Inverse of [`Self::seal`].
-    pub fn open(&self, stored: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+    pub fn open(&self, stored: Vec<u8>) -> Result<Vec<u8>, EncryptionError> {
         self.open_scoped(crate::blob::ResolvedScope::Master, stored)
     }
 
@@ -97,11 +97,11 @@ impl CloudCipher {
     pub(crate) fn seal_scoped(
         &self,
         scope: crate::blob::ResolvedScope,
-        plaintext: &[u8],
+        plaintext: Vec<u8>,
     ) -> Vec<u8> {
         match self {
-            CloudCipher::Encrypted(e) => encryption_for_scope(scope, e).encrypt(plaintext),
-            CloudCipher::Plaintext => plaintext.to_vec(),
+            CloudCipher::Encrypted(e) => encryption_for_scope(scope, e).encrypt(&plaintext),
+            CloudCipher::Plaintext => plaintext,
         }
     }
 
@@ -109,11 +109,11 @@ impl CloudCipher {
     pub(crate) fn open_scoped(
         &self,
         scope: crate::blob::ResolvedScope,
-        stored: &[u8],
+        stored: Vec<u8>,
     ) -> Result<Vec<u8>, EncryptionError> {
         match self {
-            CloudCipher::Encrypted(e) => encryption_for_scope(scope, e).decrypt(stored),
-            CloudCipher::Plaintext => Ok(stored.to_vec()),
+            CloudCipher::Encrypted(e) => encryption_for_scope(scope, e).decrypt(&stored),
+            CloudCipher::Plaintext => Ok(stored),
         }
     }
 
@@ -436,7 +436,7 @@ impl SyncStorage for CloudSyncStorage {
             // above still propagates (it retries next cycle); a parse failure of
             // a head we *can* open is our own corrupt data and still surfaces. In
             // a plaintext home `open` never fails, so this branch never trips.
-            let decoded = match self.cipher().open(&stored) {
+            let decoded = match self.cipher().open(stored) {
                 Ok(d) => d,
                 Err(e) => {
                     warn!("skipping head {device_id} this library cannot decrypt: {e}");
@@ -473,7 +473,7 @@ impl SyncStorage for CloudSyncStorage {
         let key = format!("changes/{device_id}/{seq}{}", self.suffix());
         let stored = self.home.read(&key).await?;
         self.cipher()
-            .open(&stored)
+            .open(stored)
             .map_err(|e| StorageError::Decryption(format!("changeset {device_id}/{seq}: {e}")))
     }
 
@@ -484,7 +484,7 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = format!("changes/{device_id}/{seq}{}", self.suffix());
-        let stored = self.cipher().seal(&data);
+        let stored = self.cipher().seal(data);
         self.home
             .write(
                 &key,
@@ -511,7 +511,7 @@ impl SyncStorage for CloudSyncStorage {
         );
         let json = serde_json::to_vec(&head)
             .map_err(|e| StorageError::S3(format!("serialize head: {e}")))?;
-        let stored = self.cipher().seal(&json);
+        let stored = self.cipher().seal(json);
         let key = format!("heads/{device_id}.json{}", self.suffix());
         self.home
             .write(
@@ -532,7 +532,7 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
-        let stored = self.cipher().seal_scoped(scope, &data);
+        let stored = self.cipher().seal_scoped(scope, data);
         self.home
             .write(
                 &key,
@@ -553,7 +553,7 @@ impl SyncStorage for CloudSyncStorage {
         let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
         let stored = self.home.read(&key).await?;
         self.cipher()
-            .open_scoped(scope, &stored)
+            .open_scoped(scope, stored)
             .map_err(|e| StorageError::Decryption(format!("blob {namespace}/{id}: {e}")))
     }
 
@@ -632,7 +632,7 @@ impl SyncStorage for CloudSyncStorage {
     }
 
     async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        let stored = self.cipher().seal(&data);
+        let stored = self.cipher().seal(data);
         let key = format!("acks/{device_id}.json{}", self.suffix());
         self.home
             .write(
@@ -648,7 +648,7 @@ impl SyncStorage for CloudSyncStorage {
         let key = format!("acks/{device_id}.json{}", self.suffix());
         let stored = self.home.read(&key).await?;
         self.cipher()
-            .open(&stored)
+            .open(stored)
             .map_err(|e| StorageError::Decryption(format!("ack {device_id}: {e}")))
     }
 
@@ -662,7 +662,7 @@ impl SyncStorage for CloudSyncStorage {
 
         let decoded = self
             .cipher()
-            .open(&stored)
+            .open(stored)
             .map_err(|e| StorageError::Decryption(format!("min_schema_version: {e}")))?;
 
         let parsed: MinSchemaVersionJson = serde_json::from_slice(&decoded)
@@ -688,7 +688,7 @@ impl SyncStorage for CloudSyncStorage {
         let payload = MinSchemaVersionJson::signed(version, &self.keypair);
         let json = serde_json::to_vec(&payload)
             .map_err(|e| StorageError::S3(format!("serialize min_schema_version: {e}")))?;
-        let stored = self.cipher().seal(&json);
+        let stored = self.cipher().seal(json);
         let key = format!("min_schema_version.json{}", self.suffix());
         self.home
             .write(
@@ -707,7 +707,7 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = format!("membership/{author_pubkey}/{seq}{}", self.suffix());
-        let stored = self.cipher().seal(&data);
+        let stored = self.cipher().seal(data);
         self.home
             .write(
                 &key,
@@ -726,7 +726,7 @@ impl SyncStorage for CloudSyncStorage {
         let key = format!("membership/{author_pubkey}/{seq}{}", self.suffix());
         let stored = self.home.read(&key).await?;
         self.cipher()
-            .open(&stored)
+            .open(stored)
             .map_err(|e| StorageError::Decryption(format!("membership {author_pubkey}/{seq}: {e}")))
     }
 
@@ -798,7 +798,7 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         crate::library_dir::validate_path_token(author)?;
-        let stored = self.cipher().seal(&data);
+        let stored = self.cipher().seal(data);
         let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
         self.home
             .write(
@@ -815,12 +815,12 @@ impl SyncStorage for CloudSyncStorage {
         let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
         let stored = self.home.read(&key).await?;
         self.cipher()
-            .open(&stored)
+            .open(stored)
             .map_err(|e| StorageError::Decryption(format!("snapshot_meta {author}/{seq}: {e}")))
     }
 
     async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        let stored = self.cipher().seal(&data);
+        let stored = self.cipher().seal(data);
         let key = format!("snapshot/current.json{}", self.suffix());
         self.home
             .write(
@@ -836,7 +836,7 @@ impl SyncStorage for CloudSyncStorage {
         let key = format!("snapshot/current.json{}", self.suffix());
         let stored = self.home.read(&key).await?;
         self.cipher()
-            .open(&stored)
+            .open(stored)
             .map_err(|e| StorageError::Decryption(format!("snapshot_pointer: {e}")))
     }
 
@@ -971,6 +971,37 @@ mod tests {
         assert!(CloudCipher::for_storage(HomeStorage::Opaque, None).is_none());
     }
 
+    #[test]
+    fn plaintext_cipher_returns_owned_buffers_unchanged() {
+        let cipher = CloudCipher::Plaintext;
+
+        let control_plaintext = b"control bytes".to_vec();
+        let control_plaintext_ptr = control_plaintext.as_ptr();
+        let sealed = cipher.seal(control_plaintext);
+        assert_eq!(sealed.as_ptr(), control_plaintext_ptr);
+        assert_eq!(sealed, b"control bytes");
+
+        let control_stored = b"stored control bytes".to_vec();
+        let control_stored_ptr = control_stored.as_ptr();
+        let opened = cipher.open(control_stored).expect("open plaintext control");
+        assert_eq!(opened.as_ptr(), control_stored_ptr);
+        assert_eq!(opened, b"stored control bytes");
+
+        let scoped_plaintext = b"scoped blob bytes".to_vec();
+        let scoped_plaintext_ptr = scoped_plaintext.as_ptr();
+        let sealed = cipher.seal_scoped(ResolvedScope::Master, scoped_plaintext);
+        assert_eq!(sealed.as_ptr(), scoped_plaintext_ptr);
+        assert_eq!(sealed, b"scoped blob bytes");
+
+        let scoped_stored = b"stored scoped blob bytes".to_vec();
+        let scoped_stored_ptr = scoped_stored.as_ptr();
+        let opened = cipher
+            .open_scoped(ResolvedScope::Master, scoped_stored)
+            .expect("open plaintext blob");
+        assert_eq!(opened.as_ptr(), scoped_stored_ptr);
+        assert_eq!(opened, b"stored scoped blob bytes");
+    }
+
     /// A `ResolvedScope::Key` blob is encrypted under the explicit (item) key, not
     /// the master: it round-trips with that key and the master key cannot read
     /// it. This is what lets coven scope a blob to a per-item key (the resolved
@@ -1100,7 +1131,7 @@ mod tests {
             author_pubkey: hex::encode(UserKeypair::generate().public_key),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
         };
-        let sealed = cipher.seal(&serde_json::to_vec(&forged).expect("serialize forged head"));
+        let sealed = cipher.seal(serde_json::to_vec(&forged).expect("serialize forged head"));
         storage
             .cloud_home()
             .write(
@@ -1151,7 +1182,7 @@ mod tests {
             author_pubkey: hex::encode(UserKeypair::generate().public_key),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
         };
-        let sealed = cipher.seal(&serde_json::to_vec(&forged).expect("serialize forged floor"));
+        let sealed = cipher.seal(serde_json::to_vec(&forged).expect("serialize forged floor"));
         storage
             .cloud_home()
             .write(

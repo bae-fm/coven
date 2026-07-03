@@ -401,7 +401,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
     let (sealed, suffix) = {
         let guard = enc_a.read().unwrap();
         (
-            guard.seal(&serde_json::to_vec(&forged_tombstone).unwrap()),
+            guard.seal(serde_json::to_vec(&forged_tombstone).unwrap()),
             guard.suffix(),
         )
     };
