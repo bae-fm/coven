@@ -247,7 +247,7 @@ async fn resolve_write_grant(
     let entries = super::membership_ops::download_entries(storage, &entry_keys)
         .await
         .map_err(SyncCycleError::Membership)?;
-    let our_pubkey = hex::encode(keypair.public_key);
+    let our_pubkey = hex::encode(keypair.public_key());
     Ok(membership::write_grant_coord(&entries, &our_pubkey))
 }
 

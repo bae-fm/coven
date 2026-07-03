@@ -582,7 +582,7 @@ mod tests {
             &kp,
         );
 
-        assert_eq!(head.author_pubkey, hex::encode(kp.public_key));
+        assert_eq!(head.author_pubkey, hex::encode(kp.public_key()));
         assert!(head.verify("devA"), "a freshly signed head verifies");
 
         // Round-trips through JSON unchanged.
@@ -632,7 +632,7 @@ mod tests {
         // Swap the claimed author to a different key: the signature no longer
         // matches, so the head is rejected (a forger can't claim someone else's
         // pubkey).
-        head.author_pubkey = hex::encode(other.public_key);
+        head.author_pubkey = hex::encode(other.public_key());
         assert!(!head.verify("devA"));
     }
 
@@ -643,7 +643,7 @@ mod tests {
         let cursors = BTreeMap::from([("devB".to_string(), 4u64), ("devC".to_string(), 9)]);
         let ack = AckJson::signed("devA", cursors.clone(), &kp);
 
-        assert_eq!(ack.author_pubkey, hex::encode(kp.public_key));
+        assert_eq!(ack.author_pubkey, hex::encode(kp.public_key()));
         assert!(ack.verify("devA"), "a freshly signed ack verifies");
 
         // Round-trips through JSON unchanged.
@@ -680,7 +680,7 @@ mod tests {
         let mut ack = AckJson::signed("devA", BTreeMap::from([("devB".to_string(), 1u64)]), &kp);
         // Swap the claimed author: the signature no longer matches, so the ack is
         // rejected (a forger can't claim a member's pubkey).
-        ack.author_pubkey = hex::encode(other.public_key);
+        ack.author_pubkey = hex::encode(other.public_key());
         assert!(!ack.verify("devA"));
     }
 
@@ -689,7 +689,7 @@ mod tests {
         let kp = UserKeypair::generate();
         let min = MinSchemaVersionJson::signed(5, &kp);
 
-        assert_eq!(min.author_pubkey, hex::encode(kp.public_key));
+        assert_eq!(min.author_pubkey, hex::encode(kp.public_key()));
         assert!(min.verify());
 
         let json = serde_json::to_vec(&min).expect("serialize min_schema");
@@ -729,7 +729,7 @@ mod tests {
         let cursors = BTreeMap::from([("devA".to_string(), 5u64), ("devB".to_string(), 9)]);
         let meta = SnapshotMetaJson::signed("lib", cursors.clone(), "abc123".to_string(), 3, &kp);
 
-        assert_eq!(meta.author_pubkey, hex::encode(kp.public_key));
+        assert_eq!(meta.author_pubkey, hex::encode(kp.public_key()));
         assert_eq!(meta.schema_version, 3);
         assert!(
             meta.verify("lib"),
@@ -798,7 +798,7 @@ mod tests {
         );
         // Swap the claimed author: the signature no longer matches, so the meta is
         // rejected (a forger can't claim a member's pubkey).
-        meta.author_pubkey = hex::encode(other.public_key);
+        meta.author_pubkey = hex::encode(other.public_key());
         assert!(!meta.verify("lib"));
     }
 
@@ -807,7 +807,7 @@ mod tests {
         let kp = UserKeypair::generate();
         let pointer = SnapshotPointerJson::signed("lib", 7, "abc123".to_string(), &kp);
 
-        assert_eq!(pointer.author_pubkey, hex::encode(kp.public_key));
+        assert_eq!(pointer.author_pubkey, hex::encode(kp.public_key()));
         assert!(pointer.verify("lib"), "a freshly signed pointer verifies");
 
         // Round-trips through JSON unchanged.
@@ -852,14 +852,14 @@ mod tests {
         let mut pointer = SnapshotPointerJson::signed("lib", 1, "hash".to_string(), &kp);
         // Swap the claimed author: the signature no longer matches, so the pointer
         // is rejected (a forger can't claim a member's pubkey to repoint).
-        pointer.author_pubkey = hex::encode(other.public_key);
+        pointer.author_pubkey = hex::encode(other.public_key());
         assert!(!pointer.verify("lib"));
     }
 
     #[test]
     fn wrapped_key_round_trips_and_returns_sealed_bytes() {
         let owner = UserKeypair::generate();
-        let owner_hex = hex::encode(owner.public_key);
+        let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![1u8, 2, 3, 4, 5];
         let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed.clone(), &owner);
 
@@ -882,7 +882,7 @@ mod tests {
         // attacker-chosen key — fails to verify against that owner and is refused.
         let signer = UserKeypair::generate();
         let pinned_owner = UserKeypair::generate();
-        let pinned_owner_hex = hex::encode(pinned_owner.public_key);
+        let pinned_owner_hex = hex::encode(pinned_owner.public_key());
         let sealed = vec![9u8; 32];
         let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed, &signer);
 
@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn wrapped_key_rejects_rebinding() {
         let owner = UserKeypair::generate();
-        let owner_hex = hex::encode(owner.public_key);
+        let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![9u8; 32];
         let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed, &owner);
 
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn wrapped_key_malformed_signature_fails_closed() {
         let owner = UserKeypair::generate();
-        let owner_hex = hex::encode(owner.public_key);
+        let owner_hex = hex::encode(owner.public_key());
         let mut wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", vec![1u8; 4], &owner);
 
         // A signature that isn't valid hex can't verify against the owner.
@@ -942,7 +942,7 @@ mod tests {
         // there is nothing to decrypt. This is a corrupt object, surfaced as a
         // reason distinct from a signature mismatch.
         let owner = UserKeypair::generate();
-        let owner_hex = hex::encode(owner.public_key);
+        let owner_hex = hex::encode(owner.public_key());
 
         let mut wrapped = WrappedLibraryKey {
             sealed: "not-hex!!".to_string(),

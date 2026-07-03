@@ -349,7 +349,7 @@ pub async fn push_snapshot(
     // This generation lives under this device's own keyspace, keyed by its public
     // key. The same value is what the signed meta/pointer carry as `author_pubkey`,
     // so the pointer's `{author, seq}` resolves straight to these objects.
-    let own_author = hex::encode(keypair.public_key);
+    let own_author = hex::encode(keypair.public_key());
 
     // Hash the exact bytes we store, before they move into `put_snapshot`. Both
     // the signed meta and the signed pointer commit to this hash, so a reader that
@@ -1520,7 +1520,7 @@ mod tests {
         sealed_db: Vec<u8>,
         keypair: &UserKeypair,
     ) {
-        let author = hex::encode(keypair.public_key);
+        let author = hex::encode(keypair.public_key());
         let db_hash = snapshot_db_hash(&sealed_db);
         let meta = SnapshotMetaJson::signed(
             test_library_id(),
@@ -2395,8 +2395,8 @@ mod tests {
         let storage = MockSyncStorage::new();
         let kp_a = test_keypair();
         let kp_b = test_keypair();
-        let author_a = hex::encode(kp_a.public_key);
-        let author_b = hex::encode(kp_b.public_key);
+        let author_a = hex::encode(kp_a.public_key());
+        let author_b = hex::encode(kp_b.public_key());
 
         // Device A publishes generation 5 and the pointer names it (A is live).
         publish_signed_generation(&storage, 5, HashMap::new(), vec![0xAu8], &kp_a).await;
@@ -2495,7 +2495,7 @@ mod tests {
     async fn sweep_deletes_its_own_superseded_generation() {
         let storage = MockSyncStorage::new();
         let kp = test_keypair();
-        let own_author = hex::encode(kp.public_key);
+        let own_author = hex::encode(kp.public_key());
 
         // The device publishes generation 1, then 2; the pointer now names 2 and
         // generation 1 is its own superseded generation. Both authored by `kp`.
@@ -2505,7 +2505,7 @@ mod tests {
         // A sweep keyed by a stranger's pubkey lists the stranger's keyspace — empty
         // — so it reclaims nothing, and this device's generation 1 survives: a device
         // structurally cannot reach another device's keyspace.
-        let stranger = hex::encode(test_keypair().public_key);
+        let stranger = hex::encode(test_keypair().public_key());
         delete_superseded_generations(&storage, test_library_id(), 2, &stranger)
             .await
             .expect("stranger-keyed sweep runs");
@@ -2545,7 +2545,7 @@ mod tests {
     async fn sweep_never_deletes_the_live_or_just_published_generation() {
         let storage = MockSyncStorage::new();
         let kp = test_keypair();
-        let own_author = hex::encode(kp.public_key);
+        let own_author = hex::encode(kp.public_key());
 
         // Generations 1 (superseded) and 2 (live), both authored by this device.
         publish_signed_generation(&storage, 1, HashMap::new(), vec![1u8], &kp).await;
@@ -2576,7 +2576,7 @@ mod tests {
     async fn sweep_skips_when_the_live_pointer_is_unverifiable() {
         let storage = MockSyncStorage::new();
         let kp = test_keypair();
-        let own_author = hex::encode(kp.public_key);
+        let own_author = hex::encode(kp.public_key());
 
         // Two own generations: 1 (superseded) and 2 (the pointer names it).
         publish_signed_generation(&storage, 1, HashMap::new(), vec![1u8], &kp).await;
@@ -2617,8 +2617,8 @@ mod tests {
         let storage = MockSyncStorage::new();
         let kp_a = test_keypair();
         let kp_b = test_keypair();
-        let author_a = hex::encode(kp_a.public_key);
-        let author_b = hex::encode(kp_b.public_key);
+        let author_a = hex::encode(kp_a.public_key());
+        let author_b = hex::encode(kp_b.public_key());
 
         // Device A publishes a real generation at seq 7 (its catalog has 'a-row'),
         // and the pointer names A's generation (A is the live publisher).

@@ -1126,7 +1126,7 @@ mod tests {
             seq: 100,
             snapshot_seq: None,
             last_sync: None,
-            author_pubkey: hex::encode(UserKeypair::generate().public_key),
+            author_pubkey: hex::encode(UserKeypair::generate().public_key()),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
         };
         let sealed = cipher.seal(serde_json::to_vec(&forged).expect("serialize forged head"));
@@ -1146,7 +1146,7 @@ mod tests {
         assert_eq!(heads[0].seq, 9);
         assert_eq!(
             heads[0].author_pubkey,
-            hex::encode(keypair.public_key),
+            hex::encode(keypair.public_key()),
             "the verified author is surfaced to the caller",
         );
     }
@@ -1171,13 +1171,13 @@ mod tests {
         let got = storage.get_min_schema_version().await.expect("get floor");
         let got = got.expect("a signed floor is present");
         assert_eq!(got.version, 7);
-        assert_eq!(got.author_pubkey, hex::encode(keypair.public_key));
+        assert_eq!(got.author_pubkey, hex::encode(keypair.public_key()));
 
         // Overwrite it with a forged floor (valid shape, bad signature): it is
         // treated as absent.
         let forged = MinSchemaVersionJson {
             min_schema_version: 9999,
-            author_pubkey: hex::encode(UserKeypair::generate().public_key),
+            author_pubkey: hex::encode(UserKeypair::generate().public_key()),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
         };
         let sealed = cipher.seal(serde_json::to_vec(&forged).expect("serialize forged floor"));

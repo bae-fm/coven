@@ -229,7 +229,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     ];
     let chain = MembershipChain::from_entries(entries.clone()).expect("valid chain");
     assert!(
-        !chain.can_write_now(&hex::encode(member.public_key)),
+        !chain.can_write_now(&hex::encode(member.public_key())),
         "removed member must not be a current writer",
     );
     upload_chain(&storage, &entries).await;

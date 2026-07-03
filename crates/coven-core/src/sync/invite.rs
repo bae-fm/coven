@@ -194,7 +194,7 @@ pub async fn create_invitation(
         return Err(original.into());
     }
 
-    let author_pubkey_hex = hex::encode(owner_keypair.public_key);
+    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
     if let Err(original) =
         upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await
     {
@@ -241,7 +241,7 @@ pub async fn unwrap_library_key(
     library_id: &str,
     expected_owner: &str,
 ) -> Result<[u8; 32], InviteError> {
-    let pubkey_hex = hex::encode(keypair.public_key);
+    let pubkey_hex = hex::encode(keypair.public_key());
 
     // Download the wrapped key directly off the cloud home (not through
     // `CloudSyncStorage`, which the joiner hasn't built yet). The `.enc` suffix is
@@ -335,7 +335,7 @@ pub async fn revoke_member(
     chain.add_entry(entry.clone())?;
 
     // Upload the Remove entry.
-    let author_pubkey_hex = hex::encode(owner_keypair.public_key);
+    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
     upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await?;
 
     // Generate a new random encryption key.

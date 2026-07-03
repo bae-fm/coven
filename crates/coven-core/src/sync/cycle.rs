@@ -612,7 +612,7 @@ pub async fn run_single_sync_cycle(
         // device may not snapshot — skip it. A genuine failure to read the chain is
         // fatal to the cycle, the same fail-closed stance `refresh_authorization_state`
         // takes on the membership load.
-        let our_pk = hex::encode(user_keypair.public_key);
+        let our_pk = hex::encode(user_keypair.public_key());
         let pinned_owner = db
             .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
             .await
@@ -924,7 +924,7 @@ pub async fn ensure_owner_anchored_chain(
 ) -> Result<(), String> {
     use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
-    let our_pk = hex::encode(owner_keypair.public_key);
+    let our_pk = hex::encode(owner_keypair.public_key());
     let pinned = db
         .get_sync_state(OWNER_PUBKEY_STATE_KEY)
         .await

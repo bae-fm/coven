@@ -349,7 +349,7 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     let tombstone: BlobTombstoneJson = serde_json::from_slice(&stored).expect("parse tombstone");
     assert_eq!(tombstone.cloud_key, "blob-key");
     assert_eq!(tombstone.deleted_at, "2024-06-10T00:00:00+00:00");
-    assert_eq!(tombstone.author_pubkey, hex::encode(kp.public_key));
+    assert_eq!(tombstone.author_pubkey, hex::encode(kp.public_key()));
     assert!(tombstone.verify("lib"), "the tombstone is validly signed");
 
     // The outbox row is gone.

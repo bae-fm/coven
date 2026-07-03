@@ -238,7 +238,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     use crate::sync::membership_ops::{download_chain, OWNER_PUBKEY_STATE_KEY};
 
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let hlc = Hlc::new("owner-dev".to_string());
     let db = open_test_db();
 
@@ -290,7 +290,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     let forged_founder = founder_entry(&attacker, "2026-03-01T00:00:00Z");
     forged
         .put_membership_entry(
-            &hex::encode(attacker.public_key),
+            &hex::encode(attacker.public_key()),
             1,
             serde_json::to_vec(&forged_founder).unwrap(),
         )
@@ -317,7 +317,7 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     };
 
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let hlc = Hlc::new("owner-dev".to_string());
 
     // Cloud-first crash: our founder is in storage, but the pin never landed. The

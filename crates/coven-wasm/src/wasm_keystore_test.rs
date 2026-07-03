@@ -33,7 +33,8 @@ async fn keypair_persists_across_keystore_reopen() {
         .await
         .expect("reload keypair on the same handle");
     assert_eq!(
-        kp1_again.signing_key, kp1.signing_key,
+        kp1_again.to_keypair_bytes(),
+        kp1.to_keypair_bytes(),
         "get_or_create is idempotent within one handle",
     );
 
@@ -49,11 +50,13 @@ async fn keypair_persists_across_keystore_reopen() {
         .expect("reload keypair after reopen");
 
     assert_eq!(
-        kp2.signing_key, kp1.signing_key,
+        kp2.to_keypair_bytes(),
+        kp1.to_keypair_bytes(),
         "the signing key survived the keystore reopen",
     );
     assert_eq!(
-        kp2.public_key, kp1.public_key,
+        kp2.public_key(),
+        kp1.public_key(),
         "the public key survived the keystore reopen",
     );
 
@@ -62,7 +65,7 @@ async fn keypair_persists_across_keystore_reopen() {
     let message = b"a changeset signed by this device";
     let signature = kp1.sign(message);
     assert!(
-        verify_signature(&signature, message, &kp2.public_key),
+        verify_signature(&signature, message, &kp2.public_key()),
         "the reloaded identity verifies a signature from before the reopen",
     );
 }

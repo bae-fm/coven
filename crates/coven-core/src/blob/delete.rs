@@ -148,7 +148,7 @@ impl BlobTombstoneJson {
         BlobTombstoneJson {
             cloud_key,
             deleted_at,
-            author_pubkey: hex::encode(keypair.public_key),
+            author_pubkey: hex::encode(keypair.public_key()),
             signature: hex::encode(sig),
         }
     }

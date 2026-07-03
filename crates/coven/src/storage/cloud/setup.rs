@@ -362,7 +362,7 @@ pub fn generate_restore_code(
         ek,
         name: config.library_name.clone(),
         provider,
-        sk: hex::encode(keypair.signing_key),
+        sk: hex::encode(keypair.to_keypair_bytes()),
     };
 
     Ok(encode_restore_code(&code))

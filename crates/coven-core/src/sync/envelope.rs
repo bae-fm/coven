@@ -291,7 +291,7 @@ mod tests {
         assert!(env.signature.is_some());
         assert_eq!(
             env.author_pubkey.as_ref().unwrap(),
-            &hex::encode(keypair.public_key)
+            &hex::encode(keypair.public_key())
         );
         assert!(verify_changeset_signature(&env, changeset_bytes));
 

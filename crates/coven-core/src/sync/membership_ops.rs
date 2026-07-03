@@ -73,7 +73,7 @@ pub async fn invite_member(
     library_id: &str,
     library_name: &str,
 ) -> Result<crate::join_code::InviteCode, String> {
-    let user_pubkey_hex = hex::encode(user_keypair.public_key);
+    let user_pubkey_hex = hex::encode(user_keypair.public_key());
 
     if public_key_hex == user_pubkey_hex {
         return Err("Cannot invite yourself".to_string());
@@ -234,7 +234,7 @@ pub(crate) async fn write_founder_entry(
     let bytes = serde_json::to_vec(&entry)
         .map_err(|e| format!("Failed to serialize founder entry: {e}"))?;
     storage
-        .put_membership_entry(&hex::encode(owner.public_key), 1, bytes)
+        .put_membership_entry(&hex::encode(owner.public_key()), 1, bytes)
         .await
         .map_err(|e| format!("Failed to upload founder entry: {e}"))?;
     info!("Wrote founder Owner entry for the library's membership chain");

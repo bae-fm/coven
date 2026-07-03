@@ -92,7 +92,7 @@ impl BrowserKeystore {
         }
 
         let keypair = UserKeypair::generate();
-        let blob = self.seal(&keypair.signing_key).await?;
+        let blob = self.seal(&keypair.to_keypair_bytes()).await?;
         put(
             &self.db,
             SIGNING_KEY_ID,

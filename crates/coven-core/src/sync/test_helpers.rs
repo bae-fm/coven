@@ -314,7 +314,7 @@ pub fn temp_library_dir() -> (tempfile::TempDir, LibraryDir) {
 /// Hex-encoded ed25519 public key, as membership entries and the wrapped-key
 /// store identify a member.
 pub fn pubkey_hex(kp: &UserKeypair) -> String {
-    hex::encode(kp.public_key)
+    hex::encode(kp.public_key())
 }
 
 /// A fresh membership chain whose only member is `owner`, the founding owner,

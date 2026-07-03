@@ -52,7 +52,7 @@ pub fn generate_join_request_for_keypair(
     email: Option<String>,
 ) -> String {
     let code = JoinRequestCode {
-        public_key: hex::encode(keypair.public_key),
+        public_key: hex::encode(keypair.public_key()),
         email,
     };
 

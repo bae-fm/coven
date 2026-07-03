@@ -39,7 +39,7 @@ fn restore_code_with_lid(lid: &str) -> String {
         // A real Ed25519 keypair's 64 bytes: a malicious `lid` is rejected at decode
         // before the key is touched, and a valid `lid` rebuilds this keypair and
         // proceeds to the cloud step (where the loopback endpoint fails it).
-        sk: hex::encode(crate::keys::UserKeypair::generate().signing_key),
+        sk: hex::encode(crate::keys::UserKeypair::generate().to_keypair_bytes()),
     };
     encode_restore_code(&code)
 }

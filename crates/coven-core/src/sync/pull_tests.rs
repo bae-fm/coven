@@ -1186,7 +1186,7 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
     let entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
     let entry_bytes = serde_json::to_vec(&entry).expect("serialize founder");
     storage
-        .put_membership_entry(&hex::encode(founder.public_key), 1, entry_bytes)
+        .put_membership_entry(&hex::encode(founder.public_key()), 1, entry_bytes)
         .await
         .expect("put founder entry");
 
@@ -1236,7 +1236,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
     let forged = founder_entry(&attacker, "2026-03-01T00:00:00Z");
     storage
         .put_membership_entry(
-            &hex::encode(attacker.public_key),
+            &hex::encode(attacker.public_key()),
             1,
             serde_json::to_vec(&forged).unwrap(),
         )
@@ -1246,7 +1246,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
     // The puller has the real owner pinned (a different key).
     let owner = UserKeypair::generate();
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key))
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
         .await
         .unwrap();
 
@@ -1274,7 +1274,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 
     let owner = UserKeypair::generate();
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key))
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
         .await
         .unwrap();
 
@@ -1302,7 +1302,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 #[tokio::test]
 async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_library() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // A founder entry + a changeset the owner authored: without the fail-closed
@@ -1356,7 +1356,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_library() {
 #[tokio::test]
 async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     // The owner's device is the mock: it signs the head it publishes for
     // `devOwner` with the owner keypair, so the head's author is a current member
     // and passes the head-authorization check.
@@ -1424,7 +1424,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
 #[tokio::test]
 async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     // The mock signs every head with the owner key, so the member's device head is
     // owner-authored — a current member — and passes the head-authorization check
@@ -1510,7 +1510,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
 #[tokio::test]
 async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authorize_it() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let outsider = UserKeypair::generate();
     // Head signed by the owner (a current member) so the head passes its check and
     // pull reaches the changeset-level judgment.
@@ -1572,7 +1572,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     assert_eq!(result.rejected_unauthorized[0].seq, 1);
     assert_eq!(
         result.rejected_unauthorized[0].author,
-        Some(hex::encode(outsider.public_key))
+        Some(hex::encode(outsider.public_key()))
     );
     assert_eq!(updated.get("devX"), Some(&1));
 }
@@ -1586,7 +1586,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
 #[tokio::test]
 async fn pull_skips_and_surfaces_a_changeset_with_an_invalid_signature() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
@@ -1661,7 +1661,7 @@ async fn pull_skips_and_surfaces_a_changeset_with_an_invalid_signature() {
 #[tokio::test]
 async fn pull_skips_a_removed_members_changeset() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
@@ -1737,7 +1737,7 @@ async fn pull_skips_a_removed_members_changeset() {
     assert_eq!(result.rejected_unauthorized.len(), 1);
     assert_eq!(
         result.rejected_unauthorized[0].author,
-        Some(hex::encode(member.public_key))
+        Some(hex::encode(member.public_key()))
     );
     assert_eq!(updated.get("devM"), Some(&1));
 }
@@ -1756,7 +1756,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
     bad.signature = "00".to_string();
     storage
         .put_membership_entry(
-            &hex::encode(attacker.public_key),
+            &hex::encode(attacker.public_key()),
             1,
             serde_json::to_vec(&bad).unwrap(),
         )
@@ -1765,7 +1765,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
 
     let owner = UserKeypair::generate();
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key))
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
         .await
         .unwrap();
 
@@ -1796,7 +1796,7 @@ async fn pull_skips_a_head_authored_by_a_non_member() {
     let storage = MockSyncStorage::with_keypair(outsider);
 
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
     storage
         .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
@@ -1843,7 +1843,7 @@ async fn pull_skips_a_head_authored_by_a_non_member() {
 #[tokio::test]
 async fn pull_honors_a_head_authored_by_a_current_member() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     // The mock is the owner's device, so the head it publishes for `devA` is
     // owner-signed — a current member.
     let storage = MockSyncStorage::with_keypair(owner.clone());
@@ -1905,7 +1905,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
 #[tokio::test]
 async fn pull_ignores_min_schema_version_from_a_non_owner() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
 
     // The mock signs the floor with `member` (a current member, but not an owner).
@@ -1963,7 +1963,7 @@ async fn pull_ignores_min_schema_version_from_a_non_owner() {
 #[tokio::test]
 async fn pull_honors_min_schema_version_from_a_current_owner() {
     let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key);
+    let owner_pk = hex::encode(owner.public_key());
     // The mock is the owner's device, so the floor it sets is owner-signed.
     let storage = MockSyncStorage::with_keypair(owner.clone());
 

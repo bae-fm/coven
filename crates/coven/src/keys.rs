@@ -140,13 +140,13 @@ impl KeyService {
         }
 
         let kp = UserKeypair::generate();
-        self.write_signing_key(&kp.signing_key)?;
+        self.write_signing_key(&kp.to_keypair_bytes())?;
         info!("Generated and saved new user Ed25519 keypair");
         Ok(kp)
     }
 
     pub fn get_user_public_key(&self) -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
-        Ok(self.get_user_keypair_inner()?.map(|kp| kp.public_key))
+        Ok(self.get_user_keypair_inner()?.map(|kp| kp.public_key()))
     }
 
     pub fn import_user_keypair(&self, signing_key_bytes: &[u8]) -> Result<(), KeyError> {

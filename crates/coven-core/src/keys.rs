@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::{Signer, SigningKey, Verifier};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -39,8 +39,7 @@ pub enum CloudHomeCredentials {
 /// under one pubkey across all libraries.
 #[derive(Clone)]
 pub struct UserKeypair {
-    pub signing_key: [u8; SIGN_SECRETKEYBYTES], // Ed25519 secret key (64 bytes: seed + public)
-    pub public_key: [u8; SIGN_PUBLICKEYBYTES],  // Ed25519 public key (32 bytes)
+    signing_key: SigningKey,
 }
 
 impl UserKeypair {
@@ -51,11 +50,7 @@ impl UserKeypair {
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-        let public_key = signing_key.verifying_key();
-        Self {
-            signing_key: signing_key.to_keypair_bytes(),
-            public_key: public_key.to_bytes(),
-        }
+        Self { signing_key }
     }
 
     /// Reconstruct a keypair from its 64-byte Ed25519 signing key (seed + public),
@@ -66,39 +61,38 @@ impl UserKeypair {
     pub fn from_signing_key_bytes(
         signing_key: &[u8; SIGN_SECRETKEYBYTES],
     ) -> Result<Self, KeyError> {
-        let sk = ed25519_dalek::SigningKey::from_keypair_bytes(signing_key)
+        let signing_key = ed25519_dalek::SigningKey::from_keypair_bytes(signing_key)
             .map_err(|e| KeyError::Crypto(format!("Invalid signing key bytes: {e}")))?;
-        Ok(Self {
-            signing_key: *signing_key,
-            public_key: sk.verifying_key().to_bytes(),
-        })
+        Ok(Self { signing_key })
+    }
+
+    pub fn public_key(&self) -> [u8; SIGN_PUBLICKEYBYTES] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
+    pub fn to_keypair_bytes(&self) -> [u8; SIGN_SECRETKEYBYTES] {
+        self.signing_key.to_keypair_bytes()
     }
 
     /// Sign a message, returning a 64-byte detached signature.
     pub fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES] {
-        let sk = ed25519_dalek::SigningKey::from_keypair_bytes(&self.signing_key)
-            .expect("valid keypair bytes");
-        sk.sign(message).to_bytes()
+        self.signing_key.sign(message).to_bytes()
     }
 
     /// Derive the X25519 secret key from this Ed25519 signing key.
     pub fn to_x25519_secret_key(&self) -> [u8; CURVE25519_SECRETKEYBYTES] {
-        let sk = ed25519_dalek::SigningKey::from_keypair_bytes(&self.signing_key)
-            .expect("valid keypair bytes");
-        sk.to_scalar_bytes()
+        self.signing_key.to_scalar_bytes()
     }
 
     /// Derive the X25519 public key from this Ed25519 public key.
     pub fn to_x25519_public_key(&self) -> [u8; CURVE25519_PUBLICKEYBYTES] {
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(&self.public_key)
-            .expect("valid public key bytes");
-        vk.to_montgomery().to_bytes()
+        self.signing_key.verifying_key().to_montgomery().to_bytes()
     }
 }
 
 /// Hex-encode the public key attached to `keypair`.
 pub fn public_key_hex(keypair: &UserKeypair) -> String {
-    hex::encode(keypair.public_key)
+    hex::encode(keypair.public_key())
 }
 
 /// Sign `message` and return the hex-encoded public key and detached signature.
@@ -189,20 +183,19 @@ mod tests {
     fn keypair_generation_produces_valid_keys() {
         let kp = UserKeypair::generate();
 
-        // Ed25519 secret key is 64 bytes, public key is 32 bytes
-        assert_eq!(kp.signing_key.len(), 64);
-        assert_eq!(kp.public_key.len(), 32);
+        assert_eq!(kp.to_keypair_bytes().len(), SIGN_SECRETKEYBYTES);
+        assert_eq!(kp.public_key().len(), SIGN_PUBLICKEYBYTES);
 
         // Keys should not be all zeros (astronomically unlikely)
-        assert!(kp.signing_key.iter().any(|&b| b != 0));
-        assert!(kp.public_key.iter().any(|&b| b != 0));
+        assert!(kp.to_keypair_bytes().iter().any(|&b| b != 0));
+        assert!(kp.public_key().iter().any(|&b| b != 0));
     }
 
     #[test]
     fn two_keypairs_are_distinct() {
         let kp1 = UserKeypair::generate();
         let kp2 = UserKeypair::generate();
-        assert_ne!(kp1.public_key, kp2.public_key);
+        assert_ne!(kp1.public_key(), kp2.public_key());
     }
 
     #[test]
@@ -211,7 +204,24 @@ mod tests {
         let message = b"changeset payload";
 
         let sig = kp.sign(message);
-        assert!(verify_signature(&sig, message, &kp.public_key));
+        assert!(verify_signature(&sig, message, &kp.public_key()));
+    }
+
+    #[test]
+    fn keypair_bytes_roundtrip_preserves_signing_identity() {
+        let kp = UserKeypair::generate();
+        let keypair_bytes = kp.to_keypair_bytes();
+        let restored =
+            UserKeypair::from_signing_key_bytes(&keypair_bytes).expect("stored keypair bytes");
+        let message = b"persisted identity";
+
+        assert_eq!(restored.to_keypair_bytes(), keypair_bytes);
+        assert_eq!(restored.public_key(), kp.public_key());
+        assert!(verify_signature(
+            &restored.sign(message),
+            message,
+            &restored.public_key()
+        ));
     }
 
     #[test]
@@ -229,7 +239,7 @@ mod tests {
     fn verify_rejects_wrong_message() {
         let kp = UserKeypair::generate();
         let sig = kp.sign(b"original");
-        assert!(!verify_signature(&sig, b"tampered", &kp.public_key));
+        assert!(!verify_signature(&sig, b"tampered", &kp.public_key()));
     }
 
     #[test]
@@ -237,14 +247,14 @@ mod tests {
         let kp1 = UserKeypair::generate();
         let kp2 = UserKeypair::generate();
         let sig = kp1.sign(b"message");
-        assert!(!verify_signature(&sig, b"message", &kp2.public_key));
+        assert!(!verify_signature(&sig, b"message", &kp2.public_key()));
     }
 
     #[test]
     fn sign_empty_message() {
         let kp = UserKeypair::generate();
         let sig = kp.sign(b"");
-        assert!(verify_signature(&sig, b"", &kp.public_key));
+        assert!(verify_signature(&sig, b"", &kp.public_key()));
     }
 
     #[test]
