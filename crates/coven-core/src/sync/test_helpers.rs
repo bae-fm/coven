@@ -403,6 +403,7 @@ pub struct MockSyncStorage {
     /// silently disabling authorization for the cycle.
     fail_membership_list: std::sync::atomic::AtomicBool,
     membership_list_count: std::sync::atomic::AtomicUsize,
+    membership_get_count: std::sync::atomic::AtomicUsize,
     /// `(author_pubkey, seq)` entries the LIST omits but a keyed GET still serves.
     /// Simulates the eventual-consistency window where a freshly-written
     /// membership entry isn't in the LIST yet, but a direct GET (read-after-write
@@ -429,6 +430,7 @@ impl MockSyncStorage {
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
             membership_list_count: std::sync::atomic::AtomicUsize::new(0),
+            membership_get_count: std::sync::atomic::AtomicUsize::new(0),
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
             fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -444,6 +446,11 @@ impl MockSyncStorage {
 
     pub fn membership_list_count(&self) -> usize {
         self.membership_list_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn membership_get_count(&self) -> usize {
+        self.membership_get_count
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
@@ -823,6 +830,8 @@ impl SyncStorage for MockSyncStorage {
         author_pubkey: &str,
         seq: u64,
     ) -> Result<Vec<u8>, StorageError> {
+        self.membership_get_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let key = format!("membership/{author_pubkey}/{seq}");
         let objects = self.objects.lock().unwrap();
         objects

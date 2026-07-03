@@ -330,6 +330,30 @@ impl MembershipAuthorRequirement {
     }
 }
 
+/// Authorize an already-loaded membership chain. `None` is the chain-less open
+/// library case.
+pub(crate) fn authorize_loaded_membership_author(
+    chain: Option<&MembershipChain>,
+    author_pubkey: &str,
+    requirement: MembershipAuthorRequirement,
+) -> Result<(), String> {
+    let Some(chain) = chain else {
+        debug!(
+            author = %author_pubkey,
+            required_role = ?requirement,
+            "membership author authorization skipped: library is chain-less (no membership, \
+             no pinned owner), so authorization is not applicable"
+        );
+        return Ok(());
+    };
+
+    if !requirement.permits(chain, author_pubkey) {
+        return Err(requirement.denial_message(author_pubkey));
+    }
+
+    Ok(())
+}
+
 /// Why a signed control object's author failed membership authorization.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MembershipAuthorAuthorizationError {
@@ -349,6 +373,17 @@ pub(crate) async fn authorize_membership_author(
     pinned_owner: Option<&str>,
     requirement: MembershipAuthorRequirement,
 ) -> Result<(), MembershipAuthorAuthorizationError> {
+    let chain = load_membership_chain(storage, pinned_owner).await?;
+    authorize_loaded_membership_author(chain.as_ref(), author_pubkey, requirement)
+        .map_err(MembershipAuthorAuthorizationError::Unauthorized)
+}
+
+/// Load the library membership chain when one exists, anchored to the pinned owner
+/// when known.
+pub(crate) async fn load_membership_chain(
+    storage: &dyn SyncStorage,
+    pinned_owner: Option<&str>,
+) -> Result<Option<MembershipChain>, MembershipAuthorAuthorizationError> {
     let entries = storage
         .list_membership_entries()
         .await
@@ -361,25 +396,13 @@ pub(crate) async fn authorize_membership_author(
             )));
         }
 
-        debug!(
-            author = %author_pubkey,
-            required_role = ?requirement,
-            "membership author authorization skipped: library is chain-less (no membership, \
-             no pinned owner), so authorization is not applicable"
-        );
-        return Ok(());
+        return Ok(None);
     }
 
     let chain = load_anchored_chain(storage, &entries, pinned_owner)
         .await
         .map_err(|e| MembershipAuthorAuthorizationError::Unauthorized(e.to_string()))?;
-    if !requirement.permits(&chain, author_pubkey) {
-        return Err(MembershipAuthorAuthorizationError::Unauthorized(
-            requirement.denial_message(author_pubkey),
-        ));
-    }
-
-    Ok(())
+    Ok(Some(chain))
 }
 
 /// Download and validate the membership chain from `entry_keys`, then confirm it

@@ -33,9 +33,10 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use super::cloud_storage::CloudCipher;
+use super::membership::MembershipChain;
 use super::membership_ops::{
-    authorize_membership_author, load_anchored_chain, MembershipAuthorAuthorizationError,
-    MembershipAuthorRequirement,
+    authorize_loaded_membership_author, authorize_membership_author, load_membership_chain,
+    MembershipAuthorAuthorizationError, MembershipAuthorRequirement,
 };
 use super::session::SyncedTable;
 use super::signed_control::{AckJson, SnapshotMetaJson, SnapshotPointerJson};
@@ -96,10 +97,10 @@ pub enum SnapshotError {
     #[error("snapshot DB hash does not match the signed metadata")]
     DbHashMismatch,
     /// The snapshot's author is not authorized to publish a catalog image: not a
-    /// current write-capable member of the library's membership chain, or the
+    /// current Owner of the library's membership chain, or the
     /// chain itself is not anchored to the library's owner (a wiped/refounded
     /// chain). The snapshot is refused rather than adopted.
-    #[error("snapshot author is not an authorized member: {0}")]
+    #[error("snapshot author is not an authorized owner: {0}")]
     UnauthorizedAuthor(String),
     /// The snapshot's synced-schema version is newer than this binary's top
     /// migration, so its DB image carries columns this binary's tables lack. The
@@ -579,10 +580,62 @@ pub(crate) async fn authorize_author(
         MembershipAuthorRequirement::Owner,
     )
     .await
-    .map_err(|e| match e {
+    .map_err(snapshot_authorization_error)
+}
+
+fn snapshot_authorization_error(e: MembershipAuthorAuthorizationError) -> SnapshotError {
+    match e {
         MembershipAuthorAuthorizationError::ListMembershipEntries(e) => SnapshotError::Bucket(e),
         MembershipAuthorAuthorizationError::Unauthorized(e) => SnapshotError::UnauthorizedAuthor(e),
-    })
+    }
+}
+
+struct SnapshotMembership {
+    chain: Option<MembershipChain>,
+}
+
+impl SnapshotMembership {
+    fn authorize_owner(&self, author_pubkey: &str) -> Result<(), SnapshotError> {
+        authorize_loaded_membership_author(
+            self.chain.as_ref(),
+            author_pubkey,
+            MembershipAuthorRequirement::Owner,
+        )
+        .map_err(SnapshotError::UnauthorizedAuthor)
+    }
+
+    fn current_member_pubkeys(&self) -> Option<HashSet<String>> {
+        self.chain.as_ref().map(|chain| {
+            chain
+                .current_members()
+                .into_iter()
+                .map(|(pubkey, _)| pubkey)
+                .collect()
+        })
+    }
+}
+
+async fn load_snapshot_membership(
+    storage: &dyn SyncStorage,
+    owner_pubkey: Option<&str>,
+) -> Result<SnapshotMembership, SnapshotError> {
+    match load_membership_chain(storage, owner_pubkey).await {
+        Ok(Some(chain)) => Ok(SnapshotMembership { chain: Some(chain) }),
+        Ok(None) => {
+            debug!(
+                "snapshot membership load skipped: library is chain-less (no membership, no pinned owner)"
+            );
+            Ok(SnapshotMembership { chain: None })
+        }
+        Err(e) => Err(snapshot_authorization_error(e)),
+    }
+}
+
+struct ResolvedSnapshotMeta {
+    author_pubkey: String,
+    seq: u64,
+    meta: SnapshotMetaJson,
+    membership: SnapshotMembership,
 }
 
 /// Follow the snapshot pointer to the live generation and return its author and
@@ -597,7 +650,7 @@ pub(crate) async fn authorize_author(
 ///    authorize its author against the chain (a non-member cannot repoint).
 /// 2. Read and parse that generation's signed [`SnapshotMetaJson`] from the
 ///    pointer's `{author_pubkey, seq}` keyspace; verify its signature, and
-///    authorize *its* author too (the same write-capable bar).
+///    authorize *its* author too (the same owner bar).
 /// 3. Cross-check that the pointer and the meta commit to the *same* `db_hash`, so
 ///    a generation assembled from mismatched objects is refused.
 ///
@@ -610,7 +663,7 @@ async fn resolve_current_meta(
     storage: &dyn SyncStorage,
     library_id: &str,
     owner_pubkey: Option<&str>,
-) -> Result<(String, u64, SnapshotMetaJson), SnapshotError> {
+) -> Result<ResolvedSnapshotMeta, SnapshotError> {
     // The pointer is the entry point. Its absence means no snapshot has been
     // published (a brand-new library) or the pointer object is missing — either
     // way there is no consistent generation to resolve, surfaced as the bucket's
@@ -628,7 +681,8 @@ async fn resolve_current_meta(
     if !pointer.verify(library_id) {
         return Err(SnapshotError::PointerSignatureInvalid);
     }
-    authorize_author(storage, &pointer.author_pubkey, owner_pubkey).await?;
+    let membership = load_snapshot_membership(storage, owner_pubkey).await?;
+    membership.authorize_owner(&pointer.author_pubkey)?;
 
     // Follow the pointer to the named generation's metadata — under the pointer's
     // own `{author_pubkey, seq}` keyspace — and authenticate it on its own terms
@@ -644,7 +698,7 @@ async fn resolve_current_meta(
     if !meta.verify(library_id) {
         return Err(SnapshotError::MetaSignatureInvalid);
     }
-    authorize_author(storage, &meta.author_pubkey, owner_pubkey).await?;
+    membership.authorize_owner(&meta.author_pubkey)?;
 
     // The pointer and the meta must describe the same image. They are written
     // together in one publish, so a mismatch means the generation was assembled
@@ -653,7 +707,12 @@ async fn resolve_current_meta(
         return Err(SnapshotError::PointerMetaMismatch);
     }
 
-    Ok((pointer.author_pubkey, pointer.seq, meta))
+    Ok(ResolvedSnapshotMeta {
+        author_pubkey: pointer.author_pubkey,
+        seq: pointer.seq,
+        meta,
+        membership,
+    })
 }
 
 /// One current device's contribution to the reclaim floor: its head slot
@@ -705,8 +764,8 @@ pub async fn reclaim_superseded_changesets(
     // Resolve the live generation's authenticated per-device cursors. No pointer
     // means no snapshot has been published yet -- a joiner replays from 0, so there
     // is nothing to reclaim.
-    let meta = match resolve_current_meta(storage, library_id, owner_pubkey).await {
-        Ok((_author, _seq, meta)) => meta,
+    let resolved = match resolve_current_meta(storage, library_id, owner_pubkey).await {
+        Ok(resolved) => resolved,
         Err(SnapshotError::Bucket(StorageError::NotFound(_))) => {
             info!("no snapshot pointer found, skipping changeset reclamation");
             return Ok(GcResult {
@@ -721,21 +780,7 @@ pub async fn reclaim_superseded_changesets(
     // library, where there is no membership to authorize against and every verified
     // head is a participant -- the same open-by-design path the pull and snapshot
     // authorization take when no chain exists.
-    let entries = storage.list_membership_entries().await?;
-    let members: Option<HashSet<String>> = if entries.is_empty() {
-        None
-    } else {
-        let chain = load_anchored_chain(storage, &entries, owner_pubkey)
-            .await
-            .map_err(|e| SnapshotError::UnauthorizedAuthor(e.to_string()))?;
-        Some(
-            chain
-                .current_members()
-                .into_iter()
-                .map(|(pk, _)| pk)
-                .collect(),
-        )
-    };
+    let members = resolved.membership.current_member_pubkeys();
 
     // The current devices: verified heads whose author is a current member (every
     // head when chain-less). For each, its verified ack supplies the pull cursors
@@ -785,7 +830,12 @@ pub async fn reclaim_superseded_changesets(
 
     let mut deleted = 0u64;
     for device in &devices {
-        let snapshot_cursor = meta.cursors.get(&device.device_id).copied().unwrap_or(0);
+        let snapshot_cursor = resolved
+            .meta
+            .cursors
+            .get(&device.device_id)
+            .copied()
+            .unwrap_or(0);
 
         // The min over the OTHER current devices' acked cursor on this device. A
         // device with no verified ack, or whose ack has no entry for this device,
@@ -859,10 +909,10 @@ pub struct GcResult {
 ///
 /// - The signed pointer's signature must verify (under this `library_id`, which
 ///   also refuses a different library's pointer replayed here) and its author must
-///   be a current write-capable member (a non-member cannot repoint the live
+///   be a current Owner (a non-member cannot repoint the live
 ///   snapshot).
 /// - The named generation's signed metadata must verify (likewise bound to
-///   `library_id`) and its author must be a current write-capable member (a forged,
+///   `library_id`) and its author must be a current Owner (a forged,
 ///   unsigned, or cursor-poisoned meta is refused), and the pointer and meta must
 ///   agree on the DB hash.
 /// - The downloaded DB's hash must match what that signed meta commits to (a
@@ -894,7 +944,12 @@ pub async fn bootstrap_from_snapshot(
     // touching disk. The pointer absent means no snapshot has been published (a
     // brand-new library) or its object is missing; either way there is no
     // consistent generation to adopt and we refuse, writing nothing.
-    let (author, seq, meta) = resolve_current_meta(storage, library_id, owner_pubkey).await?;
+    let ResolvedSnapshotMeta {
+        author_pubkey,
+        seq,
+        meta,
+        membership: _,
+    } = resolve_current_meta(storage, library_id, owner_pubkey).await?;
 
     // Refuse a generation whose synced-schema version is newer than this binary
     // can apply, before downloading the image: its DB carries columns this binary's
@@ -911,7 +966,7 @@ pub async fn bootstrap_from_snapshot(
     // Download the named generation's DB image from its publisher's keyspace and
     // confirm it is the exact image the (now authenticated) meta and pointer commit
     // to, before opening or writing it.
-    let sealed = storage.get_snapshot(&author, seq).await?;
+    let sealed = storage.get_snapshot(&author_pubkey, seq).await?;
     if snapshot_db_hash(&sealed) != meta.db_hash {
         return Err(SnapshotError::DbHashMismatch);
     }
@@ -2726,7 +2781,7 @@ mod authorization_tests {
     }
 
     /// A snapshot signed by a current member (the owner) bootstraps: the signature
-    /// verifies, the DB hash matches, and the author is a write-capable member of
+    /// verifies, the DB hash matches, and the author is an Owner of
     /// the chain anchored to the pinned owner.
     #[tokio::test]
     async fn bootstrap_accepts_snapshot_signed_by_member() {
@@ -2829,7 +2884,7 @@ mod authorization_tests {
     /// THE forge: a bucket writer who is not a member signs a snapshot with their
     /// own key and overwrites the objects. The author is checked against the
     /// membership chain, so the snapshot is refused and nothing is written — a
-    /// snapshot is adopted only from a current write-capable member.
+    /// snapshot is adopted only from a current Owner.
     #[tokio::test]
     async fn bootstrap_refuses_snapshot_signed_by_non_member() {
         let owner = UserKeypair::generate();
@@ -3259,7 +3314,7 @@ mod authorization_tests {
     }
 
     /// Restore pins no owner up front: the chain is anchored to its own founder and
-    /// the author must be a current write-capable member of it. A member-signed
+    /// the author must be a current Owner of it. An owner-signed
     /// snapshot is adopted (owner = None), while a non-member-signed one is still
     /// refused — so the trust-on-first-use restore path is not a hole.
     #[tokio::test]
@@ -3540,7 +3595,7 @@ mod reclaim_tests {
     }
 
     /// Found a one-owner chain and return the owner keypair. The owner authors the
-    /// snapshot (a write-capable member); it has no head, so it is not itself a
+    /// snapshot (a current owner); it has no head, so it is not itself a
     /// current device.
     async fn found_chain(storage: &MockSyncStorage) -> UserKeypair {
         let owner = UserKeypair::generate();
@@ -3598,6 +3653,31 @@ mod reclaim_tests {
         reclaim_superseded_changesets(storage, TEST_LIBRARY_ID, Some(&pubkey_hex(owner)))
             .await
             .expect("reclaim")
+    }
+
+    #[tokio::test]
+    async fn reclaim_loads_snapshot_membership_once() {
+        let storage = MockSyncStorage::new();
+        let owner = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 1).await;
+        storage.publish_head_as("A", 1, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_signed_generation(&storage, 1, [("A", 1)], vec![0u8], &owner).await;
+        publish_ack(&storage, &b, &[("A", 1)]).await;
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 1);
+        assert_eq!(
+            (
+                storage.membership_list_count(),
+                storage.membership_get_count()
+            ),
+            (1, 3)
+        );
     }
 
     /// 1. Behind member kept: the snapshot covers A->5, but the one other current
