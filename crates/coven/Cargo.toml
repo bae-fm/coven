@@ -46,6 +46,7 @@ apple-native-keyring-store = { version = "0.2", features = ["protected"] }
 android-native-keyring-store = "0.5"
 
 [dev-dependencies]
+coven-core = { path = "../coven-core", version = "0.0.0-dev", features = ["test-utils"] }
 tempfile = "3.8"
 
 [features]
