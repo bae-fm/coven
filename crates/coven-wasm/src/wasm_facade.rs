@@ -47,8 +47,9 @@ use crate::wasm_keystore::BrowserKeystore;
 ///
 /// The S3 fields name the bucket the library lives in; `endpoint` is set for an
 /// S3-compatible service (MinIO, Backblaze, R2, Google Cloud Storage's S3 API)
-/// and left unset for AWS. `library_id` names the library (it derives the OPFS
-/// filename and must be distinct per library on one origin). `storage` is
+/// and left unset for AWS. `library_id` names the library (it feeds the stable
+/// SQLite path that the browser VFS hashes into an OPFS storage filename, and
+/// must be distinct per library on one origin). `storage` is
 /// `"opaque"` (end-to-end-encrypted with obfuscated, content-addressed blob keys
 /// — then `encryption_key_hex`, 64 hex chars = a 32-byte key, is required) or
 /// `"browsable"` (a plaintext bucket at readable blob paths). `device_id`
@@ -105,11 +106,12 @@ impl CovenLibrary {
     /// to it.
     ///
     /// Assembles the whole browser stack from `config` (see [`OpenConfig`]):
-    /// installs the OPFS storage VFS, opens the [`Database`] at an OPFS file
-    /// derived from `library_id`, builds the at-rest [`CloudCipher`] and the
-    /// [`BlobPathScheme`], constructs the fetch-based [`S3WasmCloudHome`], wraps it
-    /// in [`CloudSyncStorage`], and starts a [`WasmSyncRuntime`] over it. The sync
-    /// loop is not running yet — call [`start_sync`](Self::start_sync).
+    /// installs the OPFS storage VFS, opens the [`Database`] at the
+    /// `library_id`-derived SQLite path that the browser VFS hashes into an OPFS
+    /// storage name, builds the at-rest [`CloudCipher`] and the
+    /// [`BlobPathScheme`], constructs the fetch-based [`S3WasmCloudHome`], wraps it in
+    /// [`CloudSyncStorage`], and starts a [`WasmSyncRuntime`] over it. The sync loop
+    /// is not running yet — call [`start_sync`](Self::start_sync).
     ///
     /// Every failure (bad config, storage install, database open, a missing or
     /// malformed encryption key) is returned as a `JsValue` string rather than
@@ -242,8 +244,9 @@ impl CovenLibrary {
     /// `open` builds an [`S3WasmCloudHome`] and passes it here; the test passes an
     /// in-memory home so the full Database + storage + runtime assembly is exercised
     /// without a live, CORS-configured S3 bucket. It installs the OPFS VFS, opens
-    /// the database at the `library_id`-derived path with the demo schema + synced
-    /// set, and builds (but does not start) the [`WasmSyncRuntime`] on `schedule`.
+    /// the database at the `library_id`-derived SQLite path that the browser VFS
+    /// hashes into an OPFS storage name, with the demo schema + synced set, and
+    /// builds (but does not start) the [`WasmSyncRuntime`] on `schedule`.
     /// `open` passes [`production_schedule`]; the headless test passes a short one
     /// so it converges quickly.
     ///
@@ -266,8 +269,9 @@ impl CovenLibrary {
             .await
             .map_err(|e| format!("install browser storage: {e}"))?;
 
-        // The OPFS VFS keys files by name, so the library_id is the filename. A
-        // page that opens two libraries on one origin must give them distinct ids.
+        // The browser VFS hashes this SQLite path into a flat OPFS filename
+        // (`coven-<hash>.db`), so distinct library ids produce distinct storage
+        // files on one origin.
         let path = format!("{library_id}.db");
         let (db, _stamper) = Database::open(
             std::path::Path::new(&path),

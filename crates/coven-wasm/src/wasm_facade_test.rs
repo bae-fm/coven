@@ -35,8 +35,9 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 /// Build a started [`CovenLibrary`] for `device_id` over a clone of the shared
 /// cloud, plaintext at rest with readable blob paths — the simplest home, and the
 /// one the harness README recommends as a first config. Each `library_id` is
-/// distinct so the two devices get independent OPFS databases (OPFS keys files by
-/// name) and converge only through the cloud.
+/// distinct so the two devices get independent SQLite paths, which the browser
+/// VFS hashes into separate OPFS storage names; they converge only through the
+/// cloud.
 async fn open_library(
     library_id: &str,
     device_id: &str,
@@ -107,7 +108,8 @@ async fn two_libraries_converge_a_note_through_the_facade() {
     console_error_panic_hook::set_once();
 
     // A unique suffix per run so the OPFS databases are fresh (OPFS outlives the
-    // test process, and each library_id is a persistent filename).
+    // test process, and each library_id feeds a persistent SQLite path that is
+    // hashed into an OPFS storage name).
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
 

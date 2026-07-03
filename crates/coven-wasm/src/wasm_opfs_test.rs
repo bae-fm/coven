@@ -46,9 +46,9 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), DbError> {
     .map_err(DbError::from)
 }
 
-/// Open a `Database` on the OPFS-backed VFS at `name`. The flat OPFS filename is
-/// derived from the path's file name, so this path resolves to the same OPFS file
-/// on every open with the same `name`.
+/// Open a `Database` on the OPFS-backed VFS at `name`. The browser VFS hashes the
+/// SQLite path into a flat OPFS storage name, so this path resolves to the same
+/// OPFS file on every open with the same `name`.
 fn open(name: &str) -> Database {
     let migrations = vec![Migration::run(1, "test-schema", migrate)];
     let (db, _stamper) = Database::open(
