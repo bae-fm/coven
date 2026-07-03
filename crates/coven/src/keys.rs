@@ -34,6 +34,24 @@ pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
     }
 }
 
+fn write_keyring(account: &str, value: &str) -> Result<(), KeyError> {
+    keyring_core::Entry::new(keyring_service(), account)
+        .map_err(map_keyring_error)?
+        .set_password(value)
+        .map_err(map_keyring_error)
+}
+
+fn delete_keyring(account: &str) -> Result<bool, KeyError> {
+    match keyring_core::Entry::new(keyring_service(), account)
+        .map_err(map_keyring_error)?
+        .delete_credential()
+    {
+        Ok(()) => Ok(true),
+        Err(keyring_core::Error::NoEntry) => Ok(false),
+        Err(e) => Err(map_keyring_error(e)),
+    }
+}
+
 #[derive(Clone)]
 pub struct KeyService {
     library_id: String,
@@ -62,35 +80,22 @@ impl KeyService {
         }
 
         let key_hex = hex::encode(crate::encryption::generate_random_key());
-        keyring_core::Entry::new(keyring_service(), &self.account("encryption_master_key"))
-            .map_err(map_keyring_error)?
-            .set_password(&key_hex)
-            .map_err(map_keyring_error)?;
+        write_keyring(&self.account("encryption_master_key"), &key_hex)?;
         info!("Generated and saved new encryption key to keyring");
         Ok(key_hex)
     }
 
     pub fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
-        keyring_core::Entry::new(keyring_service(), &self.account("encryption_master_key"))
-            .map_err(map_keyring_error)?
-            .set_password(value)
-            .map_err(map_keyring_error)?;
+        write_keyring(&self.account("encryption_master_key"), value)?;
         info!("Encryption key saved to keyring");
         Ok(())
     }
 
     pub fn delete_encryption_key(&self) -> Result<(), KeyError> {
-        match keyring_core::Entry::new(keyring_service(), &self.account("encryption_master_key"))
-            .map_err(map_keyring_error)?
-            .delete_credential()
-        {
-            Ok(()) => {
-                info!("Encryption key deleted from keyring");
-                Ok(())
-            }
-            Err(keyring_core::Error::NoEntry) => Ok(()),
-            Err(e) => Err(map_keyring_error(e)),
+        if delete_keyring(&self.account("encryption_master_key"))? {
+            info!("Encryption key deleted from keyring");
         }
+        Ok(())
     }
 
     pub fn get_cloud_home_credentials(&self) -> Result<Option<CloudHomeCredentials>, KeyError> {
@@ -105,26 +110,16 @@ impl KeyService {
     pub fn set_cloud_home_credentials(&self, creds: &CloudHomeCredentials) -> Result<(), KeyError> {
         let json = serde_json::to_string(creds)
             .map_err(|e| KeyError::Crypto(format!("serialize credentials: {e}")))?;
-        keyring_core::Entry::new(keyring_service(), &self.account("cloud_home_credentials"))
-            .map_err(map_keyring_error)?
-            .set_password(&json)
-            .map_err(map_keyring_error)?;
+        write_keyring(&self.account("cloud_home_credentials"), &json)?;
         info!("Cloud home credentials saved to keyring");
         Ok(())
     }
 
     pub fn delete_cloud_home_credentials(&self) -> Result<(), KeyError> {
-        match keyring_core::Entry::new(keyring_service(), &self.account("cloud_home_credentials"))
-            .map_err(map_keyring_error)?
-            .delete_credential()
-        {
-            Ok(()) => {
-                info!("Cloud home credentials deleted from keyring");
-                Ok(())
-            }
-            Err(keyring_core::Error::NoEntry) => Ok(()),
-            Err(e) => Err(map_keyring_error(e)),
+        if delete_keyring(&self.account("cloud_home_credentials"))? {
+            info!("Cloud home credentials deleted from keyring");
         }
+        Ok(())
     }
 
     const SIGNING_KEY_KEYRING_ACCOUNT: &'static str = "coven_user_signing_key";
@@ -167,10 +162,7 @@ impl KeyService {
 
     fn write_signing_key(&self, signing_key: &[u8; SIGN_SECRETKEYBYTES]) -> Result<(), KeyError> {
         let sk_hex = hex::encode(signing_key);
-        keyring_core::Entry::new(keyring_service(), Self::SIGNING_KEY_KEYRING_ACCOUNT)
-            .map_err(map_keyring_error)?
-            .set_password(&sk_hex)
-            .map_err(map_keyring_error)
+        write_keyring(Self::SIGNING_KEY_KEYRING_ACCOUNT, &sk_hex)
     }
 
     fn get_user_keypair_inner(&self) -> Result<Option<UserKeypair>, KeyError> {
