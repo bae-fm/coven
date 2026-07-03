@@ -90,15 +90,12 @@ pub fn sign_envelope(env: &mut ChangesetEnvelope, keypair: &UserKeypair, changes
 /// or malformed hex).
 pub fn verify_changeset_signature(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> bool {
     match (&env.author_pubkey, &env.signature) {
-        (None, None) => return true, // Unsigned envelope -- accepted.
-        (Some(_), None) | (None, Some(_)) => return false, // Half-signed is invalid.
-        _ => {}
+        (None, None) => true,
+        (Some(pk_hex), Some(sig_hex)) => {
+            keys::verify_signature_hex(pk_hex, sig_hex, &signing_payload(env, changeset_bytes))
+        }
+        (Some(_), None) | (None, Some(_)) => false,
     }
-    let (Some(pk_hex), Some(sig_hex)) = (&env.author_pubkey, &env.signature) else {
-        unreachable!()
-    };
-
-    keys::verify_signature_hex(pk_hex, sig_hex, &signing_payload(env, changeset_bytes))
 }
 
 /// Build a signed envelope over `changeset` and pack it into the wire format.
