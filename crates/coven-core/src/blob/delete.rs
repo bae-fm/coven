@@ -57,7 +57,7 @@ use crate::database::Database;
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{no_progress, CloudHome};
 use crate::sync::cloud_storage::CloudCipher;
-use crate::sync::membership_ops::load_anchored_chain;
+use crate::sync::membership_ops::{authorize_membership_author, MembershipAuthorRequirement};
 use crate::sync::storage::SyncStorage;
 
 /// How long a deleted blob is kept after its tombstone is written, before a GC
@@ -441,7 +441,15 @@ pub async fn gc_tombstones(
         // chain may delete a blob. A non-member tombstone (a bucket writer forging a
         // deletion), or one authored by the forged founder of a wiped/refounded
         // chain, fails here and is skipped.
-        match authorize_tombstone_author(storage, &tombstone.author_pubkey, pinned_owner).await {
+        match authorize_membership_author(
+            storage,
+            &tombstone.author_pubkey,
+            pinned_owner,
+            MembershipAuthorRequirement::WriteCapable,
+        )
+        .await
+        .map_err(|e| e.to_string())
+        {
             Ok(()) => {}
             Err(e) => {
                 warn!("skipping tombstone {key}: {e}");
@@ -550,74 +558,6 @@ pub async fn gc_tombstones(
     }
 
     Ok(deleted)
-}
-
-/// Authorize a tombstone's `author_pubkey` against the library's membership chain:
-/// it must be a current write-capable member (Owner or Member — deleting a blob is
-/// a catalog write, so a read-only Follower may not author a deletion).
-///
-/// Mirrors [`crate::sync::snapshot`]'s `authorize_author` exactly, anchored to the
-/// device's *pinned owner* (the chain founder set on join/restore/found), not to
-/// whatever founder `membership/*` currently claims. This GC runs in production and
-/// deletes user blobs, so it must meet the same bar as the snapshot restore path:
-///
-/// - Non-empty chain: load + validate it and anchor it to `pinned_owner` (the same
-///   load+anchor the pull cycle and snapshot authorize run). A chain that won't
-///   validate, or one founded by a key other than the pinned owner — a wiped
-///   `membership/*` refounded under an attacker's key — fails the anchor, so the
-///   author is not authorized and the blob survives. With a pin, the attacker's
-///   forged self-signed founder can't pass authorization at all, which is why a
-///   backdated `deleted_at` on their tombstone is moot.
-/// - Empty `membership/*` WITH a pinned owner: a wiped/refounded chain (founding
-///   writes the entry before pinning, so a real founding never leaves this state) —
-///   REFUSE, leave the blob.
-/// - Empty `membership/*` AND no pinned owner: a genuinely open/browsable library
-///   that legitimately has no chain — accept on the (already verified) signature
-///   alone, exactly as the snapshot authorize and the pull keep objects when no
-///   chain exists.
-async fn authorize_tombstone_author(
-    storage: &dyn SyncStorage,
-    author_pubkey: &str,
-    pinned_owner: Option<&str>,
-) -> Result<(), String> {
-    let entries = storage
-        .list_membership_entries()
-        .await
-        .map_err(|e| format!("failed to list membership entries: {e}"))?;
-
-    if entries.is_empty() {
-        // No chain. For an owner-pinned library this is a wiped `membership/*` — a
-        // takeover attempt — so refuse and leave the blob. A library with no pinned
-        // owner is browsable/open and legitimately has no chain, so accept on the
-        // verified signature alone (mirroring snapshot `authorize_author`).
-        if let Some(owner) = pinned_owner {
-            return Err(format!(
-                "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
-            ));
-        }
-        // Chain-less, no owner pinned: accept on the verified signature alone. Log
-        // the skip so this authorization bail-out is visible rather than a silent
-        // default.
-        debug!(
-            author = %author_pubkey,
-            "tombstone author authorization skipped: library is chain-less (no membership, \
-             no pinned owner), so authorization is not applicable"
-        );
-        return Ok(());
-    }
-
-    // Non-empty chain: load + validate it and anchor it to the pinned owner. A chain
-    // that won't validate, or one founded by a key other than the pinned owner,
-    // refuses the deletion.
-    let chain = load_anchored_chain(storage, &entries, pinned_owner)
-        .await
-        .map_err(|e| e.to_string())?;
-    if !chain.can_write_now(author_pubkey) {
-        return Err(format!(
-            "author {author_pubkey} is not a current write-capable member"
-        ));
-    }
-    Ok(())
 }
 
 /// Cancel any tombstone for `cloud_key`: delete the tombstone object so a GC pass

@@ -3,7 +3,7 @@
 //! These are the high-level orchestration functions that download the membership
 //! chain from the storage, perform the operation, and upload the results.
 
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyPersistence, UserKeypair};
@@ -13,7 +13,7 @@ use super::hlc::Hlc;
 use super::membership::{
     founder_entry, MemberInfo, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
 };
-use super::storage::SyncStorage;
+use super::storage::{StorageError, SyncStorage};
 
 /// `sync_state` key holding the hex Ed25519 pubkey of the library's established
 /// owner — pinned at create (the creator), join (the invite's owner), or restore.
@@ -297,6 +297,87 @@ pub(crate) enum AnchoredChainError {
         founder: Option<String>,
         owner: String,
     },
+}
+
+/// The membership role a signed control author must currently hold.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MembershipAuthorRequirement {
+    /// The author must be a current Owner.
+    Owner,
+    /// The author must be a current Owner or Member.
+    WriteCapable,
+}
+
+impl MembershipAuthorRequirement {
+    fn permits(self, chain: &MembershipChain, author_pubkey: &str) -> bool {
+        match self {
+            MembershipAuthorRequirement::Owner => chain.is_owner_now(author_pubkey),
+            MembershipAuthorRequirement::WriteCapable => chain.can_write_now(author_pubkey),
+        }
+    }
+
+    fn denial_message(self, author_pubkey: &str) -> String {
+        match self {
+            MembershipAuthorRequirement::Owner => {
+                format!("author {author_pubkey} is not a current owner")
+            }
+            MembershipAuthorRequirement::WriteCapable => {
+                format!("author {author_pubkey} is not a current write-capable member")
+            }
+        }
+    }
+}
+
+/// Why a signed control object's author failed membership authorization.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum MembershipAuthorAuthorizationError {
+    /// Membership entries could not be listed from storage.
+    #[error("failed to list membership entries: {0}")]
+    ListMembershipEntries(StorageError),
+    /// The author or membership chain does not satisfy the requested role.
+    #[error("{0}")]
+    Unauthorized(String),
+}
+
+/// Authorize a signed control object's author against the library's membership
+/// chain, anchored to the pinned owner when one is known.
+pub(crate) async fn authorize_membership_author(
+    storage: &dyn SyncStorage,
+    author_pubkey: &str,
+    pinned_owner: Option<&str>,
+    requirement: MembershipAuthorRequirement,
+) -> Result<(), MembershipAuthorAuthorizationError> {
+    let entries = storage
+        .list_membership_entries()
+        .await
+        .map_err(MembershipAuthorAuthorizationError::ListMembershipEntries)?;
+
+    if entries.is_empty() {
+        if let Some(owner) = pinned_owner {
+            return Err(MembershipAuthorAuthorizationError::Unauthorized(format!(
+                "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
+            )));
+        }
+
+        debug!(
+            author = %author_pubkey,
+            required_role = ?requirement,
+            "membership author authorization skipped: library is chain-less (no membership, \
+             no pinned owner), so authorization is not applicable"
+        );
+        return Ok(());
+    }
+
+    let chain = load_anchored_chain(storage, &entries, pinned_owner)
+        .await
+        .map_err(|e| MembershipAuthorAuthorizationError::Unauthorized(e.to_string()))?;
+    if !requirement.permits(&chain, author_pubkey) {
+        return Err(MembershipAuthorAuthorizationError::Unauthorized(
+            requirement.denial_message(author_pubkey),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Download and validate the membership chain from `entry_keys`, then confirm it

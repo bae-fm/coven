@@ -33,7 +33,10 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use super::cloud_storage::CloudCipher;
-use super::membership_ops::load_anchored_chain;
+use super::membership_ops::{
+    authorize_membership_author, load_anchored_chain, MembershipAuthorAuthorizationError,
+    MembershipAuthorRequirement,
+};
 use super::session::SyncedTable;
 use super::signed_control::{AckJson, SnapshotMetaJson, SnapshotPointerJson};
 use super::storage::{StorageError, SyncStorage};
@@ -572,47 +575,17 @@ pub(crate) async fn authorize_author(
     author_pubkey: &str,
     owner_pubkey: Option<&str>,
 ) -> Result<(), SnapshotError> {
-    let entries = storage
-        .list_membership_entries()
-        .await
-        .map_err(SnapshotError::Bucket)?;
-
-    if entries.is_empty() {
-        // No chain. For an owner-pinned (opaque) library this is a wiped
-        // `membership/*` — a takeover attempt — so refuse. A library with no
-        // pinned owner is browsable/open and legitimately has no chain.
-        if let Some(owner) = owner_pubkey {
-            return Err(SnapshotError::UnauthorizedAuthor(format!(
-                "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
-            )));
-        }
-        // Chain-less, no owner pinned: a browsable/open library has no membership
-        // to authorize against, so the object is accepted on its verified signature
-        // alone (open by design, exactly as the pull keeps every head when no chain
-        // exists). Log the skip so this authorization bail-out is visible rather
-        // than a silent default.
-        debug!(
-            author = %author_pubkey,
-            "snapshot author authorization skipped: library is chain-less (no membership, \
-             no pinned owner), so authorization is not applicable"
-        );
-        return Ok(());
-    }
-
-    // Non-empty chain: load + validate it and anchor to the pinned owner (the same
-    // load+anchor the pull cycle runs). A chain that won't validate, or one founded
-    // by a key other than the pinned owner, refuses the snapshot.
-    let chain = load_anchored_chain(storage, &entries, owner_pubkey)
-        .await
-        .map_err(|e| SnapshotError::UnauthorizedAuthor(e.to_string()))?;
-
-    if !chain.is_owner_now(author_pubkey) {
-        return Err(SnapshotError::UnauthorizedAuthor(format!(
-            "author {author_pubkey} is not a current owner"
-        )));
-    }
-
-    Ok(())
+    authorize_membership_author(
+        storage,
+        author_pubkey,
+        owner_pubkey,
+        MembershipAuthorRequirement::Owner,
+    )
+    .await
+    .map_err(|e| match e {
+        MembershipAuthorAuthorizationError::ListMembershipEntries(e) => SnapshotError::Bucket(e),
+        MembershipAuthorAuthorizationError::Unauthorized(e) => SnapshotError::UnauthorizedAuthor(e),
+    })
 }
 
 /// Follow the snapshot pointer to the live generation and return its author and
