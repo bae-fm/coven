@@ -61,17 +61,16 @@ impl BlobStore {
         }
 
         let batch_size = 1_048_576;
-        let file = tokio::fs::File::create(&path).await?;
-        let mut writer = tokio::io::BufWriter::new(file);
+        let mut file = tokio::fs::File::create(&path).await?;
         let mut bytes_written = 0usize;
 
         for chunk in data.chunks(batch_size) {
-            writer.write_all(chunk).await?;
+            file.write_all(chunk).await?;
             bytes_written += chunk.len();
             on_progress(bytes_written.min(total_bytes), total_bytes);
         }
 
-        writer.flush().await?;
+        file.flush().await?;
 
         Ok(())
     }
@@ -99,8 +98,7 @@ impl BlobStore {
 
         let batch_size = 1_048_576;
         let mut reader = tokio::fs::File::open(source).await?;
-        let dest = tokio::fs::File::create(&path).await?;
-        let mut writer = tokio::io::BufWriter::new(dest);
+        let mut dest = tokio::fs::File::create(&path).await?;
         let mut buf = vec![0u8; batch_size];
         let mut bytes_written = 0usize;
 
@@ -120,12 +118,12 @@ impl BlobStore {
             if filled == 0 {
                 break;
             }
-            writer.write_all(&buf[..filled]).await?;
+            dest.write_all(&buf[..filled]).await?;
             bytes_written += filled;
             on_progress(bytes_written.min(total_bytes), total_bytes);
         }
 
-        writer.flush().await?;
+        dest.flush().await?;
 
         Ok(())
     }
