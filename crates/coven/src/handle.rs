@@ -597,18 +597,32 @@ impl CovenHandle {
         let manager = self
             .sync_manager()
             .ok_or("drain_uploads: no provider connected")?;
+        let hlc = self.db.hlc();
+        if let Some(sync_loop) = manager.sync_loop_handle() {
+            let storage = sync_loop.storage().clone();
+            let cipher = sync_loop.cipher().clone();
+            return crate::blob::upload::drain_uploads(
+                &self.db,
+                storage.cloud_home(),
+                cipher.as_ref(),
+                &self.library_dir,
+                self.clock.as_ref(),
+                &hlc,
+                self.observer.as_deref(),
+            )
+            .await;
+        }
+
         let cloud_home = manager
             .cloud_home()
             .ok_or("drain_uploads: no cloud home connected")?;
         let cipher = manager
-            .blob_cipher()
+            .no_loop_upload_drain_cipher_lock()
             .ok_or("drain_uploads: no blob cipher (locked library)")?;
-        let cipher = RwLock::new(cipher);
-        let hlc = self.db.hlc();
         crate::blob::upload::drain_uploads(
             &self.db,
             cloud_home.as_ref(),
-            &cipher,
+            cipher.as_ref(),
             &self.library_dir,
             self.clock.as_ref(),
             &hlc,
@@ -685,6 +699,7 @@ mod tests {
     use crate::blob::{BlobScope, CacheFill, Provenance};
     use crate::clock::SystemClock;
     use crate::config::{CloudProvider, Config, HomeStorage};
+    use crate::encryption::EncryptionService;
     use crate::keys::{test_keyring, KeyService};
     use crate::storage::cloud::cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare};
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -942,6 +957,80 @@ mod tests {
         assert!(
             std::ptr::addr_eq(stored_home.as_ref(), loop_handle.storage().cloud_home()),
             "the sync loop storage must wrap the same cloud home stored on the manager",
+        );
+    }
+
+    // The user keypair is one process-wide keyring account, so the guard is held
+    // across this test's awaits to keep a parallel test from deleting it mid-run
+    // (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so
+    // the blocking `std` lock never deadlocks against another task on this runtime).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn host_drain_uses_the_installed_sync_loop_cipher_lock() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+
+        let config = Config::with_defaults(
+            "lib-test".to_string(),
+            "test-device".to_string(),
+            library_dir.clone(),
+            "Test Library".to_string(),
+        );
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+
+        let handle = CovenHandle::new(
+            db.clone(),
+            db.stamper(),
+            library_dir,
+            config_provider,
+            KeyService::new("lib-test".to_string()),
+            Arc::new(SystemClock),
+            None,
+            None,
+        );
+
+        let home = Arc::new(InMemoryCloudHome::new());
+        handle
+            .connect_sync_with_test_home(
+                home.clone(),
+                CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            )
+            .await
+            .expect("connect encrypted injected home");
+        let manager = handle.sync_manager().expect("sync manager installed");
+        let loop_handle = manager.sync_loop_handle().expect("sync loop installed");
+        *loop_handle.cipher().write().unwrap() = CloudCipher::Plaintext;
+
+        let plaintext = b"plain-drain-bytes-after-loop-cipher-mutation".to_vec();
+        let source = tmp.path().join("plain-source.jpg");
+        std::fs::write(&source, &plaintext).expect("write source file");
+        let cloud_key = "images/ab/cd/plain-cover";
+        db.enqueue_upload(
+            "plain-cover",
+            cloud_key,
+            Some(source.to_str().expect("temp source path is valid UTF-8")),
+            BlobScope::Master,
+            false,
+            "2024-01-01T00:00:00Z",
+        )
+        .await
+        .expect("enqueue the upload");
+
+        let outcome = handle
+            .drain_uploads()
+            .await
+            .expect("drain through the handle");
+        assert_eq!(outcome.uploaded, 1, "the queued blob uploaded");
+        assert_eq!(
+            home.get(cloud_key).as_deref(),
+            Some(plaintext.as_slice()),
+            "the host-driven drain used the mutated loop cipher lock",
         );
     }
 }

@@ -160,6 +160,13 @@ impl SyncManager {
         self.sync_loop_handle.read().unwrap().clone()
     }
 
+    /// Standalone cipher lock for the configured-home/no-loop drain path.
+    pub fn no_loop_upload_drain_cipher_lock(&self) -> Option<Arc<RwLock<CloudCipher>>> {
+        let config = (self.config_provider)();
+        CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
+            .map(|cipher| Arc::new(RwLock::new(cipher)))
+    }
+
     // =========================================================================
     // Sync lifecycle
     // =========================================================================
