@@ -1391,29 +1391,10 @@ unsafe fn effective_gate(
         },
         Some(TableGate::RemoteRoot) => Ok(true),
         Some(TableGate::Child { fk_col, parent }) => {
-            let parent_id = match row.fk_value(*fk_col) {
-                Some(id) => id.to_string(),
-                None => match row.pk() {
-                    // FK unchanged in an UPDATE: read it from the live row.
-                    Some(pk) => match lookup_fk_in_db(db, &row.table, *fk_col, pk)? {
-                        Some(id) => id,
-                        None => {
-                            warn!(
-                                "gate: child {}.{pk} has no FK target in live db; \
-                                 treating as not-shared",
-                                row.table
-                            );
-                            return Ok(false);
-                        }
-                    },
-                    None => {
-                        debug!(
-                            "gate: child row in {} has no primary key; treating as not-shared",
-                            row.table
-                        );
-                        return Ok(false);
-                    }
-                },
+            let Some(parent_id) =
+                changeset_child_parent_id(db, row, *fk_col, ChildParentResolution::ShareDecision)?
+            else {
+                return Ok(false);
             };
             Ok(resolve_root(db, gates, parent, &parent_id)?
                 .map(|r| r.kept)
@@ -1650,28 +1631,10 @@ unsafe fn gated_root_id(
         }
         Some(TableGate::RemoteRoot) => Ok(row.pk().map(|pk| (row.table.clone(), pk.to_string()))),
         Some(TableGate::Child { fk_col, parent }) => {
-            let parent_id = match row.fk_value(*fk_col) {
-                Some(id) => id.to_string(),
-                None => match row.pk() {
-                    Some(pk) => match lookup_fk_in_db(db, &row.table, *fk_col, pk)? {
-                        Some(id) => id,
-                        None => {
-                            warn!(
-                                "gate: child {}.{pk} has no FK target in live db during re-emit; \
-                                 skipping",
-                                row.table
-                            );
-                            return Ok(None);
-                        }
-                    },
-                    None => {
-                        debug!(
-                            "gate: child row in {} has no primary key during re-emit; skipping",
-                            row.table
-                        );
-                        return Ok(None);
-                    }
-                },
+            let Some(parent_id) =
+                changeset_child_parent_id(db, row, *fk_col, ChildParentResolution::ReemitScope)?
+            else {
+                return Ok(None);
             };
             Ok(resolve_root(db, gates, parent, &parent_id)?
                 .filter(|r| r.kept)
@@ -1681,6 +1644,55 @@ unsafe fn gated_root_id(
         // scoping uses; its re-emit is driven by the kept-component closure in
         // `connected_component`, not by the flipped-root descendant test.
         Some(TableGate::Parent { .. }) => Ok(None),
+    }
+}
+
+enum ChildParentResolution {
+    ShareDecision,
+    ReemitScope,
+}
+
+/// The parent id for a child changeset row. The changeset carries the FK when it
+/// changed; when it omits the FK, read the live row by primary key.
+unsafe fn changeset_child_parent_id(
+    db: *mut ffi::sqlite3,
+    row: &ChangeRow,
+    fk_col: usize,
+    resolution: ChildParentResolution,
+) -> Result<Option<String>, GateError> {
+    if let Some(id) = row.fk_value(fk_col) {
+        return Ok(Some(id.to_string()));
+    }
+
+    let Some(pk) = row.pk() else {
+        match resolution {
+            ChildParentResolution::ShareDecision => debug!(
+                "gate: child row in {} has no primary key; treating as not-shared",
+                row.table
+            ),
+            ChildParentResolution::ReemitScope => debug!(
+                "gate: child row in {} has no primary key during re-emit; skipping",
+                row.table
+            ),
+        }
+        return Ok(None);
+    };
+
+    match lookup_fk_in_db(db, &row.table, fk_col, pk)? {
+        Some(id) => Ok(Some(id)),
+        None => {
+            match resolution {
+                ChildParentResolution::ShareDecision => warn!(
+                    "gate: child {}.{pk} has no FK target in live db; treating as not-shared",
+                    row.table
+                ),
+                ChildParentResolution::ReemitScope => warn!(
+                    "gate: child {}.{pk} has no FK target in live db during re-emit; skipping",
+                    row.table
+                ),
+            }
+            Ok(None)
+        }
     }
 }
 
