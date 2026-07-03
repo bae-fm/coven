@@ -16,8 +16,10 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension};
 use tracing::error;
 
+use crate::blob::decl::BlobDecls;
 use crate::db::{ExternalBlob, OutboxEntry, OutboxOperation, MIGRATION_SQL};
 use crate::migration::{run_migrations, Migration};
+use crate::sync::gate::Gates;
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
 use crate::sync::session::SyncedTable;
 
@@ -37,6 +39,8 @@ struct DatabaseState {
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
+    gates: Arc<Gates>,
+    blob_decls: Arc<BlobDecls>,
 }
 
 /// The SQLite connection plus the capture state that must stay beside it.
@@ -61,6 +65,8 @@ struct DatabaseCore {
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
+    gates: Arc<Gates>,
+    blob_decls: Arc<BlobDecls>,
 }
 
 // Native constructs the core before spawning the actor, then moves the whole
@@ -118,6 +124,12 @@ impl DatabaseCore {
 
         let stamper = UpdatedAtStamper::new(hlc.clone());
         let synced_tables = Arc::new(synced_tables);
+        let gates = Arc::new(
+            Gates::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
+        );
+        let blob_decls = Arc::new(
+            BlobDecls::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
+        );
         let session = Some(attach_erased_session(&conn, &synced_tables)?);
         let core = DatabaseCore {
             session,
@@ -125,6 +137,8 @@ impl DatabaseCore {
             hlc,
             synced_tables,
             schema_version,
+            gates,
+            blob_decls,
         };
         let state = core.state();
 
@@ -136,6 +150,8 @@ impl DatabaseCore {
             hlc: self.hlc.clone(),
             synced_tables: self.synced_tables.clone(),
             schema_version: self.schema_version,
+            gates: self.gates.clone(),
+            blob_decls: self.blob_decls.clone(),
         }
     }
 
@@ -295,6 +311,18 @@ impl Database {
     /// separately-passed copy that could silently diverge.
     pub fn synced_tables(&self) -> &[SyncedTable] {
         &self.state.synced_tables
+    }
+
+    /// The gate model resolved from the final synced table set and live schema at
+    /// open. Fixed for this handle's life.
+    pub(crate) fn gates(&self) -> Arc<Gates> {
+        self.state.gates.clone()
+    }
+
+    /// Blob declarations resolved from the final synced table set and live schema at
+    /// open. Fixed for this handle's life.
+    pub(crate) fn blob_decls(&self) -> Arc<BlobDecls> {
+        self.state.blob_decls.clone()
     }
 
     /// The applied synced-schema version — `PRAGMA user_version` after the

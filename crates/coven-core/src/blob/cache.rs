@@ -70,11 +70,9 @@
 //! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
-use crate::blob::decl::BlobDecls;
 use crate::blob::{BlobRef, Provenance};
 use crate::database::{Database, DbError};
 use crate::library_dir::{LibraryDir, PathTokenError};
-use crate::sync::gate::Gates;
 use crate::sync::storage::{StorageError, SyncStorage};
 
 /// Prefix for the `sync_state` keys holding each namespace's device-local cache-size
@@ -915,23 +913,21 @@ enum BlobSource {
 /// table the blob's `namespace` declares ([`BlobDecls::row_for_blob_in_namespace`] —
 /// the namespace is the blob's address, so an id colliding across namespaces still
 /// reads the right table), then walked up to its gated root or remote root
-/// ([`Gates::root_kept_of`]) — the same row→root→gate resolution the make_remote drain
-/// runs ([`crate::blob::upload`]), built once here from the declared synced set + the
-/// live schema. Gate on, or a remote root, ⇒ [`BlobSource::Cache`] (Remote); gate off
-/// ⇒ provenance picks the Local copy: user-provided ⇒ [`BlobSource::External`],
-/// host-provided ⇒ [`BlobSource::LocalStore`]. A blob whose namespace declares no
-/// table, or whose row reaches no locality root, has no determinable source —
+/// ([`Gates::root_kept_of`]) using the database's open-time schema models — the same
+/// row→root→gate resolution the make_remote drain runs ([`crate::blob::upload`]).
+/// Gate on, or a remote root, ⇒ [`BlobSource::Cache`] (Remote); gate off ⇒ provenance
+/// picks the Local copy: user-provided ⇒ [`BlobSource::External`], host-provided ⇒
+/// [`BlobSource::LocalStore`]. A blob whose namespace declares no table, or whose row
+/// reaches no locality root, has no determinable source —
 /// [`BlobCacheError::LocalityUnresolved`], surfaced rather than guessed.
 async fn resolve_source(db: &Database, blob: &BlobRef) -> Result<BlobSource, BlobCacheError> {
-    let tables = db.synced_tables().to_vec();
+    let gates = db.gates();
+    let blob_decls = db.blob_decls();
     let namespace = blob.namespace.clone();
     let id = blob.id.clone();
     let kept: Option<bool> = db
         .call(move |conn| {
-            let gates = Gates::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
-            let decls =
-                BlobDecls::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
-            match decls
+            match blob_decls
                 .row_for_blob_in_namespace(conn, &namespace, &id)
                 .map_err(|e| DbError(e.to_string()))?
             {

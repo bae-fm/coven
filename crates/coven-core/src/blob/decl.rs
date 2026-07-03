@@ -5,7 +5,7 @@
 //! table, via [`SyncedTable::carries_blob`], the columns that locate a blob (its
 //! id, optional readable cloud path, and encryption-scope column) plus the
 //! namespace and retention class. [`BlobDecls::from_tables`] resolves those column
-//! *names* to indices against the live schema once per cycle — the same
+//! *names* to indices against the live schema for the database handle — the same
 //! `PRAGMA table_info` name→index resolution the gate runs — so coven reads a
 //! row's blob straight off a changeset row or a live `SELECT` with no per-row host
 //! callback.
@@ -133,10 +133,25 @@ impl TableBlob {
     }
 }
 
-/// The blob declarations for a sync cycle, resolved once from the declared set +
-/// the live schema. A synced table absent from this map carries no blob.
+/// The blob declarations for a database handle, resolved from the declared set +
+/// the live schema at open. A synced table absent from this map carries no blob.
 pub struct BlobDecls {
     tables: HashMap<String, TableBlob>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FROM_TABLES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_from_tables_call_count() {
+    FROM_TABLES_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn from_tables_call_count() -> usize {
+    FROM_TABLES_CALLS.with(std::cell::Cell::get)
 }
 
 impl BlobDecls {
@@ -146,6 +161,9 @@ impl BlobDecls {
     /// column absent from the table is a host error surfaced here, never a silent
     /// drop.
     pub fn from_tables(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, BlobDeclError> {
+        #[cfg(test)]
+        FROM_TABLES_CALLS.with(|calls| calls.set(calls.get() + 1));
+
         let mut map = HashMap::new();
         for t in tables {
             let Some(decl) = t.blob() else {

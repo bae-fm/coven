@@ -289,12 +289,27 @@ enum TableGate {
     Parent { children: Vec<(String, usize)> },
 }
 
-/// The gate model for a sync cycle, computed once from the live schema.
+/// The gate model for a database handle, computed from the live schema at open.
 ///
 /// Maps each gated-or-inheriting synced table to how it resolves its gate. A
 /// synced table absent from this map is ungated and unconditionally shared.
 pub struct Gates {
     tables: HashMap<String, TableGate>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FROM_TABLES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_from_tables_call_count() {
+    FROM_TABLES_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn from_tables_call_count() -> usize {
+    FROM_TABLES_CALLS.with(std::cell::Cell::get)
 }
 
 impl Gates {
@@ -305,6 +320,9 @@ impl Gates {
     /// Runs on the connection coven owns; the session FFI the gate uses needs the
     /// raw handle, so this borrows it once via [`Connection::handle`].
     pub fn from_tables(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, GateError> {
+        #[cfg(test)]
+        FROM_TABLES_CALLS.with(|calls| calls.set(calls.get() + 1));
+
         unsafe { Self::from_tables_raw(conn.handle(), tables) }
     }
 

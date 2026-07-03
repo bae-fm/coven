@@ -132,6 +132,72 @@ async fn second_read_is_a_local_hit() {
     );
 }
 
+#[tokio::test]
+async fn blob_reads_reuse_schema_models_built_at_open() {
+    crate::sync::gate::reset_from_tables_call_count();
+    crate::blob::decl::reset_from_tables_call_count();
+
+    let db = read_test_db("audio");
+    assert_eq!(
+        crate::sync::gate::from_tables_call_count(),
+        1,
+        "database open builds the gate model once",
+    );
+    assert_eq!(
+        crate::blob::decl::from_tables_call_count(),
+        1,
+        "database open builds the blob declaration model once",
+    );
+
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+    let blob = blob_ref("blob-reuse", "audio", CacheFill::CacheLazy);
+    let bytes = ramp(4096);
+
+    plant_blob_row(&db, &blob.id, true).await;
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
+
+    assert_eq!(
+        read_blob(&db, &ld, Some(&storage), &blob)
+            .await
+            .expect("first read fetches from cloud"),
+        bytes,
+    );
+    assert_eq!(
+        read_blob(&db, &ld, Some(&storage), &blob)
+            .await
+            .expect("second read serves from cache"),
+        bytes,
+    );
+    let offset = 1024;
+    let len = 512;
+    assert_eq!(
+        open_blob_stream(
+            &db,
+            &ld,
+            Some(&storage),
+            &blob,
+            bytes.len() as u64,
+            offset,
+            len,
+        )
+        .await
+        .expect("ranged read serves through the cache path"),
+        bytes[offset as usize..(offset + len) as usize],
+    );
+
+    assert_eq!(
+        crate::sync::gate::from_tables_call_count(),
+        1,
+        "blob reads reuse the database's gate model",
+    );
+    assert_eq!(
+        crate::blob::decl::from_tables_call_count(),
+        1,
+        "blob reads reuse the database's blob declaration model",
+    );
+}
+
 /// A CacheEager blob pulled in a changeset lands in the EVICTABLE CACHE: its file is
 /// in `storage/cache/<id>`, not the kept `storage/pinned/<id>`. On a peer the release
 /// is Remote, so the blob's local copy is a cache copy (evictable + re-fetchable, not
