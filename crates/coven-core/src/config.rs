@@ -97,18 +97,7 @@ pub struct CloudHomeConfig {
     /// How this home stores its objects: opaque ([`HomeStorage::Opaque`]) or
     /// browsable ([`HomeStorage::Browsable`]). Drives both the at-rest cipher and
     /// the blob-path scheme — see [`HomeStorage`].
-    ///
-    /// Defaults to `Opaque`: the default home is encrypted with obfuscated blob
-    /// paths, and an on-disk config written before this field existed describes
-    /// such a home, so an absent value reads back as `Opaque`.
-    #[serde(default = "default_storage")]
     pub storage: HomeStorage,
-}
-
-/// The default for [`CloudHomeConfig::storage`]: every home is opaque (encrypted)
-/// unless the host explicitly creates a browsable one.
-fn default_storage() -> HomeStorage {
-    HomeStorage::Opaque
 }
 
 impl Default for CloudHomeConfig {
@@ -126,7 +115,7 @@ impl Default for CloudHomeConfig {
             cloudkit_share_url: None,
             cloudkit_owner_name: None,
             cloudkit_zone_name: None,
-            storage: default_storage(),
+            storage: HomeStorage::Opaque,
         }
     }
 }
@@ -175,11 +164,6 @@ impl Config {
             encryption_key_fingerprint: None,
             cloud_home: CloudHomeConfig::default(),
         }
-    }
-
-    /// Persist the sync config to `library_dir/config.yaml`.
-    pub fn save(&self) -> Result<(), ConfigError> {
-        self.save_to_config_yaml()
     }
 
     /// Persist the sync config to `library_dir/config.yaml`.
