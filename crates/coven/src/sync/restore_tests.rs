@@ -10,9 +10,6 @@
 
 use std::sync::Arc;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
-
 use crate::clock::SystemClock;
 use crate::id_provider::SequentialIdProvider;
 use crate::sync::restore::{restore_from_code, RestoreError};
@@ -26,7 +23,7 @@ use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 /// fail at once — but a malicious `lid` is refused at decode, well before that.
 fn restore_code_with_lid(lid: &str) -> String {
     let code = RestoreCode {
-        v: 1,
+        v: crate::sync::restore_code::RESTORE_CODE_VERSION,
         lid: lid.to_string(),
         ek: Some("aa".repeat(32)),
         name: "Evil".to_string(),
@@ -42,7 +39,7 @@ fn restore_code_with_lid(lid: &str) -> String {
         // A real Ed25519 keypair's 64 bytes: a malicious `lid` is rejected at decode
         // before the key is touched, and a valid `lid` rebuilds this keypair and
         // proceeds to the cloud step (where the loopback endpoint fails it).
-        sk: URL_SAFE_NO_PAD.encode(crate::keys::UserKeypair::generate().signing_key),
+        sk: hex::encode(crate::keys::UserKeypair::generate().signing_key),
     };
     encode_restore_code(&code)
 }

@@ -258,10 +258,9 @@ pub fn generate_restore_code(
     config: &Config,
     key_service: &KeyService,
 ) -> Result<String, SetupError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine;
-
-    use crate::sync::restore_code::{encode_restore_code, RestoreCode, RestoreProvider};
+    use crate::sync::restore_code::{
+        encode_restore_code, RestoreCode, RestoreProvider, RESTORE_CODE_VERSION,
+    };
 
     let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
         SetupError("No cloud provider configured. Set up sync first.".to_string())
@@ -356,12 +355,12 @@ pub fn generate_restore_code(
     };
 
     let code = RestoreCode {
-        v: 1,
+        v: RESTORE_CODE_VERSION,
         lid: config.library_id.clone(),
         ek,
         name: config.library_name.clone(),
         provider,
-        sk: URL_SAFE_NO_PAD.encode(keypair.signing_key),
+        sk: hex::encode(keypair.signing_key),
     };
 
     Ok(encode_restore_code(&code))

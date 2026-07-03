@@ -17,11 +17,12 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 const PREFIX: &str = "coven:";
+pub const RESTORE_CODE_VERSION: u8 = 2;
 
 /// Everything needed to restore a library from cloud storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreCode {
-    /// Version (currently 1).
+    /// Version (currently 2).
     pub v: u8,
     /// Library ID (UUID).
     pub lid: String,
@@ -35,7 +36,7 @@ pub struct RestoreCode {
     pub name: String,
     /// Cloud provider and its connection details.
     pub provider: RestoreProvider,
-    /// Ed25519 signing key, base64url-encoded, 64 bytes. Required.
+    /// Ed25519 signing key, hex-encoded, 64 bytes. Required.
     pub sk: String,
 }
 
@@ -76,9 +77,13 @@ pub enum RestoreCodeError {
     #[error("The restore code is corrupted. Regenerate it on the source device. ({0})")]
     InvalidJson(String),
     #[error(
+        "This restore code was made with an older version of the app (v{0}). Generate a new restore code on the source device."
+    )]
+    ObsoleteVersion(u8),
+    #[error(
         "This restore code was made with a newer version of the app (v{0}). Update the app to use it."
     )]
-    UnsupportedVersion(u8),
+    NewerVersion(u8),
     /// The restore code's `lid` is not a safe path component, so it cannot name a
     /// library directory under `libraries/`. The code is unsigned and anyone can
     /// craft one, so the id is refused here at decode rather than reaching a path
@@ -87,6 +92,10 @@ pub enum RestoreCodeError {
         "The library id in this restore code is invalid. Regenerate it on the source device. ({0})"
     )]
     InvalidLibraryId(crate::library_dir::PathTokenError),
+    #[error("The encryption key in this restore code is invalid. Regenerate it on the source device. ({0})")]
+    InvalidEncryptionKey(String),
+    #[error("The signing key in this restore code is invalid. Regenerate it on the source device. ({0})")]
+    InvalidSigningKey(String),
 }
 
 /// Encode a `RestoreCode` into a prefixed base64url string.
@@ -107,8 +116,11 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
         .map_err(|_| RestoreCodeError::InvalidBase64)?;
     let code: RestoreCode =
         serde_json::from_slice(&bytes).map_err(|e| RestoreCodeError::InvalidJson(e.to_string()))?;
-    if code.v != 1 {
-        return Err(RestoreCodeError::UnsupportedVersion(code.v));
+    if code.v < RESTORE_CODE_VERSION {
+        return Err(RestoreCodeError::ObsoleteVersion(code.v));
+    }
+    if code.v > RESTORE_CODE_VERSION {
+        return Err(RestoreCodeError::NewerVersion(code.v));
     }
     // A restore code is unsigned, so `lid` is attacker-controlled. It becomes the
     // name of a directory the restorer creates under `libraries/` and recursively
@@ -118,7 +130,23 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     // `lid` that is a single safe path component.
     crate::library_dir::validate_path_token(&code.lid)
         .map_err(RestoreCodeError::InvalidLibraryId)?;
+    if let Some(key_hex) = &code.ek {
+        decode_hex_bytes("encryption key", key_hex, 32)
+            .map_err(RestoreCodeError::InvalidEncryptionKey)?;
+    }
+    decode_hex_bytes("signing key", &code.sk, 64).map_err(RestoreCodeError::InvalidSigningKey)?;
     Ok(code)
+}
+
+fn decode_hex_bytes(label: &str, hex_value: &str, expected_len: usize) -> Result<Vec<u8>, String> {
+    let bytes = hex::decode(hex_value).map_err(|e| format!("{label} is not hex: {e}"))?;
+    if bytes.len() != expected_len {
+        return Err(format!(
+            "{label} must be {expected_len} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Returns true if this provider requires an OAuth flow before restore.
@@ -153,16 +181,8 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
         RestoreProvider::OneDrive { .. } => crate::config::CloudProvider::OneDrive,
     };
 
-    let signing_key = URL_SAFE_NO_PAD
-        .decode(&parsed.sk)
-        .map_err(|e| RestoreCodeError::InvalidJson(format!("Invalid signing key encoding: {e}")))?;
-
-    if signing_key.len() != 64 {
-        return Err(RestoreCodeError::InvalidJson(format!(
-            "Signing key must be 64 bytes, got {}",
-            signing_key.len()
-        )));
-    }
+    let signing_key = decode_hex_bytes("signing key", &parsed.sk, 64)
+        .map_err(RestoreCodeError::InvalidSigningKey)?;
 
     Ok(RestoreCodeInfo {
         library_id: parsed.lid,
@@ -178,12 +198,12 @@ mod tests {
     use super::*;
 
     fn test_sk() -> String {
-        URL_SAFE_NO_PAD.encode([0xAB_u8; 64])
+        hex::encode([0xAB_u8; 64])
     }
 
     fn sample_s3_code() -> RestoreCode {
         RestoreCode {
-            v: 1,
+            v: RESTORE_CODE_VERSION,
             lid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             ek: Some("aa".repeat(32)),
             name: "Test Library".to_string(),
@@ -206,7 +226,7 @@ mod tests {
         assert!(encoded.starts_with("coven:"));
 
         let decoded = decode_restore_code(&encoded).unwrap();
-        assert_eq!(decoded.v, 1);
+        assert_eq!(decoded.v, RESTORE_CODE_VERSION);
         assert_eq!(decoded.lid, code.lid);
         assert_eq!(decoded.ek, code.ek);
         assert_eq!(decoded.sk, code.sk);
@@ -234,7 +254,7 @@ mod tests {
     #[test]
     fn roundtrip_cloudkit() {
         let code = RestoreCode {
-            v: 1,
+            v: RESTORE_CODE_VERSION,
             lid: "lib-123".to_string(),
             ek: Some("bb".repeat(32)),
             name: "CloudKit Library".to_string(),
@@ -250,7 +270,7 @@ mod tests {
     #[test]
     fn roundtrip_google_drive() {
         let code = RestoreCode {
-            v: 1,
+            v: RESTORE_CODE_VERSION,
             lid: "lib-456".to_string(),
             ek: Some("cc".repeat(32)),
             name: "GDrive Library".to_string(),
@@ -271,7 +291,7 @@ mod tests {
     #[test]
     fn roundtrip_dropbox() {
         let code = RestoreCode {
-            v: 1,
+            v: RESTORE_CODE_VERSION,
             lid: "lib-789".to_string(),
             ek: Some("dd".repeat(32)),
             name: "Dropbox Library".to_string(),
@@ -292,7 +312,7 @@ mod tests {
     #[test]
     fn roundtrip_onedrive() {
         let code = RestoreCode {
-            v: 1,
+            v: RESTORE_CODE_VERSION,
             lid: "lib-abc".to_string(),
             ek: Some("ee".repeat(32)),
             name: "OneDrive Library".to_string(),
@@ -352,7 +372,19 @@ mod tests {
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
-            Err(RestoreCodeError::UnsupportedVersion(99))
+            Err(RestoreCodeError::NewerVersion(99))
+        ));
+    }
+
+    #[test]
+    fn v1_base64_signing_key_is_unsupported_version() {
+        let mut code = sample_s3_code();
+        code.v = 1;
+        code.sk = URL_SAFE_NO_PAD.encode([0xAB_u8; 64]);
+        let encoded = encode_restore_code(&code);
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::ObsoleteVersion(1))
         ));
     }
 
@@ -368,7 +400,7 @@ mod tests {
     #[test]
     fn optional_fields_omitted_in_json() {
         let code = RestoreCode {
-            v: 1,
+            v: RESTORE_CODE_VERSION,
             lid: "lib-1".to_string(),
             ek: Some("aa".repeat(32)),
             name: "Test Library".to_string(),
@@ -395,7 +427,7 @@ mod tests {
     #[test]
     fn browsable_code_omits_ek() {
         let code = RestoreCode {
-            v: 1,
+            v: RESTORE_CODE_VERSION,
             lid: "lib-plain".to_string(),
             ek: None,
             name: "Plaintext Library".to_string(),
@@ -474,8 +506,53 @@ mod tests {
         assert!(invalid_json.contains("Regenerate"), "{invalid_json}");
         assert!(invalid_json.contains("trailing comma"), "{invalid_json}");
 
-        let bad_version = RestoreCodeError::UnsupportedVersion(99).to_string();
-        assert!(bad_version.contains("v99"), "{bad_version}");
-        assert!(bad_version.contains("Update the app"), "{bad_version}");
+        let old_version = RestoreCodeError::ObsoleteVersion(1).to_string();
+        assert!(old_version.contains("v1"), "{old_version}");
+        assert!(
+            old_version.contains("Generate a new restore code"),
+            "{old_version}"
+        );
+
+        let newer_version = RestoreCodeError::NewerVersion(99).to_string();
+        assert!(newer_version.contains("v99"), "{newer_version}");
+        assert!(newer_version.contains("Update the app"), "{newer_version}");
+    }
+
+    #[test]
+    fn invalid_encryption_key_rejected_at_decode() {
+        let mut code = sample_s3_code();
+        code.ek = Some("not hex".to_string());
+        let encoded = encode_restore_code(&code);
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::InvalidEncryptionKey(_))
+        ));
+
+        let mut code = sample_s3_code();
+        code.ek = Some(hex::encode([0u8; 31]));
+        let encoded = encode_restore_code(&code);
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::InvalidEncryptionKey(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_signing_key_rejected_at_decode() {
+        let mut code = sample_s3_code();
+        code.sk = "not hex".to_string();
+        let encoded = encode_restore_code(&code);
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::InvalidSigningKey(_))
+        ));
+
+        let mut code = sample_s3_code();
+        code.sk = hex::encode([0u8; 63]);
+        let encoded = encode_restore_code(&code);
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::InvalidSigningKey(_))
+        ));
     }
 }

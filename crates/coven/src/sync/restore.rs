@@ -288,17 +288,14 @@ pub async fn restore_from_code(
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine;
-
     use crate::sync::restore_code::{self, RestoreProvider};
 
     let parsed = restore_code::decode_restore_code(code)
         .map_err(|e| RestoreError::InvalidCode(e.to_string()))?;
 
-    // Decode signing key upfront so we fail fast on bad encoding.
-    let signing_key_bytes = URL_SAFE_NO_PAD
-        .decode(&parsed.sk)
+    // `decode_restore_code` already validated the field; convert it to bytes so
+    // restore can rebuild and later import the signing identity.
+    let signing_key_bytes = hex::decode(&parsed.sk)
         .map_err(|e| RestoreError::InvalidSigningKey(format!("invalid encoding: {e}")))?;
     // The restored device's identity. Rebuilt here (not imported yet) so the
     // storage can sign its control objects during restore, while the keyring
