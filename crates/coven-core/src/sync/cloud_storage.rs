@@ -256,8 +256,6 @@ impl CloudSyncStorage {
 /// The cache namespace a blob's `cloud_key` belongs to: the key's first
 /// `/`-component.
 ///
-/// The namespace prefix of a blob `cloud_key` — the segment before the first `/`.
-///
 /// Every blob `cloud_key` [`CloudSyncStorage::blob_key`] produces is `{namespace}/…`
 /// in BOTH [`BlobPathScheme`] variants (`Hashed` = `{namespace}/{ab}/{cd}/{id}`,
 /// `Plain` = `{namespace}/{cloud_path}`), and a namespace is a single slash-free path

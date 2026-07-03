@@ -554,10 +554,9 @@ pub async fn pull_changes(
             // can't carry the cursor past the failed seq (its blobs would then
             // never be re-fetched). The next cycle resumes at this seq. CacheLazy
             // blobs are not downloaded here — they are fetched on first read.
-            let blobs_ok = download_changeset_blobs(
+            let blobs_ok = download_blobs(
                 db,
-                &changes,
-                &blob_decls,
+                cache_eager_blobs(&blob_decls, &changes),
                 storage,
                 library_dir,
                 &in_changeset_keys,
@@ -943,38 +942,6 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
     Ok(map)
 }
 
-/// Download the `CacheEager` blobs a changeset references. Returns true if all
-/// succeeded. coven derives which rows carry blobs and their cloud
-/// namespace/scope/cache fill from the declarations in `blob_decls`; the per-blob
-/// download runs through [`download_blobs`], which writes each into the evictable
-/// cache `storage/cache/<id>` under `library_dir`.
-///
-/// Only [`CacheFill::CacheEager`] blobs are downloaded — those a device fetches into
-/// the cache on every pull, so a read serves them from local bytes without a fetch.
-/// A [`CacheFill::CacheLazy`] blob is recorded by the applied row but its bytes are
-/// fetched on first read, so it is skipped here.
-///
-/// `in_changeset_keys` are the item keys this changeset itself mints, so an
-/// `Item(id)`-scoped blob resolves its key WITHOUT the changeset having been
-/// applied first (issue #111) — the download precedes the apply.
-async fn download_changeset_blobs(
-    db: &Database,
-    changes: &[RowChange],
-    blob_decls: &BlobDecls,
-    storage: &dyn SyncStorage,
-    library_dir: &LibraryDir,
-    in_changeset_keys: &HashMap<String, [u8; 32]>,
-) -> bool {
-    download_blobs(
-        db,
-        cache_eager_blobs(blob_decls, changes),
-        storage,
-        library_dir,
-        in_changeset_keys,
-    )
-    .await
-}
-
 /// The `CacheEager` blobs the `changes` reference, derived per row from the
 /// declarations. The cache fill a pulling device fetches into its cache before
 /// applying the rows — fill-based, regardless of provenance.
@@ -1056,37 +1023,6 @@ async fn drop_deleted_blob_local(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn change_walk_pairing_rejects_mismatched_lengths() {
-        let old_changes = vec![RowChange {
-            table: "files".to_string(),
-            op: crate::changeset::ChangeOp::Update,
-            columns: vec![Some("file-1".to_string())],
-        }];
-        let new_changes = Vec::new();
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let library_dir = LibraryDir::new(tmp.path());
-        let db = rusqlite::Connection::open_in_memory().expect("db");
-        let decls = BlobDecls::from_tables(&db, &[]).expect("decls");
-
-        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &library_dir)
-            .await
-            .expect_err("mismatched changeset walks fail");
-
-        assert!(matches!(
-            err,
-            crate::blob::cache::BlobCacheError::ChangesetWalkMismatch {
-                old_count: 1,
-                new_count: 0
-            }
-        ));
-    }
 }
 
 /// Resolve a blob's public scope to its internal key scope WITHOUT requiring the
@@ -1297,3 +1233,34 @@ impl std::fmt::Display for PullError {
 }
 
 impl std::error::Error for PullError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn change_walk_pairing_rejects_mismatched_lengths() {
+        let old_changes = vec![RowChange {
+            table: "files".to_string(),
+            op: crate::changeset::ChangeOp::Update,
+            columns: vec![Some("file-1".to_string())],
+        }];
+        let new_changes = Vec::new();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let library_dir = LibraryDir::new(tmp.path());
+        let db = rusqlite::Connection::open_in_memory().expect("db");
+        let decls = BlobDecls::from_tables(&db, &[]).expect("decls");
+
+        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &library_dir)
+            .await
+            .expect_err("mismatched changeset walks fail");
+
+        assert!(matches!(
+            err,
+            crate::blob::cache::BlobCacheError::ChangesetWalkMismatch {
+                old_count: 1,
+                new_count: 0
+            }
+        ));
+    }
+}

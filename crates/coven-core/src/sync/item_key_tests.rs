@@ -179,10 +179,10 @@ async fn reading_a_wrong_length_item_key_errors() {
 
 /// A `note_photos` blob declaration mapping each row to an `Item`-scoped,
 /// `CacheEager` blob keyed by the row's `note_id` — the public scope a sharing host
-/// emits, the one whose resolution `download_changeset_blobs` performs. The
-/// namespace is `audio` (the bulk share payload bae moves this way). `CacheEager` so
-/// the pull downloads it: this exercise is about resolving the item key during
-/// download-before-apply, not the on-demand skip.
+/// emits, the one whose resolution `pull_changes` performs before applying the
+/// changeset. The namespace is `audio` (the bulk share payload bae moves this way).
+/// `CacheEager` so the pull downloads it: this exercise is about resolving the
+/// item key during download-before-apply, not the on-demand skip.
 fn item_photo_decl() -> BlobDecl {
     BlobDecl::new("audio", Provenance::HostProvided, CacheFill::CacheEager)
         .with_scope(BlobScopeSpec::ItemColumn("note_id".to_string()))
@@ -307,9 +307,9 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         "B's cursor advanced past the changeset whose blob downloaded"
     );
 
-    // The item key replayed via the changeset, and the production
-    // `download_changeset_blobs` resolved it and wrote the decrypted blob to B. A
-    // `CacheEager` blob lands in B's evictable cache (`storage/cache/<id>`) on pull.
+    // The item key replayed via the changeset, and the production pull download
+    // path resolved it and wrote the decrypted blob to B. A `CacheEager` blob
+    // lands in B's evictable cache (`storage/cache/<id>`) on pull.
     assert_eq!(
         db_b.item_key("note-1").await.expect("B post-pull read"),
         Some(item_key),
