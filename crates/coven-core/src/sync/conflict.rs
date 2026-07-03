@@ -4,8 +4,8 @@
 //! value is parsed as an HLC [`Timestamp`] and the greater one wins (the parsed
 //! order equals the lexicographic order of the string form, but parsing also lets
 //! the receiver reject a stamp it can't trust). The `_updated_at` column index is
-//! looked up dynamically from the schema (via [`TableColumns`]) so adding columns
-//! to the end of a table is safe.
+//! looked up dynamically from the schema so adding columns to the end of a table
+//! is safe.
 //!
 //! A member is trusted to author valid changesets, so this is robustness, not a
 //! security boundary: a buggy client or a device with a grossly-wrong wall clock
@@ -35,17 +35,11 @@ use super::hlc::Timestamp;
 use crate::changeset::value_ref_to_string;
 use crate::database::DbError;
 
-/// Column indices for a synced table, looked up from `PRAGMA table_info`.
-pub struct TableColumns {
-    /// Index of the `_updated_at` column.
-    pub updated_at: usize,
-}
-
 /// Schema info for all synced tables: maps table name to column indices. Built
 /// once before an apply and moved (owned) into the conflict closure, which must
 /// be `'static`.
 pub struct TableSchema {
-    tables: HashMap<String, TableColumns>,
+    updated_at_by_table: HashMap<String, usize>,
 }
 
 impl TableSchema {
@@ -53,7 +47,7 @@ impl TableSchema {
     /// A registered table that has no `_updated_at` column is a host integration
     /// error and surfaces as `Err`.
     pub fn from_db(conn: &Connection, synced_tables: &[&str]) -> Result<Self, DbError> {
-        let mut tables = HashMap::new();
+        let mut updated_at_by_table = HashMap::new();
 
         for &table in synced_tables {
             let mut stmt = conn
@@ -79,18 +73,20 @@ impl TableSchema {
             let updated_at = updated_at.ok_or_else(|| {
                 DbError(format!("synced table {table} has no _updated_at column"))
             })?;
-            tables.insert(table.to_string(), TableColumns { updated_at });
+            updated_at_by_table.insert(table.to_string(), updated_at);
         }
 
-        Ok(TableSchema { tables })
+        Ok(TableSchema {
+            updated_at_by_table,
+        })
     }
 
     /// The `_updated_at` column index for a table, or `None` if the table was not
     /// in the synced set passed to `from_db`. A remote changeset can carry a table
     /// this device hasn't declared (a newer peer added it); rather than panic mid-
     /// apply, the caller treats an unresolved table as a row to omit.
-    pub fn get(&self, table: &str) -> Option<&TableColumns> {
-        self.tables.get(table)
+    pub fn updated_at(&self, table: &str) -> Option<usize> {
+        self.updated_at_by_table.get(table).copied()
     }
 }
 
@@ -126,7 +122,7 @@ pub fn lww_conflict_handler(
 ) -> ConflictAction {
     match conflict_type {
         ConflictType::SQLITE_CHANGESET_DATA | ConflictType::SQLITE_CHANGESET_CONFLICT => {
-            let Some(cols) = schema.get(table) else {
+            let Some(uat) = schema.updated_at(table) else {
                 // The changeset carries a table this device doesn't declare (a
                 // newer peer's schema). We can't resolve its `_updated_at`, so we
                 // can't LWW it — omit rather than blindly apply a row we don't
@@ -137,7 +133,6 @@ pub fn lww_conflict_handler(
                 );
                 return ConflictAction::SQLITE_CHANGESET_OMIT;
             };
-            let uat = cols.updated_at;
             // Read each side's `_updated_at` and parse it to an HLC `Timestamp`. A
             // rusqlite error reading the column (an API failure on a known column,
             // genuinely exceptional) is logged distinctly from a value that is simply

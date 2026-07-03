@@ -874,7 +874,7 @@ fn advance_max_updated_at(
     receiver_wall_ms: u64,
 ) {
     for change in changes {
-        let Some(cols) = schema.get(&change.table) else {
+        let Some(idx) = schema.updated_at(&change.table) else {
             // A table not in this device's synced set (a newer peer's schema): the
             // apply omitted its rows, so there is no applied `_updated_at` here to
             // advance the clock past.
@@ -884,7 +884,6 @@ fn advance_max_updated_at(
             );
             continue;
         };
-        let idx = cols.updated_at;
         let Some(raw) = change.col(idx) else {
             // A DELETE carries no new-state columns, and an absent value at the
             // schema's `_updated_at` index means this row change has no stamp to
