@@ -3,14 +3,12 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// Size constants matching libsodium conventions. Exported so callers (sync modules,
-// envelope.rs, etc.) can use them for array sizes and length checks.
-pub const SIGN_PUBLICKEYBYTES: usize = 32;
-pub const SIGN_SECRETKEYBYTES: usize = 64;
-pub const SIGN_BYTES: usize = 64;
-pub const CURVE25519_PUBLICKEYBYTES: usize = 32;
-pub const CURVE25519_SECRETKEYBYTES: usize = 32;
-pub const SEALBYTES: usize = 48; // crypto_box PUBLICKEYBYTES + MACBYTES = 32 + 16
+pub const SIGN_PUBLICKEYBYTES: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
+pub const SIGN_SECRETKEYBYTES: usize = ed25519_dalek::KEYPAIR_LENGTH;
+pub const SIGN_BYTES: usize = ed25519_dalek::SIGNATURE_LENGTH;
+pub const CURVE25519_PUBLICKEYBYTES: usize = crypto_box::KEY_SIZE;
+pub const CURVE25519_SECRETKEYBYTES: usize = crypto_box::KEY_SIZE;
+pub const SEALBYTES: usize = crypto_box::SEALBYTES;
 
 #[derive(Error, Debug)]
 pub enum KeyError {
@@ -159,9 +157,6 @@ pub fn seal_box_decrypt(
     ciphertext: &[u8],
     recipient_x25519_sk: &[u8; CURVE25519_SECRETKEYBYTES],
 ) -> Result<Vec<u8>, KeyError> {
-    if ciphertext.len() < SEALBYTES {
-        return Err(KeyError::Crypto("Ciphertext too short".to_string()));
-    }
     crypto_box::SecretKey::from(*recipient_x25519_sk)
         .unseal(ciphertext)
         .map_err(|_| {
