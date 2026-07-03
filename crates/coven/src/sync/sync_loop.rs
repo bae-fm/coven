@@ -26,6 +26,7 @@ use crate::library_dir::LibraryDir;
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::cycle::SyncComponents;
 use super::hlc::Hlc;
+use super::loop_policy::{self, LoopWait, SyncLoopReport};
 use super::storage::SyncStorage;
 
 /// Status emitted by the sync loop after each cycle.
@@ -155,66 +156,31 @@ impl SyncLoopHandle {
 
                     let mut consecutive_failures: u32 = 0;
                     loop {
-                        // When an outbox drain is mid-batch (this cycle uploaded a
-                        // blob and entries remain), run the next cycle immediately
-                        // so each unit publishes as its blobs land instead of
-                        // waiting the idle interval. A failed cycle leaves this
-                        // false and falls back to the failure backoff.
-                        let mut drain_in_progress = false;
-                        match run_single_cycle(&inner, clock.as_ref(), &library_dir).await {
-                            Ok(result) => {
-                                consecutive_failures = 0;
-                                drain_in_progress = result.resume_drain_promptly;
-                                // Schema-skip takes priority — newer-version changesets
-                                // are permanently inapplicable until the user updates the
-                                // app. A rejected-unauthorized changeset (forged or from a
-                                // removed member) is a genuine integrity event, surfaced
-                                // ahead of asset-download failures, which retry naturally
-                                // next cycle.
-                                let error = if result.skipped_schema > 0 {
-                                    Some(format!(
-                                        "{} changes from a newer app version were skipped. Update the app to apply them.",
-                                        result.skipped_schema,
-                                    ))
-                                } else if result.rejected_unauthorized > 0 {
-                                    Some(format!(
-                                        "{} changes from an unauthorized device were rejected.",
-                                        result.rejected_unauthorized,
-                                    ))
-                                } else if result.invalid_signatures > 0 {
-                                    Some(format!(
-                                        "{} changes with an invalid signature were skipped.",
-                                        result.invalid_signatures,
-                                    ))
-                                } else if result.asset_downloads_failed {
-                                    Some("Some files failed to download, will retry".to_string())
-                                } else {
-                                    None
-                                };
-                                let data_changed = result.changesets_applied > 0;
-                                let row_changes = if data_changed && !result.row_changes.is_empty() {
-                                    Some(result.row_changes)
-                                } else {
-                                    None
-                                };
+                        let decision = match run_single_cycle(&inner, clock.as_ref(), &library_dir).await {
+                            Ok(result) => loop_policy::after_success(result),
+                            Err(error) => loop_policy::after_failure(error, consecutive_failures, 300),
+                        };
+                        consecutive_failures = decision.consecutive_failures;
+
+                        match decision.report {
+                            SyncLoopReport::Success(success) => {
                                 let status = SyncLoopStatus {
                                     configured: true,
                                     syncing: false,
-                                    last_sync_time: Some(result.sync_time),
-                                    error,
-                                    device_count: (result.other_device_count + 1) as u32,
-                                    data_changed,
-                                    row_changes,
+                                    last_sync_time: Some(success.last_sync_time),
+                                    error: success.alerts.primary_message(),
+                                    device_count: success.device_count,
+                                    data_changed: success.data_changed,
+                                    row_changes: success.row_changes,
                                 };
                                 let _ = event_tx.send(status);
                             }
-                            Err(e) => {
-                                consecutive_failures = consecutive_failures.saturating_add(1);
+                            SyncLoopReport::Failure(error) => {
                                 let status = SyncLoopStatus {
                                     configured: true,
                                     syncing: false,
                                     last_sync_time: None,
-                                    error: Some(e),
+                                    error: Some(error),
                                     device_count: 0,
                                     data_changed: false,
                                     row_changes: None,
@@ -223,18 +189,12 @@ impl SyncLoopHandle {
                             }
                         }
 
-                        let wait = if drain_in_progress {
-                            // Keep draining + publishing without the inter-cycle
-                            // pause. The next cycle does real upload work, so this
-                            // is paced by the upload, not a busy-loop.
-                            Duration::ZERO
-                        } else {
-                            Duration::from_secs(super::backoff::backoff_secs(
-                                consecutive_failures,
-                                300,
-                            ))
+                        let wait = match decision.wait {
+                            LoopWait::Immediate => Duration::ZERO,
+                            LoopWait::Idle => Duration::from_secs(super::backoff::backoff_secs(0, 300)),
+                            LoopWait::BackoffSecs(secs) => Duration::from_secs(secs),
                         };
-                        if consecutive_failures > 0 {
+                        if matches!(decision.wait, LoopWait::BackoffSecs(_)) {
                             debug!(
                                 "Backing off {wait:?} after {consecutive_failures} consecutive failure(s)",
                             );

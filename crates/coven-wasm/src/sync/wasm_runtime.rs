@@ -12,10 +12,10 @@
 //! `CloudSyncStorage` (no `Send`, no `Arc`, no threads).
 //!
 //! The loop mirrors the native one's shape: an initial delay so it does not race
-//! page startup, then run-cycle → wait → repeat, with exponential backoff on
-//! consecutive failures (via [`super::backoff::backoff_secs`]) and a prompt
-//! re-run while an outbox drain is mid-batch. A trigger wakes the wait
-//! immediately; a `stop()` flag ends the loop after the in-flight cycle.
+//! page startup, then run-cycle → wait → repeat. Shared loop policy resets or
+//! increments the failure count, chooses idle/backoff/immediate waits, and asks
+//! for a prompt re-run while an outbox drain is mid-batch. A trigger wakes the
+//! wait immediately; a `stop()` flag ends the loop after the in-flight cycle.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -33,6 +33,7 @@ use crate::library_dir::LibraryDir;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
+use super::loop_policy::{self, LoopWait, SyncLoopAlerts, SyncLoopReport};
 use super::storage::SyncStorage;
 
 /// Timing knobs for the loop. The native loop's cadence — which a host wires up —
@@ -152,44 +153,31 @@ impl WasmSyncRuntime {
 
             let mut consecutive_failures: u32 = 0;
             while running.get() {
-                // When an outbox drain is mid-batch, run the next cycle at once so
-                // each unit publishes as its blobs land. A failed cycle leaves
-                // this false and falls back to the failure backoff.
-                let drain_in_progress = match run_one_cycle(&inputs).await {
-                    Ok(resume_drain_promptly) => {
-                        consecutive_failures = 0;
-                        resume_drain_promptly
-                    }
-                    Err(e) => {
-                        consecutive_failures = consecutive_failures.saturating_add(1);
-                        warn!("Sync cycle failed: {e}");
-                        false
-                    }
+                let decision = match run_one_cycle(&inputs).await {
+                    Ok(result) => loop_policy::after_success(result),
+                    Err(error) => loop_policy::after_failure(
+                        error,
+                        consecutive_failures,
+                        schedule.backoff_cap_secs,
+                    ),
                 };
+                consecutive_failures = decision.consecutive_failures;
+
+                match &decision.report {
+                    SyncLoopReport::Success(success) => log_alerts(&success.alerts),
+                    SyncLoopReport::Failure(error) => warn!("Sync cycle failed: {error}"),
+                }
 
                 if !running.get() {
                     break;
                 }
 
-                let wait_ms = if drain_in_progress {
-                    // Keep draining + publishing without the inter-cycle pause. The
-                    // next cycle does real upload work, so this is paced by the
-                    // upload, not a busy-loop.
-                    0
-                } else if consecutive_failures > 0 {
-                    let secs = super::backoff::backoff_secs(
-                        consecutive_failures,
-                        schedule.backoff_cap_secs,
-                    );
+                let wait_ms = decision.wait.as_millis(schedule.idle_interval_ms);
+                if let LoopWait::BackoffSecs(secs) = decision.wait {
                     debug!(
                         "Backing off {secs}s after {consecutive_failures} consecutive failure(s)",
                     );
-                    // backoff_secs caps at backoff_cap_secs (300 in production), so
-                    // the millisecond product is far inside u32 — no truncation.
-                    (secs * 1_000) as u32
-                } else {
-                    schedule.idle_interval_ms
-                };
+                }
 
                 // Await the wait OR a wake, whichever comes first. A wake (a
                 // trigger, or the one stop() fires) returns the loop immediately
@@ -236,10 +224,9 @@ impl WasmSyncRuntime {
     }
 }
 
-/// Run one sync cycle over the owned inputs, returning whether the loop should
-/// re-run promptly to finish an in-progress outbox drain. Re-borrows each input
-/// per call (the loop owns them); no borrow spans the awaits inside the cycle.
-async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
+/// Run one sync cycle over the owned inputs. Re-borrows each input per call (the
+/// loop owns them); no borrow spans the awaits inside the cycle.
+async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleResult, String> {
     let storage: &dyn SyncStorage = &inputs.storage;
     let cloud_home = inputs.storage.cloud_home();
 
@@ -259,31 +246,29 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
     )
     .await?;
 
-    // Newer-schema skips are permanently inapplicable until the user updates the
-    // app; surface them. Asset-download failures retry naturally next cycle, so a
-    // log is enough rather than an error string.
-    if result.skipped_schema > 0 {
+    Ok(result)
+}
+
+fn log_alerts(alerts: &SyncLoopAlerts) {
+    if alerts.skipped_schema > 0 {
         error!(
-            count = result.skipped_schema,
+            count = alerts.skipped_schema,
             "Skipped changes from a newer app version; update the app to apply them",
         );
     }
-    // A rejected-unauthorized changeset is forged or from a removed member — an
-    // integrity event, surfaced at error level the same way.
-    if result.rejected_unauthorized > 0 {
+    if alerts.rejected_unauthorized > 0 {
         error!(
-            count = result.rejected_unauthorized,
+            count = alerts.rejected_unauthorized,
             "Rejected changes from an unauthorized device (forged or removed member)",
         );
     }
-    // An invalid-signature changeset is forged or corrupt data in shared storage —
-    // an integrity event, surfaced at error level the same way.
-    if result.invalid_signatures > 0 {
+    if alerts.invalid_signatures > 0 {
         error!(
-            count = result.invalid_signatures,
+            count = alerts.invalid_signatures,
             "Skipped changes with an invalid signature (forged or corrupt)",
         );
     }
-
-    Ok(result.resume_drain_promptly)
+    if alerts.asset_downloads_failed {
+        warn!("Some files failed to download, will retry");
+    }
 }

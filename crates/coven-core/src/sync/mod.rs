@@ -18,6 +18,7 @@ mod hlc_register_tests;
 pub mod invite;
 #[cfg(test)]
 mod item_key_tests;
+pub mod loop_policy;
 pub mod membership;
 pub mod membership_ops;
 pub mod pull;
