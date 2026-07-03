@@ -298,19 +298,11 @@ pub async fn read_staged(
     namespace: &str,
     id: &str,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
-    let pinned = library_dir.pinned_blob_path(namespace, id)?;
-    let cache = library_dir.cache_blob_path(namespace, id)?;
-    for path in [&pinned, &cache] {
-        match crate::local_blob::exists(path).await {
-            Ok(true) => {
-                return crate::local_blob::read(path)
-                    .await
-                    .map(Some)
-                    .map_err(BlobCacheError::Io);
-            }
-            Ok(false) => {}
-            Err(e) => return Err(BlobCacheError::Io(e)),
-        }
+    if let Some(hit) = cached_blob_path(library_dir, namespace, id).await? {
+        return crate::local_blob::read(hit.path())
+            .await
+            .map(Some)
+            .map_err(BlobCacheError::Io);
     }
     Ok(None)
 }
@@ -602,23 +594,14 @@ async fn read_remote_range(
     offset: u64,
     len: u64,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-    let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
-
     // A hit in either folder serves the slice from the local plaintext file. The
     // file is the whole blob (cache writes are whole-file), so the validated range
     // is in bounds and `read_range` reads exactly `len` bytes. An existence-check
     // failure is surfaced, not read as a miss.
-    for path in [&pinned, &cache] {
-        match crate::local_blob::exists(path).await {
-            Ok(true) => {
-                return crate::local_blob::read_range(path, offset, len)
-                    .await
-                    .map_err(BlobCacheError::Io);
-            }
-            Ok(false) => {}
-            Err(e) => return Err(BlobCacheError::Io(e)),
-        }
+    if let Some(hit) = cached_blob_path(library_dir, &blob.namespace, &blob.id).await? {
+        return crate::local_blob::read_range(hit.path(), offset, len)
+            .await
+            .map_err(BlobCacheError::Io);
     }
 
     if blob.provenance == Provenance::HostProvided {
@@ -640,27 +623,7 @@ async fn read_remote_range(
     // the whole blob by `read_blob`. Only `read_blob` populates the cache. A
     // home-less library has no storage to range-read a Remote blob from; surface it.
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
-    crate::library_dir::validate_path_token(&blob.namespace)?;
-    crate::library_dir::validate_path_token(&blob.id)?;
-    if let Some(cloud_path) = blob.cloud_path.as_deref() {
-        crate::library_dir::validate_cloud_path(cloud_path)?;
-    }
-    let resolved = db
-        .resolve_blob_scope(blob.scope.clone())
-        .await
-        .map_err(|e| BlobCacheError::Io(format!("resolve blob scope for {}: {e}", blob.id)))?;
-    storage
-        .read_blob_range(
-            &blob.namespace,
-            &blob.id,
-            resolved,
-            blob.cloud_path.as_deref(),
-            source_size,
-            offset,
-            len,
-        )
-        .await
-        .map_err(BlobCacheError::Storage)
+    fetch_range_from_cloud(db, storage, blob, source_size, offset, len).await
 }
 
 /// Ensure a blob is local AND protected: present in `storage/pinned/<id>`, exempt
@@ -680,7 +643,6 @@ pub async fn pin(
 ) -> Result<(), BlobCacheError> {
     for blob in blobs {
         let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-        let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
         // Already protected — idempotent no-op. A failure to even check existence
         // (broken filesystem) is surfaced, not collapsed into "absent": fetching and
@@ -697,13 +659,13 @@ pub async fn pin(
         // so the blob is never in both folders or neither mid-move. An `exists`
         // failure here is surfaced too, never read as "not cached" (which would
         // re-fetch over a present file).
-        match crate::local_blob::exists(&cache).await {
-            Ok(true) => {
-                rename_within_storage(&cache, &pinned).await?;
+        match cached_blob_path(library_dir, &blob.namespace, &blob.id).await? {
+            Some(CachedBlobPath::Pinned(_)) => continue,
+            Some(CachedBlobPath::Cache(path)) => {
+                rename_within_storage(&path, &pinned).await?;
                 continue;
             }
-            Ok(false) => {}
-            Err(e) => return Err(BlobCacheError::Io(e)),
+            None => {}
         }
 
         // In neither folder — fetch from the cloud straight into `pinned/`. A
@@ -968,6 +930,41 @@ async fn lookup_external_ref(
         .map_err(|e| BlobCacheError::Io(format!("look up external blob ref for {id}: {e}")))
 }
 
+/// The cache folder path that currently holds a Remote blob's plaintext, checking
+/// `pinned/` then `cache/`. The order matters: a pinned copy is the kept truth if a
+/// non-atomic wasm rename leaves both folders visible. A failure to check either
+/// path is surfaced, never collapsed into a miss.
+enum CachedBlobPath {
+    Pinned(std::path::PathBuf),
+    Cache(std::path::PathBuf),
+}
+
+impl CachedBlobPath {
+    fn path(&self) -> &std::path::Path {
+        match self {
+            CachedBlobPath::Pinned(path) | CachedBlobPath::Cache(path) => path,
+        }
+    }
+}
+
+async fn cached_blob_path(
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+) -> Result<Option<CachedBlobPath>, BlobCacheError> {
+    for hit in [
+        CachedBlobPath::Pinned(library_dir.pinned_blob_path(namespace, id)?),
+        CachedBlobPath::Cache(library_dir.cache_blob_path(namespace, id)?),
+    ] {
+        match crate::local_blob::exists(hit.path()).await {
+            Ok(true) => return Ok(Some(hit)),
+            Ok(false) => {}
+            Err(e) => return Err(BlobCacheError::Io(e)),
+        }
+    }
+    Ok(None)
+}
+
 /// A whole-blob vs ranged read of an external (user-provided Local) file. The two
 /// reads share the validate-on-read; only the local read primitive differs.
 enum ExternalRead {
@@ -1028,16 +1025,7 @@ async fn fetch_from_cloud(
     storage: &dyn SyncStorage,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    crate::library_dir::validate_path_token(&blob.namespace)?;
-    crate::library_dir::validate_path_token(&blob.id)?;
-    if let Some(cloud_path) = blob.cloud_path.as_deref() {
-        crate::library_dir::validate_cloud_path(cloud_path)?;
-    }
-
-    let resolved = db
-        .resolve_blob_scope(blob.scope.clone())
-        .await
-        .map_err(|e| BlobCacheError::Io(format!("resolve blob scope for {}: {e}", blob.id)))?;
+    let resolved = validate_and_resolve_blob_scope(db, blob).await?;
     storage
         .get_blob(
             &blob.namespace,
@@ -1047,6 +1035,47 @@ async fn fetch_from_cloud(
         )
         .await
         .map_err(BlobCacheError::Storage)
+}
+
+/// Resolve a blob's scope to its encryption key and download + decrypt a plaintext
+/// byte range from the cloud. Shared validation with [`fetch_from_cloud`]; unlike
+/// that whole-blob helper, this never writes cache files.
+async fn fetch_range_from_cloud(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    blob: &BlobRef,
+    source_size: u64,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, BlobCacheError> {
+    let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    storage
+        .read_blob_range(
+            &blob.namespace,
+            &blob.id,
+            resolved,
+            blob.cloud_path.as_deref(),
+            source_size,
+            offset,
+            len,
+        )
+        .await
+        .map_err(BlobCacheError::Storage)
+}
+
+async fn validate_and_resolve_blob_scope(
+    db: &Database,
+    blob: &BlobRef,
+) -> Result<crate::blob::ResolvedScope, BlobCacheError> {
+    crate::library_dir::validate_path_token(&blob.namespace)?;
+    crate::library_dir::validate_path_token(&blob.id)?;
+    if let Some(cloud_path) = blob.cloud_path.as_deref() {
+        crate::library_dir::validate_cloud_path(cloud_path)?;
+    }
+
+    db.resolve_blob_scope(blob.scope.clone())
+        .await
+        .map_err(|e| BlobCacheError::Io(format!("resolve blob scope for {}: {e}", blob.id)))
 }
 
 /// Move a blob file from one cache folder to the other (`cache/`↔`pinned/`). Both
