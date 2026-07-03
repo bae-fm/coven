@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, ToSql};
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
@@ -668,9 +668,66 @@ fn count_other_pending_uploads(
          WHERE operation = 'upload' AND id != ?1 AND file_id IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
-    let params = std::iter::once(exclude_id.to_string())
-        .chain(blob_ids.iter().cloned())
-        .collect::<Vec<_>>();
-    stmt.query_row(params_from_iter(params.iter()), |r| r.get::<_, i64>(0))
+    let params = count_other_pending_upload_params(&exclude_id, blob_ids);
+    stmt.query_row(params_from_iter(params), |r| r.get::<_, i64>(0))
         .map_err(DbError::from)
+}
+
+fn count_other_pending_upload_params<'a>(
+    exclude_id: &'a i64,
+    blob_ids: &'a [String],
+) -> Vec<&'a dyn ToSql> {
+    let mut params: Vec<&dyn ToSql> = Vec::with_capacity(blob_ids.len() + 1);
+    params.push(exclude_id);
+    params.extend(blob_ids.iter().map(|id| id as &dyn ToSql));
+    params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_other_pending_uploads_excludes_current_row_and_counts_matching_blob_ids() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch(crate::db::MIGRATION_SQL)
+            .expect("create bookkeeping schema");
+        for (id, operation, file_id, cloud_key) in [
+            (1, "upload", "blob-a", "key-a-current"),
+            (2, "upload", "blob-a", "key-a-other"),
+            (3, "upload", "blob-b", "key-b"),
+            (4, "delete", "blob-a", "key-a-delete"),
+        ] {
+            conn.execute(
+                "INSERT INTO cloud_outbox (id, operation, file_id, cloud_key, scope, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z')",
+                (id, operation, file_id, cloud_key),
+            )
+            .expect("insert outbox row");
+        }
+
+        let blob_ids = vec!["blob-a".to_string()];
+        let count = count_other_pending_uploads(&conn, &blob_ids, 1).expect("count uploads");
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn count_other_pending_upload_params_keep_database_types() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        let exclude_id = 1_i64;
+        let blob_ids = vec!["blob-a".to_string()];
+        let params = count_other_pending_upload_params(&exclude_id, &blob_ids);
+
+        let (id_type, blob_type): (String, String) = conn
+            .query_row(
+                "SELECT typeof(?1), typeof(?2)",
+                params_from_iter(params),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("inspect parameter types");
+
+        assert_eq!(id_type, "integer");
+        assert_eq!(blob_type, "text");
+    }
 }
