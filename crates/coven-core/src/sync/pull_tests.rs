@@ -231,6 +231,46 @@ async fn push_stamps_the_dbs_schema_version() {
 }
 
 #[tokio::test]
+async fn sync_reuses_opened_schema_models() {
+    crate::sync::gate::reset_from_tables_call_count();
+    crate::blob::decl::reset_from_tables_call_count();
+
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    assert_eq!(crate::sync::gate::from_tables_call_count(), 1);
+    assert_eq!(crate::blob::decl::from_tables_call_count(), 1);
+
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'One', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db.take_changeset().await.expect("capture outgoing");
+
+    let keypair = UserKeypair::generate();
+    let (_tmp, library_dir) = temp_library_dir();
+    service::sync(
+        "dev1",
+        &db,
+        db.synced_tables(),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &library_dir,
+    )
+    .await
+    .expect("sync");
+
+    assert_eq!(crate::sync::gate::from_tables_call_count(), 1);
+    assert_eq!(crate::blob::decl::from_tables_call_count(), 1);
+}
+
+#[tokio::test]
 async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
     let storage = MockSyncStorage::new();
 

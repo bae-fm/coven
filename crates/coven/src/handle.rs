@@ -923,7 +923,6 @@ mod tests {
             KeyService::new("lib-cloudkit-home-reuse".to_string()),
             Arc::new(SystemClock),
             Some(Arc::new(TestCloudKitOps::new())),
-            Arc::new(crate::id_provider::UuidProvider),
             None,
         );
 

@@ -145,19 +145,10 @@ pub async fn pull_changes(
     cursors: &HashMap<String, u64>,
     library_dir: &LibraryDir,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
-    // The blob declarations, resolved once per pull from the synced set + live
-    // schema, the same gate-sibling model the push and snapshot backfill build.
-    // Drives both the download-before-apply of CacheEager blobs and the apply-side
-    // cache drop for deleted blob-bearing rows.
-    let blob_decls = {
-        let tables = tables.to_vec();
-        db.call(move |conn| {
-            BlobDecls::from_tables(conn, &tables)
-                .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))
-        })
-        .await
-        .map_err(|e| PullError::Apply(e.0))?
-    };
+    // The opened database handle already resolved blob declarations from the final
+    // synced set + live schema. Pull reuses that model for download-before-apply of
+    // CacheEager blobs and apply-side cache drops for deleted blob-bearing rows.
+    let blob_decls = db.blob_decls();
     // The receiver's current wall-clock millis, read once from the register clock
     // and passed down to bound an incoming `_updated_at`'s physical component. A
     // stamp grossly beyond this (plus a generous offline allowance) is a broken

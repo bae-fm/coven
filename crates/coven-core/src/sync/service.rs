@@ -18,7 +18,6 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::OptionalExtension;
 use tracing::{debug, error, info, warn};
 
-use crate::blob::decl::BlobDecls;
 use crate::blob::{BlobRef, CacheFill, Provenance};
 use crate::database::Database;
 use crate::keys::UserKeypair;
@@ -27,7 +26,6 @@ use crate::sync::session::SyncedTable;
 
 use super::envelope;
 use super::gate;
-use super::gate::Gates;
 use super::membership::{self, MembershipCoord};
 use super::pull::{self, PullResult};
 use super::push::OutgoingChangeset;
@@ -113,11 +111,9 @@ pub async fn sync(
     let outgoing_cs: Option<Vec<u8>> = if outgoing.is_empty() {
         None
     } else {
-        let tables = tables.to_vec();
+        let gates = db.gates();
         let gated = db
             .call(move |conn| {
-                let gates = gate::Gates::from_tables(conn, &tables)
-                    .map_err(|e| crate::database::DbError(format!("gate build: {e}")))?;
                 gate::gate_outbound(conn, &outgoing, &gates)
                     .map_err(|e| crate::database::DbError(format!("gate outbound: {e}")))
             })
@@ -151,17 +147,9 @@ pub async fn sync(
     // copy moves into the cache (a cache copy is evictable + re-fetchable).
     if let Some(ref cs) = outgoing_cs {
         let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
-        let tables = tables.to_vec();
-        let decl_tables = tables.clone();
-        let blob_decls = db
-            .call(move |conn| {
-                BlobDecls::from_tables(conn, &decl_tables)
-                    .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))
-            })
-            .await
-            .map_err(|e| SyncCycleError::AssetScan(e.0))?;
+        let blob_decls = db.blob_decls();
         let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes);
-        let make_remote_intents = make_remote_intents_for_blobs(db, &tables, &host_blobs).await?;
+        let make_remote_intents = make_remote_intents_for_blobs(db, &host_blobs).await?;
         let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
         for blob in host_blobs {
             let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
@@ -385,12 +373,10 @@ async fn ready_host_provided_make_remotes(
     db: &Database,
     tables: &[SyncedTable],
 ) -> Result<Vec<ReadyHostProvidedMakeRemote>, SyncCycleError> {
+    let gates = db.gates();
+    let decls = db.blob_decls();
     let tables = tables.to_vec();
     db.call(move |conn| {
-        let gates = Gates::from_tables(conn, &tables)
-            .map_err(|e| crate::database::DbError(format!("gate build: {e}")))?;
-        let decls = BlobDecls::from_tables(conn, &tables)
-            .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?;
         let gate_columns: HashMap<String, String> = tables
             .iter()
             .filter_map(|table| {
@@ -518,19 +504,15 @@ async fn finish_host_provided_make_remote(
 
 async fn make_remote_intents_for_blobs(
     db: &Database,
-    tables: &[SyncedTable],
     blobs: &[BlobRef],
 ) -> Result<HashMap<(String, String), InlineMakeRemoteIntent>, SyncCycleError> {
     if blobs.is_empty() {
         return Ok(HashMap::new());
     }
-    let tables = tables.to_vec();
+    let gates = db.gates();
+    let decls = db.blob_decls();
     let blobs = blobs.to_vec();
     db.call(move |conn| {
-        let gates = Gates::from_tables(conn, &tables)
-            .map_err(|e| crate::database::DbError(format!("gate build: {e}")))?;
-        let decls = BlobDecls::from_tables(conn, &tables)
-            .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?;
         let mut out = HashMap::new();
         for blob in blobs {
             let Some((table, pk)) = decls
