@@ -86,8 +86,8 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[5u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [5u8; 32],
     )));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
@@ -151,8 +151,8 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[8u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [8u8; 32],
     )));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
@@ -202,8 +202,8 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[9u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [9u8; 32],
     )));
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
@@ -570,8 +570,8 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[4u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [4u8; 32],
     )));
 
     // A peer A has published one changeset (an insert of note 'a1') to shared
@@ -637,8 +637,8 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[6u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [6u8; 32],
     )));
 
     // Peer A publishes a changeset; M pulls and applies it in cycle 1.
@@ -683,8 +683,8 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[8u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [8u8; 32],
     )));
     let storage = MockSyncStorage::new();
     let db = open_test_db_with_blob(BlobDecl::new(
@@ -786,8 +786,8 @@ async fn capture_stage_failure_keeps_session_batch_for_retry() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[9u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [9u8; 32],
     )));
     let storage = MockSyncStorage::new();
     let db = open_test_db();
@@ -891,8 +891,8 @@ async fn cycle_reclaims_a_fully_acked_changeset() {
     let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db_m = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[11u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [11u8; 32],
     )));
     let hlc = Hlc::new("M".to_string());
 
@@ -928,8 +928,8 @@ async fn cycle_keeps_a_behind_peers_changeset() {
     let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db_m = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[12u8; 32],
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [12u8; 32],
     )));
     let hlc = Hlc::new("M".to_string());
 
@@ -1003,8 +1003,8 @@ async fn member_device_does_not_create_a_snapshot() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[5u8; 32],
+    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [5u8; 32],
     )));
     let hlc = Hlc::new("M".to_string());
 
@@ -1077,8 +1077,8 @@ async fn owner_device_creates_a_snapshot() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_library_dir();
-    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[6u8; 32],
+    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [6u8; 32],
     )));
     let hlc = Hlc::new("M".to_string());
 

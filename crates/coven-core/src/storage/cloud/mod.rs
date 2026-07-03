@@ -175,7 +175,8 @@ enum BlobSource {
         nonce_pending: bool,
         /// Whether any plaintext chunk has been sealed — distinguishes a truly
         /// empty file (which still seals one tag-only chunk, matching
-        /// `encrypt_chunked`) from one that produced chunks and then drained.
+        /// `EncryptionService::encrypt`) from one that produced chunks and then
+        /// drained.
         sealed_any: bool,
         eof: bool,
     },
@@ -215,8 +216,8 @@ impl BlobSource {
                 if chunk.is_empty() {
                     *eof = true;
                     // A sealed empty file still emits one tag-only chunk, matching
-                    // `encrypt_chunked`; a plaintext file (or a sealed one that
-                    // already produced chunks) ends here.
+                    // `EncryptionService::encrypt`; a plaintext file (or a sealed
+                    // one that already produced chunks) ends here.
                     if let Some(s) = sealer {
                         if !*sealed_any {
                             *sealed_any = true;
@@ -474,7 +475,7 @@ mod streaming_tests {
     use std::sync::Mutex;
 
     fn service() -> EncryptionService {
-        EncryptionService::new_with_key(&[7u8; 32])
+        EncryptionService::from_key([7u8; 32])
     }
 
     /// Build a sealed [`BlobBody`] over a temp file holding `plaintext`. The

@@ -343,8 +343,8 @@ fn fixed_clock(rfc3339: &str) -> FixedClock {
 }
 
 fn enc() -> RwLock<CloudCipher> {
-    RwLock::new(CloudCipher::Encrypted(EncryptionService::new_with_key(
-        &[0u8; 32],
+    RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [0u8; 32],
     )))
 }
 

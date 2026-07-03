@@ -910,7 +910,7 @@ mod tests {
     /// wire format the whole-buffer encryptor does.
     #[tokio::test]
     async fn streaming_open_body_multipart_round_trips_through_write() {
-        let master = EncryptionService::new_with_key(&[11u8; 32]);
+        let master = EncryptionService::from_key([11u8; 32]);
         let cipher = CloudCipher::Encrypted(master.clone());
         let home = InMemoryCloudHome::new();
 
@@ -950,7 +950,7 @@ mod tests {
     /// `BlobRangeReader` and writes through the outbox agree on the protection.
     #[test]
     fn for_storage_maps_mode_to_cipher() {
-        let master = EncryptionService::new_with_key(&[4u8; 32]);
+        let master = EncryptionService::from_key([4u8; 32]);
 
         assert!(matches!(
             CloudCipher::for_storage(HomeStorage::Opaque, Some(master.clone())),
@@ -1007,7 +1007,7 @@ mod tests {
     /// recipient — without exposing the whole library.
     #[tokio::test]
     async fn key_scoped_blob_round_trips_and_master_cannot_read_it() {
-        let master = EncryptionService::new_with_key(&[7u8; 32]);
+        let master = EncryptionService::from_key([7u8; 32]);
         let storage = CloudSyncStorage::new(
             Arc::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(master),
@@ -1062,7 +1062,7 @@ mod tests {
     async fn list_heads_skips_a_head_it_cannot_decrypt() {
         let storage = CloudSyncStorage::new(
             Arc::new(InMemoryCloudHome::new()),
-            CloudCipher::Encrypted(EncryptionService::new_with_key(&[1u8; 32])),
+            CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32])),
             BlobPathScheme::Hashed,
             UserKeypair::generate(),
         );
@@ -1104,7 +1104,7 @@ mod tests {
     #[tokio::test]
     async fn list_heads_verifies_signatures_and_skips_a_forged_head() {
         let keypair = UserKeypair::generate();
-        let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[2u8; 32]));
+        let cipher = CloudCipher::Encrypted(EncryptionService::from_key([2u8; 32]));
         let storage = CloudSyncStorage::new(
             Arc::new(InMemoryCloudHome::new()),
             cipher.clone(),
@@ -1158,7 +1158,7 @@ mod tests {
     #[tokio::test]
     async fn get_min_schema_version_verifies_and_ignores_a_forged_floor() {
         let keypair = UserKeypair::generate();
-        let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32]));
+        let cipher = CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32]));
         let storage = CloudSyncStorage::new(
             Arc::new(InMemoryCloudHome::new()),
             cipher.clone(),
@@ -1374,7 +1374,7 @@ mod tests {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::new_with_key(&[3u8; 32])),
+            CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
             BlobPathScheme::Plain,
             UserKeypair::generate(),
         );
@@ -1453,7 +1453,7 @@ mod tests {
     #[tokio::test]
     async fn blob_range_reader_decrypts_a_multi_chunk_sub_range() {
         let home = InMemoryCloudHome::new();
-        let master = EncryptionService::new_with_key(&[5u8; 32]);
+        let master = EncryptionService::from_key([5u8; 32]);
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),
@@ -1540,7 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn blob_range_reader_resolves_the_blob_scope() {
         let home = InMemoryCloudHome::new();
-        let master = EncryptionService::new_with_key(&[7u8; 32]);
+        let master = EncryptionService::from_key([7u8; 32]);
         let cipher = CloudCipher::Encrypted(master);
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
@@ -1597,7 +1597,7 @@ mod tests {
     #[tokio::test]
     async fn blob_range_reader_rejects_an_out_of_range_read() {
         let home = InMemoryCloudHome::new();
-        let master = EncryptionService::new_with_key(&[9u8; 32]);
+        let master = EncryptionService::from_key([9u8; 32]);
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),

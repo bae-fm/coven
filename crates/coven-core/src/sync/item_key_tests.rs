@@ -56,7 +56,7 @@ fn open_db(device_id: &str) -> Database {
 fn storage_over(home: InMemoryCloudHome) -> CloudSyncStorage {
     CloudSyncStorage::new(
         std::sync::Arc::new(home),
-        CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
+        CloudCipher::Encrypted(EncryptionService::from_key(MASTER_KEY)),
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
     )
@@ -232,7 +232,7 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
 async fn changeset_replay_join_resolves_item_and_decrypts() {
     let storage = CloudSyncStorage::new(
         std::sync::Arc::new(InMemoryCloudHome::new()),
-        CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY)),
+        CloudCipher::Encrypted(EncryptionService::from_key(MASTER_KEY)),
         BlobPathScheme::Hashed,
         UserKeypair::generate(),
     );
@@ -342,7 +342,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
 async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     let home = InMemoryCloudHome::new();
     let storage = storage_over(home);
-    let snapshot_enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&MASTER_KEY));
+    let snapshot_enc = CloudCipher::Encrypted(EncryptionService::from_key(MASTER_KEY));
 
     // --- Device A: mint + upload an Item-scoped blob, then snapshot its live DB. ---
     let db_a = open_db("dev-a");

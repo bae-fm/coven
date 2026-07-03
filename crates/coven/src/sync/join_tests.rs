@@ -169,7 +169,7 @@ async fn join_accepts_a_normal_library_id_past_decode() {
 
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
-    let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[7u8; 32]));
+    let enc = CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32]));
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables();
 
@@ -295,7 +295,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 /// album renders a placeholder cover. Asserts the file lands.
 #[tokio::test]
 async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
-    let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[9u8; 32]));
+    let enc = CloudCipher::Encrypted(EncryptionService::from_key([9u8; 32]));
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
@@ -417,7 +417,7 @@ async fn backfill_pending(db: &Database) -> bool {
 /// advanced that cursor past the INSERT that carried this one.
 #[tokio::test]
 async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
-    let enc = CloudCipher::Encrypted(EncryptionService::new_with_key(&[11u8; 32]));
+    let enc = CloudCipher::Encrypted(EncryptionService::from_key([11u8; 32]));
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",

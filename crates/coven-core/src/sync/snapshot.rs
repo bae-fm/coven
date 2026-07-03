@@ -1485,7 +1485,7 @@ mod tests {
     /// run against. Plaintext-home snapshot round-tripping is covered end-to-end
     /// through the real cycle in `delete_propagation_tests`.
     fn test_encryption() -> CloudCipher {
-        CloudCipher::Encrypted(EncryptionService::new_with_key(&[0x42u8; 32]))
+        CloudCipher::Encrypted(EncryptionService::from_key([0x42u8; 32]))
     }
 
     /// The keypair the snapshot tests push and sign with, when they don't care
@@ -3048,7 +3048,7 @@ mod authorization_tests {
 
     /// The encrypted-home cipher these tests seal snapshots under.
     fn cipher() -> CloudCipher {
-        CloudCipher::Encrypted(EncryptionService::new_with_key(&[0x42u8; 32]))
+        CloudCipher::Encrypted(EncryptionService::from_key([0x42u8; 32]))
     }
 
     /// A minimal sealed snapshot blob. The authorization checks operate on the

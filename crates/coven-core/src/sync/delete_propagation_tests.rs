@@ -63,7 +63,7 @@ async fn run_cycle(
 /// the grace reclaims the blob. Driven end to end through the real cycle.
 #[tokio::test]
 async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
-    let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[11u8; 32]));
+    let cipher = CloudCipher::Encrypted(EncryptionService::from_key([11u8; 32]));
     let enc_a = RwLock::new(cipher.clone());
     let enc_b = RwLock::new(cipher.clone());
     let storage = MockSyncStorage::new();
@@ -240,7 +240,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
     use crate::sync::membership::{MemberRole, MembershipAction};
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
-    let cipher = CloudCipher::Encrypted(EncryptionService::new_with_key(&[11u8; 32]));
+    let cipher = CloudCipher::Encrypted(EncryptionService::from_key([11u8; 32]));
     let enc_a = RwLock::new(cipher.clone());
     let storage = MockSyncStorage::new();
     let kp_a = UserKeypair::generate(); // founder + Owner

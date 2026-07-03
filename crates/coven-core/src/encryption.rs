@@ -24,21 +24,21 @@ pub fn generate_random_key() -> [u8; 32] {
     key
 }
 
-/// The length of the encrypted blob [`EncryptionService::encrypt_chunked`]
-/// produces for a plaintext of `plaintext_len` bytes: the base nonce, the
-/// plaintext itself, and one 16-byte tag per chunk. An empty plaintext still
-/// produces one (tag-only) chunk. Lets a streaming upload know the final object
-/// size up front, before a byte is sealed.
+/// The length of the encrypted blob [`EncryptionService::encrypt`] produces for
+/// a plaintext of `plaintext_len` bytes: the base nonce, the plaintext itself,
+/// and one 16-byte tag per chunk. An empty plaintext still produces one
+/// (tag-only) chunk. Lets a streaming upload know the final object size up
+/// front, before a byte is sealed.
 pub fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
     let chunks = plaintext_len.div_ceil(CHUNK_SIZE as u64).max(1);
     NONCE_SIZE as u64 + plaintext_len + chunks * TAG_SIZE as u64
 }
 
 /// Incremental encryptor that emits the same `[base_nonce][chunk_0][chunk_1]...`
-/// bytes as [`EncryptionService::encrypt_chunked`], one chunk at a time, so a
-/// large blob is sealed and uploaded without ever holding the whole plaintext or
-/// ciphertext in memory. `encrypt_chunked` is itself implemented on top of this,
-/// so the streaming and whole-buffer forms cannot drift.
+/// bytes as [`EncryptionService::encrypt`], one chunk at a time, so a large blob
+/// is sealed and uploaded without ever holding the whole plaintext or ciphertext
+/// in memory. `encrypt` is itself implemented on top of this, so the streaming
+/// and whole-buffer forms cannot drift.
 pub struct ChunkSealer {
     cipher: XChaCha20Poly1305,
     base_nonce: [u8; NONCE_SIZE],
@@ -103,7 +103,7 @@ pub struct EncryptionService {
 impl std::fmt::Debug for EncryptionService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptionService")
-            .field("cipher", &"<initialized>")
+            .field("key", &"<redacted>")
             .finish()
     }
 }
@@ -132,16 +132,6 @@ impl EncryptionService {
         hex::encode(&hash[..8])
     }
 
-    /// Create an encryption service with a raw key (for testing)
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn new_with_key(key_bytes: &[u8]) -> Self {
-        if key_bytes.len() != 32 {
-            panic!("Invalid key length, expected 32 bytes");
-        }
-        let key: [u8; 32] = key_bytes.try_into().unwrap();
-        EncryptionService { key }
-    }
-
     /// Return the raw 32-byte key.
     pub fn key_bytes(&self) -> [u8; 32] {
         self.key
@@ -152,18 +142,6 @@ impl EncryptionService {
     /// For small data (single chunk), this is equivalent to standard AEAD.
     /// For large data, each chunk is independently encrypted for random-access.
     pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        self.encrypt_chunked(plaintext)
-    }
-
-    /// Decrypt data in chunked format: [nonce (24 bytes)][ciphertext chunks...]
-    pub fn decrypt(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, EncryptionError> {
-        self.decrypt_chunked(encrypted_data)
-    }
-
-    /// Encrypt data using chunked XChaCha20-Poly1305 format.
-    /// Returns: `[base_nonce: 24 bytes][chunk_0][chunk_1]...`
-    /// Each chunk is independently encrypted, enabling random-access decryption.
-    pub fn encrypt_chunked(&self, plaintext: &[u8]) -> Vec<u8> {
         let mut sealer = self.sealer();
         let mut output = sealer.base_nonce().to_vec();
 
@@ -180,6 +158,31 @@ impl EncryptionService {
         output
     }
 
+    /// Decrypt data in chunked format: [nonce (24 bytes)][ciphertext chunks...]
+    pub fn decrypt(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        let base_nonce = read_base_nonce(encrypted_data)?;
+        let layout = encrypted_chunk_layout(encrypted_data.len())?;
+        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&self.key));
+
+        let mut result = Vec::with_capacity(decrypted_len_upper_bound(layout.data_len));
+        for chunk_index in 0..layout.total_chunks {
+            let (chunk_start, chunk_end) =
+                layout.chunk_bounds(encrypted_data.len(), chunk_index)?;
+            let chunk_data = &encrypted_data[chunk_start..chunk_end];
+            let decrypted =
+                decrypt_chunk_with_cipher(&cipher, &base_nonce, chunk_index as u64, chunk_data)
+                    .map_err(|_| {
+                        EncryptionError::Decryption(format!(
+                            "Authentication failed for chunk {}",
+                            chunk_index
+                        ))
+                    })?;
+            result.extend(decrypted);
+        }
+
+        Ok(result)
+    }
+
     /// A streaming sealer over this service's key, for encrypting a blob
     /// chunk-by-chunk straight into an upload. See [`ChunkSealer`].
     pub fn sealer(&self) -> ChunkSealer {
@@ -193,70 +196,14 @@ impl EncryptionService {
         ciphertext: &[u8],
         chunk_index: usize,
     ) -> Result<Vec<u8>, EncryptionError> {
-        if ciphertext.len() < NONCE_SIZE {
-            return Err(EncryptionError::Decryption(
-                "Ciphertext too short for nonce".to_string(),
-            ));
-        }
-
-        let base_nonce: [u8; NONCE_SIZE] = ciphertext[..NONCE_SIZE]
-            .try_into()
-            .map_err(|_| EncryptionError::Decryption("Invalid nonce".to_string()))?;
-
-        let data_start = NONCE_SIZE;
-        let total_data_len = ciphertext.len() - data_start;
-
-        // Calculate chunk boundaries
-        let num_full_chunks = total_data_len / ENCRYPTED_CHUNK_SIZE;
-        let has_partial = !total_data_len.is_multiple_of(ENCRYPTED_CHUNK_SIZE);
-        let total_chunks = num_full_chunks + if has_partial { 1 } else { 0 };
-
-        if chunk_index >= total_chunks {
-            return Err(EncryptionError::Decryption(format!(
-                "Chunk index {} out of range (total chunks: {})",
-                chunk_index, total_chunks
-            )));
-        }
-
-        let chunk_start = data_start + chunk_index * ENCRYPTED_CHUNK_SIZE;
-        let chunk_end = if chunk_index == total_chunks - 1 && has_partial {
-            ciphertext.len()
-        } else {
-            chunk_start + ENCRYPTED_CHUNK_SIZE
-        };
-
+        let base_nonce = read_base_nonce(ciphertext)?;
+        let layout = encrypted_chunk_layout(ciphertext.len())?;
+        let (chunk_start, chunk_end) = layout.chunk_bounds(ciphertext.len(), chunk_index)?;
         let chunk_data = &ciphertext[chunk_start..chunk_end];
-        let nonce = chunk_nonce(&base_nonce, chunk_index as u64);
-        let nonce_arr = GenericArray::from_slice(&nonce);
 
         let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&self.key));
-        cipher
-            .decrypt(nonce_arr, chunk_data)
+        decrypt_chunk_with_cipher(&cipher, &base_nonce, chunk_index as u64, chunk_data)
             .map_err(|_| EncryptionError::Decryption("Authentication failed".to_string()))
-    }
-
-    /// Decrypt all chunks from chunked encrypted data.
-    pub fn decrypt_chunked(&self, ciphertext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
-        if ciphertext.len() < NONCE_SIZE {
-            return Err(EncryptionError::Decryption(
-                "Ciphertext too short for nonce".to_string(),
-            ));
-        }
-
-        let data_start = NONCE_SIZE;
-        let total_data_len = ciphertext.len() - data_start;
-
-        let num_full_chunks = total_data_len / ENCRYPTED_CHUNK_SIZE;
-        let has_partial = !total_data_len.is_multiple_of(ENCRYPTED_CHUNK_SIZE);
-        let total_chunks = num_full_chunks + if has_partial { 1 } else { 0 };
-
-        let mut result = Vec::new();
-        for i in 0..total_chunks {
-            let chunk = self.decrypt_chunk(ciphertext, i)?;
-            result.extend(chunk);
-        }
-
-        Ok(result)
     }
 
     /// Decrypt a plaintext byte range using nonce from DB and partial chunk data.
@@ -381,6 +328,82 @@ impl EncryptionService {
     }
 }
 
+#[derive(Clone, Copy)]
+struct EncryptedChunkLayout {
+    data_len: usize,
+    total_chunks: usize,
+    has_partial: bool,
+}
+
+impl EncryptedChunkLayout {
+    fn chunk_bounds(
+        self,
+        ciphertext_len: usize,
+        chunk_index: usize,
+    ) -> Result<(usize, usize), EncryptionError> {
+        if chunk_index >= self.total_chunks {
+            return Err(EncryptionError::Decryption(format!(
+                "Chunk index {} out of range (total chunks: {})",
+                chunk_index, self.total_chunks
+            )));
+        }
+
+        let chunk_start = NONCE_SIZE + chunk_index * ENCRYPTED_CHUNK_SIZE;
+        let chunk_end = if chunk_index == self.total_chunks - 1 && self.has_partial {
+            ciphertext_len
+        } else {
+            chunk_start + ENCRYPTED_CHUNK_SIZE
+        };
+        Ok((chunk_start, chunk_end))
+    }
+}
+
+fn read_base_nonce(ciphertext: &[u8]) -> Result<[u8; NONCE_SIZE], EncryptionError> {
+    if ciphertext.len() < NONCE_SIZE {
+        return Err(EncryptionError::Decryption(
+            "Ciphertext too short for nonce".to_string(),
+        ));
+    }
+
+    let mut base_nonce = [0u8; NONCE_SIZE];
+    base_nonce.copy_from_slice(&ciphertext[..NONCE_SIZE]);
+    Ok(base_nonce)
+}
+
+fn encrypted_chunk_layout(ciphertext_len: usize) -> Result<EncryptedChunkLayout, EncryptionError> {
+    if ciphertext_len < NONCE_SIZE {
+        return Err(EncryptionError::Decryption(
+            "Ciphertext too short for nonce".to_string(),
+        ));
+    }
+
+    let data_len = ciphertext_len - NONCE_SIZE;
+    let num_full_chunks = data_len / ENCRYPTED_CHUNK_SIZE;
+    let has_partial = !data_len.is_multiple_of(ENCRYPTED_CHUNK_SIZE);
+    let total_chunks = num_full_chunks + usize::from(has_partial);
+    Ok(EncryptedChunkLayout {
+        data_len,
+        total_chunks,
+        has_partial,
+    })
+}
+
+fn decrypted_len_upper_bound(encrypted_data_len: usize) -> usize {
+    let chunk_count = encrypted_data_len.div_ceil(ENCRYPTED_CHUNK_SIZE);
+    encrypted_data_len.saturating_sub(chunk_count * TAG_SIZE)
+}
+
+fn decrypt_chunk_with_cipher(
+    cipher: &XChaCha20Poly1305,
+    base_nonce: &[u8; NONCE_SIZE],
+    chunk_index: u64,
+    chunk_data: &[u8],
+) -> Result<Vec<u8>, ()> {
+    let nonce = chunk_nonce(base_nonce, chunk_index);
+    let nonce_arr = GenericArray::from_slice(&nonce);
+    cipher.decrypt(nonce_arr, chunk_data).map_err(|_| ())
+}
+
 /// Derive nonce for chunk i: base_nonce XOR i (little-endian)
 fn chunk_nonce(base_nonce: &[u8; NONCE_SIZE], chunk_index: u64) -> [u8; NONCE_SIZE] {
     let mut nonce = *base_nonce;
@@ -422,7 +445,7 @@ mod tests {
     }
 
     fn create_test_service() -> EncryptionService {
-        EncryptionService::new_with_key(&test_key())
+        EncryptionService::from_key(test_key())
     }
 
     fn decrypt_plaintext_range(
@@ -460,7 +483,7 @@ mod tests {
     /// The streaming sealer (base nonce + per-chunk `seal_chunk`) produces a blob
     /// the existing whole-buffer decryptor reads back unchanged, across the
     /// boundaries that matter: empty, sub-chunk, exact chunk, and several
-    /// non-aligned chunks. `encrypt_chunked` is built on the sealer, so this also
+    /// non-aligned chunks. `encrypt` is built on the sealer, so this also
     /// guards the streaming form against drifting from the stored format.
     #[test]
     fn streaming_sealer_matches_whole_buffer_format() {
@@ -499,11 +522,11 @@ mod tests {
         }
     }
 
-    /// `chunked_encrypted_len` predicts the exact byte length `encrypt_chunked`
+    /// `chunked_encrypted_len` predicts the exact byte length `encrypt`
     /// produces, across the chunk boundaries that matter — so a streaming upload
     /// can announce the final object size before sealing a byte.
     #[test]
-    fn chunked_encrypted_len_matches_encrypt_chunked() {
+    fn chunked_encrypted_len_matches_encrypt() {
         let service = create_test_service();
         for n in [
             0usize,
@@ -513,7 +536,7 @@ mod tests {
             CHUNK_SIZE + 1,
             200_000,
         ] {
-            let produced = service.encrypt_chunked(&vec![0u8; n]).len() as u64;
+            let produced = service.encrypt(&vec![0u8; n]).len() as u64;
             assert_eq!(
                 chunked_encrypted_len(n as u64),
                 produced,
@@ -885,8 +908,8 @@ mod tests {
 
     #[test]
     fn test_fingerprint_different_keys() {
-        let service1 = EncryptionService::new_with_key(&[0u8; 32]);
-        let service2 = EncryptionService::new_with_key(&[1u8; 32]);
+        let service1 = EncryptionService::from_key([0u8; 32]);
+        let service2 = EncryptionService::from_key([1u8; 32]);
         assert_ne!(service1.fingerprint(), service2.fingerprint());
     }
 
@@ -908,8 +931,8 @@ mod tests {
 
     #[test]
     fn derive_scoped_different_master_keys() {
-        let svc1 = EncryptionService::new_with_key(&[0u8; 32]);
-        let svc2 = EncryptionService::new_with_key(&[1u8; 32]);
+        let svc1 = EncryptionService::from_key([0u8; 32]);
+        let svc2 = EncryptionService::from_key([1u8; 32]);
         let key1 = svc1.derive_scoped("rel-123").key_bytes();
         let key2 = svc2.derive_scoped("rel-123").key_bytes();
         assert_ne!(key1, key2);

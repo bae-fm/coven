@@ -98,9 +98,9 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     // edit and advances b_hlc from the applied row's `_updated_at`.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
     let (_t, ld) = temp_library_dir();
-    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::new_with_key(&[3u8; 32]),
-    ));
+    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [3u8; 32],
+    )));
     let keypair = UserKeypair::generate();
 
     let result = run_single_sync_cycle(
@@ -569,9 +569,9 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
 
     let storage = MockSyncStorage::new();
     let (_t, ld) = temp_library_dir();
-    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(
-        EncryptionService::new_with_key(&[7u8; 32]),
-    ));
+    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [7u8; 32],
+    )));
     let keypair = UserKeypair::generate();
     let hlc = db.hlc();
 
