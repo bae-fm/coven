@@ -67,17 +67,9 @@ pub fn captured_staging_path(library_dir: &LibraryDir) -> PathBuf {
     library_dir.join("sync_capture_staging.bin")
 }
 
-fn captured_staging_temp_path(library_dir: &LibraryDir) -> PathBuf {
-    library_dir.join("sync_capture_staging.bin.tmp")
-}
-
 /// Clear the staged changeset after a successful push.
 pub async fn clear_staged_changeset(library_dir: &LibraryDir) {
     let _ = crate::local_blob::remove_file(&staging_path(library_dir)).await;
-}
-
-async fn remove_file_if_exists(path: PathBuf) -> Result<(), String> {
-    crate::local_blob::remove_file(&path).await.map(|_| ())
 }
 
 pub async fn read_staged_captured_changeset(
@@ -91,8 +83,9 @@ pub async fn read_staged_captured_changeset(
 }
 
 pub async fn clear_staged_captured_changeset(library_dir: &LibraryDir) -> Result<(), String> {
-    remove_file_if_exists(captured_staging_path(library_dir)).await?;
-    remove_file_if_exists(captured_staging_temp_path(library_dir)).await
+    crate::local_blob::remove_file(&captured_staging_path(library_dir))
+        .await
+        .map(|_| ())
 }
 
 /// Read a previously staged changeset (if any) for retry.
