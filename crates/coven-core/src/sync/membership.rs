@@ -175,6 +175,25 @@ pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
     )
 }
 
+fn apply_active_member_rule(active: &mut Vec<(String, MemberRole)>, entry: &MembershipEntry) {
+    active.retain(|(pk, _)| pk != &entry.user_pubkey);
+    if entry.action == MembershipAction::Add {
+        active.push((entry.user_pubkey.clone(), entry.role.clone()));
+    }
+}
+
+fn members_can_write(members: &[(String, MemberRole)], pubkey: &str) -> bool {
+    members
+        .iter()
+        .any(|(pk, role)| pk == pubkey && role.can_write())
+}
+
+fn members_has_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
+    members
+        .iter()
+        .any(|(pk, role)| pk == pubkey && *role == MemberRole::Owner)
+}
+
 /// An append-only membership chain.
 ///
 /// Entries are sorted by timestamp (HLC string comparison gives causal order).
@@ -242,34 +261,19 @@ impl MembershipChain {
             return Err(MembershipError::InvalidSignature(0));
         }
 
-        // Track active members as we walk the chain.
-        let mut active: Vec<(String, MemberRole)> = vec![];
-        active.push((first.user_pubkey.clone(), first.role.clone()));
+        let mut active: Vec<(String, MemberRole)> = Vec::new();
+        apply_active_member_rule(&mut active, first);
 
         for (i, entry) in self.entries.iter().enumerate().skip(1) {
             if !verify_membership_entry(entry) {
                 return Err(MembershipError::InvalidSignature(i));
             }
 
-            // Author must be an active owner.
-            let is_owner = active
-                .iter()
-                .any(|(pk, role)| pk == &entry.author_pubkey && *role == MemberRole::Owner);
-
-            if !is_owner {
+            if !members_has_owner(&active, &entry.author_pubkey) {
                 return Err(MembershipError::NotAnOwner(i));
             }
 
-            match entry.action {
-                MembershipAction::Add => {
-                    // Remove any existing entry for this pubkey (role change).
-                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
-                    active.push((entry.user_pubkey.clone(), entry.role.clone()));
-                }
-                MembershipAction::Remove => {
-                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
-                }
-            }
+            apply_active_member_rule(&mut active, entry);
         }
 
         Ok(())
@@ -284,17 +288,13 @@ impl MembershipChain {
     /// the key rotation `remove_member` performs, not by replaying the chain at
     /// a claimed instant.
     pub fn can_write_now(&self, pubkey: &str) -> bool {
-        self.current_members()
-            .into_iter()
-            .any(|(pk, role)| pk == pubkey && role.can_write())
+        members_can_write(&self.current_members(), pubkey)
     }
 
     /// Whether `pubkey` is *currently* a library Owner. Owner-only writes
     /// (snapshots) authorize against this rather than `can_write_now`.
     pub fn is_owner_now(&self, pubkey: &str) -> bool {
-        self.current_members()
-            .into_iter()
-            .any(|(pk, role)| pk == pubkey && role == MemberRole::Owner)
+        members_has_owner(&self.current_members(), pubkey)
     }
 
     /// Return current active members with their roles.
@@ -302,15 +302,7 @@ impl MembershipChain {
         let mut active: Vec<(String, MemberRole)> = Vec::new();
 
         for entry in &self.entries {
-            match entry.action {
-                MembershipAction::Add => {
-                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
-                    active.push((entry.user_pubkey.clone(), entry.role.clone()));
-                }
-                MembershipAction::Remove => {
-                    active.retain(|(pk, _)| pk != &entry.user_pubkey);
-                }
-            }
+            apply_active_member_rule(&mut active, entry);
         }
 
         active
@@ -336,39 +328,14 @@ impl MembershipChain {
 
     /// Validate and append an entry to the chain.
     pub fn add_entry(&mut self, entry: MembershipEntry) -> Result<(), MembershipError> {
-        if self.entries.is_empty() {
-            // First entry: must be self-signed owner Add.
-            if entry.action != MembershipAction::Add
-                || entry.role != MemberRole::Owner
-                || entry.author_pubkey != entry.user_pubkey
-            {
-                return Err(MembershipError::InvalidFirstEntry);
-            }
-
-            if !verify_membership_entry(&entry) {
-                return Err(MembershipError::InvalidSignature(0));
-            }
-
-            self.entries.push(entry);
-            return Ok(());
-        }
-
-        if !verify_membership_entry(&entry) {
-            return Err(MembershipError::InvalidSignature(self.entries.len()));
-        }
-
-        // Author must be an active owner.
-        let members = self.current_members();
-        let is_owner = members
-            .iter()
-            .any(|(pk, role)| pk == &entry.author_pubkey && *role == MemberRole::Owner);
-
-        if !is_owner {
-            return Err(MembershipError::NotAnOwner(self.entries.len()));
-        }
-
         self.entries.push(entry);
-        Ok(())
+        match self.validate() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.entries.pop();
+                Err(e)
+            }
+        }
     }
 }
 
@@ -554,14 +521,12 @@ mod tests {
         chain.validate().unwrap();
 
         // Owners and Members may author changesets; a Follower may not.
-        assert!(chain.can_write_now(&pubkey_hex(&owner)));
-        assert!(chain.can_write_now(&pubkey_hex(&member)));
-        assert!(!chain.can_write_now(&pubkey_hex(&follower)));
+        let members = chain.current_members();
+        assert!(members_can_write(&members, &pubkey_hex(&owner)));
+        assert!(members_can_write(&members, &pubkey_hex(&member)));
+        assert!(!members_can_write(&members, &pubkey_hex(&follower)));
         // ...but the Follower is still a registered member (can read).
-        assert!(chain
-            .current_members()
-            .iter()
-            .any(|(pk, _)| pk == &pubkey_hex(&follower)));
+        assert!(members.iter().any(|(pk, _)| pk == &pubkey_hex(&follower)));
 
         // Revoking the follower drops them entirely: not a current member,
         // cannot write.
@@ -574,11 +539,9 @@ mod tests {
                 "0000000004000-0000-dev1",
             ))
             .unwrap();
-        assert!(!chain
-            .current_members()
-            .iter()
-            .any(|(pk, _)| pk == &pubkey_hex(&follower)));
-        assert!(!chain.can_write_now(&pubkey_hex(&follower)));
+        let members = chain.current_members();
+        assert!(!members.iter().any(|(pk, _)| pk == &pubkey_hex(&follower)));
+        assert!(!members_can_write(&members, &pubkey_hex(&follower)));
     }
 
     #[test]
@@ -623,15 +586,16 @@ mod tests {
         chain.validate().unwrap();
 
         // Only Owners pass: the founder and the second Owner.
-        assert!(chain.is_owner_now(&pubkey_hex(&owner)));
-        assert!(chain.is_owner_now(&pubkey_hex(&owner2)));
+        let members = chain.current_members();
+        assert!(members_has_owner(&members, &pubkey_hex(&owner)));
+        assert!(members_has_owner(&members, &pubkey_hex(&owner2)));
         // A write-capable Member is NOT an Owner — the owner-only bar is stricter
         // than can_write_now.
-        assert!(chain.can_write_now(&pubkey_hex(&member)));
-        assert!(!chain.is_owner_now(&pubkey_hex(&member)));
+        assert!(members_can_write(&members, &pubkey_hex(&member)));
+        assert!(!members_has_owner(&members, &pubkey_hex(&member)));
         // A read-only Follower and an outsider are not Owners.
-        assert!(!chain.is_owner_now(&pubkey_hex(&follower)));
-        assert!(!chain.is_owner_now("deadbeef"));
+        assert!(!members_has_owner(&members, &pubkey_hex(&follower)));
+        assert!(!members_has_owner(&members, "deadbeef"));
     }
 
     #[test]
@@ -913,6 +877,40 @@ mod tests {
 
         let result = chain.add_entry(entry);
         assert!(matches!(result, Err(MembershipError::InvalidSignature(_))));
+        assert_eq!(chain.entries().len(), 1);
+    }
+
+    #[test]
+    fn failed_append_reports_new_entry_index_and_rolls_back() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let outsider = gen_keypair();
+
+        let mut chain = MembershipChain::new();
+        chain
+            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
+            .unwrap();
+        chain
+            .add_entry(make_entry(
+                &owner,
+                MembershipAction::Add,
+                &member,
+                MemberRole::Member,
+                "0000000002000-0000-dev1",
+            ))
+            .unwrap();
+
+        let result = chain.add_entry(make_entry(
+            &member,
+            MembershipAction::Add,
+            &outsider,
+            MemberRole::Member,
+            "0000000003000-0000-dev1",
+        ));
+
+        assert!(matches!(result, Err(MembershipError::NotAnOwner(2))));
+        assert_eq!(chain.entries().len(), 2);
+        assert!(chain.validate().is_ok());
     }
 
     #[test]

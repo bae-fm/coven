@@ -19,7 +19,7 @@ use super::apply::apply_changeset_lww_with_schema;
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
-use super::membership::{MembershipChain, MembershipCoord, MembershipEntry};
+use super::membership::{MemberRole, MembershipChain, MembershipCoord, MembershipEntry};
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, SyncStorage};
 use crate::blob::decl::BlobDecls;
@@ -50,11 +50,23 @@ fn cursor_for_device(cursors: &HashMap<String, u64>, device_id: &str) -> u64 {
     }
 }
 
-/// Whether `pubkey` is a current member of `chain` in any role (Owner, Member, or
-/// the read-only Follower). The gate for honoring a device's *head*: a Follower
+/// Whether `pubkey` is a current member in any role (Owner, Member, or the
+/// read-only Follower). The gate for honoring a device's *head*: a Follower
 /// reads, so its head is legitimate even though it may not author changesets.
-fn is_current_member(chain: &MembershipChain, pubkey: &str) -> bool {
-    chain.current_members().iter().any(|(pk, _)| pk == pubkey)
+fn is_current_member(members: &[(String, MemberRole)], pubkey: &str) -> bool {
+    members.iter().any(|(pk, _)| pk == pubkey)
+}
+
+fn is_current_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
+    members
+        .iter()
+        .any(|(pk, role)| pk == pubkey && *role == MemberRole::Owner)
+}
+
+fn can_write_now(members: &[(String, MemberRole)], pubkey: &str) -> bool {
+    members
+        .iter()
+        .any(|(pk, role)| pk == pubkey && role.can_write())
 }
 
 /// A changeset skipped because its author is not a write-capable member, judged
@@ -216,6 +228,9 @@ pub async fn pull_changes(
                 None
             }
         };
+    let mut membership_members = membership_chain
+        .as_ref()
+        .map(MembershipChain::current_members);
 
     // Check min_schema_version before processing any changesets. The floor is an
     // untrusted control object, so it is honored only when its verified author is
@@ -229,8 +244,8 @@ pub async fn pull_changes(
         .await
         .map_err(PullError::Storage)?
     {
-        let honor = match membership_chain.as_ref() {
-            Some(chain) => chain.is_owner_now(&min.author_pubkey),
+        let honor = match membership_members.as_ref() {
+            Some(members) => is_current_owner(members, &min.author_pubkey),
             None => true,
         };
         if honor {
@@ -260,9 +275,9 @@ pub async fn pull_changes(
     let heads = storage.list_heads().await.map_err(PullError::Storage)?;
     let heads: Vec<DeviceHead> = heads
         .into_iter()
-        .filter(|head| match membership_chain.as_ref() {
-            Some(chain) => {
-                let authorized = is_current_member(chain, &head.author_pubkey);
+        .filter(|head| match membership_members.as_ref() {
+            Some(members) => {
+                let authorized = is_current_member(members, &head.author_pubkey);
                 if !authorized {
                     warn!(
                         device_id = %head.device_id,
@@ -425,9 +440,9 @@ pub async fn pull_changes(
             // write-capable, so a changeset it authored is rejected here too.
             if membership_chain.is_some() {
                 let author = env.author_pubkey.as_deref();
-                let authorized = membership_chain
+                let authorized = membership_members
                     .as_ref()
-                    .is_some_and(|chain| author.is_some_and(|pk| chain.can_write_now(pk)));
+                    .is_some_and(|members| author.is_some_and(|pk| can_write_now(members, pk)));
                 if !authorized {
                     match resolve_membership_authorization(
                         storage,
@@ -443,6 +458,7 @@ pub async fn pull_changes(
                             // named grant entry) authorizes the author. Adopt it for
                             // the rest of this cycle so other newly-authorized peers
                             // don't each re-trigger a reload.
+                            membership_members = Some(refreshed.current_members());
                             membership_chain = Some(refreshed);
                         }
                         MembershipJudgment::Unauthorized => {
