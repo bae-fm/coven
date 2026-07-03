@@ -636,25 +636,15 @@ impl CovenHandle {
     }
 
     pub fn get_user_pubkey(&self) -> Result<Option<String>, String> {
-        match self.sync_manager() {
-            Some(manager) => manager.get_user_pubkey(),
-            None => self
-                .key_service
-                .get_user_public_key()
-                .map(|opt| opt.map(hex::encode))
-                .map_err(|e| format!("Failed to read user public key: {e}")),
-        }
+        self.key_service
+            .get_user_public_key()
+            .map(|opt| opt.map(hex::encode))
+            .map_err(|e| format!("Failed to read user public key: {e}"))
     }
 
     pub fn generate_restore_code(&self) -> Result<String, String> {
-        match self.sync_manager() {
-            Some(manager) => manager.generate_restore_code(),
-            None => crate::storage::cloud::setup::generate_restore_code(
-                &self.config(),
-                &self.key_service,
-            )
-            .map_err(|e| e.to_string()),
-        }
+        crate::storage::cloud::setup::generate_restore_code(&self.config(), &self.key_service)
+            .map_err(|e| e.to_string())
     }
 
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, String> {

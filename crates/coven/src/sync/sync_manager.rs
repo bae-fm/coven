@@ -451,19 +451,6 @@ impl SyncManager {
     // Keys / codes
     // =========================================================================
 
-    pub fn get_user_pubkey(&self) -> Result<Option<String>, String> {
-        self.key_service
-            .get_user_public_key()
-            .map(|opt| opt.map(hex::encode))
-            .map_err(|e| format!("Failed to read user public key: {e}"))
-    }
-
-    pub fn generate_restore_code(&self) -> Result<String, String> {
-        let config = (self.config_provider)();
-        crate::storage::cloud::setup::generate_restore_code(&config, &self.key_service)
-            .map_err(|e| e.to_string())
-    }
-
     // =========================================================================
     // Membership
     // =========================================================================
