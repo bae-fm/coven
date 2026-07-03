@@ -22,7 +22,6 @@ use crate::storage::cloud::CloudHome;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
-use super::service::SyncService;
 use super::storage::SyncStorage;
 
 /// Result of a single sync cycle.
@@ -224,7 +223,6 @@ pub async fn run_single_sync_cycle_with_key_persistence(
 ) -> Result<SyncCycleResult, String> {
     // The synced-table set is owned by the Database; read it once here.
     let tables = db.synced_tables();
-    let sync_service = SyncService::new(device_id.to_string());
 
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
     // judges, or decrypts (#85/#87). Membership and the rotatable library key are
@@ -385,10 +383,15 @@ pub async fn run_single_sync_cycle_with_key_persistence(
 
     let timestamp = hlc.now().to_string();
 
-    if sync_service
-        .complete_host_provided_make_remotes(db, tables, storage, &timestamp, library_dir)
-        .await
-        .map_err(|e| format!("Host-provided make_remote completion failed: {e}"))?
+    if super::service::complete_host_provided_make_remotes(
+        db,
+        tables,
+        storage,
+        &timestamp,
+        library_dir,
+    )
+    .await
+    .map_err(|e| format!("Host-provided make_remote completion failed: {e}"))?
     {
         resume_drain_promptly = true;
     }
@@ -409,21 +412,21 @@ pub async fn run_single_sync_cycle_with_key_persistence(
     };
 
     // Run the core gate + push-prep + pull.
-    let sync_result = sync_service
-        .sync(
-            db,
-            tables,
-            outgoing,
-            local_seq,
-            &cursors,
-            storage,
-            &timestamp,
-            "background sync",
-            user_keypair,
-            library_dir,
-        )
-        .await
-        .map_err(|e| format!("Sync cycle error: {e}"))?;
+    let sync_result = super::service::sync(
+        device_id,
+        db,
+        tables,
+        outgoing,
+        local_seq,
+        &cursors,
+        storage,
+        &timestamp,
+        "background sync",
+        user_keypair,
+        library_dir,
+    )
+    .await
+    .map_err(|e| format!("Sync cycle error: {e}"))?;
 
     // Propagate the captured changeset. The gate already cut any row whose
     // gate column is off (the host keeps a blob-bearing row gated until its

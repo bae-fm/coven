@@ -21,7 +21,7 @@ use crate::sync::pull::PullError;
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
-use crate::sync::service::{SyncCycleError, SyncService};
+use crate::sync::service::{self, SyncCycleError};
 use crate::sync::session::{BlobDecl, BlobScopeSpec};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
@@ -184,7 +184,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
 
 /// The push side stamps an outgoing changeset with the db's
 /// [`Database::schema_version`], driven through the real producer
-/// (`SyncService::sync`) and read back off the produced envelope — so a regression
+/// (`service::sync`) and read back off the produced envelope — so a regression
 /// that stamped a constant instead would fail here. Paired with
 /// `pull_gate_tracks_the_dbs_schema_version`, which covers the receiver gate.
 #[tokio::test]
@@ -204,23 +204,22 @@ async fn push_stamps_the_dbs_schema_version() {
     .await;
     let outgoing = db1.take_changeset().await.expect("capture insert");
 
-    let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
-    let result = service
-        .sync(
-            &db1,
-            &tables,
-            outgoing,
-            0,
-            &HashMap::new(),
-            &storage,
-            "2026-01-01T00:00:00Z",
-            "",
-            &keypair,
-            &ld1,
-        )
-        .await
-        .expect("sync push");
+    let result = service::sync(
+        "dev1",
+        &db1,
+        &tables,
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld1,
+    )
+    .await
+    .expect("sync push");
 
     let packed = result.outgoing.expect("an outgoing changeset").packed;
     let (env, _changeset) = envelope::unpack(&packed).expect("unpack outgoing envelope");
@@ -446,23 +445,22 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     store_local(&ld1, "newaaaa", b"NEW-BLOB").await;
     let outgoing = db1.take_changeset().await.expect("capture update");
 
-    let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
-    let result = service
-        .sync(
-            &db1,
-            &tables,
-            outgoing,
-            0,
-            &HashMap::new(),
-            &storage,
-            "2026-01-01T00:00:00Z",
-            "",
-            &keypair,
-            &ld1,
-        )
-        .await
-        .expect("sync update");
+    let result = service::sync(
+        "dev1",
+        &db1,
+        &tables,
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld1,
+    )
+    .await
+    .expect("sync update");
     let outgoing = result.outgoing.expect("outgoing update");
     assert!(
         storage.exists("photos/newaaaa").await.unwrap(),
@@ -626,24 +624,23 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     // Drive the real push path. The inline push uploads only host-provided blobs, so
     // the user-provided audio is NOT uploaded here — it goes via the durable outbox in
     // the make_remote flow, not this changeset-blob upload.
-    let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
     let (_t1, ld1) = temp_library_dir();
-    let result = service
-        .sync(
-            &db1,
-            &audio_tables(),
-            outgoing,
-            0,
-            &HashMap::new(),
-            &storage,
-            "2026-01-01T00:00:00Z",
-            "",
-            &keypair,
-            &ld1,
-        )
-        .await
-        .expect("sync");
+    let result = service::sync(
+        "dev1",
+        &db1,
+        &audio_tables(),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld1,
+    )
+    .await
+    .expect("sync");
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
@@ -733,23 +730,22 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
     .await;
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
-    let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
     let (_t1, ld1) = temp_library_dir();
-    let result = service
-        .sync(
-            &db1,
-            &test_synced_tables_with_blob(photo_decl()),
-            outgoing,
-            0,
-            &HashMap::new(),
-            &storage,
-            "2026-01-01T00:00:00Z",
-            "",
-            &keypair,
-            &ld1,
-        )
-        .await;
+    let result = service::sync(
+        "dev1",
+        &db1,
+        &test_synced_tables_with_blob(photo_decl()),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld1,
+    )
+    .await;
     // `SyncResult` is not Debug; inspect only the error side for the assert message.
     let err = result.err();
     assert!(
@@ -780,7 +776,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     );
 
     // Device A: a shared note + a cover photo whose file is present locally.
-    // Driven through the real `SyncService::sync` + `push_changeset` so the
+    // Driven through the real `service::sync` + `push_changeset` so the
     // production blob-upload path keys the blob from its `cloud_path`.
     let plaintext = b"COVERART";
 
@@ -803,23 +799,22 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     store_local(&ld1, "p1cover", plaintext).await;
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
-    let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
-    let result = service
-        .sync(
-            &db1,
-            &test_synced_tables_with_blob(readable_photo_decl()),
-            outgoing,
-            0,
-            &HashMap::new(),
-            &storage,
-            "2026-01-01T00:00:00Z",
-            "",
-            &keypair,
-            &ld1,
-        )
-        .await
-        .expect("sync");
+    let result = service::sync(
+        "dev1",
+        &db1,
+        &test_synced_tables_with_blob(readable_photo_decl()),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld1,
+    )
+    .await
+    .expect("sync");
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
@@ -871,7 +866,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 
 /// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
 /// shared `CloudHome`. Device A publishes a note plus its cover photo via the real
-/// `SyncService::sync`; the blob lands ciphertext at rest. Device B — a fresh DB
+/// `service::sync`; the blob lands ciphertext at rest. Device B — a fresh DB
 /// with its own asset directory but the same library key — pulls, downloads the
 /// blob, decrypts it, and recovers the original bytes byte-for-byte.
 #[tokio::test]
@@ -909,23 +904,22 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     store_local(&ld1, "p1cover", plaintext).await;
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
-    let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
-    let result = service
-        .sync(
-            &db1,
-            &test_synced_tables_with_blob(decl()),
-            outgoing,
-            0,
-            &HashMap::new(),
-            &storage,
-            "2026-01-01T00:00:00Z",
-            "",
-            &keypair,
-            &ld1,
-        )
-        .await
-        .expect("sync");
+    let result = service::sync(
+        "dev1",
+        &db1,
+        &test_synced_tables_with_blob(decl()),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld1,
+    )
+    .await
+    .expect("sync");
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
@@ -1019,23 +1013,22 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
         .expect("store lazy blob in local store");
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
-    let service = SyncService::new("dev1".to_string());
     let keypair = UserKeypair::generate();
-    service
-        .sync(
-            &db1,
-            &test_synced_tables_with_user_and_host_blobs(eager_decl(), lazy_decl()),
-            outgoing,
-            0,
-            &HashMap::new(),
-            &storage,
-            "2026-01-01T00:00:00Z",
-            "",
-            &keypair,
-            &ld1,
-        )
-        .await
-        .expect("sync");
+    service::sync(
+        "dev1",
+        &db1,
+        &test_synced_tables_with_user_and_host_blobs(eager_decl(), lazy_decl()),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld1,
+    )
+    .await
+    .expect("sync");
 
     // Both blobs reached the cloud — the inline push uploads regardless of fill.
     assert!(

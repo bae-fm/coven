@@ -1,6 +1,6 @@
 //! Push-related types for the sync system.
 //!
-//! The actual push orchestration happens in `SyncService::sync()`, which
+//! The actual push orchestration happens in [`super::service::sync`], which
 //! returns an `OutgoingChangeset` for the caller to encrypt and upload.
 //! This module holds the shared types.
 //!
