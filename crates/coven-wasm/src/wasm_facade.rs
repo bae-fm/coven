@@ -366,9 +366,7 @@ fn parse_migrations(value: JsValue) -> Result<Vec<Migration>, String> {
                     m.version, m.name
                 ));
             }
-            let name: &'static str = Box::leak(m.name.into_boxed_str());
-            let sql: &'static str = Box::leak(m.sql.into_boxed_str());
-            Ok(Migration::sql(m.version, name, sql))
+            Ok(Migration::sql_owned(m.version, m.name, m.sql))
         })
         .collect()
 }
