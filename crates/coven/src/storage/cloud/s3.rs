@@ -831,6 +831,61 @@ mod tests {
         }
     }
 
+    fn optional_test_env(name: &str) -> Option<String> {
+        match std::env::var(name) {
+            Ok(s) => Some(s),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(raw)) => {
+                panic!("test env var {name} is non-utf8: {raw:?}");
+            }
+        }
+    }
+
+    struct ExistingS3ObjectEnv {
+        bucket: String,
+        region: String,
+        endpoint: String,
+        key: String,
+        access_key: String,
+        secret_key: String,
+    }
+
+    fn existing_s3_object_env() -> Option<ExistingS3ObjectEnv> {
+        let names = [
+            "COVEN_TEST_S3_BUCKET",
+            "COVEN_TEST_S3_REGION",
+            "COVEN_TEST_S3_URL",
+            "COVEN_TEST_S3_EXISTING_KEY",
+            "COVEN_TEST_S3_KEY",
+            "COVEN_TEST_S3_SECRET",
+        ];
+        let mut values = Vec::with_capacity(names.len());
+        let mut missing = Vec::new();
+        for name in names {
+            match optional_test_env(name) {
+                Some(value) => values.push(value),
+                None => missing.push(name),
+            }
+        }
+        if !missing.is_empty() {
+            eprintln!(
+                "skipping live S3 object test; unset env vars: {}",
+                missing.join(", ")
+            );
+            return None;
+        }
+        let [bucket, region, endpoint, key, access_key, secret_key]: [String; 6] =
+            values.try_into().expect("collected every live S3 env var");
+        Some(ExistingS3ObjectEnv {
+            bucket,
+            region,
+            endpoint,
+            key,
+            access_key,
+            secret_key,
+        })
+    }
+
     #[tokio::test]
     #[ignore]
     async fn read_range_succeeds_against_existing_s3_object() {
@@ -872,39 +927,43 @@ mod tests {
     /// panic with "no reactor running" or hang; a real byte vec back proves the
     /// spawn-on-other-runtime path works.
     ///
-    /// Reads the GCS S3-compatible bucket `sommbuddy-library`. Credentials come
-    /// from `COVEN_TEST_S3_KEY` / `COVEN_TEST_S3_SECRET` so secrets stay out of
-    /// the repo; the bucket, endpoint, region, and object key are not secret.
+    /// Reads an existing object from a real S3-compatible bucket. Coordinates
+    /// come from `COVEN_TEST_S3_BUCKET`, `COVEN_TEST_S3_REGION`,
+    /// `COVEN_TEST_S3_URL`, and `COVEN_TEST_S3_EXISTING_KEY`.
     #[tokio::test]
     #[ignore]
-    async fn s3_big_stack_reads_real_bytes_from_gcs() {
-        let access_key = required_test_env("COVEN_TEST_S3_KEY");
-        let secret_key = required_test_env("COVEN_TEST_S3_SECRET");
+    async fn s3_big_stack_reads_real_bytes_from_existing_object() {
+        let Some(env) = existing_s3_object_env() else {
+            return;
+        };
 
         let home = S3CloudHome::new(
-            "sommbuddy-library".to_string(),
-            "us-central1".to_string(),
-            Some("https://storage.googleapis.com".to_string()),
-            access_key,
-            secret_key,
+            env.bucket,
+            env.region,
+            Some(env.endpoint),
+            env.access_key,
+            env.secret_key,
             None,
         )
         .await
         .expect("construct S3CloudHome");
 
-        let key = "snapshot/current.json.enc";
         let whole = home
-            .read(key)
+            .read(&env.key)
             .await
-            .unwrap_or_else(|e| panic!("read({key}) failed: {e:?}"));
-        assert!(!whole.is_empty(), "expected non-empty object at {key}");
-        eprintln!("read {} bytes from {key}", whole.len());
+            .unwrap_or_else(|e| panic!("read({}) failed: {e:?}", env.key));
+        assert!(
+            !whole.is_empty(),
+            "expected non-empty object at {}",
+            env.key
+        );
+        eprintln!("read {} bytes from {}", whole.len(), env.key);
 
         let n = whole.len().min(16) as u64;
         let head = home
-            .read_range(key, 0, n)
+            .read_range(&env.key, 0, n)
             .await
-            .unwrap_or_else(|e| panic!("read_range({key}, 0..{n}) failed: {e:?}"));
+            .unwrap_or_else(|e| panic!("read_range({}, 0..{n}) failed: {e:?}", env.key));
         assert_eq!(
             head.as_slice(),
             &whole[..n as usize],
