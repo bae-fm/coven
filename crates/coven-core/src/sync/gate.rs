@@ -198,20 +198,27 @@ unsafe fn copy_sqlite_bytes_and_free(buf: *mut c_void, len: c_int) -> Vec<u8> {
 
 /// How a synced table relates to the gate.
 enum TableGate {
-    /// A gated root: the boolean gate lives at this column index.
-    Root { gate_col: usize },
+    /// A gated root: the boolean gate lives at this column.
+    Root { gate_col: GateColumn },
     /// A root whose rows sync unconditionally and whose blob subtree is always
     /// Remote.
     RemoteRoot,
     /// A child whose gate is inherited from `parent` via the FK column at
-    /// `fk_col` (column index in *this* table), holding the parent's id.
-    Child { fk_col: usize, parent: String },
+    /// `fk_col` (in *this* table), holding the parent's id.
+    Child { fk_col: GateColumn, parent: String },
     /// An always-shared ancestor kept alive by its gated subtree: shared iff
     /// some inferred child still has a kept row referencing it. Each entry is a
-    /// `(child table, FK column index in that child)` pair, where the FK column
-    /// holds this table's id. The children are inferred from the live FK graph,
-    /// never declared.
-    Parent { children: Vec<(String, usize)> },
+    /// `(child table, FK column in that child)` pair, where the FK column holds
+    /// this table's id. The children are inferred from the live FK graph, never
+    /// declared.
+    Parent { children: Vec<(String, GateColumn)> },
+}
+
+/// A gate column as both a changeset position and a SQL column name.
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+struct GateColumn {
+    index: usize,
+    name: String,
 }
 
 /// The gate model for a database handle, computed from the live schema at open.
@@ -284,10 +291,8 @@ impl Gates {
             }
 
             if let Some(gate) = t.gate_column() {
-                let idx = cols.iter().position(|c| c == gate).ok_or_else(|| {
-                    GateError::MissingGateColumn(t.name().to_string(), gate.to_string())
-                })?;
-                gate_map.insert(t.name().to_string(), TableGate::Root { gate_col: idx });
+                let gate_col = gate_column(&cols, t.name(), gate)?;
+                gate_map.insert(t.name().to_string(), TableGate::Root { gate_col });
                 continue;
             }
 
@@ -296,9 +301,7 @@ impl Gates {
             // parents, and (for a multi-FK join row) toward the gated side, never
             // up an ancestor back-edge.
             if let Some((fk_name, parent)) = select_parent_fk(conn, t.name(), tables, &ancestors)? {
-                let fk_col = cols.iter().position(|c| c == &fk_name).ok_or_else(|| {
-                    GateError::MissingFkColumn(t.name().to_string(), fk_name.clone())
-                })?;
+                let fk_col = fk_column(&cols, t.name(), &fk_name)?;
                 gate_map.insert(t.name().to_string(), TableGate::Child { fk_col, parent });
             }
             // else: ungated, unconditionally shared — not in the map.
@@ -333,8 +336,10 @@ impl Gates {
                     }
                 }
                 // Otherwise, if this table has an FK referencing the ancestor, it
-                // is a keep-child: record the FK column index in that child.
-                if let Some(fk_col) = fk_col_referencing(conn, t.name(), ancestor)? {
+                // is a keep-child: record the FK column in that child.
+                if let Some(fk_name) = fk_col_referencing(conn, t.name(), ancestor)? {
+                    let cols = column_names(conn, t.name())?;
+                    let fk_col = fk_column(&cols, t.name(), &fk_name)?;
                     children.push((t.name().to_string(), fk_col));
                 }
             }
@@ -416,7 +421,7 @@ impl Gates {
         let mut order = self.gated_tables_parent_first(conn)?;
         order.reverse();
         for tbl in order {
-            let keep = self.keep_clause(conn, &tbl)?;
+            let keep = self.keep_clause(&tbl)?;
             let sql = format!("DELETE FROM {} WHERE NOT ({keep})", quote_ident(&tbl));
             execute_batch(conn, &sql)?;
         }
@@ -441,13 +446,12 @@ impl Gates {
     /// loop. Revisiting a table in the current path yields `FALSE` rather than
     /// recursing again.
     ///
-    fn keep_clause(&self, conn: &Connection, tbl: &str) -> Result<String, GateError> {
-        self.keep_clause_guarded(conn, tbl, &mut HashSet::new())
+    fn keep_clause(&self, tbl: &str) -> Result<String, GateError> {
+        self.keep_clause_guarded(tbl, &mut HashSet::new())
     }
 
     fn keep_clause_guarded(
         &self,
-        conn: &Connection,
         tbl: &str,
         visiting: &mut HashSet<String>,
     ) -> Result<String, GateError> {
@@ -457,16 +461,16 @@ impl Gates {
             return Ok("FALSE".to_string());
         }
         let clause = match self.tables.get(tbl) {
-            Some(TableGate::Root { gate_col }) => {
-                let gate = nth_column_name(conn, tbl, *gate_col)?;
-                truthy_sql(&format!("{}.{}", quote_ident(tbl), quote_ident(&gate)))
-            }
+            Some(TableGate::Root { gate_col }) => truthy_sql(&format!(
+                "{}.{}",
+                quote_ident(tbl),
+                quote_ident(&gate_col.name)
+            )),
             Some(TableGate::RemoteRoot) => "TRUE".to_string(),
             Some(TableGate::Child { fk_col, parent }) => {
-                let fk = nth_column_name(conn, tbl, *fk_col)?;
-                let inner = self.keep_clause_guarded(conn, parent, visiting)?;
+                let inner = self.keep_clause_guarded(parent, visiting)?;
                 // Join up the FK to the parent's keep: parent.id = child.fk.
-                fk_exists_clause(parent, "id", tbl, &fk, &inner)
+                fk_exists_clause(parent, "id", tbl, &fk_col.name, &inner)
             }
             Some(TableGate::Parent { children }) => {
                 if children.is_empty() {
@@ -477,10 +481,9 @@ impl Gates {
                 }
                 let mut disjuncts = Vec::with_capacity(children.len());
                 for (child, fk_col) in children {
-                    let fk = nth_column_name(conn, child, *fk_col)?;
-                    let inner = self.keep_clause_guarded(conn, child, visiting)?;
+                    let inner = self.keep_clause_guarded(child, visiting)?;
                     // Join down to each child's keep: child.fk = parent.id.
-                    disjuncts.push(fk_exists_clause(child, &fk, tbl, "id", &inner));
+                    disjuncts.push(fk_exists_clause(child, &fk_col.name, tbl, "id", &inner));
                 }
                 format!("({})", disjuncts.join(" OR "))
             }
@@ -501,7 +504,7 @@ impl Gates {
     /// row's own columns.
     ///
     fn row_kept(&self, conn: &Connection, tbl: &str, id: &str) -> Result<bool, GateError> {
-        let keep = self.keep_clause(conn, tbl)?;
+        let keep = self.keep_clause(tbl)?;
         let sql = format!(
             "SELECT 1 FROM {t} WHERE {t}.{id_col} = ? AND ({keep})",
             t = quote_ident(tbl),
@@ -832,10 +835,10 @@ unsafe fn gate_outbound_raw(
         if let Some(TableGate::Root { gate_col }) = gates.tables.get(&row.table) {
             let flips = match row.op {
                 x if x == ffi::SQLITE_UPDATE => {
-                    row.old_truth(*gate_col) == Some(false)
-                        && row.new_truth(*gate_col) == Some(true)
+                    row.old_truth(gate_col.index) == Some(false)
+                        && row.new_truth(gate_col.index) == Some(true)
                 }
-                x if x == ffi::SQLITE_INSERT => row.new_truth(*gate_col) == Some(true),
+                x if x == ffi::SQLITE_INSERT => row.new_truth(gate_col.index) == Some(true),
                 _ => false,
             };
             if flips {
@@ -858,8 +861,8 @@ unsafe fn gate_outbound_raw(
             // it. A root that was never shared has no true→false transition and is
             // handled by the ordinary cut path below (it emits nothing).
             let retracts = row.op == ffi::SQLITE_UPDATE
-                && row.old_truth(*gate_col) == Some(true)
-                && row.new_truth(*gate_col) == Some(false);
+                && row.old_truth(gate_col.index) == Some(true)
+                && row.new_truth(gate_col.index) == Some(false);
             if retracts {
                 match row.pk() {
                     Some(pk) => {
@@ -1279,26 +1282,23 @@ unsafe fn effective_gate(
 ) -> Result<bool, GateError> {
     match gates.tables.get(&row.table) {
         None => Ok(true), // ungated table: always shared.
-        Some(TableGate::Root { gate_col }) => match row.effective_truth(*gate_col) {
+        Some(TableGate::Root { gate_col }) => match row.effective_truth(gate_col.index) {
             Some(t) => Ok(t),
             // Gate unchanged in an UPDATE (omitted from the changeset): read the
             // current value from the live row. A delete with no old gate value
             // resolves the same way (the row may still exist as old-state).
             None => match row.pk() {
-                Some(pk) => {
-                    let col = nth_column_name(conn, &row.table, *gate_col)?;
-                    match query_truth(conn, &row.table, &col, pk)? {
-                        Some(t) => Ok(t),
-                        None => {
-                            warn!(
-                                "gate: root {}.{pk} absent from live db while resolving an \
+                Some(pk) => match query_truth(conn, &row.table, &gate_col.name, pk)? {
+                    Some(t) => Ok(t),
+                    None => {
+                        warn!(
+                            "gate: root {}.{pk} absent from live db while resolving an \
                                  unchanged gate column; treating as not-shared",
-                                row.table
-                            );
-                            Ok(false)
-                        }
+                            row.table
+                        );
+                        Ok(false)
                     }
-                }
+                },
                 None => {
                     debug!(
                         "gate: root row in {} has no primary key; treating as not-shared",
@@ -1310,12 +1310,8 @@ unsafe fn effective_gate(
         },
         Some(TableGate::RemoteRoot) => Ok(true),
         Some(TableGate::Child { fk_col, parent }) => {
-            let Some(parent_id) = changeset_child_parent_id(
-                conn,
-                row,
-                *fk_col,
-                ChildParentResolution::ShareDecision,
-            )?
+            let Some(parent_id) =
+                changeset_child_parent_id(conn, row, fk_col, ChildParentResolution::ShareDecision)?
             else {
                 return Ok(false);
             };
@@ -1472,7 +1468,7 @@ unsafe fn was_shared(
         // gate is a genuine not-shared value (a gated-false root), not masked data;
         // a gate column missing from the delete row's old image is malformed.
         Some(TableGate::Root { gate_col }) => match deleted.get(&key) {
-            Some(row) => match row.old.get(*gate_col) {
+            Some(row) => match row.old.get(gate_col.index) {
                 Some(Some(v)) => truthy(v),
                 Some(None) => false,
                 None => {
@@ -1480,22 +1476,19 @@ unsafe fn was_shared(
                     false
                 }
             },
-            None => {
-                let col = nth_column_name(conn, table, *gate_col)?;
-                match query_truth(conn, table, &col, id)? {
-                    Some(t) => t,
-                    None => {
-                        warn!(table, id, "gate: live root absent while resolving a descendant's pre-delete share; treating as not shared");
-                        false
-                    }
+            None => match query_truth(conn, table, &gate_col.name, id)? {
+                Some(t) => t,
+                None => {
+                    warn!(table, id, "gate: live root absent while resolving a descendant's pre-delete share; treating as not shared");
+                    false
                 }
-            }
+            },
         },
         Some(TableGate::RemoteRoot) => true,
         Some(TableGate::Child { fk_col, parent }) => {
             let parent_id = match deleted.get(&key) {
-                Some(row) => row.fk_value(*fk_col).map(str::to_string),
-                None => lookup_fk_in_db(conn, table, *fk_col, id)?,
+                Some(row) => row.fk_value(fk_col.index).map(str::to_string),
+                None => lookup_fk_in_db(conn, table, &fk_col.name, id)?,
             };
             match parent_id {
                 Some(pid) => was_shared(conn, gates, deleted, parent, &pid, memo, visiting)?,
@@ -1517,7 +1510,7 @@ unsafe fn was_shared(
                 'children: for (child_table, child_fk_col) in children {
                     for ((dt, dpk), drow) in deleted {
                         if dt == child_table
-                            && drow.fk_value(*child_fk_col) == Some(id)
+                            && drow.fk_value(child_fk_col.index) == Some(id)
                             && was_shared(conn, gates, deleted, child_table, dpk, memo, visiting)?
                         {
                             found = true;
@@ -1546,7 +1539,7 @@ unsafe fn gated_root_id(
     match gates.tables.get(&row.table) {
         None => Ok(None),
         Some(TableGate::Root { gate_col }) => {
-            if row.effective_truth(*gate_col) == Some(true) {
+            if row.effective_truth(gate_col.index) == Some(true) {
                 Ok(row.pk().map(|pk| (row.table.clone(), pk.to_string())))
             } else {
                 Ok(None)
@@ -1555,7 +1548,7 @@ unsafe fn gated_root_id(
         Some(TableGate::RemoteRoot) => Ok(row.pk().map(|pk| (row.table.clone(), pk.to_string()))),
         Some(TableGate::Child { fk_col, parent }) => {
             let Some(parent_id) =
-                changeset_child_parent_id(conn, row, *fk_col, ChildParentResolution::ReemitScope)?
+                changeset_child_parent_id(conn, row, fk_col, ChildParentResolution::ReemitScope)?
             else {
                 return Ok(None);
             };
@@ -1580,10 +1573,10 @@ enum ChildParentResolution {
 unsafe fn changeset_child_parent_id(
     conn: &Connection,
     row: &ChangeRow,
-    fk_col: usize,
+    fk_col: &GateColumn,
     resolution: ChildParentResolution,
 ) -> Result<Option<String>, GateError> {
-    if let Some(id) = row.fk_value(fk_col) {
+    if let Some(id) = row.fk_value(fk_col.index) {
         return Ok(Some(id.to_string()));
     }
 
@@ -1601,7 +1594,7 @@ unsafe fn changeset_child_parent_id(
         return Ok(None);
     };
 
-    match lookup_fk_in_db(conn, &row.table, fk_col, pk)? {
+    match lookup_fk_in_db(conn, &row.table, &fk_col.name, pk)? {
         Some(id) => Ok(Some(id)),
         None => {
             match resolution {
@@ -1639,20 +1632,17 @@ fn resolve_root(
     id: &str,
 ) -> Result<Option<ResolvedGate>, GateError> {
     match gates.tables.get(table) {
-        Some(TableGate::Root { gate_col }) => {
-            let col = nth_column_name(conn, table, *gate_col)?;
-            match query_truth(conn, table, &col, id)? {
-                Some(truth) => Ok(Some(ResolvedGate {
-                    terminus_table: table.to_string(),
-                    terminus_id: id.to_string(),
-                    kept: truth,
-                })),
-                None => {
-                    warn!("gate: gated root {table}.{id} absent from live db; cannot resolve gate");
-                    Ok(None)
-                }
+        Some(TableGate::Root { gate_col }) => match query_truth(conn, table, &gate_col.name, id)? {
+            Some(truth) => Ok(Some(ResolvedGate {
+                terminus_table: table.to_string(),
+                terminus_id: id.to_string(),
+                kept: truth,
+            })),
+            None => {
+                warn!("gate: gated root {table}.{id} absent from live db; cannot resolve gate");
+                Ok(None)
             }
-        }
+        },
         Some(TableGate::RemoteRoot) => match query_column_text(conn, table, "id", id)? {
             Some(_) => Ok(Some(ResolvedGate {
                 terminus_table: table.to_string(),
@@ -1665,8 +1655,7 @@ fn resolve_root(
             }
         },
         Some(TableGate::Child { fk_col, parent }) => {
-            let col = nth_column_name(conn, table, *fk_col)?;
-            match query_column_text(conn, table, &col, id)? {
+            match query_column_text(conn, table, &fk_col.name, id)? {
                 Some(parent_id) => resolve_root(conn, gates, parent, &parent_id),
                 None => {
                     warn!("gate: {table}.{id} has no FK parent in live db; cannot resolve gate");
@@ -1789,12 +1778,27 @@ fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>, GateError
     query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(1))
 }
 
-/// The name of column `idx` of `table`.
-fn nth_column_name(conn: &Connection, table: &str, idx: usize) -> Result<String, GateError> {
-    column_names(conn, table)?
-        .into_iter()
-        .nth(idx)
-        .ok_or_else(|| GateError::MissingFkColumn(table.to_string(), format!("col#{idx}")))
+fn gate_column(cols: &[String], table: &str, name: &str) -> Result<GateColumn, GateError> {
+    column_ref_or(cols, table, name, GateError::MissingGateColumn)
+}
+
+fn fk_column(cols: &[String], table: &str, name: &str) -> Result<GateColumn, GateError> {
+    column_ref_or(cols, table, name, GateError::MissingFkColumn)
+}
+
+fn column_ref_or(
+    cols: &[String],
+    table: &str,
+    name: &str,
+    err: impl FnOnce(String, String) -> GateError,
+) -> Result<GateColumn, GateError> {
+    cols.iter()
+        .position(|c| c == name)
+        .map(|index| GateColumn {
+            index,
+            name: name.to_string(),
+        })
+        .ok_or_else(|| err(table.to_string(), name.to_string()))
 }
 
 /// Every foreign key on `table`, as `(child column name, parent table name)`
@@ -1872,29 +1876,19 @@ where
         .map_err(|e| GateError::Sql(format!("query: {sql}"), e))
 }
 
-/// The index in `child`'s column list of the FK column that references `parent`,
-/// or `None` if `child` has no FK to `parent`. Used to wire an ancestor to a
-/// keep-child: the inference names the child *table*, and this resolves which of
-/// its columns holds the ancestor's id.
+/// The FK column in `child` that references `parent`, or `None` if `child` has
+/// no FK to `parent`. Used to wire an ancestor to a keep-child: the inference
+/// names the child *table*, and this resolves which of its columns holds the
+/// ancestor's id.
 fn fk_col_referencing(
     conn: &Connection,
     child: &str,
     parent: &str,
-) -> Result<Option<usize>, GateError> {
-    let from = foreign_keys(conn, child)?
+) -> Result<Option<String>, GateError> {
+    Ok(foreign_keys(conn, child)?
         .into_iter()
         .find(|(_, p)| p == parent)
-        .map(|(from, _)| from);
-    match from {
-        Some(from) => {
-            let cols = column_names(conn, child)?;
-            cols.iter()
-                .position(|c| c == &from)
-                .map(Some)
-                .ok_or_else(|| GateError::MissingFkColumn(child.to_string(), from))
-        }
-        None => Ok(None),
-    }
+        .map(|(from, _)| from))
 }
 
 /// Pick `table`'s single DOWNWARD gate-parent among ALL its synced-parent FKs —
@@ -2169,15 +2163,14 @@ fn query_truth(
     Ok(query_column_text(conn, table, column, id)?.map(|s| truthy(&s)))
 }
 
-/// Read the FK value (`column` at index `fk_col`) for the live row `pk`.
+/// Read the FK value (`column`) for the live row `pk`.
 fn lookup_fk_in_db(
     conn: &Connection,
     table: &str,
-    fk_col: usize,
+    column: &str,
     pk: &str,
 ) -> Result<Option<String>, GateError> {
-    let column = nth_column_name(conn, table, fk_col)?;
-    query_column_text(conn, table, &column, pk)
+    query_column_text(conn, table, column, pk)
 }
 
 fn row_value_to_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
@@ -2973,12 +2966,12 @@ mod tests {
     }
 
     /// The inferred keep-children of `tbl`, as `(child, fk column name)`, sorted.
-    fn inferred_children(c: &Connection, gates: &Gates, tbl: &str) -> Vec<(String, String)> {
+    fn inferred_children(gates: &Gates, tbl: &str) -> Vec<(String, String)> {
         match gates.tables.get(tbl) {
             Some(TableGate::Parent { children }) => {
                 let mut out: Vec<(String, String)> = children
                     .iter()
-                    .map(|(ch, idx)| (ch.clone(), nth_column_name(c, ch, *idx).expect("fk col")))
+                    .map(|(ch, col)| (ch.clone(), col.name.clone()))
                     .collect();
                 out.sort();
                 out
@@ -2990,12 +2983,9 @@ mod tests {
 
     /// The downward gate-parent `from_tables` chose for `tbl`, as `(parent, fk
     /// column name)`. Panics if `tbl` is not modeled as an inheriting `Child`.
-    fn downward_parent(c: &Connection, gates: &Gates, tbl: &str) -> (String, String) {
+    fn downward_parent(gates: &Gates, tbl: &str) -> (String, String) {
         match gates.tables.get(tbl) {
-            Some(TableGate::Child { fk_col, parent }) => (
-                parent.clone(),
-                nth_column_name(c, tbl, *fk_col).expect("fk col"),
-            ),
+            Some(TableGate::Child { fk_col, parent }) => (parent.clone(), fk_col.name.clone()),
             other => panic!(
                 "{tbl} must be an inheriting Child, got present={}",
                 other.is_some()
@@ -3010,12 +3000,12 @@ mod tests {
         let gates = Gates::from_tables(&c, &album_tables()).expect("gates");
 
         assert_eq!(
-            inferred_children(&c, &gates, "albums"),
+            inferred_children(&gates, "albums"),
             vec![("releases".to_string(), "album_id".to_string())],
             "albums is kept only by releases (the album_artists back-edge is excluded)"
         );
         assert_eq!(
-            inferred_children(&c, &gates, "artists"),
+            inferred_children(&gates, "artists"),
             vec![
                 ("album_artists".to_string(), "artist_id".to_string()),
                 ("albums".to_string(), "artist_id".to_string()),
@@ -3023,7 +3013,7 @@ mod tests {
             "artists is kept by albums OR album_artists"
         );
         assert_eq!(
-            downward_parent(&c, &gates, "album_artists"),
+            downward_parent(&gates, "album_artists"),
             ("albums".to_string(), "album_id".to_string()),
         );
     }
@@ -3062,7 +3052,7 @@ mod tests {
         ];
         let gates = Gates::from_tables(&c, &tables).expect("gates");
         assert_eq!(
-            downward_parent(&c, &gates, "joiner"),
+            downward_parent(&gates, "joiner"),
             ("zinner".to_string(), "zinner_id".to_string()),
             "the most-specific (deeper) ancestor wins even though it sorts \
              lexicographically later than `aouter`"
@@ -4259,7 +4249,7 @@ mod tests {
         let gates =
             Gates::from_tables(&c, &tables).expect("gate model builds with an asset child present");
         assert!(
-            !inferred_children(&c, &gates, "artists")
+            !inferred_children(&gates, "artists")
                 .iter()
                 .any(|(child, _)| child == "artist_images"),
             "the artist image is never a keep-reason for its artist"
@@ -4350,7 +4340,7 @@ mod tests {
 
         let without = Gates::from_tables(&c, &base(false)).expect("gates without asset marker");
         assert!(
-            inferred_children(&c, &without, "artists")
+            inferred_children(&without, "artists")
                 .iter()
                 .any(|(child, _)| child == "artist_images"),
             "without .asset(), the image is a keep-child of artists (the back-edge does not exclude it)"
@@ -4358,7 +4348,7 @@ mod tests {
 
         let with = Gates::from_tables(&c, &base(true)).expect("gates with asset marker");
         assert!(
-            !inferred_children(&c, &with, "artists")
+            !inferred_children(&with, "artists")
                 .iter()
                 .any(|(child, _)| child == "artist_images"),
             ".asset() excludes the image from artists' keep-children"
