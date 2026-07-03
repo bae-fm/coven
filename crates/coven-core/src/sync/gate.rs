@@ -408,7 +408,7 @@ impl Gates {
         // ancestors are themselves termini and are always retained.
         let reaches_gate: HashSet<String> = gate_map
             .keys()
-            .filter(|name| chain_to_gate_depth(&gate_map, name).is_some())
+            .filter(|name| reaches_gate_terminus(&gate_map, name))
             .cloned()
             .collect();
         gate_map.retain(|name, tg| match tg {
@@ -735,29 +735,25 @@ fn fk_exists_clause(
     )
 }
 
-/// Walk `gate_map` from `name` up its declared-FK chain to a gate terminus — a
-/// gated root or an ancestor: `Some(0)` for a terminus itself, `Some(n)` for an
-/// n-hop descendant of one, `None` if the chain never reaches a terminus (the
-/// table is effectively ungated) or loops. Only `Child` links are followed
-/// upward; a terminus stops the walk (a `Parent`'s upward keep over its own
-/// children is a separate relation, not part of this downward chain).
-fn chain_to_gate_depth(gate_map: &HashMap<String, TableGate>, name: &str) -> Option<usize> {
-    let mut depth = 0;
+/// Whether walking `gate_map` from `name` up its declared-FK chain reaches a
+/// gate terminus: a gated root, remote root, or ancestor. Only `Child` links are
+/// followed upward; a terminus stops the walk (a `Parent`'s upward keep over its
+/// own children is a separate relation, not part of this downward chain).
+fn reaches_gate_terminus(gate_map: &HashMap<String, TableGate>, name: &str) -> bool {
     let mut cur = name;
     let mut seen = HashSet::new();
     loop {
         if !seen.insert(cur.to_string()) {
-            return None; // cycle, defensive
+            return false; // cycle, defensive
         }
         match gate_map.get(cur) {
             Some(TableGate::Root { .. })
             | Some(TableGate::RemoteRoot)
-            | Some(TableGate::Parent { .. }) => return Some(depth),
+            | Some(TableGate::Parent { .. }) => return true,
             Some(TableGate::Child { parent, .. }) => {
-                depth += 1;
                 cur = parent.as_str();
             }
-            None => return None,
+            None => return false,
         }
     }
 }
