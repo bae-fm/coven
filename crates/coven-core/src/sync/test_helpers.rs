@@ -482,6 +482,17 @@ impl MockSyncStorage {
     /// `bootstrap_from_snapshot` would adopt without re-deriving the pointer→seq→db
     /// resolution itself.
     pub async fn current_snapshot_db(&self) -> Option<Vec<u8>> {
+        let (author, seq) = self.current_snapshot_target().await?;
+        self.snapshot_objects
+            .lock()
+            .unwrap()
+            .get(&format!("snapshot/{author}/{seq}.db"))
+            .cloned()
+    }
+
+    /// The live snapshot generation's author and sequence, or None if no pointer
+    /// has been published.
+    pub async fn current_snapshot_target(&self) -> Option<(String, u64)> {
         let pointer_bytes = self
             .snapshot_objects
             .lock()
@@ -490,13 +501,23 @@ impl MockSyncStorage {
             .cloned()?;
         let pointer: crate::sync::signed_control::SnapshotPointerJson =
             serde_json::from_slice(&pointer_bytes).expect("parse pointer");
+        Some((pointer.author_pubkey, pointer.seq))
+    }
+
+    /// The sequence the live snapshot pointer names, or None if no pointer has
+    /// been published.
+    pub async fn current_snapshot_seq(&self) -> Option<u64> {
+        self.current_snapshot_target().await.map(|(_, seq)| seq)
+    }
+
+    /// The metadata of the live snapshot generation — the one the pointer names —
+    /// or None if no snapshot has been published.
+    pub async fn current_snapshot_meta(&self) -> Option<Vec<u8>> {
+        let (author, seq) = self.current_snapshot_target().await?;
         self.snapshot_objects
             .lock()
             .unwrap()
-            .get(&format!(
-                "snapshot/{}/{}.db",
-                pointer.author_pubkey, pointer.seq
-            ))
+            .get(&format!("snapshot/{author}/{seq}_meta.json"))
             .cloned()
     }
 

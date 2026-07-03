@@ -1034,17 +1034,47 @@ fn test_library_id() -> &'static str {
     "test-library"
 }
 
+/// Publish a full snapshot generation directly: the signed meta over `cursors`,
+/// the db image, and the signed pointer naming `{author, seq}`.
+#[cfg(test)]
+async fn publish_signed_generation<I, K>(
+    storage: &dyn SyncStorage,
+    seq: u64,
+    cursors: I,
+    sealed_db: Vec<u8>,
+    keypair: &UserKeypair,
+) where
+    I: IntoIterator<Item = (K, u64)>,
+    K: Into<String>,
+{
+    let author = hex::encode(keypair.public_key());
+    let db_hash = snapshot_db_hash(&sealed_db);
+    let cursors = cursors
+        .into_iter()
+        .map(|(device_id, seq)| (device_id.into(), seq))
+        .collect();
+    let meta = SnapshotMetaJson::signed(test_library_id(), cursors, db_hash.clone(), 0, keypair);
+    storage
+        .put_snapshot_meta(&author, seq, serde_json::to_vec(&meta).unwrap())
+        .await
+        .unwrap();
+    storage.put_snapshot(&author, seq, sealed_db).await.unwrap();
+    let pointer = SnapshotPointerJson::signed(test_library_id(), seq, db_hash, keypair);
+    storage
+        .put_snapshot_pointer(serde_json::to_vec(&pointer).unwrap())
+        .await
+        .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::encryption::EncryptionService;
     use crate::sync::apply::apply_changeset_lww;
-    use crate::sync::storage::{DeviceHead, MinSchemaVersion};
-    use async_trait::async_trait;
+    use crate::sync::test_helpers::MockSyncStorage;
     use rusqlite::session::Session as RqSession;
     use rusqlite::{Connection, OptionalExtension};
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
     // ---- in-process db helpers (rusqlite, the new `&Connection` API) ----
 
@@ -1139,348 +1169,6 @@ mod tests {
         buf
     }
 
-    /// Full-featured mock storage for snapshot tests.
-    ///
-    /// Snapshots are stored exactly as the cloud lays them out: each generation's
-    /// db and meta under a per-`(author, seq)` key, plus a single pointer the
-    /// publish writes last. Keying generations under their author (not a flat seq)
-    /// is what lets the cross-device tests exercise the real globally-unique
-    /// keyspace and the torn-read/GC behavior.
-    struct MockSyncStorage {
-        changesets: Mutex<HashMap<String, Vec<u8>>>,
-        heads: Mutex<HashMap<String, (u64, Option<u64>)>>,
-        /// Per-generation snapshot db images, keyed by (author, seq).
-        snapshot_dbs: Mutex<HashMap<(String, u64), Vec<u8>>>,
-        /// Per-generation snapshot metadata, keyed by (author, seq).
-        snapshot_metas: Mutex<HashMap<(String, u64), Vec<u8>>>,
-        /// The pointer naming the live generation (None until the first publish).
-        snapshot_pointer: Mutex<Option<Vec<u8>>>,
-        min_schema_version: Mutex<Option<u32>>,
-        /// Per-device signed pull-acks, keyed by device_id (`acks/{device_id}.json`).
-        acks: Mutex<HashMap<String, Vec<u8>>>,
-    }
-
-    impl MockSyncStorage {
-        fn new() -> Self {
-            MockSyncStorage {
-                changesets: Mutex::new(HashMap::new()),
-                heads: Mutex::new(HashMap::new()),
-                snapshot_dbs: Mutex::new(HashMap::new()),
-                snapshot_metas: Mutex::new(HashMap::new()),
-                snapshot_pointer: Mutex::new(None),
-                min_schema_version: Mutex::new(None),
-                acks: Mutex::new(HashMap::new()),
-            }
-        }
-
-        /// Helper to add a changeset directly.
-        fn add_changeset(&self, device_id: &str, seq: u64, data: Vec<u8>) {
-            let key = format!("{device_id}/{seq}");
-            self.changesets.lock().unwrap().insert(key, data);
-
-            let mut heads = self.heads.lock().unwrap();
-            let entry = heads.entry(device_id.to_string()).or_insert((0, None));
-            if seq > entry.0 {
-                entry.0 = seq;
-            }
-        }
-
-        /// The live generation's `{author, seq}`, or None if nothing is published.
-        fn current_pointer_target(&self) -> Option<(String, u64)> {
-            let pointer = self.snapshot_pointer.lock().unwrap();
-            let bytes = pointer.as_ref()?;
-            let parsed: SnapshotPointerJson = serde_json::from_slice(bytes).expect("parse pointer");
-            Some((parsed.author_pubkey, parsed.seq))
-        }
-
-        /// The seq the pointer currently names, or None if nothing is published.
-        fn current_pointer_seq(&self) -> Option<u64> {
-            self.current_pointer_target().map(|(_, seq)| seq)
-        }
-
-        /// The live generation's db image (the one the pointer names).
-        fn get_stored_snapshot(&self) -> Option<Vec<u8>> {
-            let target = self.current_pointer_target()?;
-            self.snapshot_dbs.lock().unwrap().get(&target).cloned()
-        }
-
-        /// The live generation's metadata (the one the pointer names).
-        fn get_stored_snapshot_meta(&self) -> Option<Vec<u8>> {
-            let target = self.current_pointer_target()?;
-            self.snapshot_metas.lock().unwrap().get(&target).cloned()
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl SyncStorage for MockSyncStorage {
-        async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
-            let heads = self.heads.lock().unwrap();
-            Ok(heads
-                .iter()
-                .map(|(id, (seq, snap))| DeviceHead {
-                    device_id: id.clone(),
-                    seq: *seq,
-                    snapshot_seq: *snap,
-                    last_sync: None,
-                    author_pubkey: String::new(),
-                })
-                .collect())
-        }
-
-        async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-            let key = format!("{device_id}/{seq}");
-            let cs = self.changesets.lock().unwrap();
-            cs.get(&key).cloned().ok_or(StorageError::NotFound(key))
-        }
-
-        async fn put_changeset(
-            &self,
-            device_id: &str,
-            seq: u64,
-            data: Vec<u8>,
-        ) -> Result<(), StorageError> {
-            let key = format!("{device_id}/{seq}");
-            self.changesets.lock().unwrap().insert(key, data);
-            Ok(())
-        }
-
-        async fn put_head(
-            &self,
-            device_id: &str,
-            seq: u64,
-            snapshot_seq: Option<u64>,
-            _timestamp: &str,
-        ) -> Result<(), StorageError> {
-            let mut heads = self.heads.lock().unwrap();
-            let entry = heads.entry(device_id.to_string()).or_insert((0, None));
-            entry.0 = seq;
-            if snapshot_seq.is_some() {
-                entry.1 = snapshot_seq;
-            }
-            Ok(())
-        }
-
-        async fn put_blob(
-            &self,
-            _namespace: &str,
-            _id: &str,
-            _scope: crate::blob::ResolvedScope,
-            _cloud_path: Option<&str>,
-            _data: Vec<u8>,
-        ) -> Result<(), StorageError> {
-            Ok(())
-        }
-
-        async fn get_blob(
-            &self,
-            namespace: &str,
-            id: &str,
-            _scope: crate::blob::ResolvedScope,
-            _cloud_path: Option<&str>,
-        ) -> Result<Vec<u8>, StorageError> {
-            Err(StorageError::NotFound(format!("{namespace}/{id}")))
-        }
-
-        async fn read_blob_range(
-            &self,
-            namespace: &str,
-            id: &str,
-            _scope: crate::blob::ResolvedScope,
-            _cloud_path: Option<&str>,
-            _source_size: u64,
-            _offset: u64,
-            _len: u64,
-        ) -> Result<Vec<u8>, StorageError> {
-            // Snapshot tests never stream a blob; no object store to slice.
-            Err(StorageError::NotFound(format!("{namespace}/{id}")))
-        }
-
-        async fn put_snapshot(
-            &self,
-            author: &str,
-            seq: u64,
-            data: Vec<u8>,
-        ) -> Result<(), StorageError> {
-            self.snapshot_dbs
-                .lock()
-                .unwrap()
-                .insert((author.to_string(), seq), data);
-            Ok(())
-        }
-
-        async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-            self.snapshot_dbs
-                .lock()
-                .unwrap()
-                .get(&(author.to_string(), seq))
-                .cloned()
-                .ok_or(StorageError::NotFound(format!(
-                    "snapshot/{author}/{seq}.db"
-                )))
-        }
-
-        async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
-            let key = format!("{device_id}/{seq}");
-            self.changesets.lock().unwrap().remove(&key);
-            Ok(())
-        }
-
-        async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
-            let prefix = format!("{device_id}/");
-            let cs = self.changesets.lock().unwrap();
-            let mut seqs: Vec<u64> = cs
-                .keys()
-                .filter_map(|k| k.strip_prefix(&prefix).and_then(|s| s.parse().ok()))
-                .collect();
-            seqs.sort();
-            Ok(seqs)
-        }
-
-        async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
-            self.acks
-                .lock()
-                .unwrap()
-                .insert(device_id.to_string(), data);
-            Ok(())
-        }
-
-        async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
-            self.acks
-                .lock()
-                .unwrap()
-                .get(device_id)
-                .cloned()
-                .ok_or_else(|| StorageError::NotFound(format!("acks/{device_id}.json")))
-        }
-
-        async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
-            Ok(self
-                .min_schema_version
-                .lock()
-                .unwrap()
-                .map(|version| MinSchemaVersion {
-                    version,
-                    author_pubkey: String::new(),
-                }))
-        }
-
-        async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
-            *self.min_schema_version.lock().unwrap() = Some(version);
-            Ok(())
-        }
-
-        async fn put_membership_entry(
-            &self,
-            _author_pubkey: &str,
-            _seq: u64,
-            _data: Vec<u8>,
-        ) -> Result<(), StorageError> {
-            Ok(())
-        }
-
-        async fn get_membership_entry(
-            &self,
-            author_pubkey: &str,
-            seq: u64,
-        ) -> Result<Vec<u8>, StorageError> {
-            Err(StorageError::NotFound(format!(
-                "membership/{author_pubkey}/{seq}"
-            )))
-        }
-
-        async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
-            Ok(vec![])
-        }
-
-        async fn put_wrapped_key(
-            &self,
-            _user_pubkey: &str,
-            _data: Vec<u8>,
-        ) -> Result<(), StorageError> {
-            Ok(())
-        }
-
-        async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-            Err(StorageError::NotFound(format!("keys/{user_pubkey}")))
-        }
-
-        async fn delete_wrapped_key(&self, _user_pubkey: &str) -> Result<(), StorageError> {
-            Ok(())
-        }
-
-        async fn put_snapshot_meta(
-            &self,
-            author: &str,
-            seq: u64,
-            data: Vec<u8>,
-        ) -> Result<(), StorageError> {
-            self.snapshot_metas
-                .lock()
-                .unwrap()
-                .insert((author.to_string(), seq), data);
-            Ok(())
-        }
-
-        async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-            self.snapshot_metas
-                .lock()
-                .unwrap()
-                .get(&(author.to_string(), seq))
-                .cloned()
-                .ok_or(StorageError::NotFound(format!(
-                    "snapshot/{author}/{seq}_meta.json"
-                )))
-        }
-
-        async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
-            *self.snapshot_pointer.lock().unwrap() = Some(data);
-            Ok(())
-        }
-
-        async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
-            self.snapshot_pointer
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or(StorageError::NotFound("snapshot/current.json".into()))
-        }
-
-        async fn list_own_snapshot_generations(
-            &self,
-            author: &str,
-        ) -> Result<Vec<u64>, StorageError> {
-            // List only this author's own keyspace — the meta objects under
-            // `snapshot/{author}/` — exactly as `CloudSyncStorage` does. Ownership is
-            // structural: a peer's generations live under a different prefix and are
-            // never listed here.
-            let mut seqs: Vec<u64> = self
-                .snapshot_metas
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|(a, _)| a == author)
-                .map(|(_, seq)| *seq)
-                .collect();
-            seqs.sort_unstable();
-            Ok(seqs)
-        }
-
-        async fn delete_snapshot_generation(
-            &self,
-            author: &str,
-            seq: u64,
-        ) -> Result<(), StorageError> {
-            // Remove the db first, the meta last: the meta is what `list` keys a
-            // generation by, so a crash between the two leaves it still listed (and
-            // re-deletable), never a meta-less db.
-            let key = (author.to_string(), seq);
-            self.snapshot_dbs.lock().unwrap().remove(&key);
-            self.snapshot_metas.lock().unwrap().remove(&key);
-            Ok(())
-        }
-    }
-
     /// An encrypted-home cipher over a fixed key, the default the snapshot tests
     /// run against. Plaintext-home snapshot round-tripping is covered end-to-end
     /// through the real cycle in `delete_propagation_tests`.
@@ -1495,50 +1183,6 @@ mod tests {
     /// alone. The membership-authorization tests build their own chained mock.
     fn test_keypair() -> UserKeypair {
         UserKeypair::generate()
-    }
-
-    /// Publish a full snapshot generation directly: the signed meta over `cursors`,
-    /// the db image, and the signed pointer naming `{author, seq}` — all consistent
-    /// on the generation's DB hash, exactly as `push_snapshot` writes them, under the
-    /// publishing device's own keyspace. The single snapshot-staging helper the tests
-    /// use when they set cursors (or a seq) directly without driving `push_snapshot`.
-    ///
-    /// `keypair` is the generation's author, so the generation lands under
-    /// `snapshot/{author}/{seq}` and the pointer commits to that author. The
-    /// superseded-generation sweep lists only its own keyspace, so a test that stages
-    /// a generation it expects its own sweep to reclaim must stage it under the same
-    /// keypair it later sweeps with; one staging a peer's generation uses a different
-    /// keypair.
-    ///
-    /// GC tests pass a placeholder db (GC never fetches the snapshot DB — only the
-    /// pointer/meta signatures and the cursors drive deletion). Bootstrap tests
-    /// pass the real sealed bytes, so the DB-image hash check passes.
-    async fn publish_signed_generation(
-        storage: &MockSyncStorage,
-        seq: u64,
-        cursors: HashMap<String, u64>,
-        sealed_db: Vec<u8>,
-        keypair: &UserKeypair,
-    ) {
-        let author = hex::encode(keypair.public_key());
-        let db_hash = snapshot_db_hash(&sealed_db);
-        let meta = SnapshotMetaJson::signed(
-            test_library_id(),
-            cursors.into_iter().collect(),
-            db_hash.clone(),
-            0,
-            keypair,
-        );
-        storage
-            .put_snapshot_meta(&author, seq, serde_json::to_vec(&meta).unwrap())
-            .await
-            .unwrap();
-        storage.put_snapshot(&author, seq, sealed_db).await.unwrap();
-        let pointer = SnapshotPointerJson::signed(test_library_id(), seq, db_hash, keypair);
-        storage
-            .put_snapshot_pointer(serde_json::to_vec(&pointer).unwrap())
-            .await
-            .unwrap();
     }
 
     // ---- should_create_snapshot tests ----
@@ -2046,7 +1690,7 @@ mod tests {
         .expect("push_snapshot should succeed");
 
         // Snapshot should be stored.
-        assert_eq!(storage.get_stored_snapshot(), Some(data));
+        assert_eq!(storage.current_snapshot_db().await, Some(data));
 
         // Head should be updated with snapshot_seq.
         let heads = storage.list_heads().await.unwrap();
@@ -2056,7 +1700,8 @@ mod tests {
 
         // Snapshot metadata reflects the applied cursors plus our own seq.
         let meta_json = storage
-            .get_stored_snapshot_meta()
+            .current_snapshot_meta()
+            .await
             .expect("metadata should be written");
         let meta: SnapshotMetaJson = serde_json::from_slice(&meta_json).unwrap();
         assert_eq!(meta.cursors.get("dev-1"), Some(&42));
@@ -2084,7 +1729,7 @@ mod tests {
         publish_signed_generation(
             &storage,
             10,
-            HashMap::from([("dev-1".to_string(), 10), ("dev-2".to_string(), 7)]),
+            BTreeMap::from([("dev-1".to_string(), 10), ("dev-2".to_string(), 7)]),
             encrypted,
             &test_keypair(),
         )
@@ -2399,7 +2044,14 @@ mod tests {
         let author_b = hex::encode(kp_b.public_key());
 
         // Device A publishes generation 5 and the pointer names it (A is live).
-        publish_signed_generation(&storage, 5, HashMap::new(), vec![0xAu8], &kp_a).await;
+        publish_signed_generation(
+            &storage,
+            5,
+            BTreeMap::<String, u64>::new(),
+            vec![0xAu8],
+            &kp_a,
+        )
+        .await;
 
         // Device B writes its own generation at the SAME seq 5's db + meta but does
         // NOT flip the pointer: B's seq 5 is present yet not-yet-live, under B's own
@@ -2409,7 +2061,7 @@ mod tests {
         let db_hash_b = snapshot_db_hash(&db_b);
         let meta_b = SnapshotMetaJson::signed(
             test_library_id(),
-            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::<String, u64>::new(),
             db_hash_b,
             0,
             &kp_b,
@@ -2455,7 +2107,7 @@ mod tests {
             "B's same-seq db image is its own bytes, not overwritten by A's publish",
         );
         assert_eq!(
-            storage.current_pointer_seq(),
+            storage.current_snapshot_seq().await,
             Some(5),
             "the pointer still names A's generation; B is mid-publish",
         );
@@ -2499,8 +2151,10 @@ mod tests {
 
         // The device publishes generation 1, then 2; the pointer now names 2 and
         // generation 1 is its own superseded generation. Both authored by `kp`.
-        publish_signed_generation(&storage, 1, HashMap::new(), vec![1u8], &kp).await;
-        publish_signed_generation(&storage, 2, HashMap::new(), vec![2u8], &kp).await;
+        publish_signed_generation(&storage, 1, BTreeMap::<String, u64>::new(), vec![1u8], &kp)
+            .await;
+        publish_signed_generation(&storage, 2, BTreeMap::<String, u64>::new(), vec![2u8], &kp)
+            .await;
 
         // A sweep keyed by a stranger's pubkey lists the stranger's keyspace — empty
         // — so it reclaims nothing, and this device's generation 1 survives: a device
@@ -2548,8 +2202,10 @@ mod tests {
         let own_author = hex::encode(kp.public_key());
 
         // Generations 1 (superseded) and 2 (live), both authored by this device.
-        publish_signed_generation(&storage, 1, HashMap::new(), vec![1u8], &kp).await;
-        publish_signed_generation(&storage, 2, HashMap::new(), vec![2u8], &kp).await;
+        publish_signed_generation(&storage, 1, BTreeMap::<String, u64>::new(), vec![1u8], &kp)
+            .await;
+        publish_signed_generation(&storage, 2, BTreeMap::<String, u64>::new(), vec![2u8], &kp)
+            .await;
 
         // Sweep claiming seq 1 as just-published: 1 is protected as just-published, 2
         // as live — nothing is deleted even though both are this device's own.
@@ -2579,8 +2235,10 @@ mod tests {
         let own_author = hex::encode(kp.public_key());
 
         // Two own generations: 1 (superseded) and 2 (the pointer names it).
-        publish_signed_generation(&storage, 1, HashMap::new(), vec![1u8], &kp).await;
-        publish_signed_generation(&storage, 2, HashMap::new(), vec![2u8], &kp).await;
+        publish_signed_generation(&storage, 1, BTreeMap::<String, u64>::new(), vec![1u8], &kp)
+            .await;
+        publish_signed_generation(&storage, 2, BTreeMap::<String, u64>::new(), vec![2u8], &kp)
+            .await;
 
         // Overwrite the pointer with bytes that neither parse nor verify.
         storage
@@ -2632,7 +2290,7 @@ mod tests {
         publish_signed_generation(
             &storage,
             7,
-            HashMap::from([("A".to_string(), 7)]),
+            BTreeMap::from([("A".to_string(), 7)]),
             snap_a,
             &kp_a,
         )
@@ -2732,7 +2390,7 @@ mod tests {
                  VALUES ('n1', 'Release Draft', 1, '0000000001000-0000-M', '2026-01-01')",
             );
         });
-        storage.add_changeset("M", k, cs_insert.clone());
+        storage.store_changeset("M", k, &cs_insert, 0);
 
         // M later pushes a follow-up edit as seq K+1 = 2, raising M's
         // head to 2 — but this edit is NOT in any snapshot yet.
@@ -2748,7 +2406,7 @@ mod tests {
                  _updated_at = '0000000002000-0000-M' WHERE id = 'n1'",
             );
         });
-        storage.add_changeset("M", k + 1, cs_update.clone());
+        storage.store_changeset("M", k + 1, &cs_update, 0);
 
         // Device B is behind: it has applied M only up to K. B snapshots its state.
         let db_b = synced_conn();
@@ -2772,7 +2430,7 @@ mod tests {
         .await
         .expect("push");
 
-        let meta_json = storage.get_stored_snapshot_meta().expect("meta");
+        let meta_json = storage.current_snapshot_meta().await.expect("meta");
         let meta: SnapshotMetaJson = serde_json::from_slice(&meta_json).unwrap();
         assert_eq!(
             meta.cursors.get("M"),
@@ -2798,7 +2456,8 @@ mod tests {
             if seq <= c_cursor {
                 continue;
             }
-            let bytes = storage.get_changeset("M", seq).await.unwrap();
+            let packed = storage.get_changeset("M", seq).await.unwrap();
+            let (_env, bytes) = crate::sync::envelope::unpack(&packed).expect("unpack changeset");
             apply(&db_c, &bytes);
         }
         assert_eq!(
@@ -2825,7 +2484,7 @@ mod tests {
                  VALUES ('n1', 'Draft', 1, '0000000001000-0000-owner', '2026-01-01')",
             );
         });
-        storage.add_changeset("owner", 1, cs1.clone());
+        storage.store_changeset("owner", 1, &cs1, 0);
 
         let db_owner = synced_conn();
         apply(&db_owner, &cs1);
@@ -2868,7 +2527,7 @@ mod tests {
                  _updated_at = '0000000002000-0000-owner' WHERE id = 'n1'",
             );
         });
-        storage.add_changeset("owner", 2, cs2.clone());
+        storage.store_changeset("owner", 2, &cs2, 0);
 
         // B pulls the update (everything past its bootstrap cursor).
         let mut b_cursors = b_boot.cursors.clone();
@@ -2877,7 +2536,8 @@ mod tests {
             if seq <= b_owner_cursor {
                 continue;
             }
-            let bytes = storage.get_changeset("owner", seq).await.unwrap();
+            let packed = storage.get_changeset("owner", seq).await.unwrap();
+            let (_env, bytes) = crate::sync::envelope::unpack(&packed).expect("unpack changeset");
             apply(&db_b, &bytes);
             b_cursors.insert("owner".to_string(), seq);
         }
@@ -2913,7 +2573,8 @@ mod tests {
             if seq <= c_owner_cursor {
                 continue;
             }
-            let bytes = storage.get_changeset("owner", seq).await.unwrap();
+            let packed = storage.get_changeset("owner", seq).await.unwrap();
+            let (_env, bytes) = crate::sync::envelope::unpack(&packed).expect("unpack changeset");
             apply(&db_c, &bytes);
         }
         assert_eq!(
@@ -2931,7 +2592,7 @@ mod tests {
         let storage = MockSyncStorage::new();
         let kp = test_keypair();
         for seq in 1..=3 {
-            storage.add_changeset("M", seq, vec![seq as u8]);
+            storage.store_changeset("M", seq, &[seq as u8], 0);
         }
 
         // Snapshot honestly covers M only through seq 2.
@@ -3004,7 +2665,7 @@ mod tests {
         let storage = MockSyncStorage::new();
 
         // Device M's head is ahead at seq 9.
-        storage.add_changeset("M", 9, vec![9]);
+        storage.store_changeset("M", 9, &[9], 0);
 
         // The snapshotting device B has only applied M through seq 4.
         let applied = HashMap::from([("M".to_string(), 4)]);
@@ -3022,7 +2683,7 @@ mod tests {
         .await
         .expect("push");
 
-        let meta_json = storage.get_stored_snapshot_meta().expect("meta");
+        let meta_json = storage.current_snapshot_meta().await.expect("meta");
         let meta: SnapshotMetaJson = serde_json::from_slice(&meta_json).unwrap();
         assert_eq!(
             meta.cursors.get("M"),
@@ -3915,38 +3576,13 @@ mod reclaim_tests {
             .unwrap();
     }
 
-    /// Publish the live snapshot generation (meta + db + pointer) signed by `owner`,
-    /// carrying `cursors` (device_id -> seq). The db image is a placeholder —
-    /// reclamation reads only the pointer/meta signatures and the cursors.
-    async fn publish_snapshot(
-        storage: &MockSyncStorage,
-        owner: &UserKeypair,
-        seq: u64,
-        cursors: &[(&str, u64)],
-    ) {
-        let cursors: BTreeMap<String, u64> =
-            cursors.iter().map(|(d, s)| (d.to_string(), *s)).collect();
-        let db = vec![0u8];
-        let db_hash = snapshot_db_hash(&db);
-        let author = pubkey_hex(owner);
-        let meta = SnapshotMetaJson::signed(test_library_id(), cursors, db_hash.clone(), 0, owner);
-        storage
-            .put_snapshot_meta(&author, seq, serde_json::to_vec(&meta).unwrap())
-            .await
-            .unwrap();
-        storage.put_snapshot(&author, seq, db).await.unwrap();
-        let pointer = SnapshotPointerJson::signed(test_library_id(), seq, db_hash, owner);
-        storage
-            .put_snapshot_pointer(serde_json::to_vec(&pointer).unwrap())
-            .await
-            .unwrap();
-    }
-
     /// Publish `device`'s pull-ack (`cursors`: peer_id -> seq), signed by its own
     /// key so its author matches its head.
     async fn publish_ack(storage: &MockSyncStorage, device: &Device, cursors: &[(&str, u64)]) {
-        let cursors: BTreeMap<String, u64> =
-            cursors.iter().map(|(d, s)| (d.to_string(), *s)).collect();
+        let cursors = cursors
+            .iter()
+            .map(|(device_id, seq)| (device_id.to_string(), *seq))
+            .collect();
         let ack = AckJson::signed(&device.id, cursors, &device.kp);
         storage
             .put_ack(&device.id, serde_json::to_vec(&ack).unwrap())
@@ -3983,7 +3619,7 @@ mod reclaim_tests {
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
         publish_ack(&storage, &b, &[("A", 3)]).await;
 
         let result = reclaim(&storage, &owner).await;
@@ -4005,7 +3641,7 @@ mod reclaim_tests {
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 3)]).await;
+        publish_signed_generation(&storage, 1, [("A", 3)], vec![0u8], &owner).await;
         publish_ack(&storage, &b, &[("A", 5)]).await;
 
         let result = reclaim(&storage, &owner).await;
@@ -4026,7 +3662,7 @@ mod reclaim_tests {
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
         publish_ack(&storage, &b, &[("A", 5)]).await;
 
         let result = reclaim(&storage, &owner).await;
@@ -4047,7 +3683,7 @@ mod reclaim_tests {
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
         // B publishes no ack.
 
         let result = reclaim(&storage, &owner).await;
@@ -4073,7 +3709,7 @@ mod reclaim_tests {
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
         // B (removed) publishes no ack.
 
         let result = reclaim(&storage, &owner).await;
@@ -4096,7 +3732,7 @@ mod reclaim_tests {
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
 
         // An outsider signs an ack for B's slot claiming B has pulled A->5.
         let outsider = UserKeypair::generate();
@@ -4125,7 +3761,7 @@ mod reclaim_tests {
         append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 3)]).await;
+        publish_signed_generation(&storage, 1, [("A", 3)], vec![0u8], &owner).await;
 
         let result = reclaim(&storage, &owner).await;
         assert_eq!(result.deleted, 3);
@@ -4146,7 +3782,7 @@ mod reclaim_tests {
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
-        publish_snapshot(&storage, &owner, 1, &[("A", 5)]).await;
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
         // A acks only its peer B (no self-entry for A); B acks A->4.
         publish_ack(&storage, &a, &[("B", 2)]).await;
         publish_ack(&storage, &b, &[("A", 4)]).await;
