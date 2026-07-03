@@ -3,3 +3,5 @@
 *.db-wal
 *.db-shm
 .DS_Store
+plans/
+.worktrees/
