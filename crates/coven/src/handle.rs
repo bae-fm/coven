@@ -401,13 +401,23 @@ impl CovenHandle {
     /// a test home injected via
     /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) is served
     /// from with no separate hook. A manager connected but not yet running its loop
-    /// (sync configured but not enabled) falls back to building from config, as
-    /// does a home-less library (provider `None` ⇒ `None`).
+    /// still wraps the manager's stored home; only a home-less library builds from
+    /// config when a provider is configured.
     async fn blob_storage(&self) -> Result<Option<Arc<dyn SyncStorage>>, String> {
         if let Some(manager) = self.sync_manager() {
             if let Some(loop_handle) = manager.sync_loop_handle() {
                 let storage: Arc<dyn SyncStorage> = loop_handle.storage().clone();
                 return Ok(Some(storage));
+            }
+            if let Some(home) = manager.cloud_home() {
+                let config = self.config();
+                let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
+                    &config,
+                    &self.key_service,
+                    home,
+                    None,
+                )?;
+                return Ok(Some(Arc::new(storage)));
             }
         }
         let config = self.config();
@@ -674,12 +684,103 @@ mod tests {
 
     use crate::blob::{BlobScope, CacheFill, Provenance};
     use crate::clock::SystemClock;
-    use crate::config::{Config, HomeStorage};
+    use crate::config::{CloudProvider, Config, HomeStorage};
     use crate::keys::{test_keyring, KeyService};
+    use crate::storage::cloud::cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare};
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::storage::cloud::CloudHomeError;
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::sync_manager::ConfigProvider;
     use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_library_dir};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    struct TestCloudKitOps {
+        store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
+    }
+
+    impl TestCloudKitOps {
+        fn new() -> Self {
+            Self {
+                store: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl CloudKitOps for TestCloudKitOps {
+        fn write_record(
+            &self,
+            scope: &CloudKitScope,
+            key: &str,
+            data: Vec<u8>,
+        ) -> Result<(), CloudHomeError> {
+            self.store
+                .lock()
+                .unwrap()
+                .insert((scope.clone(), key.to_string()), data);
+            Ok(())
+        }
+
+        fn read_record(&self, scope: &CloudKitScope, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            self.store
+                .lock()
+                .unwrap()
+                .get(&(scope.clone(), key.to_string()))
+                .cloned()
+                .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
+        }
+
+        fn list_records(
+            &self,
+            scope: &CloudKitScope,
+            prefix: &str,
+        ) -> Result<Vec<String>, CloudHomeError> {
+            Ok(self
+                .store
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(stored_scope, key)| stored_scope == scope && key.starts_with(prefix))
+                .map(|(_, key)| key.clone())
+                .collect())
+        }
+
+        fn delete_record(&self, scope: &CloudKitScope, key: &str) -> Result<(), CloudHomeError> {
+            self.store
+                .lock()
+                .unwrap()
+                .remove(&(scope.clone(), key.to_string()));
+            Ok(())
+        }
+
+        fn record_exists(&self, scope: &CloudKitScope, key: &str) -> Result<bool, CloudHomeError> {
+            Ok(self
+                .store
+                .lock()
+                .unwrap()
+                .contains_key(&(scope.clone(), key.to_string())))
+        }
+
+        fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {
+            Ok(CloudKitShare {
+                share_url: format!("coven-test-share-{member_pubkey}"),
+                owner_name: "owner".to_string(),
+                zone_name: "zone".to_string(),
+            })
+        }
+
+        fn revoke_share(&self, _member_pubkey: &str) -> Result<(), CloudHomeError> {
+            Ok(())
+        }
+
+        fn accept_share(&self, _share_url: &str) -> Result<CloudKitShare, CloudHomeError> {
+            Ok(CloudKitShare {
+                share_url: "coven-test-share".to_string(),
+                owner_name: "owner".to_string(),
+                zone_name: "zone".to_string(),
+            })
+        }
+    }
 
     /// `connect_sync_with_test_home` stands a real `SyncManager` over an injected
     /// `InMemoryCloudHome` and routes BOTH the upload drain and the read path
@@ -789,6 +890,59 @@ mod tests {
         assert_eq!(
             read, plaintext,
             "read_blob fetched the blob's plaintext from the injected test home",
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn connected_manager_reuses_cloud_home_for_loop_storage() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+
+        let mut config = Config::with_defaults(
+            "lib-cloudkit-home-reuse".to_string(),
+            "test-device".to_string(),
+            library_dir.clone(),
+            "Test Library".to_string(),
+        );
+        config.cloud_home.provider = Some(CloudProvider::CloudKit);
+        config.cloud_home.storage = HomeStorage::Browsable;
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+
+        let handle = CovenHandle::new(
+            db.clone(),
+            db.stamper(),
+            library_dir,
+            config_provider,
+            KeyService::new("lib-cloudkit-home-reuse".to_string()),
+            Arc::new(SystemClock),
+            Some(Arc::new(TestCloudKitOps::new())),
+            Arc::new(crate::id_provider::UuidProvider),
+            None,
+        );
+
+        handle
+            .connect_sync(None)
+            .await
+            .expect("connect sync over the test CloudKit driver");
+
+        let manager = handle
+            .sync_manager()
+            .expect("connect_sync installs a manager");
+        let stored_home = manager.cloud_home().expect("manager stores cloud home");
+        let loop_handle = manager
+            .sync_loop_handle()
+            .expect("connect_sync starts the sync loop");
+
+        assert!(
+            std::ptr::addr_eq(stored_home.as_ref(), loop_handle.storage().cloud_home()),
+            "the sync loop storage must wrap the same cloud home stored on the manager",
         );
     }
 }

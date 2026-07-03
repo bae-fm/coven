@@ -13,6 +13,8 @@ use crate::keys::{CloudHomeCredentials, KeyService};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::cloud_storage::BlobPathScheme;
 use crate::sync::cloud_storage::CloudCipher;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 /// Google Drive OAuth sign-in: authorize, find/create the library folder, save
 /// tokens to the keyring. Returns the folder id for the host to persist in its
@@ -421,7 +423,16 @@ pub async fn create_sync_storage_with_cloudkit(
         super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops)
             .await
             .map_err(|e| format!("{e}"))?;
+    create_sync_storage_with_home(config, key_service, Arc::from(cloud_home), cipher)
+}
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create_sync_storage_with_home(
+    config: &Config,
+    key_service: &KeyService,
+    home: Arc<dyn super::CloudHome>,
+    cipher: Option<CloudCipher>,
+) -> Result<crate::sync::cloud_storage::CloudSyncStorage, String> {
     let cipher = match cipher {
         Some(c) => c,
         None => build_cloud_cipher(config, key_service)?,
@@ -435,7 +446,7 @@ pub async fn create_sync_storage_with_cloudkit(
         .map_err(|e| format!("Failed to load user keypair: {e}"))?;
 
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
-        std::sync::Arc::from(cloud_home),
+        home,
         cipher,
         BlobPathScheme::for_storage(config.cloud_home.storage),
         keypair,

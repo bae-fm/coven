@@ -186,8 +186,9 @@ impl SyncManager {
         )
         .await
         .map_err(|e| format!("failed to build cloud home: {e}"))?;
+        let cloud_home: Arc<dyn CloudHome> = Arc::from(cloud_home);
 
-        *self.cloud_home.write().unwrap() = Some(Arc::from(cloud_home));
+        *self.cloud_home.write().unwrap() = Some(cloud_home.clone());
 
         if !sync_enabled(&config, &self.key_service) {
             // Not a failure: a configured-but-not-yet-enabled library (e.g. no
@@ -214,14 +215,12 @@ impl SyncManager {
             .key_service
             .get_or_create_user_keypair()
             .map_err(|e| format!("failed to load user keypair for sync: {e}"))?;
-        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
+        let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
             &self.key_service,
+            cloud_home,
             Some(cipher.clone()),
-            self.clock.clone(),
-            self.cloudkit_ops.clone(),
         )
-        .await
         .map_err(|e| format!("failed to create sync storage: {e}"))?;
 
         let components = crate::sync::cycle::init_sync_over_storage(
@@ -461,22 +460,41 @@ impl SyncManager {
             return Ok(Vec::new());
         }
 
-        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
-            &config,
-            &self.key_service,
-            None,
-            self.clock.clone(),
-            self.cloudkit_ops.clone(),
-        )
-        .await
-        .map_err(|e| format!("Failed to create storage client: {e}"))?;
+        let loop_storage = self
+            .sync_loop_handle()
+            .map(|handle| handle.storage().clone());
+        let owned_storage;
+        let storage: &dyn SyncStorage = if let Some(storage) = loop_storage.as_deref() {
+            storage
+        } else {
+            owned_storage = match self.cloud_home() {
+                Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
+                    &config,
+                    &self.key_service,
+                    home,
+                    None,
+                ),
+                None => {
+                    crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
+                        &config,
+                        &self.key_service,
+                        None,
+                        self.clock.clone(),
+                        self.cloudkit_ops.clone(),
+                    )
+                    .await
+                }
+            }
+            .map_err(|e| format!("Failed to create storage client: {e}"))?;
+            &owned_storage
+        };
 
         let user_pubkey = self
             .key_service
             .get_user_public_key()
             .map_err(|e| format!("Failed to read user public key: {e}"))?;
         crate::sync::membership_ops::get_members(
-            &storage,
+            storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
         )
         .await
