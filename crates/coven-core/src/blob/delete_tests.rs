@@ -17,7 +17,7 @@ use crate::blob::delete::{
 };
 use crate::blob::BlobScope;
 use crate::clock::FixedClock;
-use crate::database::Database;
+use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -26,6 +26,7 @@ use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::membership::{MemberRole, MembershipAction};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{founder_entry, make_entry, pubkey_hex, MockSyncStorage};
+use rusqlite::OptionalExtension;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -47,6 +48,23 @@ fn open_outbox_db() -> Database {
     )
     .expect("open outbox database");
     db
+}
+
+/// Read back `(attempt_count, last_error, last_attempt_at)` for a delete entry, or
+/// `None` if it was removed.
+async fn get_delete(db: &Database, id: i64) -> Option<(i64, Option<String>, Option<String>)> {
+    db.call(move |conn| {
+        conn.query_row(
+            "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox \
+             WHERE id = ?1 AND operation = 'delete'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("query delete outbox entry")
 }
 
 /// A plaintext cipher (tests don't encrypt) behind the lock the drain/GC take.
@@ -177,34 +195,56 @@ impl CloudHome for CancelTombstoneOnExists<'_> {
     }
 }
 
-/// A `CloudHome` over an inner `MockSyncStorage` that fails `delete` on one named
-/// key the first `fail_times` attempts, then delegates normally. Every other method
-/// delegates. Drives the cancel-failure-then-retry paths deterministically: the
-/// upload drain's inline tombstone cancel (a `delete` of the tombstone key) and the
-/// GC's tombstone delete both go through `delete`, so pointing this at the tombstone
-/// key makes those specific deletes fail without disturbing blob writes or reads.
-struct FailDeleteOnKey<'a> {
-    inner: &'a MockSyncStorage,
-    key: String,
-    fail_times: usize,
-    failures: AtomicUsize,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailingCloudOp {
+    Delete,
+    Exists,
+    PutObject,
 }
 
-impl<'a> FailDeleteOnKey<'a> {
-    fn new(inner: &'a MockSyncStorage, key: &str, fail_times: usize) -> Self {
+/// A `CloudHome` wrapper that fails one operation on one named key for the first
+/// `fail_times` matching calls, counts matching calls, then delegates normally.
+struct FailCloudOpOnKey<'a, H: CloudHome + ?Sized> {
+    inner: &'a H,
+    op: FailingCloudOp,
+    key: String,
+    fail_times: usize,
+    calls: AtomicUsize,
+}
+
+impl<'a, H: CloudHome + ?Sized> FailCloudOpOnKey<'a, H> {
+    fn new(inner: &'a H, op: FailingCloudOp, key: &str, fail_times: usize) -> Self {
         Self {
             inner,
+            op,
             key: key.to_string(),
             fail_times,
-            failures: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
         }
+    }
+
+    fn matching_calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn should_fail(&self, op: FailingCloudOp, key: &str) -> bool {
+        if self.op == op && key == self.key {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            return call < self.fail_times;
+        }
+        false
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl CloudHome for FailDeleteOnKey<'_> {
+impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        if self.should_fail(FailingCloudOp::PutObject, key) {
+            return Err(CloudHomeError::Storage(format!(
+                "injected put_object failure for {key}"
+            )));
+        }
         self.inner.put_object(key, data).await
     }
 
@@ -233,8 +273,7 @@ impl CloudHome for FailDeleteOnKey<'_> {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        if key == self.key && self.failures.load(Ordering::SeqCst) < self.fail_times {
-            self.failures.fetch_add(1, Ordering::SeqCst);
+        if self.should_fail(FailingCloudOp::Delete, key) {
             return Err(CloudHomeError::Storage(format!(
                 "injected delete failure for {key}"
             )));
@@ -243,6 +282,11 @@ impl CloudHome for FailDeleteOnKey<'_> {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        if self.should_fail(FailingCloudOp::Exists, key) {
+            return Err(CloudHomeError::Storage(format!(
+                "injected exists failure for {key}"
+            )));
+        }
         self.inner.exists(key).await
     }
 
@@ -350,6 +394,178 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
     let deletes = db.get_pending_cloud_deletes().await.expect("deletes");
     assert_eq!(deletes.len(), 1);
     assert_eq!(deletes[0].operation, OutboxOperation::Delete);
+}
+
+/// A failed tombstone existence check records durable retry state, then the
+/// delete drain skips the row inside the backoff window and retries once the
+/// window has elapsed.
+#[tokio::test]
+async fn delete_existence_failure_backs_off_then_retries() {
+    let db = open_outbox_db();
+    let inner = InMemoryCloudHome::new();
+    let cloud = FailCloudOpOnKey::new(
+        &inner,
+        FailingCloudOp::Exists,
+        "blob_tombstones/blob-key",
+        1,
+    );
+    let cipher = plaintext_cipher();
+    let kp = UserKeypair::generate();
+
+    db.enqueue_delete("blob-key", T0).await.expect("enqueue");
+    let first = FixedClock(at("2024-06-01T00:00:00Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
+        .await
+        .expect("first drain");
+    assert_eq!(n, 0, "the failed existence check writes no tombstone");
+    assert_eq!(cloud.matching_calls(), 1);
+
+    let first_row = get_delete(&db, 1).await.expect("delete row remains");
+    assert_eq!(first_row.0, 1, "the failed attempt is counted");
+    assert!(
+        first_row
+            .1
+            .as_deref()
+            .unwrap()
+            .contains("tombstone existence check failed"),
+        "the failure reason is recorded",
+    );
+    let recorded = chrono::DateTime::parse_from_rfc3339(first_row.2.as_deref().unwrap()).unwrap();
+    assert_eq!(recorded.with_timezone(&chrono::Utc), first.0);
+
+    let inside = FixedClock(at("2024-06-01T00:00:10Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &inside)
+        .await
+        .expect("inside backoff drain");
+    assert_eq!(n, 0, "inside the backoff window no tombstone is written");
+    assert_eq!(
+        cloud.matching_calls(),
+        1,
+        "inside the backoff window no cloud existence check runs",
+    );
+    assert_eq!(
+        get_delete(&db, 1).await.expect("delete row remains"),
+        first_row,
+        "the skipped row is unchanged",
+    );
+
+    let after = FixedClock(at("2024-06-01T00:00:31Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &after)
+        .await
+        .expect("after backoff drain");
+    assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
+    assert_eq!(cloud.matching_calls(), 2);
+    assert!(
+        inner.get("blob_tombstones/blob-key").is_some(),
+        "the retried drain writes the tombstone",
+    );
+    assert!(
+        get_delete(&db, 1).await.is_none(),
+        "the successful retry clears the delete row",
+    );
+}
+
+/// A failed tombstone write records the same durable retry state as an existence
+/// check failure, and the backoff gate suppresses the write attempt until the
+/// retry window has elapsed.
+#[tokio::test]
+async fn delete_write_failure_backs_off_then_retries() {
+    let db = open_outbox_db();
+    let inner = InMemoryCloudHome::new();
+    let cloud = FailCloudOpOnKey::new(
+        &inner,
+        FailingCloudOp::PutObject,
+        "blob_tombstones/blob-key",
+        1,
+    );
+    let cipher = plaintext_cipher();
+    let kp = UserKeypair::generate();
+
+    db.enqueue_delete("blob-key", T0).await.expect("enqueue");
+    let first = FixedClock(at("2024-06-01T00:00:00Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
+        .await
+        .expect("first drain");
+    assert_eq!(n, 0, "the failed write creates no tombstone");
+    assert_eq!(cloud.matching_calls(), 1);
+
+    let first_row = get_delete(&db, 1).await.expect("delete row remains");
+    assert_eq!(first_row.0, 1, "the failed write is counted");
+    assert!(
+        first_row
+            .1
+            .as_deref()
+            .unwrap()
+            .contains("tombstone write failed"),
+        "the write failure is recorded",
+    );
+
+    let inside = FixedClock(at("2024-06-01T00:00:10Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &inside)
+        .await
+        .expect("inside backoff drain");
+    assert_eq!(n, 0, "inside the backoff window no tombstone is written");
+    assert_eq!(
+        cloud.matching_calls(),
+        1,
+        "inside the backoff window no cloud write runs",
+    );
+
+    let after = FixedClock(at("2024-06-01T00:00:31Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &after)
+        .await
+        .expect("after backoff drain");
+    assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
+    assert_eq!(cloud.matching_calls(), 2);
+    assert!(
+        inner.get("blob_tombstones/blob-key").is_some(),
+        "the retried drain writes the tombstone",
+    );
+}
+
+/// Corrupt local retry metadata must not strand a delete row. The drain logs the
+/// timestamp parse failure and retries the row.
+#[tokio::test]
+async fn corrupt_delete_backoff_timestamp_does_not_strand_the_row() {
+    let db = open_outbox_db();
+    let inner = InMemoryCloudHome::new();
+    let cloud = FailCloudOpOnKey::new(
+        &inner,
+        FailingCloudOp::Exists,
+        "blob_tombstones/blob-key",
+        1,
+    );
+    let cipher = plaintext_cipher();
+    let kp = UserKeypair::generate();
+
+    db.enqueue_delete("blob-key", T0).await.expect("enqueue");
+    let first = FixedClock(at("2024-06-01T00:00:00Z"));
+    drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
+        .await
+        .expect("first drain");
+
+    db.call(|conn| {
+        conn.execute(
+            "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp' \
+             WHERE id = 1 AND operation = 'delete'",
+            [],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("corrupt last_attempt_at");
+
+    let inside = FixedClock(at("2024-06-01T00:00:10Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &inside)
+        .await
+        .expect("corrupt timestamp drain");
+    assert_eq!(n, 1, "the corrupt timestamp does not suppress the retry");
+    assert_eq!(cloud.matching_calls(), 2);
+    assert!(
+        get_delete(&db, 1).await.is_none(),
+        "the retried delete row clears after the tombstone is present",
+    );
 }
 
 // ----- the grace: kept before, reclaimed after -----
@@ -1002,7 +1218,12 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
     // The cloud fails the cancel (a `delete` of the tombstone key) the first time.
     // The drain writes the blob, the inline cancel fails, and a durable cancel row
     // is queued in its place.
-    let failing = FailDeleteOnKey::new(&storage, "blob_tombstones/blob-key", 1);
+    let failing = FailCloudOpOnKey::new(
+        &storage,
+        FailingCloudOp::Delete,
+        "blob_tombstones/blob-key",
+        1,
+    );
     let clock = FixedClock(at("2024-06-01T01:00:00Z"));
     let n = drain_uploads(
         &db,
@@ -1095,7 +1316,12 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
 
     // First GC past the grace: the blob delete succeeds, but the tombstone delete
     // fails (injected). The blob is reclaimed; the tombstone is left behind.
-    let failing = FailDeleteOnKey::new(&storage, "blob_tombstones/blob-key", 1);
+    let failing = FailCloudOpOnKey::new(
+        &storage,
+        FailingCloudOp::Delete,
+        "blob_tombstones/blob-key",
+        1,
+    );
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = gc_tombstones(&storage, &failing, &cipher, "test-lib", Some(&owner), &past)
         .await

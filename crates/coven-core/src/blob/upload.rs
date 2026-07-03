@@ -122,9 +122,8 @@ pub(crate) fn backoff_window(attempt_count: i64) -> chrono::Duration {
 }
 
 /// Record a failed upload attempt and notify the observer. The entry is left
-/// queued; it becomes eligible for retry again after [`backoff_window`]. Only
-/// uploads fail this way (a delete failure just retries next cycle), so the
-/// caller passes the upload's `file_id` for the observer notification.
+/// queued; it becomes eligible for retry again after [`backoff_window`]. Uploads
+/// additionally notify the observer, so the caller passes the upload's `file_id`.
 async fn record_failure(
     db: &Database,
     entry: &OutboxEntry,
