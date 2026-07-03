@@ -75,7 +75,7 @@ use crate::sync::sync_manager::{ConfigProvider, SyncManager};
 /// // Rows: run app SQL on the connection coven owns.
 /// let note_count: i64 = handle
 ///     .sql(|sql| {
-///         sql.connection()
+///         sql.tx()
 ///             .query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
 ///             .map_err(coven::CovenError::from)
 ///     })

@@ -335,7 +335,7 @@ pub(crate) fn install_platform() {
 }
 
 pub use coven::{
-    Coven, CovenBuilder, CovenConfig, CovenError, CovenResult, PendingBlob, SqlContext, WriteBatch,
+    Coven, CovenBuilder, CovenConfig, CovenError, CovenResult, SqlContext, WriteBatch,
 };
 pub use handle::CovenHandle;
 

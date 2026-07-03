@@ -33,10 +33,6 @@ pub enum CovenError {
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven library")]
     MissingMigrations,
-    #[error("write batch did not install a SQL closure")]
-    MissingSql,
-    #[error("write batch can install only one SQL closure")]
-    MultipleSqlClosures,
     #[error("blob {namespace}/{id} is still referenced by a row after the write")]
     BlobStillReferenced { namespace: String, id: String },
 }
@@ -54,33 +50,22 @@ impl From<PathTokenError> for CovenError {
 }
 
 #[derive(Clone)]
-pub enum CovenConfig {
-    Static(Config),
-    Provider(ConfigProvider),
-}
+pub struct CovenConfig(ConfigProvider);
 
 impl CovenConfig {
     fn current(&self) -> Config {
-        match self {
-            CovenConfig::Static(config) => config.clone(),
-            CovenConfig::Provider(provider) => provider(),
-        }
+        (self.0)()
     }
 
     fn provider(&self) -> ConfigProvider {
-        match self {
-            CovenConfig::Static(config) => {
-                let config = config.clone();
-                Arc::new(move || config.clone())
-            }
-            CovenConfig::Provider(provider) => provider.clone(),
-        }
+        self.0.clone()
     }
 }
 
 impl From<Config> for CovenConfig {
     fn from(value: Config) -> Self {
-        CovenConfig::Static(value)
+        let config = value;
+        Self(Arc::new(move || config.clone()))
     }
 }
 
@@ -89,7 +74,7 @@ where
     F: Fn() -> Config + Send + Sync + 'static,
 {
     fn from(value: F) -> Self {
-        CovenConfig::Provider(Arc::new(value))
+        Self(Arc::new(value))
     }
 }
 
@@ -199,10 +184,6 @@ impl<'ctx, 'conn> SqlContext<'ctx, 'conn> {
         Self { tx, stamper }
     }
 
-    pub fn connection(&self) -> &'ctx Connection {
-        self.tx
-    }
-
     pub fn tx(&self) -> &'ctx rusqlite::Transaction<'conn> {
         self.tx
     }
@@ -215,18 +196,16 @@ impl<'ctx, 'conn> SqlContext<'ctx, 'conn> {
 type WriteSql<R> =
     Box<dyn for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send>;
 
-pub struct WriteBatch<R> {
+pub struct WriteBatch {
     new_blobs: Vec<NewBlob>,
     deleted_blobs: Vec<BlobRef>,
-    sql: Option<WriteSql<R>>,
 }
 
-impl<R> WriteBatch<R> {
+impl WriteBatch {
     fn new() -> Self {
         Self {
             new_blobs: Vec::new(),
             deleted_blobs: Vec::new(),
-            sql: None,
         }
     }
 
@@ -235,42 +214,16 @@ impl<R> WriteBatch<R> {
         namespace: impl Into<String>,
         id: impl Into<String>,
         bytes: impl Into<Vec<u8>>,
-    ) -> PendingBlob {
-        let blob = NewBlob {
+    ) {
+        self.new_blobs.push(NewBlob {
             namespace: namespace.into(),
             id: id.into(),
             bytes: bytes.into(),
-        };
-        let pending = PendingBlob {
-            id: blob.id.clone(),
-        };
-        self.new_blobs.push(blob);
-        pending
+        });
     }
 
     pub fn delete_blob(&mut self, blob: BlobRef) {
         self.deleted_blobs.push(blob);
-    }
-
-    pub fn sql(
-        &mut self,
-        sql: impl for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send + 'static,
-    ) -> CovenResult<()> {
-        if self.sql.is_some() {
-            return Err(CovenError::MultipleSqlClosures);
-        }
-        self.sql = Some(Box::new(sql));
-        Ok(())
-    }
-}
-
-pub struct PendingBlob {
-    id: String,
-}
-
-impl PendingBlob {
-    pub fn id(&self) -> &str {
-        &self.id
     }
 }
 
@@ -280,15 +233,12 @@ struct NewBlob {
     bytes: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub(crate) struct StagedBlob {
     pub namespace: String,
     pub id: String,
     pub staged: PathBuf,
     pub final_path: PathBuf,
-}
-
-struct InstalledBlob {
-    blob: StagedBlob,
 }
 
 pub(crate) enum WriteDbOutcome<R> {
@@ -314,14 +264,15 @@ impl CovenHandle {
             .map_err(CovenError::from)
     }
 
-    pub async fn write<F, R>(&self, f: F) -> CovenResult<R>
+    pub async fn write<F, S, R>(&self, f: F, sql: S) -> CovenResult<R>
     where
-        F: FnOnce(&mut WriteBatch<R>) -> CovenResult<()> + Send + 'static,
+        F: FnOnce(&mut WriteBatch) -> CovenResult<()> + Send + 'static,
+        S: for<'ctx, 'conn> FnOnce(SqlContext<'ctx, 'conn>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
         let mut batch = WriteBatch::new();
         f(&mut batch)?;
-        let sql = batch.sql.take().ok_or(CovenError::MissingSql)?;
+        let sql: WriteSql<R> = Box::new(sql);
         let staged = self.stage_blobs(batch.new_blobs).await?;
         let staged_paths = staged
             .iter()
@@ -445,14 +396,7 @@ fn run_write_batch_on_connection<R>(
                 moved,
             );
         }
-        moved.push(InstalledBlob {
-            blob: StagedBlob {
-                namespace: blob.namespace.clone(),
-                id: blob.id.clone(),
-                staged: blob.staged.clone(),
-                final_path: blob.final_path.clone(),
-            },
-        });
+        moved.push(blob.clone());
         if let Err(e) = std::fs::remove_file(&blob.staged) {
             return rollback_write_batch(
                 CovenError::Blob(format!(
@@ -506,15 +450,15 @@ fn run_write_batch_on_connection<R>(
     }
 }
 
-fn rollback_write_batch<R>(error: CovenError, moved: Vec<InstalledBlob>) -> WriteDbOutcome<R> {
+fn rollback_write_batch<R>(error: CovenError, moved: Vec<StagedBlob>) -> WriteDbOutcome<R> {
     for blob in moved.iter().rev() {
-        if let Err(e) = std::fs::remove_file(&blob.blob.final_path) {
+        if let Err(e) = std::fs::remove_file(&blob.final_path) {
             return WriteDbOutcome::RolledBack {
                 error: CovenError::Blob(format!(
                     "rollback local blob {}/{} at {}: {e}",
-                    blob.blob.namespace,
-                    blob.blob.id,
-                    blob.blob.final_path.display()
+                    blob.namespace,
+                    blob.id,
+                    blob.final_path.display()
                 )),
             };
         }
@@ -600,7 +544,7 @@ mod tests {
         let (_tmp, handle) = open_files_handle();
         let has_coven_table: i64 = handle
             .sql(|sql| {
-                sql.connection().query_row(
+                sql.tx().query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_state'",
                     [],
                     |row| row.get(0),
@@ -610,7 +554,7 @@ mod tests {
             .expect("query coven table");
         let has_host_table: i64 = handle
             .sql(|sql| {
-                sql.connection().query_row(
+                sql.tx().query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'files'",
                     [],
                     |row| row.get(0),
@@ -628,7 +572,7 @@ mod tests {
         let id = "file-sql".to_string();
         handle
             .sql(move |sql| {
-                sql.connection().execute(
+                sql.tx().execute(
                     "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
                     params![id, sql.stamp()],
                 )?;
@@ -638,7 +582,7 @@ mod tests {
             .expect("insert through sql");
         let count: i64 = handle
             .sql(|sql| {
-                sql.connection()
+                sql.tx()
                     .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                     .map_err(CovenError::from)
             })
@@ -652,18 +596,23 @@ mod tests {
         let (_tmp, handle) = open_files_handle();
         let bytes = b"piece-bytes".to_vec();
         handle
-            .write(move |w| {
-                let blob = w.put_blob("media-files", "blobaaaa", bytes.clone());
-                let blob_id = blob.id().to_string();
-                w.sql(move |sql| {
+            .write(
+                {
+                    let bytes = bytes.clone();
+                    move |w| {
+                        w.put_blob("media-files", "blobaaaa", bytes);
+                        Ok(())
+                    }
+                },
+                move |sql| {
                     sql.tx().execute(
                         "INSERT INTO files (id, blob_id, size, _updated_at) \
                          VALUES (?1, ?2, ?3, ?4)",
-                        params!["file-1", blob_id, bytes.len() as i64, sql.stamp()],
+                        params!["file-1", "blobaaaa", bytes.len() as i64, sql.stamp()],
                     )?;
                     Ok(())
-                })
-            })
+                },
+            )
             .await
             .expect("write row and blob");
         let path = handle
@@ -683,30 +632,35 @@ mod tests {
         let bytes = expected.clone();
 
         let blob = handle
-            .write(move |w| {
-                let pending = w.put_blob("media-files", "rrhpaaaa", bytes.clone());
-                let blob_id = pending.id().to_string();
-                w.sql(move |sql| {
+            .write(
+                {
+                    let bytes = bytes.clone();
+                    move |w| {
+                        w.put_blob("media-files", "rrhpaaaa", bytes);
+                        Ok(())
+                    }
+                },
+                move |sql| {
                     sql.tx().execute(
                         "INSERT INTO files (id, blob_id, size, _updated_at) \
                          VALUES (?1, ?2, ?3, ?4)",
                         params![
                             "file-remote-root",
-                            blob_id.as_str(),
+                            "rrhpaaaa",
                             bytes.len() as i64,
                             sql.stamp()
                         ],
                     )?;
                     Ok(BlobRef {
                         namespace: "media-files".to_string(),
-                        id: blob_id,
+                        id: "rrhpaaaa".to_string(),
                         scope: BlobScope::Master,
                         cloud_path: None,
                         provenance: Provenance::HostProvided,
                         fill: CacheFill::CacheLazy,
                     })
-                })
-            })
+                },
+            )
             .await
             .expect("write remote-root row and host-provided blob");
 
@@ -735,10 +689,13 @@ mod tests {
     async fn sql_failure_removes_staged_blob() {
         let (_tmp, handle) = open_files_handle();
         let err = handle
-            .write::<_, ()>(|w| {
-                w.put_blob("media-files", "blobbbbb", b"staged".to_vec());
-                w.sql(|_sql| Err(CovenError::Blob("sql failed".to_string())))
-            })
+            .write(
+                |w| {
+                    w.put_blob("media-files", "blobbbbb", b"staged".to_vec());
+                    Ok(())
+                },
+                |_sql| Err::<(), CovenError>(CovenError::Blob("sql failed".to_string())),
+            )
             .await
             .expect_err("write fails");
         assert!(err.to_string().contains("sql failed"));
@@ -752,23 +709,26 @@ mod tests {
     #[tokio::test]
     async fn blob_stage_failure_does_not_run_sql() {
         let (_tmp, handle) = open_files_handle();
-        let result = handle
-            .write(|w| {
-                w.put_blob("media-files", "..", b"bad".to_vec());
-                w.sql(|sql| {
-                    sql.connection().execute(
+        let result: CovenResult<()> = handle
+            .write(
+                |w| {
+                    w.put_blob("media-files", "..", b"bad".to_vec());
+                    Ok(())
+                },
+                |sql| {
+                    sql.tx().execute(
                         "INSERT INTO files (id, blob_id, size, _updated_at) \
                          VALUES ('should-not-exist', NULL, 0, ?1)",
                         [sql.stamp()],
                     )?;
                     Ok(())
-                })
-            })
+                },
+            )
             .await;
         assert!(result.is_err());
         let count: i64 = handle
             .sql(|sql| {
-                sql.connection()
+                sql.tx()
                     .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                     .map_err(CovenError::from)
             })
@@ -785,7 +745,7 @@ mod tests {
             .expect("store old");
         handle
             .sql(|sql| {
-                sql.connection().execute(
+                sql.tx().execute(
                     "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
                     params!["file-1", "oldaaaa", sql.stamp()],
                 )?;
@@ -802,18 +762,20 @@ mod tests {
             fill: CacheFill::CacheLazy,
         };
         handle
-            .write(move |w| {
-                let new_blob = w.put_blob("media-files", "newaaaa", b"new".to_vec());
-                w.delete_blob(old_ref);
-                let new_id = new_blob.id().to_string();
-                w.sql(move |sql| {
-                    sql.connection().execute(
+            .write(
+                move |w| {
+                    w.put_blob("media-files", "newaaaa", b"new".to_vec());
+                    w.delete_blob(old_ref);
+                    Ok(())
+                },
+                move |sql| {
+                    sql.tx().execute(
                         "UPDATE files SET blob_id = ?1, size = 3, _updated_at = ?2 WHERE id = 'file-1'",
-                        params![new_id, sql.stamp()],
+                        params!["newaaaa", sql.stamp()],
                     )?;
                     Ok(())
-                })
-            })
+                },
+            )
             .await
             .expect("replace blob");
         assert!(!handle
@@ -836,7 +798,7 @@ mod tests {
             .expect("store old");
         handle
             .sql(|sql| {
-                sql.connection().execute(
+                sql.tx().execute(
                     "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
                     params!["file-1", "oldbbbb", sql.stamp()],
                 )?;
@@ -852,18 +814,21 @@ mod tests {
             provenance: Provenance::HostProvided,
             fill: CacheFill::CacheLazy,
         };
-        let result = handle
-            .write(move |w| {
-                w.put_blob("media-files", "newbbbb", b"new".to_vec());
-                w.delete_blob(old_ref);
-                w.sql(move |sql| {
-                    sql.connection().execute(
+        let result: CovenResult<()> = handle
+            .write(
+                move |w| {
+                    w.put_blob("media-files", "newbbbb", b"new".to_vec());
+                    w.delete_blob(old_ref);
+                    Ok(())
+                },
+                move |sql| {
+                    sql.tx().execute(
                         "UPDATE files SET _updated_at = ?1 WHERE id = 'file-1'",
                         [sql.stamp()],
                     )?;
                     Ok(())
-                })
-            })
+                },
+            )
             .await;
         assert!(matches!(
             result,
@@ -884,11 +849,14 @@ mod tests {
     #[tokio::test]
     async fn sql_panic_removes_moved_blob() {
         let (_tmp, handle) = open_files_handle();
-        let result = handle
-            .write::<_, ()>(|w| {
-                w.put_blob("media-files", "panicccc", b"new".to_vec());
-                w.sql(|_sql| panic!("boom"))
-            })
+        let result: CovenResult<()> = handle
+            .write(
+                |w| {
+                    w.put_blob("media-files", "panicccc", b"new".to_vec());
+                    Ok(())
+                },
+                |_sql| panic!("boom"),
+            )
             .await;
         assert!(result
             .expect_err("panic is surfaced")
@@ -909,27 +877,32 @@ mod tests {
 
         let write_winner = tokio::spawn(async move {
             winner
-                .write(move |w| {
-                    let blob = w.put_blob("media-files", "raceblob", b"committed".to_vec());
-                    let blob_id = blob.id().to_string();
-                    w.sql(move |sql| {
+                .write(
+                    move |w| {
+                        w.put_blob("media-files", "raceblob", b"committed".to_vec());
+                        Ok(())
+                    },
+                    move |sql| {
                         sql.tx().execute(
                             "INSERT INTO files (id, blob_id, size, _updated_at) \
                              VALUES (?1, ?2, ?3, ?4)",
-                            params!["winner", blob_id, 9i64, sql.stamp()],
+                            params!["winner", "raceblob", 9i64, sql.stamp()],
                         )?;
                         Ok(())
-                    })
-                })
+                    },
+                )
                 .await
         });
 
         let write_loser = tokio::spawn(async move {
             loser
-                .write::<_, ()>(move |w| {
-                    w.put_blob("media-files", "raceblob", b"rolled-back".to_vec());
-                    w.sql(|_sql| Err(CovenError::Blob("force rollback".to_string())))
-                })
+                .write(
+                    move |w| {
+                        w.put_blob("media-files", "raceblob", b"rolled-back".to_vec());
+                        Ok(())
+                    },
+                    |_sql| Err::<(), CovenError>(CovenError::Blob("force rollback".to_string())),
+                )
                 .await
         });
 
@@ -945,7 +918,7 @@ mod tests {
         assert_eq!(std::fs::read(path).expect("read race blob"), b"committed");
         let rows: i64 = handle
             .sql(|sql| {
-                sql.connection()
+                sql.tx()
                     .query_row(
                         "SELECT count(*) FROM files WHERE id = 'winner'",
                         [],
