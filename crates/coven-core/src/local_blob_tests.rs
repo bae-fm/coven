@@ -80,18 +80,6 @@ impl PlatformLocalBlobBackend for TestLocalBlobBackend {
         Ok(buf)
     }
 
-    async fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-        tokio::fs::write(path, bytes)
-            .await
-            .map_err(|e| format!("write local blob {}: {e}", path.display()))
-    }
-
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
         let parent = path
             .parent()
@@ -100,7 +88,9 @@ impl PlatformLocalBlobBackend for TestLocalBlobBackend {
             .await
             .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
         let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
-        self.write(&tmp, bytes).await?;
+        tokio::fs::write(&tmp, bytes)
+            .await
+            .map_err(|e| format!("write local blob {}: {e}", tmp.display()))?;
         tokio::fs::rename(&tmp, path).await.map_err(|e| {
             format!(
                 "rename temp blob {} -> {}: {e}",
@@ -130,6 +120,7 @@ impl PlatformLocalBlobBackend for TestLocalBlobBackend {
         }
     }
 
+    #[cfg(test)]
     async fn remove_dir_all(&self, path: &Path) -> Result<bool, String> {
         match tokio::fs::remove_dir_all(path).await {
             Ok(()) => Ok(true),

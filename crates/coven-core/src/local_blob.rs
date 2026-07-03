@@ -24,11 +24,11 @@ pub trait PlatformLocalBlobBackend: crate::MaybeThreadSafe {
     async fn copy_atomic(&self, src: &Path, dst: &Path) -> Result<(), String>;
     async fn read(&self, path: &Path) -> Result<Vec<u8>, String>;
     async fn read_range(&self, path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String>;
-    async fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
     async fn exists(&self, path: &Path) -> Result<bool, String>;
     async fn rename(&self, from: &Path, to: &Path) -> Result<(), String>;
     async fn remove_file(&self, path: &Path) -> Result<bool, String>;
+    #[cfg(test)]
     async fn remove_dir_all(&self, path: &Path) -> Result<bool, String>;
     async fn create_dir_all(&self, path: &Path) -> Result<(), String>;
     async fn sync_parent_dir(&self, _path: &Path) -> Result<(), String> {
@@ -57,10 +57,6 @@ pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, S
     backend().read_range(path, offset, len).await
 }
 
-pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    backend().write(path, bytes).await
-}
-
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     backend().write_atomic(path, bytes).await
 }
@@ -77,6 +73,7 @@ pub async fn remove_file(path: &Path) -> Result<bool, String> {
     backend().remove_file(path).await
 }
 
+#[cfg(test)]
 pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
     backend().remove_dir_all(path).await
 }

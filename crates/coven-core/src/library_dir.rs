@@ -199,10 +199,10 @@ impl LibraryDir {
 
     /// An opportunistic (evictable) cache copy of a **Remote** blob:
     /// `storage/cache/<namespace>/{ab}/{cd}/<id>`. A file here is a cached-but-unpinned
-    /// blob — fetched on read or eagerly on pull, droppable by `clear_cache` or the
-    /// budget sweep. The folder it lives in, not a table, is what makes it evictable
-    /// rather than kept. Segmented by `namespace` so each namespace's budget evicts
-    /// only its own subtree (see [`Self::cache_namespace_dir`]). `Err` if
+    /// blob — fetched on read or eagerly on pull, droppable by the budget sweep. The
+    /// folder it lives in, not a table, is what makes it evictable rather than kept.
+    /// Segmented by `namespace` so each namespace's budget evicts only its own
+    /// subtree (see [`Self::cache_namespace_dir`]). `Err` if
     /// `namespace`/`id` is unsafe or `id` is not indexable (see [`Self::id_shard`]).
     pub fn cache_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
         self.cache_folder_blob_path("cache", namespace, id)
@@ -257,10 +257,8 @@ impl LibraryDir {
     }
 
     /// The evictable-cache root, `storage/cache`, holding every namespace's subtree.
-    /// `clear_cache` removes this whole tree in one sweep (the kept tree under
-    /// `storage/pinned` and the local store under `storage/local` are left
-    /// untouched). The per-namespace budget sweep walks only one namespace's subtree
-    /// under it — see [`Self::cache_namespace_dir`].
+    /// The per-namespace budget sweep walks only one namespace's subtree under it —
+    /// see [`Self::cache_namespace_dir`].
     pub fn cache_dir(&self) -> PathBuf {
         self.storage_dir().join("cache")
     }

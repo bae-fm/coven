@@ -3,7 +3,7 @@
 //!
 //! Two layers are covered:
 //!
-//! 1. [`local_blob`](crate::local_blob) directly — write/read/exists/overwrite
+//! 1. [`local_blob`](crate::local_blob) directly — atomic write/read/exists/overwrite
 //!    against OPFS, the unit that replaces `std::fs` on wasm.
 //! 2. The real sync cycle end to end — device A writes a photo blob to OPFS and
 //!    pushes a changeset referencing it (`SyncService` reads the file through
@@ -113,7 +113,7 @@ async fn local_blob_round_trips_through_opfs() {
 
     // Write creates the nested directories and the file.
     let payload = b"the quick brown fox jumps over the lazy dog".to_vec();
-    crate::local_blob::write(path, &payload)
+    crate::local_blob::write_atomic(path, &payload)
         .await
         .expect("write blob to OPFS");
     assert_eq!(
@@ -129,7 +129,7 @@ async fn local_blob_round_trips_through_opfs() {
 
     // Overwriting with shorter content must not leave any tail of the old bytes.
     let shorter = b"short".to_vec();
-    crate::local_blob::write(path, &shorter)
+    crate::local_blob::write_atomic(path, &shorter)
         .await
         .expect("overwrite blob");
     assert_eq!(
@@ -141,7 +141,7 @@ async fn local_blob_round_trips_through_opfs() {
     );
 
     // Empty content round-trips too.
-    crate::local_blob::write(path, b"")
+    crate::local_blob::write_atomic(path, b"")
         .await
         .expect("write empty");
     assert!(
@@ -248,8 +248,8 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 /// `rename` moves a file across directories (copy-then-delete, since OPFS has no
 /// native rename), `remove_file` drops one file, and `remove_dir_all` drops a whole
 /// subtree. Absence is reported as `Ok(false)` / an empty list, never an error —
-/// the contract `evict_to_budget` and `clear_cache` rely on. Disjoint path prefix
-/// from the other tests so a shared OPFS within one run doesn't collide.
+/// the contract `evict_to_budget` and test cache resets rely on. Disjoint path
+/// prefix from the other tests so a shared OPFS within one run doesn't collide.
 #[wasm_bindgen_test]
 async fn local_blob_dir_ops_round_trip_through_opfs() {
     console_error_panic_hook::set_once();
@@ -258,10 +258,10 @@ async fn local_blob_dir_ops_round_trip_through_opfs() {
     // Two files under a two-level shard, mirroring the cache's `{ab}/{cd}/<id>`.
     let a = root.join("ab/cd/blob-a");
     let b = root.join("ef/01/blob-b");
-    crate::local_blob::write(&a, b"aaaa")
+    crate::local_blob::write_atomic(&a, b"aaaa")
         .await
         .expect("write blob-a");
-    crate::local_blob::write(&b, b"bbbbbb")
+    crate::local_blob::write_atomic(&b, b"bbbbbb")
         .await
         .expect("write blob-b");
 

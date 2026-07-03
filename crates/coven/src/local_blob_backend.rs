@@ -148,18 +148,6 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         Ok(buf)
     }
 
-    async fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-        tokio::fs::write(path, bytes)
-            .await
-            .map_err(|e| format!("write local blob {}: {e}", path.display()))
-    }
-
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
         use tokio::io::AsyncWriteExt;
 
@@ -227,14 +215,6 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(format!("remove file {}: {e}", path.display())),
-        }
-    }
-
-    async fn remove_dir_all(&self, path: &Path) -> Result<bool, String> {
-        match tokio::fs::remove_dir_all(path).await {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(format!("remove dir tree {}: {e}", path.display())),
         }
     }
 

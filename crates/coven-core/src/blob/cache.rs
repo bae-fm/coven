@@ -67,9 +67,8 @@
 //! the recency proxy — there is no `last_accessed` column, the same folder-truth
 //! trade-off the whole cache makes; pinning retains the Remote blobs the user chose
 //! to keep local. With a namespace's budget unset eviction is off for it and its
-//! cache grows without bound. [`clear_cache`] drops all of `cache/` (every namespace)
-//! in one sweep regardless of any budget; a pinned blob (in `pinned/`) survives
-//! either way because it lives in the other folder.
+//! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
+//! blob (in `pinned/`) survives because it lives in the other folder.
 
 use crate::blob::decl::BlobDecls;
 use crate::blob::{BlobRef, Provenance};
@@ -109,8 +108,8 @@ pub enum BlobCacheError {
     /// a Remote blob was read with no provider connected — a real fault, surfaced
     /// rather than masked.
     NoCloudHome,
-    /// A local-disk failure (a cache write, a folder move, the `clear_cache`
-    /// sweep), or a scope that couldn't be resolved to an encryption key. Carries a
+    /// A local-disk failure (a cache write, a folder move, or a test cache reset),
+    /// or a scope that couldn't be resolved to an encryption key. Carries a
     /// human-readable cause.
     Io(String),
     /// The old-value and new-value walks of one changeset disagreed on row count.
@@ -806,9 +805,9 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
 /// over budget because a single in-use blob is larger than the whole budget. It is
 /// surfaced, not silently reported as if the budget were met.
 ///
-/// A file that has vanished by the time it is deleted (a concurrent `clear_cache`
-/// or sweep already removed it) is the one legitimate skip — logged at debug, its
-/// now-absent bytes dropped from the running total. Every other stat or delete
+/// A file that has vanished by the time it is deleted (a concurrent sweep or test
+/// cache reset already removed it) is the one legitimate skip — logged at debug,
+/// its now-absent bytes dropped from the running total. Every other stat or delete
 /// failure is surfaced, never swallowed: a cache that can't be measured or trimmed
 /// must fail loudly, not silently drift over budget.
 pub async fn evict_to_budget(
@@ -868,9 +867,9 @@ pub async fn evict_to_budget(
         };
         match crate::local_blob::remove_file(&path).await {
             Ok(true) => total = subtract(total),
-            // The file is already gone (a concurrent sweep/clear). Its bytes are no
-            // longer on disk, so drop them from the total and move on — the one
-            // legitimate skip, not a masked failure.
+            // The file is already gone (a concurrent sweep or test reset). Its bytes
+            // are no longer on disk, so drop them from the total and move on — the
+            // one legitimate skip, not a masked failure.
             Ok(false) => {
                 tracing::debug!("evict: {} already gone, skipping", path.display());
                 total = subtract(total);

@@ -59,10 +59,6 @@ impl PlatformLocalBlobBackend for OpfsLocalBlobBackend {
         read_range(path, offset, len).await
     }
 
-    async fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
-        write(path, bytes).await
-    }
-
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
         write_atomic(path, bytes).await
     }
@@ -77,10 +73,6 @@ impl PlatformLocalBlobBackend for OpfsLocalBlobBackend {
 
     async fn remove_file(&self, path: &Path) -> Result<bool, String> {
         remove_file(path).await
-    }
-
-    async fn remove_dir_all(&self, path: &Path) -> Result<bool, String> {
-        remove_dir_all(path).await
     }
 
     async fn create_dir_all(&self, path: &Path) -> Result<(), String> {
@@ -160,19 +152,12 @@ pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, S
     imp::read_range(path, offset, len).await
 }
 
-/// Write `bytes` to `path`, creating any missing parent directories. Overwrites an
-/// existing file exactly — no stale tail survives from a longer previous version.
-/// Callers that need whole-file visibility use [`write_atomic`].
-pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    imp::write(path, bytes).await
-}
-
 /// Write `bytes` to `path` ATOMICALLY: a concurrent or post-crash reader sees
 /// either the previous file or the whole new one, never a torn prefix. This is the
 /// guarantee callers depend on — the cache treats "the file exists" as equivalent to
 /// "all the bytes are there" (presence is the only truth, no length or checksum
 /// column), so every cache write goes through this rather than the in-place
-/// [`write`], which truncates the destination before refilling it.
+/// platform helper, which truncates the destination before refilling it.
 ///
 /// Native: write a temp file in the same directory, fsync it, then `rename` it over the
 /// destination (atomic on one filesystem) — a reader sees the old file or the whole new
@@ -183,9 +168,9 @@ pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// handled by the same fetch-on-read path, not a wrong state anyone reconciles. (Dir
 /// fsync isn't portable anyway — Windows has no handle-based dir flush.)
 ///
-/// wasm/OPFS: delegate to [`write`]. OPFS has no cross-file rename to build temp→rename
-/// atomicity from, so this is the whole-file sync-access write — best-effort on that
-/// platform (the same as every other OPFS write in this codebase), with the same
+/// wasm/OPFS: delegates to the private whole-file sync-access write helper. OPFS
+/// has no cross-file rename to build temp→rename atomicity from, so this is the
+/// best available whole-file write on that platform, with the same
 /// re-fetchable-cache safety net the native path relies on.
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     imp::write_atomic(path, bytes).await
@@ -224,12 +209,14 @@ pub async fn remove_file(path: &Path) -> Result<bool, String> {
 }
 
 /// Remove the directory tree at `path` and everything under it. `Ok(true)` if it
-/// was there and is now gone, `Ok(false)` if it was already absent (an empty cache
-/// `clear_cache` is asked to drop). `Err` is a real backend failure — a tree the
+/// was there and is now gone, `Ok(false)` if it was already absent. `Err` is a
+/// real backend failure — a tree the
 /// caller asked to clear must actually be gone, never reported clear over a failed
 /// delete.
-/// Test-only: the production cache sweeps individual files via [`remove_file`];
-/// Used by cache clearing and tests that need to reset an OPFS subtree.
+///
+/// Test-only: production cache eviction sweeps individual files via
+/// [`remove_file`]. Cache clearing and tests that reset an OPFS subtree use this.
+#[cfg(test)]
 pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
     imp::remove_dir_all(path).await
 }
@@ -248,10 +235,10 @@ pub async fn create_dir_all(path: &Path) -> Result<(), String> {
 ///
 /// An absent `dir` is an empty result, not an error: nothing has been cached yet,
 /// so there is nothing to measure. A directory or file that vanishes mid-walk (a
-/// concurrent `clear_cache`/sweep) is dropped from the result, logged at debug —
-/// the one legitimate skip. Every other failure to read a directory or stat a file
-/// is surfaced: a cache that cannot be fully measured fails loudly rather than
-/// under-counting and silently drifting over budget.
+/// concurrent sweep or test reset removed it) is dropped from the result, logged at
+/// debug — the one legitimate skip. Every other failure to read a directory or stat
+/// a file is surfaced: a cache that cannot be fully measured fails loudly rather
+/// than under-counting and silently drifting over budget.
 pub async fn walk_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)>, String> {
     imp::walk_files(dir).await
 }
@@ -536,8 +523,8 @@ mod imp {
                 let path = entry.path();
                 let metadata = match entry.metadata().await {
                     Ok(metadata) => metadata,
-                    // Vanished between listing and stat (a concurrent clear/sweep) —
-                    // it no longer occupies the tree, so it drops out of the measure.
+                    // Vanished between listing and stat (a concurrent sweep or test
+                    // reset) — it no longer occupies the tree, so it drops out.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         tracing::debug!(
                             "walk_files: {} vanished between listing and stat, skipping",
@@ -882,7 +869,7 @@ mod imp {
         Ok(buf)
     }
 
-    pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         // `create = true`, so a component is created rather than reported missing —
         // not-found can't arise here, but fold it into a message for completeness.
         let fh = file_handle(path, true)
@@ -968,6 +955,7 @@ mod imp {
         remove_entry(path, false).await
     }
 
+    #[cfg(test)]
     pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
         remove_entry(path, true).await
     }
