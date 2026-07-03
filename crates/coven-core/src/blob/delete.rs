@@ -183,10 +183,10 @@ fn tombstone_signing_payload(library_id: &str, cloud_key: &str, deleted_at: &str
 /// converges on the deletion, rather than deleting the blob out from under a peer
 /// that hasn't pulled the row removal yet.
 ///
-/// A failed tombstone write leaves the outbox row queued (the row is removed only
-/// after the tombstone is present), so the next cycle retries — the deletion is not
-/// lost. Per-row failures are logged and skipped so one bad row doesn't block the
-/// rest. Returns the number of tombstones written this pass.
+/// A failed tombstone attempt leaves the outbox row queued (the row is removed only
+/// after the tombstone is present), with a per-row backoff before the next retry —
+/// the deletion is not lost. Per-row failures are logged and skipped so one bad row
+/// doesn't block the rest. Returns the number of tombstones written this pass.
 ///
 /// The write is idempotent on the tombstone's existence, not its contents: if a
 /// tombstone already exists for the key it is left untouched and only the row is
@@ -208,10 +208,29 @@ pub async fn drain_tombstones(
         .await
         .map_err(|e| format!("Failed to get pending deletes: {e}"))?;
 
-    let now = clock.now().to_rfc3339();
+    let now = clock.now();
+    let now_rfc = now.to_rfc3339();
     let suffix = cipher.read().unwrap().suffix();
     let mut count = 0;
     for entry in deletes {
+        if let Some(last) = entry.last_attempt_at.as_deref() {
+            match chrono::DateTime::parse_from_rfc3339(last) {
+                Ok(last_dt) => {
+                    let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
+                    if elapsed < crate::blob::upload::backoff_window(entry.attempt_count) {
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    // Don't strand a deletion on a corrupt timestamp; log and retry.
+                    warn!(
+                        "Delete outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
+                        entry.id
+                    );
+                }
+            }
+        }
+
         let key = tombstone_key(&entry.cloud_key, suffix);
 
         // Write only when absent. A tombstone already at the key carries the
@@ -230,7 +249,7 @@ pub async fn drain_tombstones(
                 let tombstone = BlobTombstoneJson::signed(
                     library_id,
                     entry.cloud_key.clone(),
-                    now.clone(),
+                    now_rfc.clone(),
                     keypair,
                 );
                 let bytes = match serde_json::to_vec(&tombstone) {
@@ -239,7 +258,9 @@ pub async fn drain_tombstones(
                         // Serializing our own freshly built struct cannot fail in
                         // practice; if it somehow did, leave the row queued and
                         // surface it rather than dropping the deletion silently.
+                        let msg = format!("tombstone serialization failed: {e}");
                         warn!("Failed to serialize tombstone for {}: {e}", entry.cloud_key);
+                        record_delete_failure(db, entry.id, &entry.cloud_key, &msg, &now_rfc).await;
                         continue;
                     }
                 };
@@ -259,7 +280,9 @@ pub async fn drain_tombstones(
                     // Leave the row queued for the next cycle; the deletion is
                     // durable intent and must not be dropped on a transient cloud
                     // error.
+                    let msg = format!("tombstone write failed: {e}");
                     warn!("Tombstone write failed for {}: {e}", entry.cloud_key);
+                    record_delete_failure(db, entry.id, &entry.cloud_key, &msg, &now_rfc).await;
                     continue;
                 }
                 count += 1;
@@ -268,10 +291,12 @@ pub async fn drain_tombstones(
                 // Couldn't determine whether a tombstone already exists. Writing a
                 // fresh one would risk resetting the grace; skip and retry next
                 // cycle with the row still queued.
+                let msg = format!("tombstone existence check failed: {e}");
                 warn!(
                     "Failed to check for an existing tombstone for {}: {e}",
                     entry.cloud_key
                 );
+                record_delete_failure(db, entry.id, &entry.cloud_key, &msg, &now_rfc).await;
                 continue;
             }
         }
@@ -286,6 +311,21 @@ pub async fn drain_tombstones(
     }
 
     Ok(count)
+}
+
+async fn record_delete_failure(
+    db: &Database,
+    entry_id: i64,
+    cloud_key: &str,
+    error: &str,
+    attempted_at: &str,
+) {
+    if let Err(e) = db
+        .record_cloud_delete_failure(entry_id, error, attempted_at)
+        .await
+    {
+        warn!("Failed to record delete failure for {cloud_key} (entry {entry_id}): {e}");
+    }
 }
 
 /// Garbage-collect tombstones: delete each blob whose authentic tombstone has aged
