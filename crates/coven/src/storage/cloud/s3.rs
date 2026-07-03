@@ -739,6 +739,10 @@ mod tests {
         })
         .await;
 
+        if !loopback_connects(&endpoint).await {
+            return;
+        }
+
         let home = S3CloudHome::new(
             bucket,
             "us-central1".to_string(),
@@ -757,6 +761,27 @@ mod tests {
 
         assert_eq!(bytes, range_body);
         let _ = shutdown.send(());
+    }
+
+    async fn loopback_connects(endpoint: &str) -> bool {
+        let Some(addr) = endpoint.strip_prefix("http://") else {
+            panic!("fake S3 endpoint must be an http URL, got {endpoint}");
+        };
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(_) => true,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                tracing::debug!(
+                    "skipping fake S3 endpoint test: loopback connect unavailable: {e}"
+                );
+                false
+            }
+            Err(e) => panic!("fake S3 endpoint is not reachable at {endpoint}: {e}"),
+        }
     }
 
     // ── probe() against a real S3 endpoint ──────────────────────────────
