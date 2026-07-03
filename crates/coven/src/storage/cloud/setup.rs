@@ -10,11 +10,22 @@ use tracing::info;
 
 use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, KeyService};
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+use crate::oauth::OAuthTokens;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::cloud_storage::BlobPathScheme;
 use crate::sync::cloud_storage::CloudCipher;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+fn save_oauth_tokens(key_service: &KeyService, tokens: &OAuthTokens) -> Result<(), SetupError> {
+    let token_json = serde_json::to_string(tokens)
+        .map_err(|e| SetupError(format!("Failed to serialize tokens: {e}")))?;
+    key_service
+        .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
+        .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))
+}
 
 /// Google Drive OAuth sign-in: authorize, find/create the library folder, save
 /// tokens to the keyring. Returns the folder id for the host to persist in its
@@ -57,7 +68,7 @@ pub async fn sign_in_google_drive(
         })?;
 
     if !search_resp.status().is_success() {
-        let body = search_resp.text().await.unwrap_or_default();
+        let body = super::http::body_text(search_resp).await;
         return Err(SetupError(format!(
             "Failed to search for existing Google Drive folder: {body}"
         )));
@@ -104,12 +115,7 @@ pub async fn sign_in_google_drive(
             .to_string()
     };
 
-    // Save tokens to keyring
-    let token_json = serde_json::to_string(&tokens)
-        .map_err(|e| SetupError(format!("Failed to serialize tokens: {e}")))?;
-    key_service
-        .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
-        .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))?;
+    save_oauth_tokens(key_service, &tokens)?;
 
     info!("Authorized Google Drive; folder ready");
     Ok(folder_id)
@@ -159,12 +165,7 @@ pub async fn sign_in_dropbox(
         }
     }
 
-    // Save tokens to keyring
-    let token_json = serde_json::to_string(&tokens)
-        .map_err(|e| SetupError(format!("Failed to serialize tokens: {e}")))?;
-    key_service
-        .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
-        .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))?;
+    save_oauth_tokens(key_service, &tokens)?;
 
     info!("Authorized Dropbox; folder ready");
     Ok(folder_path)
@@ -244,12 +245,7 @@ pub async fn sign_in_onedrive(
         .ok_or_else(|| SetupError("Folder response missing 'id' field".to_string()))?
         .to_string();
 
-    // Save tokens to keyring
-    let token_json = serde_json::to_string(&tokens)
-        .map_err(|e| SetupError(format!("Failed to serialize tokens: {e}")))?;
-    key_service
-        .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
-        .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))?;
+    save_oauth_tokens(key_service, &tokens)?;
 
     info!("Authorized OneDrive; folder ready");
     Ok((drive_id, folder_id))
