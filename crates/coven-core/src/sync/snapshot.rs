@@ -193,8 +193,7 @@ pub fn create_snapshot(
         .expect("temp path should be valid UTF-8");
 
     // VACUUM INTO creates a clean, defragmented copy of the live database.
-    let vacuum = format!("VACUUM INTO '{}'", path_str.replace('\'', "''"));
-    if let Err(e) = conn.execute_batch(&vacuum) {
+    if let Err(e) = conn.execute("VACUUM INTO ?1", [path_str]) {
         cleanup_snapshot_path(&snapshot_path);
         return Err(SnapshotError::VacuumFailed(e.to_string()));
     }
@@ -1604,6 +1603,33 @@ mod tests {
         assert!(
             plaintext.starts_with(b"SQLite format 3\0"),
             "snapshot should be a valid SQLite database"
+        );
+    }
+
+    #[test]
+    fn create_snapshot_accepts_apostrophe_in_temp_path() {
+        let c = synced_conn();
+        exec(
+            &c,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'Note One', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+        );
+
+        let temp = tempfile::Builder::new()
+            .prefix("snapshot-'")
+            .tempdir()
+            .unwrap();
+        let enc = test_encryption();
+        let encrypted = create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let plaintext = enc.open(encrypted).expect("open");
+
+        let db_path = temp.path().join("verify.db");
+        std::fs::write(&db_path, &plaintext).unwrap();
+        let db2 = open_db_at(&db_path);
+
+        assert_eq!(
+            query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'"),
+            "Note One"
         );
     }
 
