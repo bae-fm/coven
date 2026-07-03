@@ -98,6 +98,16 @@ impl UserKeypair {
     }
 }
 
+/// Hex-encode the public key attached to `keypair`.
+pub fn public_key_hex(keypair: &UserKeypair) -> String {
+    hex::encode(keypair.public_key)
+}
+
+/// Sign `message` and return the hex-encoded public key and detached signature.
+pub fn sign_hex(keypair: &UserKeypair, message: &[u8]) -> (String, String) {
+    (public_key_hex(keypair), hex::encode(keypair.sign(message)))
+}
+
 /// Verify a detached Ed25519 signature against a public key.
 pub fn verify_signature(
     signature: &[u8; SIGN_BYTES],
@@ -207,6 +217,17 @@ mod tests {
 
         let sig = kp.sign(message);
         assert!(verify_signature(&sig, message, &kp.public_key));
+    }
+
+    #[test]
+    fn sign_hex_returns_public_key_and_valid_signature() {
+        let kp = UserKeypair::generate();
+        let message = b"changeset payload";
+
+        let (pk_hex, sig_hex) = sign_hex(&kp, message);
+
+        assert_eq!(pk_hex, public_key_hex(&kp));
+        assert!(verify_signature_hex(&pk_hex, &sig_hex, message));
     }
 
     #[test]

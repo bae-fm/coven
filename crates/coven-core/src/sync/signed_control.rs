@@ -68,13 +68,13 @@ impl HeadJson {
         keypair: &UserKeypair,
     ) -> Self {
         let payload = head_signing_payload(device_id, seq, snapshot_seq, last_sync.as_deref());
-        let sig = keypair.sign(&payload);
+        let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         HeadJson {
             seq,
             snapshot_seq,
             last_sync,
-            author_pubkey: hex::encode(keypair.public_key),
-            signature: hex::encode(sig),
+            author_pubkey,
+            signature,
         }
     }
 
@@ -154,11 +154,11 @@ impl AckJson {
         keypair: &UserKeypair,
     ) -> Self {
         let payload = ack_signing_payload(device_id, &cursors);
-        let sig = keypair.sign(&payload);
+        let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         AckJson {
             cursors,
-            author_pubkey: hex::encode(keypair.public_key),
-            signature: hex::encode(sig),
+            author_pubkey,
+            signature,
         }
     }
 
@@ -199,11 +199,12 @@ impl MinSchemaVersionJson {
     /// production caller (the read/`verify` side is live).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn signed(min_schema_version: u32, keypair: &UserKeypair) -> Self {
-        let sig = keypair.sign(&min_schema_signing_payload(min_schema_version));
+        let (author_pubkey, signature) =
+            keys::sign_hex(keypair, &min_schema_signing_payload(min_schema_version));
         MinSchemaVersionJson {
             min_schema_version,
-            author_pubkey: hex::encode(keypair.public_key),
-            signature: hex::encode(sig),
+            author_pubkey,
+            signature,
         }
     }
 
@@ -217,9 +218,16 @@ impl MinSchemaVersionJson {
     }
 }
 
+#[derive(Serialize)]
+struct MinSchemaFields {
+    min_schema_version: u32,
+}
+
 fn min_schema_signing_payload(version: u32) -> Vec<u8> {
-    // A single integer field; its big-endian bytes are a canonical payload.
-    version.to_be_bytes().to_vec()
+    serde_json::to_vec(&MinSchemaFields {
+        min_schema_version: version,
+    })
+    .expect("min schema fields serialization cannot fail")
 }
 
 /// Serialized form of a snapshot generation's
@@ -298,13 +306,13 @@ impl SnapshotMetaJson {
         keypair: &UserKeypair,
     ) -> Self {
         let payload = snapshot_meta_signing_payload(library_id, &cursors, &db_hash, schema_version);
-        let sig = keypair.sign(&payload);
+        let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         SnapshotMetaJson {
             cursors,
             db_hash,
             schema_version,
-            author_pubkey: hex::encode(keypair.public_key),
-            signature: hex::encode(sig),
+            author_pubkey,
+            signature,
         }
     }
 
@@ -411,12 +419,12 @@ impl SnapshotPointerJson {
     /// its own to [`Self::verify`].
     pub fn signed(library_id: &str, seq: u64, db_hash: String, keypair: &UserKeypair) -> Self {
         let payload = snapshot_pointer_signing_payload(library_id, seq, &db_hash);
-        let sig = keypair.sign(&payload);
+        let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         SnapshotPointerJson {
             seq,
             db_hash,
-            author_pubkey: hex::encode(keypair.public_key),
-            signature: hex::encode(sig),
+            author_pubkey,
+            signature,
         }
     }
 
@@ -513,10 +521,10 @@ impl WrappedLibraryKey {
     ) -> Self {
         let sealed_hex = hex::encode(sealed);
         let payload = wrapped_key_signing_payload(library_id, recipient_pubkey, &sealed_hex);
-        let sig = owner.sign(&payload);
+        let (_, signature) = keys::sign_hex(owner, &payload);
         WrappedLibraryKey {
             sealed: sealed_hex,
-            signature: hex::encode(sig),
+            signature,
         }
     }
 
@@ -692,6 +700,14 @@ mod tests {
         let mut tampered = MinSchemaVersionJson::signed(5, &kp);
         tampered.min_schema_version = 9999;
         assert!(!tampered.verify());
+    }
+
+    #[test]
+    fn min_schema_signing_payload_is_canonical_json() {
+        assert_eq!(
+            min_schema_signing_payload(5),
+            br#"{"min_schema_version":5}"#
+        );
     }
 
     #[test]
@@ -933,7 +949,8 @@ mod tests {
             signature: String::new(),
         };
         let payload = wrapped_key_signing_payload("lib", "recipient-pk", &wrapped.sealed);
-        wrapped.signature = hex::encode(owner.sign(&payload));
+        let (_, signature) = keys::sign_hex(&owner, &payload);
+        wrapped.signature = signature;
 
         assert!(matches!(
             wrapped.verify_and_unwrap("lib", "recipient-pk", &owner_hex),

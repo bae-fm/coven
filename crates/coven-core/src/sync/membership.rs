@@ -142,7 +142,7 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
 /// entry at creation, and the chain is later anchored to `owner`'s pubkey so no
 /// one can wipe `membership/*` and refound themselves as Owner (issue #95).
 pub fn founder_entry(owner: &UserKeypair, timestamp: &str) -> MembershipEntry {
-    let pk_hex = hex::encode(owner.public_key);
+    let pk_hex = keys::public_key_hex(owner);
     let mut entry = MembershipEntry {
         action: MembershipAction::Add,
         user_pubkey: pk_hex.clone(),
@@ -160,10 +160,10 @@ pub fn founder_entry(owner: &UserKeypair, timestamp: &str) -> MembershipEntry {
 ///
 /// Sets `author_pubkey` and `signature` on the entry.
 pub fn sign_membership_entry(entry: &mut MembershipEntry, keypair: &UserKeypair) {
-    entry.author_pubkey = hex::encode(keypair.public_key);
+    entry.author_pubkey = keys::public_key_hex(keypair);
     let bytes = canonical_bytes(entry);
-    let sig = keypair.sign(&bytes);
-    entry.signature = hex::encode(sig);
+    let (_, signature) = keys::sign_hex(keypair, &bytes);
+    entry.signature = signature;
 }
 
 /// Verify the signature on a membership entry.

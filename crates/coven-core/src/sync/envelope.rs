@@ -74,9 +74,10 @@ fn signing_payload(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> Vec<u8> {
 /// hex-encoded detached signature over the envelope metadata and changeset
 /// bytes (see `signing_payload`).
 pub fn sign_envelope(env: &mut ChangesetEnvelope, keypair: &UserKeypair, changeset_bytes: &[u8]) {
-    let sig = keypair.sign(&signing_payload(env, changeset_bytes));
-    env.author_pubkey = Some(hex::encode(keypair.public_key));
-    env.signature = Some(hex::encode(sig));
+    let (author_pubkey, signature) =
+        keys::sign_hex(keypair, &signing_payload(env, changeset_bytes));
+    env.author_pubkey = Some(author_pubkey);
+    env.signature = Some(signature);
 }
 
 /// Verify the signature on a changeset envelope.
@@ -190,7 +191,7 @@ mod tests {
             device_id: "dev-abc123".into(),
             seq: 42,
             schema_version: 2,
-            message: "Imported Album One".into(),
+            message: "Imported release placeholder".into(),
             timestamp: "2026-02-10T14:30:00Z".into(),
             changeset_size: 4096,
             author_pubkey: None,
