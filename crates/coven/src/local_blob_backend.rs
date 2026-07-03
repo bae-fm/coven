@@ -67,6 +67,9 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("create parent dir for {}: {e}", dst.display()))?;
+        // A temp sibling in the destination directory keeps the rename within one
+        // filesystem, so readers see either the previous destination or the whole
+        // copied file.
         let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
 
         let copy = async {
@@ -76,6 +79,8 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
             let mut out = tokio::fs::File::create(&tmp)
                 .await
                 .map_err(|e| format!("create temp pin {}: {e}", tmp.display()))?;
+            // Stream src into the temp file in bounded windows, then fsync the
+            // temp before its name can become the destination.
             let mut buf = vec![0u8; 1 << 20];
             loop {
                 let n = input
@@ -96,6 +101,8 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         }
         .await;
         if let Err(e) = copy {
+            // The destination still points at the old file or is absent; remove
+            // only the temp debris left by the failed copy.
             if let Err(rm) = tokio::fs::remove_file(&tmp).await {
                 tracing::warn!(
                     "could not remove temp pin {} after a failed copy: {rm}",
@@ -105,6 +112,8 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
             return Err(e);
         }
         if let Err(e) = tokio::fs::rename(&tmp, dst).await {
+            // A failed rename leaves the destination unchanged; remove only the
+            // temp file the caller should not observe.
             if let Err(rm) = tokio::fs::remove_file(&tmp).await {
                 tracing::warn!(
                     "could not remove temp pin {} after a failed rename: {rm}",
@@ -157,6 +166,9 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
+        // A temp sibling in the same directory keeps the final rename on one
+        // filesystem. The destination name does not point at the new bytes until
+        // the temp file has been fully written and fsynced.
         let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
 
         let write_tmp = async {
@@ -173,6 +185,8 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         }
         .await;
         if let Err(e) = write_tmp {
+            // A failed temp write leaves the destination untouched; remove only
+            // the temp debris so a retry starts from the same visible state.
             if let Err(rm) = tokio::fs::remove_file(&tmp).await {
                 tracing::warn!(
                     "could not remove temp blob {} after a failed write: {rm}",
@@ -183,6 +197,8 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         }
 
         if let Err(e) = tokio::fs::rename(&tmp, path).await {
+            // A failed rename leaves the old destination visible; remove only the
+            // temp file that never became authoritative.
             if let Err(rm) = tokio::fs::remove_file(&tmp).await {
                 tracing::warn!(
                     "could not remove temp blob {} after a failed rename: {rm}",
@@ -195,6 +211,11 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
                 path.display()
             ));
         }
+        // No parent-directory fsync. Cache correctness needs atomic visibility:
+        // a reader sees the old file or the whole new one, never a torn file.
+        // The cache is a mirror of cloud blobs, so losing the post-rename
+        // directory entry to a crash means the blob is absent and can be fetched
+        // again; preserving that directory entry is not part of this contract.
         Ok(())
     }
 

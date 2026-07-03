@@ -4,16 +4,14 @@
 //! pull (after downloading and decrypting); the cache ([`crate::blob::cache`])
 //! decides where each file lives (`storage/pinned/<id>` or `storage/cache/<id>`,
 //! built from the validated blob id). This module is just the read / write / exists
-//! primitives over whatever storage the target platform has.
+//! primitives over the browser's Origin Private File System.
 //!
-//! - **Native** uses the filesystem through `tokio::fs`, so a large blob's read or
-//!   write runs on the blocking pool instead of stalling the sync loop.
-//! - **wasm** has no `std::fs`, so it uses the browser's Origin Private File System,
-//!   reached through the dedicated DB Worker's *synchronous* access handles — the
-//!   same stable OPFS API the SQLite VFS runs on. Getting a handle is async (it is
-//!   awaited here); the read/write through it is synchronous. An absolute coven path
-//!   like `/coven/images/ab/cd/<id>` maps to nested OPFS directories ending in the
-//!   file, so the on-disk layout the host names is preserved under the OPFS root.
+//! wasm has no `std::fs`, so this module uses OPFS through the dedicated DB
+//! Worker's *synchronous* access handles — the same stable OPFS API the SQLite
+//! VFS runs on. Getting a handle is async (it is awaited here); the read/write
+//! through it is synchronous. An absolute coven path like
+//! `/coven/images/ab/cd/<id>` maps to nested OPFS directories ending in the file,
+//! so the on-disk layout the host names is preserved under the OPFS root.
 
 use std::path::Path;
 
@@ -90,9 +88,8 @@ impl PlatformLocalBlobBackend for OpfsLocalBlobBackend {
 /// [`crate::storage::cloud::BlobBody`]: each [`next_chunk`](PlaintextReader::next_chunk)
 /// returns up to `max` more bytes, and an empty result marks end of file.
 ///
-/// Native: a `tokio::fs::File` read on the blocking pool. wasm: an OPFS sync-access
-/// handle read at a running offset (the handle is held open for the reader's life
-/// and closed on drop).
+/// Backed by an OPFS sync-access handle read at a running offset; the handle is
+/// held open for the reader's life and closed on drop.
 pub struct PlaintextReader(imp::PlaintextReader);
 
 impl PlaintextReader {
@@ -119,12 +116,10 @@ pub async fn file_len(path: &Path) -> Result<u64, String> {
     imp::file_len(path).await
 }
 
-/// Stream-copy the plaintext file at `src` to `dst` atomically, creating `dst`'s
-/// parent directories. Used to pin a just-uploaded blob into the protected cache
-/// folder without materializing it in RAM: a 1.5 GB pinned blob is copied window
-/// by window. Native: temp-in-same-dir + fsync + rename, the same atomicity guard
-/// as [`write_atomic`]. wasm/OPFS: a whole-file read+write (no cross-file rename),
-/// the same best-effort posture every other OPFS write here takes.
+/// Copy the plaintext file at `src` to `dst`, creating `dst`'s parent
+/// directories. Used to pin a just-uploaded blob into the protected cache
+/// folder. OPFS has no cross-file rename, so this is a whole-file read followed
+/// by [`write_atomic`].
 pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
     imp::copy_atomic(src, dst).await
 }
@@ -152,26 +147,11 @@ pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, S
     imp::read_range(path, offset, len).await
 }
 
-/// Write `bytes` to `path` ATOMICALLY: a concurrent or post-crash reader sees
-/// either the previous file or the whole new one, never a torn prefix. This is the
-/// guarantee callers depend on — the cache treats "the file exists" as equivalent to
-/// "all the bytes are there" (presence is the only truth, no length or checksum
-/// column), so every cache write goes through this rather than the in-place
-/// platform helper, which truncates the destination before refilling it.
-///
-/// Native: write a temp file in the same directory, fsync it, then `rename` it over the
-/// destination (atomic on one filesystem) — a reader sees the old file or the whole new
-/// one, never a torn one. There is deliberately no parent-directory fsync, and thus no
-/// durability sub-step that could fail after the rename: the cache is a re-fetchable
-/// mirror of the cloud, not a durable store. If a crash loses the rename's directory
-/// entry, the blob is simply absent — indistinguishable from one that was never cached,
-/// handled by the same fetch-on-read path, not a wrong state anyone reconciles. (Dir
-/// fsync isn't portable anyway — Windows has no handle-based dir flush.)
-///
-/// wasm/OPFS: delegates to the private whole-file sync-access write helper. OPFS
-/// has no cross-file rename to build temp→rename atomicity from, so this is the
-/// best available whole-file write on that platform, with the same
-/// re-fetchable-cache safety net the native path relies on.
+/// Write `bytes` to `path` through OPFS's sync-access-handle path, creating any
+/// missing parent directories. OPFS exposes no cross-file rename for the native
+/// temp→rename shape, so this delegates to [`write`]: truncate, write the whole
+/// payload, then flush the handle. The cache remains a re-fetchable mirror of
+/// cloud blobs on this platform.
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     imp::write_atomic(path, bytes).await
 }
@@ -191,10 +171,9 @@ pub async fn exists(path: &Path) -> Result<bool, String> {
 /// destination's parent directories must already exist (the cache creates them via
 /// [`create_dir_all`] first).
 ///
-/// Native: a `tokio::fs::rename`, atomic within one filesystem — a reader never
-/// sees the blob in both folders or neither. wasm/OPFS has no cross-directory
-/// rename, so this is copy-then-delete and is NOT atomic; see the wasm `imp` for
-/// why a transient duplicate is benign for a re-fetchable cache.
+/// OPFS has no cross-directory rename, so this is copy-then-delete and is NOT
+/// atomic; see the implementation for why a transient duplicate is benign for a
+/// re-fetchable cache.
 pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
     imp::rename(from, to).await
 }
@@ -229,8 +208,8 @@ pub async fn create_dir_all(path: &Path) -> Result<(), String> {
 
 /// Enumerate every file in the tree rooted at `dir`, returning `(path, recency,
 /// size)` per file — the input to a budget eviction sweep over `storage/cache/`.
-/// `recency` is milliseconds since the Unix epoch (native: the file's modification
-/// time; wasm: `File.lastModified`), larger meaning more recently written, so the
+/// `recency` is milliseconds since the Unix epoch (`File.lastModified`),
+/// larger meaning more recently written, so the
 /// caller evicts the smallest `recency` first. `size` is the file's byte length.
 ///
 /// An absent `dir` is an empty result, not an error: nothing has been cached yet,
@@ -241,329 +220,6 @@ pub async fn create_dir_all(path: &Path) -> Result<(), String> {
 /// than under-counting and silently drifting over budget.
 pub async fn walk_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)>, String> {
     imp::walk_files(dir).await
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-mod imp {
-    use std::path::Path;
-
-    use tokio::io::AsyncReadExt;
-
-    /// Native incremental reader: a `tokio::fs::File` plus the per-call fill loop.
-    pub struct PlaintextReader {
-        file: tokio::fs::File,
-        path: std::path::PathBuf,
-    }
-
-    impl PlaintextReader {
-        pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
-            debug_assert!(max > 0, "next_chunk max must be positive");
-            let mut buf = vec![0u8; max];
-            let mut filled = 0;
-            // `read` may return fewer bytes than requested mid-file, so loop until
-            // the window is full or EOF — a non-final chunk must be exactly `max`.
-            while filled < max {
-                let n = self
-                    .file
-                    .read(&mut buf[filled..])
-                    .await
-                    .map_err(|e| format!("read local blob {}: {e}", self.path.display()))?;
-                if n == 0 {
-                    break;
-                }
-                filled += n;
-            }
-            buf.truncate(filled);
-            Ok(buf)
-        }
-    }
-
-    pub async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
-        let file = tokio::fs::File::open(path)
-            .await
-            .map_err(|e| format!("open local blob {} for streaming: {e}", path.display()))?;
-        Ok(PlaintextReader {
-            file,
-            path: path.to_path_buf(),
-        })
-    }
-
-    pub async fn file_len(path: &Path) -> Result<u64, String> {
-        tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len())
-            .map_err(|e| format!("stat local blob {}: {e}", path.display()))
-    }
-
-    pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
-        use tokio::io::AsyncWriteExt;
-
-        let parent = dst
-            .parent()
-            .ok_or_else(|| format!("blob path has no parent dir: {}", dst.display()))?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create parent dir for {}: {e}", dst.display()))?;
-        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
-
-        let copy = async {
-            let mut input = tokio::fs::File::open(src)
-                .await
-                .map_err(|e| format!("open pin source {}: {e}", src.display()))?;
-            let mut out = tokio::fs::File::create(&tmp)
-                .await
-                .map_err(|e| format!("create temp pin {}: {e}", tmp.display()))?;
-            // Stream src → tmp in bounded windows so a large blob never lands whole
-            // in RAM (the whole point of pinning from the path, not the plaintext).
-            let mut buf = vec![0u8; 1 << 20];
-            loop {
-                let n = input
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| format!("read pin source {}: {e}", src.display()))?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buf[..n])
-                    .await
-                    .map_err(|e| format!("write temp pin {}: {e}", tmp.display()))?;
-            }
-            out.sync_all()
-                .await
-                .map_err(|e| format!("fsync temp pin {}: {e}", tmp.display()))?;
-            Ok::<(), String>(())
-        }
-        .await;
-        if let Err(e) = copy {
-            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
-                tracing::warn!(
-                    "could not remove temp pin {} after a failed copy: {rm}",
-                    tmp.display()
-                );
-            }
-            return Err(e);
-        }
-        if let Err(e) = tokio::fs::rename(&tmp, dst).await {
-            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
-                tracing::warn!(
-                    "could not remove temp pin {} after a failed rename: {rm}",
-                    tmp.display()
-                );
-            }
-            return Err(format!(
-                "rename temp pin {} -> {}: {e}",
-                tmp.display(),
-                dst.display()
-            ));
-        }
-        Ok(())
-    }
-
-    pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
-        tokio::fs::read(path)
-            .await
-            .map_err(|e| format!("read local blob {}: {e}", path.display()))
-    }
-
-    pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let mut file = tokio::fs::File::open(path)
-            .await
-            .map_err(|e| format!("open local blob {} for ranged read: {e}", path.display()))?;
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|e| format!("seek local blob {} to {offset}: {e}", path.display()))?;
-        // `read_exact` errors if fewer than `len` bytes remain rather than
-        // returning a short buffer, so a request past the file's end fails loudly
-        // instead of silently truncating the served range.
-        let mut buf = vec![0u8; len as usize];
-        file.read_exact(&mut buf).await.map_err(|e| {
-            format!(
-                "read {len} bytes at {offset} from local blob {}: {e}",
-                path.display()
-            )
-        })?;
-        Ok(buf)
-    }
-
-    pub async fn exists(path: &Path) -> Result<bool, String> {
-        tokio::fs::try_exists(path)
-            .await
-            .map_err(|e| format!("check local blob {}: {e}", path.display()))
-    }
-
-    pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-        use tokio::io::AsyncWriteExt;
-
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-
-        // A temp sibling in the SAME directory, so the rename below is within one
-        // filesystem (cross-filesystem rename is not atomic). A v4 uuid suffix keeps
-        // two concurrent writers of the same blob from colliding on the temp name.
-        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
-
-        // Write + fsync the temp file fully before it is renamed into place: the
-        // bytes must be durable on disk before the destination name points at them,
-        // or a crash could surface a present-but-empty/torn blob the cache would
-        // trust. On any failure remove the temp so a retry isn't blocked by debris.
-        let write_tmp = async {
-            let mut file = tokio::fs::File::create(&tmp)
-                .await
-                .map_err(|e| format!("create temp blob {}: {e}", tmp.display()))?;
-            file.write_all(bytes)
-                .await
-                .map_err(|e| format!("write temp blob {}: {e}", tmp.display()))?;
-            file.sync_all()
-                .await
-                .map_err(|e| format!("fsync temp blob {}: {e}", tmp.display()))?;
-            Ok::<(), String>(())
-        }
-        .await;
-        if let Err(e) = write_tmp {
-            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
-                tracing::warn!(
-                    "could not remove temp blob {} after a failed write: {rm}",
-                    tmp.display()
-                );
-            }
-            return Err(e);
-        }
-
-        if let Err(e) = tokio::fs::rename(&tmp, path).await {
-            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
-                tracing::warn!(
-                    "could not remove temp blob {} after a failed rename: {rm}",
-                    tmp.display()
-                );
-            }
-            return Err(format!(
-                "rename temp blob {} -> {}: {e}",
-                tmp.display(),
-                path.display()
-            ));
-        }
-
-        // No parent-directory fsync. The guarantee write_atomic makes is atomicity:
-        // a reader sees the old file or the whole new one, never a torn one — given by
-        // fsyncing the temp before the rename and the rename being atomic. It does NOT
-        // promise the new directory entry survives a crash; that would need a parent
-        // fsync, which isn't portable (Windows has no handle-based dir flush) and isn't
-        // needed here — every blob the cache holds is re-fetchable from the cloud, so a
-        // rename lost to a crash is re-fetched on the next read, never corruption. There
-        // is thus no durability sub-step that could fail after this point.
-        Ok(())
-    }
-
-    pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
-        tokio::fs::rename(from, to)
-            .await
-            .map_err(|e| format!("rename {} -> {}: {e}", from.display(), to.display()))
-    }
-
-    pub async fn remove_file(path: &Path) -> Result<bool, String> {
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(format!("remove file {}: {e}", path.display())),
-        }
-    }
-
-    #[cfg(test)]
-    pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
-        match tokio::fs::remove_dir_all(path).await {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(format!("remove dir tree {}: {e}", path.display())),
-        }
-    }
-
-    pub async fn create_dir_all(path: &Path) -> Result<(), String> {
-        tokio::fs::create_dir_all(path)
-            .await
-            .map_err(|e| format!("create dir tree {}: {e}", path.display()))
-    }
-
-    pub async fn walk_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)>, String> {
-        // Descend the tree with an explicit stack and collect only leaf files. The
-        // cache stores blobs under a two-level shard (`{ab}/{cd}/<id>`), so the walk
-        // is shallow but recursive.
-        let mut files = Vec::new();
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(d) = stack.pop() {
-            let mut read_dir = match tokio::fs::read_dir(&d).await {
-                Ok(rd) => rd,
-                // No dir (the whole tree, or a shard removed mid-walk) — nothing more
-                // to measure down this branch. A legitimate skip, logged so it is not
-                // silent.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::debug!(
-                        "walk_files: {} absent, skipping (empty tree or concurrently-removed dir)",
-                        d.display()
-                    );
-                    continue;
-                }
-                Err(e) => return Err(format!("read dir {}: {e}", d.display())),
-            };
-
-            loop {
-                let entry = match read_dir.next_entry().await {
-                    Ok(Some(entry)) => entry,
-                    Ok(None) => break,
-                    Err(e) => return Err(format!("read dir entry under {}: {e}", d.display())),
-                };
-                let path = entry.path();
-                let metadata = match entry.metadata().await {
-                    Ok(metadata) => metadata,
-                    // Vanished between listing and stat (a concurrent sweep or test
-                    // reset) — it no longer occupies the tree, so it drops out.
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        tracing::debug!(
-                            "walk_files: {} vanished between listing and stat, skipping",
-                            path.display()
-                        );
-                        continue;
-                    }
-                    Err(e) => return Err(format!("stat entry {}: {e}", path.display())),
-                };
-                if metadata.is_dir() {
-                    stack.push(path);
-                } else {
-                    let recency = mtime_millis(&metadata, &path)?;
-                    files.push((path, recency, metadata.len()));
-                }
-            }
-        }
-        Ok(files)
-    }
-
-    /// Milliseconds since the Unix epoch from a file's modification time — the
-    /// recency key eviction sorts on. A pre-epoch mtime (impossible for a file the
-    /// cache wrote, but bad data if it occurs) fails loudly rather than wrapping to
-    /// a bogus key.
-    fn mtime_millis(metadata: &std::fs::Metadata, path: &Path) -> Result<u64, String> {
-        let mtime = metadata
-            .modified()
-            .map_err(|e| format!("modified time of {}: {e}", path.display()))?;
-        let millis = mtime
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| {
-                format!(
-                    "modified time of {} predates the Unix epoch: {e}",
-                    path.display()
-                )
-            })?
-            .as_millis();
-        Ok(millis as u64)
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -792,7 +448,7 @@ mod imp {
 
     pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
         // OPFS has no cross-file rename, so the pin copy is a whole-file read+write
-        // — the same best-effort atomicity every OPFS write here relies on.
+        // through the same sync-access-handle path as every OPFS write here.
         let bytes = read(src).await?;
         write_atomic(dst, &bytes).await
     }
@@ -843,7 +499,7 @@ mod imp {
     /// `read_range` always `close()`s the handle afterward. A sync-access read
     /// positioned at `offset` returns however many bytes are available there; if
     /// that is short of `len` the file doesn't cover the range, so this errors
-    /// rather than returning a truncated slice — matching the native `read_exact`.
+    /// rather than returning a truncated slice.
     fn read_range_at(
         sah: &FileSystemSyncAccessHandle,
         offset: u64,
@@ -914,23 +570,19 @@ mod imp {
         }
     }
 
-    /// OPFS has no cross-file rename to build a temp→rename atomic write from, but
-    /// the sync-access-handle write `write` performs IS OPFS's atomic unit: it
-    /// truncates then writes the whole payload through one handle, and a reader can't
-    /// observe a torn intermediate. So the atomic-write contract is already met by
-    /// delegating — this is the real OPFS guarantee, not a stand-in.
+    /// OPFS has no cross-file rename to build a temp→rename write from, so the
+    /// wasm backend uses the same sync-access-handle write path as [`write`].
     pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         write(path, bytes).await
     }
 
     /// OPFS has no cross-directory rename, so a move is copy-then-delete: read the
     /// source's whole contents, write them to the destination (creating its parent
-    /// directories), then remove the source. Unlike the native `rename` this is NOT
-    /// atomic — a crash between the write and the delete leaves the blob in both
-    /// places — but every blob the cache moves is re-fetchable from the cloud and a
-    /// read checks both folders, so a transient duplicate is benign (it serves the
-    /// same bytes from either folder), the same best-effort posture every other OPFS
-    /// write here takes.
+    /// directories), then remove the source. This is NOT atomic — a crash between
+    /// the write and the delete leaves the blob in both places — but every blob the
+    /// cache moves is re-fetchable from the cloud and a read checks both folders,
+    /// so a transient duplicate is benign because either folder serves the same
+    /// bytes.
     pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
         let from_fh = file_handle(from, false)
             .await
@@ -1007,7 +659,7 @@ mod imp {
 
     pub async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
         // An absent root directory means nothing has been cached yet — an empty
-        // result, the same posture the native walk takes on a missing dir.
+        // result.
         let start = match dir_handle(dir, false).await {
             Ok(start) => start,
             Err(HandleError::NotFound) => return Ok(Vec::new()),
@@ -1055,7 +707,7 @@ mod imp {
                     // `File.size` and `File.lastModified` give eviction the bytes and
                     // the recency key without opening (and locking) a sync-access
                     // handle. lastModified is milliseconds since the Unix epoch — the
-                    // same unit the native mtime path yields.
+                    // same unit the public API returns.
                     let file = JsFuture::from(fh.get_file()).await.map_err(|e| {
                         format!("OPFS getFile {}: {}", child.display(), err_str(&e))
                     })?;
