@@ -78,8 +78,10 @@ pub struct MinSchemaVersion {
 /// Error type for storage operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
-    #[error("S3 operation failed: {0}")]
-    S3(String),
+    #[error("storage operation failed: {0}")]
+    Storage(String),
+    #[error("storage object parse failed: {0}")]
+    Parse(String),
     #[error("object not found: {0}")]
     NotFound(String),
     #[error("decryption failed: {0}")]
@@ -90,9 +92,9 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
     fn from(e: crate::storage::cloud::CloudHomeError) -> Self {
         match e {
             crate::storage::cloud::CloudHomeError::NotFound(key) => StorageError::NotFound(key),
-            crate::storage::cloud::CloudHomeError::Storage(msg) => StorageError::S3(msg),
+            crate::storage::cloud::CloudHomeError::Storage(msg) => StorageError::Storage(msg),
             crate::storage::cloud::CloudHomeError::Io(io_err) => {
-                StorageError::S3(format!("I/O error: {io_err}"))
+                StorageError::Storage(format!("I/O error: {io_err}"))
             }
         }
     }
@@ -103,7 +105,7 @@ impl From<crate::library_dir::PathTokenError> for StorageError {
     /// data, surfaced so the caller refuses the blob rather than reaching storage
     /// with a key that could escape its prefix.
     fn from(e: crate::library_dir::PathTokenError) -> Self {
-        StorageError::S3(format!("unsafe blob path: {e}"))
+        StorageError::Parse(format!("unsafe blob path: {e}"))
     }
 }
 

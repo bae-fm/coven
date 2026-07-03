@@ -577,7 +577,7 @@ impl SyncStorage for MockSyncStorage {
         let mut out = Vec::new();
         for (device_id, bytes) in heads.iter() {
             let head: HeadJson = serde_json::from_slice(bytes)
-                .map_err(|e| StorageError::S3(format!("parse head {device_id}: {e}")))?;
+                .map_err(|e| StorageError::Parse(format!("parse head {device_id}: {e}")))?;
             // Mirror the cloud: a head whose signature doesn't verify against its
             // slot is skipped, not returned — and logged, like production.
             if !head.verify(device_id) {
@@ -643,7 +643,7 @@ impl SyncStorage for MockSyncStorage {
             )
             .is_ok()
         {
-            return Err(StorageError::S3(format!(
+            return Err(StorageError::Storage(format!(
                 "forced blob upload failure for {namespace}/{id}"
             )));
         }
@@ -687,10 +687,10 @@ impl SyncStorage for MockSyncStorage {
             return Ok(Vec::new());
         }
         let end = offset.checked_add(len).ok_or_else(|| {
-            StorageError::S3(format!("blob range overflow: offset={offset}, len={len}"))
+            StorageError::Storage(format!("blob range overflow: offset={offset}, len={len}"))
         })?;
         if end > source_size {
-            return Err(StorageError::S3(format!(
+            return Err(StorageError::Storage(format!(
                 "blob range {offset}..{end} exceeds blob size {source_size}"
             )));
         }
@@ -767,7 +767,7 @@ impl SyncStorage for MockSyncStorage {
             return Ok(None);
         };
         let parsed: MinSchemaVersionJson = serde_json::from_slice(bytes)
-            .map_err(|e| StorageError::S3(format!("parse min_schema_version: {e}")))?;
+            .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
         // Mirror the cloud: an unverifiable floor is treated as absent, and logged.
         if !parsed.verify() {
             tracing::warn!("ignoring min_schema_version with an invalid signature");
@@ -817,7 +817,9 @@ impl SyncStorage for MockSyncStorage {
             .fail_membership_list
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(StorageError::S3("injected membership-list failure".into()));
+            return Err(StorageError::Storage(
+                "injected membership-list failure".into(),
+            ));
         }
         let objects = self.objects.lock().unwrap();
         let hidden = self.hidden_from_listing.lock().unwrap();

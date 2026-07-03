@@ -241,7 +241,7 @@ impl CloudSyncStorage {
             }
             BlobPathScheme::Plain => {
                 let path = cloud_path.ok_or_else(|| {
-                    StorageError::S3(format!(
+                    StorageError::Parse(format!(
                         "unobfuscated blob-path home requires a cloud_path for blob {namespace}/{id}"
                     ))
                 })?;
@@ -352,10 +352,10 @@ impl BlobRangeReader {
             return Ok(Vec::new());
         }
         let end = offset.checked_add(len).ok_or_else(|| {
-            StorageError::S3(format!("blob range overflow: offset={offset}, len={len}"))
+            StorageError::Storage(format!("blob range overflow: offset={offset}, len={len}"))
         })?;
         if end > self.source_size {
-            return Err(StorageError::S3(format!(
+            return Err(StorageError::Storage(format!(
                 "blob range {offset}..{end} exceeds blob size {}",
                 self.source_size
             )));
@@ -423,7 +423,7 @@ impl SyncStorage for CloudSyncStorage {
                 .strip_prefix("heads/")
                 .and_then(|s| s.strip_suffix(suffix))
                 .and_then(|s| s.strip_suffix(".json"))
-                .ok_or_else(|| StorageError::S3(format!("unexpected head key format: {key}")))?;
+                .ok_or_else(|| StorageError::Parse(format!("unexpected head key format: {key}")))?;
 
             let stored = self.home.read(key).await?;
             // A head we can't open is not ours: a head a *different* library
@@ -443,7 +443,7 @@ impl SyncStorage for CloudSyncStorage {
             };
 
             let head_json: HeadJson = serde_json::from_slice(&decoded)
-                .map_err(|e| StorageError::S3(format!("parse head {device_id}: {e}")))?;
+                .map_err(|e| StorageError::Parse(format!("parse head {device_id}: {e}")))?;
 
             // A head whose signature doesn't verify against its embedded author
             // is forged (the bucket is untrusted) -- skip it like one we can't
@@ -508,7 +508,7 @@ impl SyncStorage for CloudSyncStorage {
             &self.keypair,
         );
         let json = serde_json::to_vec(&head)
-            .map_err(|e| StorageError::S3(format!("serialize head: {e}")))?;
+            .map_err(|e| StorageError::Parse(format!("serialize head: {e}")))?;
         let stored = self.cipher().seal(json);
         let key = format!("heads/{device_id}.json{}", self.suffix());
         self.home
@@ -664,7 +664,7 @@ impl SyncStorage for CloudSyncStorage {
             .map_err(|e| StorageError::Decryption(format!("min_schema_version: {e}")))?;
 
         let parsed: MinSchemaVersionJson = serde_json::from_slice(&decoded)
-            .map_err(|e| StorageError::S3(format!("parse min_schema_version: {e}")))?;
+            .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
 
         // The bucket is untrusted: a floor set by anyone with the credential can
         // freeze the fleet or force a downgrade. Treat a value whose signature
@@ -685,7 +685,7 @@ impl SyncStorage for CloudSyncStorage {
     async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
         let payload = MinSchemaVersionJson::signed(version, &self.keypair);
         let json = serde_json::to_vec(&payload)
-            .map_err(|e| StorageError::S3(format!("serialize min_schema_version: {e}")))?;
+            .map_err(|e| StorageError::Parse(format!("serialize min_schema_version: {e}")))?;
         let stored = self.cipher().seal(json);
         let key = format!("min_schema_version.json{}", self.suffix());
         self.home
@@ -1424,9 +1424,11 @@ mod tests {
     /// blobs under unfindable keys). Asserts both `blob_key` and `put_blob` error.
     #[tokio::test]
     async fn plain_scheme_without_cloud_path_errors() {
+        let err = CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", "id-1", None)
+            .expect_err("plain home with no cloud_path must error");
         assert!(
-            CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", "id-1", None).is_err(),
-            "blob_key for a plain home with no cloud_path must error",
+            matches!(err, StorageError::Parse(_)),
+            "plain home with no cloud_path is invalid object data, got {err}",
         );
 
         let storage = CloudSyncStorage::new(
@@ -1435,12 +1437,13 @@ mod tests {
             BlobPathScheme::Plain,
             UserKeypair::generate(),
         );
+        let err = storage
+            .put_blob("images", "id-1", ResolvedScope::Master, None, b"x".to_vec())
+            .await
+            .expect_err("put_blob for a plain home with no cloud_path must error");
         assert!(
-            storage
-                .put_blob("images", "id-1", ResolvedScope::Master, None, b"x".to_vec())
-                .await
-                .is_err(),
-            "put_blob for a plain home with no cloud_path must error, not silently hash",
+            matches!(err, StorageError::Parse(_)),
+            "put_blob for a plain home with no cloud_path must not silently hash, got {err}",
         );
     }
 
