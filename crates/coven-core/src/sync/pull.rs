@@ -137,7 +137,6 @@ struct DeferredChangeset {
 /// device_id -> last_seq we've applied from that device.
 ///
 /// Returns the updated cursors map and a summary of what was applied.
-#[allow(clippy::too_many_arguments)]
 pub async fn pull_changes(
     db: &Database,
     tables: &[SyncedTable],

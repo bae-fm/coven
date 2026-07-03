@@ -252,6 +252,7 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<bool, String> {
         &inputs.db,
         &inputs.cipher,
         &inputs.user_keypair,
+        None,
         &inputs.library_dir,
         Some(cloud_home),
         inputs.observer.as_deref(),

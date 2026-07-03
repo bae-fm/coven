@@ -80,6 +80,7 @@ async fn run_cycle(
         db,
         &cipher,
         &keypair,
+        None,
         library_dir,
         None,
         None,

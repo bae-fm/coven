@@ -308,7 +308,7 @@ async fn run_single_cycle(
     let storage: &dyn SyncStorage = &*inner.storage;
     let cloud_home = inner.storage.cloud_home();
 
-    super::cycle::run_single_sync_cycle_with_key_persistence(
+    super::cycle::run_single_sync_cycle(
         storage,
         &inner.library_id,
         &inner.device_id,

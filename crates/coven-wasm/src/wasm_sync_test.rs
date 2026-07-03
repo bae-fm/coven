@@ -84,6 +84,7 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
         db,
         &cipher,
         &keypair,
+        None,
         &library_dir,
         None,
         None,

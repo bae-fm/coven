@@ -156,6 +156,7 @@ async fn run_cycle(
         db,
         cipher,
         kp,
+        None,
         lib,
         Some(storage as &dyn crate::storage::cloud::CloudHome),
         observer,

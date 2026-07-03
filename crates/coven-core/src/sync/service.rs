@@ -91,7 +91,6 @@ pub async fn complete_host_provided_make_remotes(
 /// `Database::take_changeset`; capture stays enabled, and the apply inside
 /// `pull` disables it around only the apply, so the applied rows are not
 /// re-recorded while host writes during the network steps are.
-#[allow(clippy::too_many_arguments)]
 pub async fn sync(
     device_id: &str,
     db: &Database,

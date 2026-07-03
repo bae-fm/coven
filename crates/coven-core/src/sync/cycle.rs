@@ -9,6 +9,7 @@
 //! applied rows are not echoed.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use tracing::{debug, error, info, warn};
 
@@ -70,15 +71,6 @@ fn captured_staging_temp_path(library_dir: &LibraryDir) -> PathBuf {
     library_dir.join("sync_capture_staging.bin.tmp")
 }
 
-async fn write_staged(path: PathBuf, bytes: &[u8]) -> Result<(), String> {
-    crate::local_blob::write_atomic(&path, bytes).await
-}
-
-/// Stage outgoing changeset bytes to disk before pushing.
-pub async fn stage_changeset(library_dir: &LibraryDir, packed: &[u8]) -> Result<(), String> {
-    write_staged(staging_path(library_dir), packed).await
-}
-
 /// Clear the staged changeset after a successful push.
 pub async fn clear_staged_changeset(library_dir: &LibraryDir) {
     let _ = crate::local_blob::remove_file(&staging_path(library_dir)).await;
@@ -125,6 +117,31 @@ pub async fn read_staged_changeset(library_dir: &LibraryDir) -> Option<Vec<u8>> 
             None
         }
     }
+}
+
+async fn read_sync_state<T>(db: &Database, key: &str) -> Result<Option<T>, String>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    match db.get_sync_state(key).await {
+        Ok(Some(value)) => value
+            .parse::<T>()
+            .map(Some)
+            .map_err(|e| format!("Corrupt {key} value: {e}")),
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("Failed to read {key}: {e}")),
+    }
+}
+
+fn parse_sync_state<T>(key: &str, value: &str) -> Result<T, String>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse::<T>()
+        .map_err(|e| format!("Corrupt {key} value: {e}"))
 }
 
 /// Push a changeset to the sync storage and update the device head.
@@ -175,39 +192,7 @@ async fn commit_push_success(
 /// phases is captured into the next outgoing changeset rather than lost.
 /// Loads/persists all cycle state (local_seq, cursors, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_single_sync_cycle(
-    storage: &dyn SyncStorage,
-    library_id: &str,
-    device_id: &str,
-    hlc: &Hlc,
-    clock: &dyn crate::clock::Clock,
-    db: &Database,
-    cipher: &std::sync::RwLock<CloudCipher>,
-    user_keypair: &UserKeypair,
-    library_dir: &LibraryDir,
-    cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<SyncCycleResult, String> {
-    run_single_sync_cycle_with_key_persistence(
-        storage,
-        library_id,
-        device_id,
-        hlc,
-        clock,
-        db,
-        cipher,
-        user_keypair,
-        None,
-        library_dir,
-        cloud_home,
-        observer,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_single_sync_cycle_with_key_persistence(
     storage: &dyn SyncStorage,
     library_id: &str,
     device_id: &str,
@@ -249,56 +234,26 @@ pub async fn run_single_sync_cycle_with_key_persistence(
     // Load persisted sync state — DB errors abort the cycle (a transient SQLite
     // error must not make us treat the device as brand-new at seq 0). None (key
     // not set yet) legitimately defaults to 0 / None.
-    let mut local_seq = match db.get_sync_state("local_seq").await {
-        Ok(Some(v)) => v
-            .parse::<u64>()
-            .map_err(|e| format!("Corrupt local_seq value: {e}"))?,
-        Ok(None) => 0,
-        Err(e) => return Err(format!("Failed to read local_seq: {e}")),
-    };
-
-    let snapshot_seq: Option<u64> = match db.get_sync_state("snapshot_seq").await {
-        Ok(Some(v)) => Some(
-            v.parse::<u64>()
-                .map_err(|e| format!("Corrupt snapshot_seq value: {e}"))?,
-        ),
-        Ok(None) => None,
-        Err(e) => return Err(format!("Failed to read snapshot_seq: {e}")),
-    };
-
+    let mut local_seq = read_sync_state(db, "local_seq").await?.unwrap_or(0);
+    let snapshot_seq: Option<u64> = read_sync_state(db, "snapshot_seq").await?;
     let last_snapshot_time: Option<chrono::DateTime<chrono::Utc>> =
-        match db.get_sync_state("last_snapshot_time").await {
-            Ok(Some(v)) => Some(
-                chrono::DateTime::parse_from_rfc3339(&v)
-                    .map_err(|e| format!("Corrupt last_snapshot_time value: {e}"))?
-                    .with_timezone(&chrono::Utc),
-            ),
-            Ok(None) => None,
-            Err(e) => return Err(format!("Failed to read last_snapshot_time: {e}")),
-        };
-
-    let staged_seq: Option<u64> = match db.get_sync_state("staged_seq").await {
-        Ok(Some(v)) if v.is_empty() => None,
-        Ok(Some(v)) => Some(
-            v.parse::<u64>()
-                .map_err(|e| format!("Corrupt staged_seq value: {e}"))?,
-        ),
-        Ok(None) => None,
-        Err(e) => return Err(format!("Failed to read staged_seq: {e}")),
-    };
+        read_sync_state::<chrono::DateTime<chrono::FixedOffset>>(db, "last_snapshot_time")
+            .await?
+            .map(|time| time.with_timezone(&chrono::Utc));
+    let staged_seq: Option<u64> = read_sync_state::<String>(db, "staged_seq")
+        .await?
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_sync_state("staged_seq", &value))
+        .transpose()?;
 
     // A snapshot bootstrap that could not land every blob it references records a
     // pending flag (an empty/absent value means caught up). While it is set, the
     // reconciliation below re-runs each cycle until every blob is local; a clear
     // flag skips the scan entirely, so a caught-up library pays nothing.
-    let snapshot_blob_backfill_pending = match db
-        .get_sync_state(super::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING)
-        .await
-    {
-        Ok(Some(v)) => !v.is_empty(),
-        Ok(None) => false,
-        Err(e) => return Err(format!("Failed to read snapshot blob backfill flag: {e}")),
-    };
+    let snapshot_blob_backfill_pending =
+        read_sync_state::<String>(db, super::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING)
+            .await?
+            .is_some_and(|value| !value.is_empty());
 
     // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
     // the gate column: a root being made Remote stays gated off until its last
@@ -437,7 +392,7 @@ pub async fn run_single_sync_cycle_with_key_persistence(
     if let Some(outgoing) = &sync_result.outgoing {
         let seq = outgoing.seq;
 
-        stage_changeset(library_dir, &outgoing.packed)
+        crate::local_blob::write_atomic(&staging_path(library_dir), &outgoing.packed)
             .await
             .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
         db.set_sync_state("staged_seq", &seq.to_string())
