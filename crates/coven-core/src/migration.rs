@@ -9,10 +9,9 @@
 //!
 //! This is the host's *synced* schema only. coven's own bookkeeping tables and the
 //! coven-owned `item_keys` synced table are reconciled declaratively, every open,
-//! by `db::MIGRATION_SQL` and `database::migrate_bookkeeping_schema`; their rows
-//! are stripped on snapshot but their schemas ride from the writer's binary, so a
-//! versioned ledger cannot track them. They are deliberately NOT part of this
-//! ladder.
+//! by `db::MIGRATION_SQL`; their rows are stripped on snapshot but their schemas
+//! ride from the writer's binary, so a versioned ledger cannot track them. They
+//! are deliberately NOT part of this ladder.
 
 use rusqlite::Connection;
 use tracing::{info, warn};

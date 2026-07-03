@@ -94,7 +94,6 @@ impl DatabaseCore {
         // versioned ledger can't track them; the host's synced ladder version rides
         // inside the snapshot's DB header.
         conn.execute_batch(MIGRATION_SQL).map_err(DbError::from)?;
-        migrate_bookkeeping_schema(&conn)?;
         let schema_version = run_migrations(&conn, migrations)?;
 
         // `item_keys` is coven-owned but is library-global content every member
@@ -1098,21 +1097,6 @@ fn read_item_key(conn: &Connection, item_id: &str) -> Result<Option<[u8; 32]>, D
     }
 }
 
-fn migrate_bookkeeping_schema(conn: &Connection) -> Result<(), DbError> {
-    let columns = crate::blob::decl::table_columns(conn, "blob_make_remote_intents")
-        .map_err(|e| DbError(e.to_string()))?;
-    let has_retain_pinned = columns.iter().any(|column| column == "retain_pinned");
-    if !has_retain_pinned {
-        conn.execute(
-            "ALTER TABLE blob_make_remote_intents \
-             ADD COLUMN retain_pinned INTEGER",
-            [],
-        )
-        .map_err(DbError::from)?;
-    }
-    Ok(())
-}
-
 /// Map a `cloud_outbox` row to an [`OutboxEntry`]. Column order matches the
 /// SELECT in [`Database::pending_outbox`]. The flat row reads back as one
 /// [`OutboxOperation`] variant or the other, built from the columns that belong
@@ -1288,4 +1272,53 @@ fn open_connection(path: &Path) -> Result<Connection, DbError> {
         .ok_or_else(|| DbError("platform SQLite connection opener is not registered".to_string()))?(
         path,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fresh_open_creates_canonical_make_remote_intent_retain_pinned_column() {
+        let (db, _stamper) = Database::open(
+            Path::new(":memory:"),
+            Vec::new(),
+            "test-device".to_string(),
+            &[],
+        )
+        .expect("open database");
+
+        let column = db
+            .call(|conn| {
+                let mut stmt = conn
+                    .prepare("PRAGMA table_info(blob_make_remote_intents)")
+                    .map_err(DbError::from)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?;
+                for row in rows {
+                    let (name, notnull, default_value) = row.map_err(DbError::from)?;
+                    if name == "retain_pinned" {
+                        return Ok(Some((notnull, default_value)));
+                    }
+                }
+                Ok(None)
+            })
+            .await
+            .expect("read make_remote intent schema")
+            .expect("retain_pinned column exists");
+
+        assert_eq!(column.0, 1, "retain_pinned must be NOT NULL");
+        assert_eq!(
+            column.1.as_deref(),
+            Some("0"),
+            "retain_pinned must default to 0",
+        );
+    }
 }
