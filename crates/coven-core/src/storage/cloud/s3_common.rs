@@ -27,11 +27,26 @@ pub fn apply_prefix(prefix: Option<&str>, key: &str) -> String {
     }
 }
 
-/// The string a `list` strips from each returned key to undo `apply_prefix`:
-/// `"{prefix}/"`, or `None` when there is no prefix. The normalized prefix has no
-/// trailing slash, so this appends exactly one.
-pub fn list_strip_prefix(prefix: Option<&str>) -> Option<String> {
-    prefix.map(|p| format!("{p}/"))
+/// Strip a configured key prefix from a key returned by ListObjectsV2.
+///
+/// With no configured prefix, the listed key is already in coven's local key
+/// space. With a prefix, the configured root is removed from the returned key so
+/// the caller sees the same keyspace as a no-prefix backend. In both cases the
+/// listed key must also sit under the exact ListObjectsV2 query prefix; an
+/// out-of-prefix key is skipped by the caller after logging the provider
+/// mismatch.
+pub fn strip_listed_key_prefix<'a>(
+    configured_prefix: Option<&str>,
+    queried_prefix: &str,
+    key: &'a str,
+) -> Option<&'a str> {
+    if !key.starts_with(queried_prefix) {
+        return None;
+    }
+    match configured_prefix {
+        Some(prefix) => key.strip_prefix(prefix)?.strip_prefix('/'),
+        None => Some(key),
+    }
 }
 
 /// Whether an S3 error code/marker means "absent key" — `NoSuchKey` (GCS's S3 XML
@@ -84,5 +99,54 @@ pub fn s3_join_info(
         access_key,
         secret_key,
         key_prefix,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_listed_key_prefix_no_configured_prefix_keeps_key() {
+        assert_eq!(
+            strip_listed_key_prefix(None, "heads/", "heads/dev1.json"),
+            Some("heads/dev1.json")
+        );
+    }
+
+    #[test]
+    fn strip_listed_key_prefix_removes_configured_prefix() {
+        assert_eq!(
+            strip_listed_key_prefix(
+                Some("libs/abc"),
+                "libs/abc/heads/",
+                "libs/abc/heads/dev1.json"
+            ),
+            Some("heads/dev1.json")
+        );
+    }
+
+    #[test]
+    fn strip_listed_key_prefix_skips_key_outside_configured_prefix() {
+        assert_eq!(
+            strip_listed_key_prefix(Some("libs/abc"), "libs/abc/heads/", "other/heads/dev1.json"),
+            None
+        );
+    }
+
+    #[test]
+    fn strip_listed_key_prefix_skips_key_outside_queried_prefix() {
+        assert_eq!(
+            strip_listed_key_prefix(None, "heads/", "membership/owner/1.enc"),
+            None
+        );
+        assert_eq!(
+            strip_listed_key_prefix(
+                Some("libs/abc"),
+                "libs/abc/heads/",
+                "libs/abc/membership/owner/1.enc"
+            ),
+            None
+        );
     }
 }

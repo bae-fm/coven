@@ -43,7 +43,7 @@ use reqwest::Response;
 use tracing::warn;
 
 use super::s3_common::{
-    apply_prefix, list_strip_prefix, normalize_prefix, probe_error, s3_join_info,
+    apply_prefix, normalize_prefix, probe_error, s3_join_info, strip_listed_key_prefix,
 };
 use super::{
     range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
@@ -667,7 +667,6 @@ impl CloudHome for S3WasmCloudHome {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
         let full_prefix = self.full_key(prefix);
-        let strip_prefix = list_strip_prefix(self.key_prefix.as_deref());
 
         let mut keys = Vec::new();
         let mut continuation_token: Option<String> = None;
@@ -699,18 +698,17 @@ impl CloudHome for S3WasmCloudHome {
 
             let page = parse_list_objects_v2(&body)?;
             for key in page.keys {
-                match strip_prefix.as_deref() {
-                    // We queried S3 with this prefix, so every key should carry it;
-                    // a key that doesn't is anomalous — skip it loudly rather than
-                    // return a wrongly-prefixed key the caller can't resolve.
-                    Some(p) => match key.strip_prefix(p) {
-                        Some(stripped) => keys.push(stripped.to_string()),
-                        None => {
-                            warn!("S3 returned key {key:?} outside queried prefix {p:?}; skipping")
-                        }
-                    },
-                    None => keys.push(key),
-                }
+                let Some(stripped) =
+                    strip_listed_key_prefix(self.key_prefix.as_deref(), &full_prefix, &key)
+                else {
+                    warn!(
+                        "list {prefix}: key {key} is outside the configured S3 prefix {:?}; \
+                         skipping it",
+                        self.key_prefix
+                    );
+                    continue;
+                };
+                keys.push(stripped.to_string());
             }
 
             match page.next_continuation_token {

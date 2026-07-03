@@ -12,7 +12,8 @@ use aws_sdk_s3::Client;
 use tracing::warn;
 
 use super::s3_common::{
-    apply_prefix, is_not_found_code, list_strip_prefix, normalize_prefix, probe_error, s3_join_info,
+    apply_prefix, is_not_found_code, normalize_prefix, probe_error, s3_join_info,
+    strip_listed_key_prefix,
 };
 use super::{
     range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
@@ -501,7 +502,7 @@ impl CloudHome for S3CloudHome {
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
         let full_prefix = self.full_key(prefix);
-        let strip_prefix = list_strip_prefix(self.key_prefix.as_deref());
+        let key_prefix = self.key_prefix.clone();
         let prefix = prefix.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
@@ -531,18 +532,15 @@ impl CloudHome for S3CloudHome {
                         warn!("list {prefix}: S3 returned an object with no key; skipping it");
                         continue;
                     };
-                    let stripped = match &strip_prefix {
-                        Some(p) => match key.strip_prefix(p.as_str()) {
-                            Some(s) => s,
-                            None => {
-                                warn!(
-                                    "list {prefix}: key {key} is outside the queried prefix {p}; \
-                                     keeping the full key"
-                                );
-                                key
-                            }
-                        },
-                        None => key,
+                    let Some(stripped) =
+                        strip_listed_key_prefix(key_prefix.as_deref(), &full_prefix, key)
+                    else {
+                        warn!(
+                            "list {prefix}: key {key} is outside the configured S3 prefix {:?}; \
+                             skipping it",
+                            key_prefix
+                        );
+                        continue;
                     };
                     keys.push(stripped.to_string());
                 }
