@@ -220,9 +220,10 @@ impl CloudHome for CloudKitCloudHome {
         let scope = self.scope.clone();
         let key = key.to_string();
         blocking(move || {
-            // Try single record first
-            if ops.record_exists(&scope, &key)? {
-                return ops.read_record(&scope, &key);
+            match ops.read_record(&scope, &key) {
+                Ok(data) => return Ok(data),
+                Err(CloudHomeError::NotFound(_)) => {}
+                Err(e) => return Err(e),
             }
 
             // Try chunked records
@@ -270,16 +271,18 @@ impl CloudHome for CloudKitCloudHome {
             let start = start as usize;
             let end = end as usize;
 
-            // Try single record first
-            if ops.record_exists(&scope, &key)? {
-                let data = ops.read_record(&scope, &key)?;
-                if end > data.len() {
-                    return Err(CloudHomeError::Storage(format!(
-                        "range {start}..{end} exceeds file size {}",
-                        data.len()
-                    )));
+            match ops.read_record(&scope, &key) {
+                Ok(data) => {
+                    if end > data.len() {
+                        return Err(CloudHomeError::Storage(format!(
+                            "range {start}..{end} exceeds file size {}",
+                            data.len()
+                        )));
+                    }
+                    return Ok(data[start..end].to_vec());
                 }
-                return Ok(data[start..end].to_vec());
+                Err(CloudHomeError::NotFound(_)) => {}
+                Err(e) => return Err(e),
             }
 
             // Chunked read: calculate which chunks overlap [start, end)
@@ -378,11 +381,13 @@ mod tests {
     use super::*;
     use crate::storage::cloud::{no_progress, BlobBody};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     struct MockCloudKitOps {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
         calls: Mutex<Vec<(CloudKitScope, String)>>,
+        record_exists_calls: AtomicUsize,
     }
 
     impl MockCloudKitOps {
@@ -390,6 +395,7 @@ mod tests {
             Self {
                 store: Mutex::new(HashMap::new()),
                 calls: Mutex::new(Vec::new()),
+                record_exists_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -457,6 +463,7 @@ mod tests {
         }
 
         fn record_exists(&self, scope: &CloudKitScope, key: &str) -> Result<bool, CloudHomeError> {
+            self.record_exists_calls.fetch_add(1, Ordering::Relaxed);
             self.calls
                 .lock()
                 .unwrap()
@@ -491,6 +498,11 @@ mod tests {
 
     fn make_cloud_home() -> CloudKitCloudHome {
         CloudKitCloudHome::new(Arc::new(MockCloudKitOps::new()))
+    }
+
+    fn make_cloud_home_with_ops() -> (CloudKitCloudHome, Arc<MockCloudKitOps>) {
+        let ops = Arc::new(MockCloudKitOps::new());
+        (CloudKitCloudHome::new(ops.clone()), ops)
     }
 
     #[tokio::test]
@@ -560,6 +572,58 @@ mod tests {
         .unwrap();
         let slice = ch.read_range("range.bin", 3, 7).await.unwrap();
         assert_eq!(slice, b"3456");
+    }
+
+    #[tokio::test]
+    async fn read_single_record_does_not_probe_existence() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        let data = b"hello world".to_vec();
+        ch.write(
+            "single.bin",
+            BlobBody::from_bytes(data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        let read = ch.read("single.bin").await.unwrap();
+
+        assert_eq!(read, data);
+        assert_eq!(ops.record_exists_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn read_range_single_record_does_not_probe_existence() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        ch.write(
+            "single-range.bin",
+            BlobBody::from_bytes(b"0123456789".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        let read = ch.read_range("single-range.bin", 2, 6).await.unwrap();
+
+        assert_eq!(read, b"2345");
+        assert_eq!(ops.record_exists_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn read_chunked_record_after_base_record_not_found() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        let first = vec![1u8; CHUNK_SIZE];
+        let second = b"tail".to_vec();
+        ops.write_record(&CloudKitScope::Private, "chunked.bin.part0", first.clone())
+            .unwrap();
+        ops.write_record(&CloudKitScope::Private, "chunked.bin.part1", second.clone())
+            .unwrap();
+
+        let read = ch.read("chunked.bin").await.unwrap();
+
+        let mut expected = first;
+        expected.extend_from_slice(&second);
+        assert_eq!(read, expected);
     }
 
     #[tokio::test]
