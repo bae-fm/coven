@@ -202,19 +202,14 @@ index alone, a reader can decrypt chunk `k` on its own:
 takes the whole object (it reads the base nonce from the first 24 bytes) and the
 chunk index, and returns that one chunk's plaintext.
 
-There are two ways to read a byte range, depending on what bytes you fetched.
-When the object you hold starts at byte 0 (the nonce, then chunks from index 0,
-possibly truncated after the last chunk the range needs),
-[`decrypt_range`](rustdoc:method:coven::encryption::EncryptionService::decrypt_range)
-takes that object and the plaintext start and end.
+To read a byte range, fetch the 24-byte nonce separately, then use
 [`encrypted_chunk_range`](rustdoc:fn:coven::encryption::encrypted_chunk_range)
-goes with the other path: it returns the encrypted byte bounds of just the chunks
-covering the range (no nonce, starting at the first needed chunk, not at 0), so
-you store the 24-byte nonce separately, range-request only those bytes, and pass
-both plus the first chunk index to
+to get the encrypted byte bounds of the chunks covering the plaintext range.
+Those bounds start at the first needed encrypted chunk, not byte 0, so the caller
+passes the nonce, the fetched encrypted chunks, and the first chunk index to
 [`decrypt_range_with_offset`](rustdoc:method:coven::encryption::EncryptionService::decrypt_range_with_offset).
-Either returns exactly the requested plaintext bytes. The base nonce is random
-per `encrypt` call, so encrypting the same plaintext twice produces different
+It returns exactly the requested plaintext bytes. The base nonce is random per
+`encrypt` call, so encrypting the same plaintext twice produces different
 ciphertext; within one call the index-derived nonces keep each chunk distinct.
 
 A scope can get its own key derived from the library key with
