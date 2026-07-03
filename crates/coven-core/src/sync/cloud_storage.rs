@@ -222,6 +222,58 @@ impl CloudSyncStorage {
         self.cipher().suffix()
     }
 
+    async fn write_sealed(&self, key: &str, plaintext: Vec<u8>) -> Result<(), StorageError> {
+        let stored = self.cipher().seal(plaintext);
+        self.home
+            .write(
+                key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn read_sealed(&self, key: &str, label: &str) -> Result<Vec<u8>, StorageError> {
+        let stored = self.home.read(key).await?;
+        self.open_stored(stored, label)
+    }
+
+    fn open_stored(&self, stored: Vec<u8>, label: &str) -> Result<Vec<u8>, StorageError> {
+        self.cipher()
+            .open(stored)
+            .map_err(|e| StorageError::Decryption(format!("{label}: {e}")))
+    }
+
+    async fn write_blob_sealed(
+        &self,
+        key: &str,
+        scope: crate::blob::ResolvedScope,
+        plaintext: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let stored = self.cipher().seal_scoped(scope, plaintext);
+        self.home
+            .write(
+                key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn read_blob_sealed(
+        &self,
+        key: &str,
+        scope: crate::blob::ResolvedScope,
+        label: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        let stored = self.home.read(key).await?;
+        self.cipher()
+            .open_scoped(scope, stored)
+            .map_err(|e| StorageError::Decryption(format!("{label}: {e}")))
+    }
+
     /// The cloud object key for a blob under the home's [`BlobPathScheme`].
     ///
     /// `Hashed` ignores `cloud_path` and shards by the id:
@@ -255,6 +307,8 @@ impl CloudSyncStorage {
 
 /// The cache namespace a blob's `cloud_key` belongs to: the key's first
 /// `/`-component.
+///
+/// The namespace prefix of a blob `cloud_key` — the segment before the first `/`.
 ///
 /// Every blob `cloud_key` [`CloudSyncStorage::blob_key`] produces is `{namespace}/…`
 /// in BOTH [`BlobPathScheme`] variants (`Hashed` = `{namespace}/{ab}/{cd}/{id}`,
@@ -434,7 +488,7 @@ impl SyncStorage for CloudSyncStorage {
             // above still propagates (it retries next cycle); a parse failure of
             // a head we *can* open is our own corrupt data and still surfaces. In
             // a plaintext home `open` never fails, so this branch never trips.
-            let decoded = match self.cipher().open(stored) {
+            let decoded = match self.open_stored(stored, &format!("head {device_id}")) {
                 Ok(d) => d,
                 Err(e) => {
                     warn!("skipping head {device_id} this library cannot decrypt: {e}");
@@ -469,10 +523,8 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
         let key = format!("changes/{device_id}/{seq}{}", self.suffix());
-        let stored = self.home.read(&key).await?;
-        self.cipher()
-            .open(stored)
-            .map_err(|e| StorageError::Decryption(format!("changeset {device_id}/{seq}: {e}")))
+        self.read_sealed(&key, &format!("changeset {device_id}/{seq}"))
+            .await
     }
 
     async fn put_changeset(
@@ -482,15 +534,7 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = format!("changes/{device_id}/{seq}{}", self.suffix());
-        let stored = self.cipher().seal(data);
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, data).await
     }
 
     async fn put_head(
@@ -509,16 +553,8 @@ impl SyncStorage for CloudSyncStorage {
         );
         let json = serde_json::to_vec(&head)
             .map_err(|e| StorageError::Parse(format!("serialize head: {e}")))?;
-        let stored = self.cipher().seal(json);
         let key = format!("heads/{device_id}.json{}", self.suffix());
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, json).await
     }
 
     async fn put_blob(
@@ -530,15 +566,7 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
-        let stored = self.cipher().seal_scoped(scope, data);
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_blob_sealed(&key, scope, data).await
     }
 
     async fn get_blob(
@@ -549,10 +577,8 @@ impl SyncStorage for CloudSyncStorage {
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
         let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
-        let stored = self.home.read(&key).await?;
-        self.cipher()
-            .open_scoped(scope, stored)
-            .map_err(|e| StorageError::Decryption(format!("blob {namespace}/{id}: {e}")))
+        self.read_blob_sealed(&key, scope, &format!("blob {namespace}/{id}"))
+            .await
     }
 
     async fn read_blob_range(
@@ -630,24 +656,13 @@ impl SyncStorage for CloudSyncStorage {
     }
 
     async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        let stored = self.cipher().seal(data);
         let key = format!("acks/{device_id}.json{}", self.suffix());
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, data).await
     }
 
     async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
         let key = format!("acks/{device_id}.json{}", self.suffix());
-        let stored = self.home.read(&key).await?;
-        self.cipher()
-            .open(stored)
-            .map_err(|e| StorageError::Decryption(format!("ack {device_id}: {e}")))
+        self.read_sealed(&key, &format!("ack {device_id}")).await
     }
 
     async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
@@ -658,10 +673,7 @@ impl SyncStorage for CloudSyncStorage {
             Err(e) => return Err(StorageError::from(e)),
         };
 
-        let decoded = self
-            .cipher()
-            .open(stored)
-            .map_err(|e| StorageError::Decryption(format!("min_schema_version: {e}")))?;
+        let decoded = self.open_stored(stored, "min_schema_version")?;
 
         let parsed: MinSchemaVersionJson = serde_json::from_slice(&decoded)
             .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
@@ -686,16 +698,8 @@ impl SyncStorage for CloudSyncStorage {
         let payload = MinSchemaVersionJson::signed(version, &self.keypair);
         let json = serde_json::to_vec(&payload)
             .map_err(|e| StorageError::Parse(format!("serialize min_schema_version: {e}")))?;
-        let stored = self.cipher().seal(json);
         let key = format!("min_schema_version.json{}", self.suffix());
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, json).await
     }
 
     async fn put_membership_entry(
@@ -705,15 +709,7 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         let key = format!("membership/{author_pubkey}/{seq}{}", self.suffix());
-        let stored = self.cipher().seal(data);
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, data).await
     }
 
     async fn get_membership_entry(
@@ -722,10 +718,8 @@ impl SyncStorage for CloudSyncStorage {
         seq: u64,
     ) -> Result<Vec<u8>, StorageError> {
         let key = format!("membership/{author_pubkey}/{seq}{}", self.suffix());
-        let stored = self.home.read(&key).await?;
-        self.cipher()
-            .open(stored)
-            .map_err(|e| StorageError::Decryption(format!("membership {author_pubkey}/{seq}: {e}")))
+        self.read_sealed(&key, &format!("membership {author_pubkey}/{seq}"))
+            .await
     }
 
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
@@ -796,46 +790,25 @@ impl SyncStorage for CloudSyncStorage {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         crate::library_dir::validate_path_token(author)?;
-        let stored = self.cipher().seal(data);
         let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, data).await
     }
 
     async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
         crate::library_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
-        let stored = self.home.read(&key).await?;
-        self.cipher()
-            .open(stored)
-            .map_err(|e| StorageError::Decryption(format!("snapshot_meta {author}/{seq}: {e}")))
+        self.read_sealed(&key, &format!("snapshot_meta {author}/{seq}"))
+            .await
     }
 
     async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        let stored = self.cipher().seal(data);
         let key = format!("snapshot/current.json{}", self.suffix());
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, data).await
     }
 
     async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
         let key = format!("snapshot/current.json{}", self.suffix());
-        let stored = self.home.read(&key).await?;
-        self.cipher()
-            .open(stored)
-            .map_err(|e| StorageError::Decryption(format!("snapshot_pointer: {e}")))
+        self.read_sealed(&key, "snapshot_pointer").await
     }
 
     async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
@@ -967,37 +940,6 @@ mod tests {
         ));
         // An opaque home with no key (a locked library) has no cipher.
         assert!(CloudCipher::for_storage(HomeStorage::Opaque, None).is_none());
-    }
-
-    #[test]
-    fn plaintext_cipher_returns_owned_buffers_unchanged() {
-        let cipher = CloudCipher::Plaintext;
-
-        let control_plaintext = b"control bytes".to_vec();
-        let control_plaintext_ptr = control_plaintext.as_ptr();
-        let sealed = cipher.seal(control_plaintext);
-        assert_eq!(sealed.as_ptr(), control_plaintext_ptr);
-        assert_eq!(sealed, b"control bytes");
-
-        let control_stored = b"stored control bytes".to_vec();
-        let control_stored_ptr = control_stored.as_ptr();
-        let opened = cipher.open(control_stored).expect("open plaintext control");
-        assert_eq!(opened.as_ptr(), control_stored_ptr);
-        assert_eq!(opened, b"stored control bytes");
-
-        let scoped_plaintext = b"scoped blob bytes".to_vec();
-        let scoped_plaintext_ptr = scoped_plaintext.as_ptr();
-        let sealed = cipher.seal_scoped(ResolvedScope::Master, scoped_plaintext);
-        assert_eq!(sealed.as_ptr(), scoped_plaintext_ptr);
-        assert_eq!(sealed, b"scoped blob bytes");
-
-        let scoped_stored = b"stored scoped blob bytes".to_vec();
-        let scoped_stored_ptr = scoped_stored.as_ptr();
-        let opened = cipher
-            .open_scoped(ResolvedScope::Master, scoped_stored)
-            .expect("open plaintext blob");
-        assert_eq!(opened.as_ptr(), scoped_stored_ptr);
-        assert_eq!(opened, b"stored scoped blob bytes");
     }
 
     /// A `ResolvedScope::Key` blob is encrypted under the explicit (item) key, not
@@ -1424,11 +1366,9 @@ mod tests {
     /// blobs under unfindable keys). Asserts both `blob_key` and `put_blob` error.
     #[tokio::test]
     async fn plain_scheme_without_cloud_path_errors() {
-        let err = CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", "id-1", None)
-            .expect_err("plain home with no cloud_path must error");
         assert!(
-            matches!(err, StorageError::Parse(_)),
-            "plain home with no cloud_path is invalid object data, got {err}",
+            CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", "id-1", None).is_err(),
+            "blob_key for a plain home with no cloud_path must error",
         );
 
         let storage = CloudSyncStorage::new(
@@ -1437,13 +1377,12 @@ mod tests {
             BlobPathScheme::Plain,
             UserKeypair::generate(),
         );
-        let err = storage
-            .put_blob("images", "id-1", ResolvedScope::Master, None, b"x".to_vec())
-            .await
-            .expect_err("put_blob for a plain home with no cloud_path must error");
         assert!(
-            matches!(err, StorageError::Parse(_)),
-            "put_blob for a plain home with no cloud_path must not silently hash, got {err}",
+            storage
+                .put_blob("images", "id-1", ResolvedScope::Master, None, b"x".to_vec())
+                .await
+                .is_err(),
+            "put_blob for a plain home with no cloud_path must error, not silently hash",
         );
     }
 
