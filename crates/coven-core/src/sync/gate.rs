@@ -93,19 +93,28 @@ unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
 /// The new value at `col` for the change at the iterator's current position
 /// (`None` if absent — e.g. an unchanged column in an update — or NULL).
 unsafe fn extract_new_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
-    let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
-    let rc = ffi::sqlite3changeset_new(iter, col, &mut val);
-    if rc != ffi::SQLITE_OK as c_int || val.is_null() {
-        return None;
-    }
-    value_to_string(val)
+    extract_value(iter, col, ffi::sqlite3changeset_new)
 }
 
 /// The old value at `col` for the change at the iterator's current position
 /// (`None` if absent — e.g. an unchanged column in an update — or NULL).
 unsafe fn extract_old_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
+    extract_value(iter, col, ffi::sqlite3changeset_old)
+}
+
+type ChangesetValueReader = unsafe extern "C" fn(
+    *mut ffi::sqlite3_changeset_iter,
+    c_int,
+    *mut *mut ffi::sqlite3_value,
+) -> c_int;
+
+unsafe fn extract_value(
+    iter: *mut ffi::sqlite3_changeset_iter,
+    col: c_int,
+    read_value: ChangesetValueReader,
+) -> Option<String> {
     let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
-    let rc = ffi::sqlite3changeset_old(iter, col, &mut val);
+    let rc = read_value(iter, col, &mut val);
     if rc != ffi::SQLITE_OK as c_int || val.is_null() {
         return None;
     }
@@ -162,16 +171,7 @@ impl Changegroup {
         if rc != ffi::SQLITE_OK as c_int {
             return Err(GateError::Ffi("sqlite3changegroup_output", rc));
         }
-        // `output` hands us sqlite3-managed memory; copy it out then free it.
-        let bytes = if buf.is_null() || len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(buf as *const u8, len as usize).to_vec() }
-        };
-        if !buf.is_null() {
-            unsafe { ffi::sqlite3_free(buf) };
-        }
-        Ok(bytes)
+        Ok(unsafe { copy_sqlite_bytes_and_free(buf, len) })
     }
 }
 
@@ -247,15 +247,7 @@ impl DiffSession {
         if rc != ffi::SQLITE_OK as c_int {
             return Err(GateError::ChangesetExtract(rc));
         }
-        let bytes = if buf.is_null() || len == 0 {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(buf as *const u8, len as usize).to_vec()
-        };
-        if !buf.is_null() {
-            ffi::sqlite3_free(buf);
-        }
-        Ok(bytes)
+        Ok(copy_sqlite_bytes_and_free(buf, len))
     }
 }
 
@@ -263,6 +255,20 @@ impl Drop for DiffSession {
     fn drop(&mut self) {
         unsafe { ffi::sqlite3session_delete(self.raw) };
     }
+}
+
+/// SQLite hands session/changegroup output back in sqlite3-managed memory; copy
+/// the bytes before freeing the buffer.
+unsafe fn copy_sqlite_bytes_and_free(buf: *mut c_void, len: c_int) -> Vec<u8> {
+    let bytes = if buf.is_null() || len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(buf as *const u8, len as usize).to_vec()
+    };
+    if !buf.is_null() {
+        ffi::sqlite3_free(buf);
+    }
+    bytes
 }
 
 /// How a synced table relates to the gate.
@@ -440,7 +446,7 @@ impl Gates {
     unsafe fn gated_tables_parent_first(
         &self,
         db: *mut ffi::sqlite3,
-    ) -> Result<Vec<&str>, GateError> {
+    ) -> Result<Vec<String>, GateError> {
         fk_topological_order(db, &self.tables)
     }
 
@@ -483,8 +489,8 @@ impl Gates {
         let mut order = self.gated_tables_parent_first(db)?;
         order.reverse();
         for tbl in order {
-            let keep = self.keep_clause(db, tbl)?;
-            let sql = format!("DELETE FROM {} WHERE NOT ({keep})", quote_ident(tbl));
+            let keep = self.keep_clause(db, &tbl)?;
+            let sql = format!("DELETE FROM {} WHERE NOT ({keep})", quote_ident(&tbl));
             exec_sql(db, &sql)?;
         }
         Ok(())
@@ -807,52 +813,49 @@ unsafe fn gated_fk_child_edges(
 unsafe fn fk_topological_order(
     db: *mut ffi::sqlite3,
     gate_map: &HashMap<String, TableGate>,
-) -> Result<Vec<&str>, GateError> {
+) -> Result<Vec<String>, GateError> {
     // Edge parent -> child means "parent must precede child". A table's FK to a
     // gated table makes that table its prerequisite (it points at the parent's
     // id), so the FK target is the parent of the edge and the referrer the child.
     // Only edges between two gated tables matter.
-    let names: Vec<&str> = gate_map.keys().map(String::as_str).collect();
-    let mut indegree: HashMap<&str, usize> = names.iter().map(|&n| (n, 0)).collect();
-    let mut edges: HashMap<&str, Vec<&str>> = names.iter().map(|&n| (n, Vec::new())).collect();
+    let names: Vec<String> = gate_map.keys().cloned().collect();
+    let mut indegree: HashMap<String, usize> = names.iter().map(|n| (n.clone(), 0)).collect();
+    let mut edges: HashMap<String, Vec<String>> =
+        names.iter().map(|n| (n.clone(), Vec::new())).collect();
 
     let child_edges = gated_fk_child_edges(db, gate_map)?;
     for (parent, children) in &child_edges {
-        // Resolve the owned names back to the gate_map's `&str` keys so the
-        // returned order borrows from the map.
-        let (parent_key, _) = gate_map.get_key_value(parent).unwrap();
         for (child, _fk_col) in children {
-            let (child_key, _) = gate_map.get_key_value(child).unwrap();
-            edges.get_mut(parent_key.as_str()).unwrap().push(child_key);
-            *indegree.get_mut(child_key.as_str()).unwrap() += 1;
+            edges.get_mut(parent).unwrap().push(child.clone());
+            *indegree.get_mut(child).unwrap() += 1;
         }
     }
 
     // Kahn with a deterministic tie-break: a min-heap of the ready
     // (zero-indegree) tables, so equal-rank tables always emit smallest-first.
-    let mut ready: BinaryHeap<Reverse<&str>> = indegree
+    let mut ready: BinaryHeap<Reverse<String>> = indegree
         .iter()
         .filter(|(_, &d)| d == 0)
-        .map(|(&n, _)| Reverse(n))
+        .map(|(n, _)| Reverse(n.clone()))
         .collect();
 
     let mut order = Vec::with_capacity(names.len());
     while let Some(Reverse(next)) = ready.pop() {
-        order.push(next);
-        for &child in &edges[next] {
+        for child in &edges[&next] {
             let d = indegree.get_mut(child).unwrap();
             *d -= 1;
             if *d == 0 {
-                ready.push(Reverse(child));
+                ready.push(Reverse(child.clone()));
             }
         }
+        order.push(next);
     }
 
     if order.len() != names.len() {
         let mut remaining: Vec<String> = names
             .iter()
-            .filter(|n| !order.contains(*n))
-            .map(|n| n.to_string())
+            .filter(|n| !order.contains(n))
+            .cloned()
             .collect();
         remaining.sort();
         return Err(GateError::FkCycle(remaining));
@@ -1281,7 +1284,7 @@ unsafe fn rows_referencing(
 unsafe fn with_empty_clone<R>(
     db: *mut ffi::sqlite3,
     gates: &Gates,
-    f: impl FnOnce(&str, &[&str]) -> Result<R, GateError>,
+    f: impl FnOnce(&str, &[String]) -> Result<R, GateError>,
 ) -> Result<R, GateError> {
     let alias = "coven_gate_empty";
     let attach = format!("ATTACH DATABASE ':memory:' AS {alias}");
@@ -1804,10 +1807,6 @@ impl ChangeRow {
 
     /// Primary key (column 0), following op semantics.
     fn pk(&self) -> Option<&str> {
-        self.col0()
-    }
-
-    fn col0(&self) -> Option<&str> {
         match self.op {
             x if x == ffi::SQLITE_DELETE => self.old.first().and_then(|v| v.as_deref()),
             _ => self

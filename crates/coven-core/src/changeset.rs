@@ -1,8 +1,8 @@
-//! Changeset walking: the single primitive for inspecting SQLite changesets.
+//! Changeset walking: the public row-change primitive for inspecting SQLite changesets.
 //!
 //! coven uses it internally (to find blobs a changeset references); the host
-//! uses it to map row-changes to its own domain events. It is the crate's only
-//! changeset iterator, built on `rusqlite::session::ChangesetIter`.
+//! uses it to map row-changes to its own domain events. It is built on
+//! `rusqlite::session::ChangesetIter`.
 
 use fallible_streaming_iterator::FallibleStreamingIterator;
 use rusqlite::hooks::Action;
