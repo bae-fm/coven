@@ -12,8 +12,7 @@ use aws_sdk_s3::Client;
 use tracing::warn;
 
 use super::s3_common::{
-    apply_prefix, is_not_found_code, normalize_prefix, probe_error, s3_join_info,
-    strip_listed_key_prefix,
+    apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
     range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
@@ -617,14 +616,14 @@ impl CloudHome for S3CloudHome {
         &self,
         _grant: CloudAccessGrant,
     ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Ok(s3_join_info(
-            self.bucket.clone(),
-            self.region.clone(),
-            self.endpoint.clone(),
-            self.access_key.clone(),
-            self.secret_key.clone(),
-            self.key_prefix.clone(),
-        ))
+        Ok(CloudHomeJoinInfo::S3 {
+            bucket: self.bucket.clone(),
+            region: self.region.clone(),
+            endpoint: self.endpoint.clone(),
+            access_key: self.access_key.clone(),
+            secret_key: self.secret_key.clone(),
+            key_prefix: self.key_prefix.clone(),
+        })
     }
 
     async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {

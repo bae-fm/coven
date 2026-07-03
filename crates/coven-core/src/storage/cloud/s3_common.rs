@@ -1,11 +1,11 @@
 //! Pure helpers shared by both S3 backends.
 //!
-//! S3-compatible backends must compute the same object keys and produce the same
-//! join info, so a library created on one platform opens unchanged on the other.
-//! These free functions are that shared definition; backends call them rather
-//! than each holding its own copy.
+//! S3-compatible backends must compute the same object keys, so a library
+//! created on one platform opens unchanged on the other. These free functions
+//! are that shared definition; backends call them rather than each holding its
+//! own copy.
 
-use super::{CloudHomeError, CloudHomeJoinInfo};
+use super::CloudHomeError;
 
 /// Normalize a configured key prefix ONCE, at construction: trim any trailing
 /// slash and drop an empty prefix. Both S3 backends store the normalized form, so
@@ -79,29 +79,6 @@ pub fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeEr
         CloudHomeError::Storage(format!("S3 probe failed (status {status}, code {code:?})"))
     }
 }
-
-/// Build the join info both backends hand back from `grant_access`. S3 access is
-/// managed externally (IAM / pre-shared credentials), so this carries the
-/// owner's bucket coordinates and credentials to embed in the invite code; there
-/// is no per-member grant to make.
-pub fn s3_join_info(
-    bucket: String,
-    region: String,
-    endpoint: Option<String>,
-    access_key: String,
-    secret_key: String,
-    key_prefix: Option<String>,
-) -> CloudHomeJoinInfo {
-    CloudHomeJoinInfo::S3 {
-        bucket,
-        region,
-        endpoint,
-        access_key,
-        secret_key,
-        key_prefix,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

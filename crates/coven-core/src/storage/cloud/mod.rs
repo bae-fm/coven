@@ -5,7 +5,7 @@
 //! semantics. Higher-level concerns live in `CloudSyncStorage` which wraps any
 //! `dyn CloudHome` and applies the path layout and at-rest protection.
 
-// Pure helpers (prefix handling, join info) that S3-compatible backends share.
+// Pure helpers that S3-compatible backends share.
 pub mod s3_common;
 
 #[cfg(any(test, feature = "test-utils"))]

@@ -5,7 +5,7 @@
 //! the same S3 REST API directly: it builds an `http::Request`, signs it with AWS
 //! SigV4 (via `reqsign-aws-v4`), and sends it through reqwest's `fetch` backend.
 //! Its public semantics mirror `super::s3::S3CloudHome` exactly — the same prefix
-//! handling, object-key layout, path-style addressing, join info, and error
+//! handling, object-key layout, path-style addressing, grant metadata, and error
 //! mapping — so a library created on the desktop opens unchanged in the browser.
 //!
 //! ## Addressing
@@ -45,9 +45,7 @@ use reqwest::Response;
 use serde::Deserialize;
 use tracing::warn;
 
-use super::s3_common::{
-    apply_prefix, normalize_prefix, probe_error, s3_join_info, strip_listed_key_prefix,
-};
+use super::s3_common::{apply_prefix, normalize_prefix, probe_error, strip_listed_key_prefix};
 use super::{
     range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
 };
@@ -780,14 +778,14 @@ impl CloudHome for S3WasmCloudHome {
         &self,
         _grant: CloudAccessGrant,
     ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Ok(s3_join_info(
-            self.bucket.clone(),
-            self.region.clone(),
-            self.endpoint.clone(),
-            self.access_key.clone(),
-            self.secret_key.clone(),
-            self.key_prefix.clone(),
-        ))
+        Ok(CloudHomeJoinInfo::S3 {
+            bucket: self.bucket.clone(),
+            region: self.region.clone(),
+            endpoint: self.endpoint.clone(),
+            access_key: self.access_key.clone(),
+            secret_key: self.secret_key.clone(),
+            key_prefix: self.key_prefix.clone(),
+        })
     }
 
     async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
