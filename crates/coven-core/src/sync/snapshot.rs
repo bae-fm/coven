@@ -409,12 +409,10 @@ pub async fn push_snapshot(
 
     // The pointer now names `current_seq`; older generations this device published
     // are superseded. Reclaim them — listing only this device's own keyspace, so a
-    // peer's generation is never touched. A failure here is logged, not fatal — the
-    // publish already succeeded; the leftover is unreferenced storage a later sweep
-    // by this device reclaims, never a wrong state the reader can see.
-    if let Err(e) =
-        delete_superseded_generations(storage, library_id, current_seq, &own_author).await
-    {
+    // peer's generation is never touched. A failure here is logged, not fatal: the
+    // publish already succeeded, and the leftover is unreferenced storage rather
+    // than reader-visible state.
+    if let Err(e) = delete_superseded_generations(storage, current_seq, &own_author).await {
         warn!(error = %e, "failed to delete superseded snapshot generations after publish");
     }
 
@@ -437,70 +435,22 @@ pub async fn push_snapshot(
 /// generation (under a different prefix) is never even a candidate, and the strand
 /// a cross-device sweep would risk is structurally impossible.
 ///
-/// Within this device's own generations, a delete is gated on two facts:
-///
-/// 1. **Not just-published.** The generation is not the one this caller just
-///    published (`just_published_seq`).
-/// 2. **Not live.** The generation is not the one the pointer names *right now*.
-///    The pointer is re-read here; if it names this device's own `{own_author,
-///    seq}`, that `seq` is protected. (A peer-authored live generation isn't in
-///    this device's keyspace, so it can't be a candidate anyway — but re-reading
-///    the pointer also covers this device having flipped to a newer generation
-///    concurrently, e.g. a GC sweep racing a publish.)
-///
-/// A generation that is neither just-published nor live is unreferenced and safe to
-/// delete: this device wrote it and is the only one that reclaims it, and it does
-/// not sweep concurrently with its own publish (the sync loop runs cycles
-/// serially), so the generation can no longer become live. This is space
-/// reclamation of correct-but-superseded objects, not repair of a wrong state.
+/// Within this device's own generations, the just-published generation is live by
+/// construction: `push_snapshot` wrote the pointer naming `just_published_seq`
+/// before this sweep. Peer-authored live generations sit under a different
+/// keyspace and are never candidates. Every other own generation is superseded and
+/// safe to delete because this device wrote it, this device is the only one that
+/// reclaims it, and the sync loop does not sweep concurrently with its own publish.
 async fn delete_superseded_generations(
     storage: &dyn SyncStorage,
-    library_id: &str,
     just_published_seq: u64,
     own_author: &str,
 ) -> Result<(), SnapshotError> {
-    // Re-read the live pointer so a concurrent flip is observed, and establish which
-    // of this device's own generations (if any) is the live one. The live generation
-    // is this device's own only when the pointer resolves to an author equal to this
-    // device; a peer-authored live generation is under a different prefix and is never
-    // a candidate below. If the pointer can't be read or verified, liveness is
-    // unknown — skip the sweep entirely rather than delete on incomplete information.
-    // A later sweep, once a readable pointer is present, reclaims; deleting now could
-    // remove a generation whose liveness we never confirmed.
-    let live_own_seq: Option<u64> = match storage.get_snapshot_pointer().await {
-        Ok(bytes) => match serde_json::from_slice::<SnapshotPointerJson>(&bytes) {
-            Ok(pointer) if pointer.verify(library_id) => {
-                if pointer.author_pubkey == own_author {
-                    Some(pointer.seq)
-                } else {
-                    // The live generation is a peer's (different keyspace): no own
-                    // generation is live, so every own one below is superseded.
-                    None
-                }
-            }
-            Ok(_) => {
-                warn!("snapshot sweep: live pointer signature does not verify; skipping this sweep until a readable pointer is present");
-                return Ok(());
-            }
-            Err(e) => {
-                warn!(error = %e, "snapshot sweep: live pointer failed to parse; skipping this sweep until a readable pointer is present");
-                return Ok(());
-            }
-        },
-        Err(StorageError::NotFound(_)) => {
-            // No pointer visible yet. This device just wrote one before sweeping, so
-            // this is an eventual-consistency lag, not a permanent absence; liveness
-            // can't be established this pass, so skip and let a later sweep reclaim.
-            debug!("snapshot sweep: no live pointer visible; skipping this sweep");
-            return Ok(());
-        }
-        Err(e) => return Err(SnapshotError::Bucket(e)),
-    };
-
     for seq in storage.list_own_snapshot_generations(own_author).await? {
-        // Never delete the live generation or the one we just published. Authorship
-        // is already settled by the keyspace — every seq here is this device's own.
-        if seq == just_published_seq || live_own_seq == Some(seq) {
+        // Authorship is already settled by the keyspace: every seq here is this
+        // device's own generation, and the published seq is the one the caller made
+        // live before sweeping.
+        if seq == just_published_seq {
             continue;
         }
 
@@ -2165,7 +2115,7 @@ mod tests {
         // Device A's real sweep, keyed by A's pubkey, with A's just-published seq. It
         // lists only A's keyspace, so B's same-seq generation is never a candidate and
         // survives.
-        delete_superseded_generations(&storage, TEST_LIBRARY_ID, 5, &author_a)
+        delete_superseded_generations(&storage, 5, &author_a)
             .await
             .expect("A's sweep runs");
         assert_eq!(
@@ -2210,7 +2160,7 @@ mod tests {
         // — so it reclaims nothing, and this device's generation 1 survives: a device
         // structurally cannot reach another device's keyspace.
         let stranger = hex::encode(test_keypair().public_key());
-        delete_superseded_generations(&storage, TEST_LIBRARY_ID, 2, &stranger)
+        delete_superseded_generations(&storage, 2, &stranger)
             .await
             .expect("stranger-keyed sweep runs");
         let mut after_foreign = storage
@@ -2226,7 +2176,7 @@ mod tests {
 
         // The real sweep, keyed by this device's own pubkey, reclaims its superseded
         // generation 1 and keeps the live generation 2.
-        delete_superseded_generations(&storage, TEST_LIBRARY_ID, 2, &own_author)
+        delete_superseded_generations(&storage, 2, &own_author)
             .await
             .expect("own sweep runs");
         assert_eq!(
@@ -2239,14 +2189,12 @@ mod tests {
         );
     }
 
-    /// The live and just-published generations are never deleted, even when both are
-    /// this device's own. The device authored generations 1 (superseded) and 2
-    /// (live). A sweep keyed by its pubkey but told it *just published 1* must still
-    /// keep 1 (it is the just-published seq) and keep 2 (it is live) — so neither the
-    /// just-published guard nor the live-pointer guard ever deletes a generation a
-    /// reader could still need, regardless of authorship.
+    /// The just-published generation is never deleted. The device authored
+    /// generations 1 (superseded) and 2 (live by construction). A sweep keyed by
+    /// its pubkey after publishing generation 2 keeps 2 and deletes the older own
+    /// generation.
     #[tokio::test]
-    async fn sweep_never_deletes_the_live_or_just_published_generation() {
+    async fn sweep_never_deletes_the_just_published_generation() {
         let storage = MockSyncStorage::new();
         let kp = test_keypair();
         let own_author = hex::encode(kp.public_key());
@@ -2257,29 +2205,28 @@ mod tests {
         publish_signed_generation(&storage, 2, BTreeMap::<String, u64>::new(), vec![2u8], &kp)
             .await;
 
-        // Sweep claiming seq 1 as just-published: 1 is protected as just-published, 2
-        // as live — nothing is deleted even though both are this device's own.
-        delete_superseded_generations(&storage, TEST_LIBRARY_ID, 1, &own_author)
+        // Sweep after publishing seq 2: the published generation remains, and the
+        // older own generation is reclaimed.
+        delete_superseded_generations(&storage, 2, &own_author)
             .await
             .expect("sweep runs");
-        let mut after = storage
+        let after = storage
             .list_own_snapshot_generations(&own_author)
             .await
             .unwrap();
-        after.sort_unstable();
         assert_eq!(
             after,
-            vec![1, 2],
-            "neither the live nor the just-published generation is ever deleted",
+            vec![2],
+            "the published generation remains and older own generations are reclaimed",
         );
     }
 
-    /// When the live pointer can't be read or verified, the sweep can't establish
-    /// which of this device's generations is live, so it deletes nothing rather than
-    /// guess. A later sweep with a readable pointer reclaims; deleting on an
-    /// unverifiable pointer could remove a generation that is in fact live.
+    /// The just-published seq protects the live generation within this device's
+    /// own keyspace. Pointer bytes are not part of this sweep's liveness decision:
+    /// after publishing generation 2, generation 1 is superseded even if the pointer
+    /// object later becomes unreadable.
     #[tokio::test]
-    async fn sweep_skips_when_the_live_pointer_is_unverifiable() {
+    async fn sweep_reclaims_superseded_generation_when_pointer_is_unreadable() {
         let storage = MockSyncStorage::new();
         let kp = test_keypair();
         let own_author = hex::encode(kp.public_key());
@@ -2296,19 +2243,19 @@ mod tests {
             .await
             .unwrap();
 
-        // The sweep can't establish liveness, so it returns having deleted nothing.
-        delete_superseded_generations(&storage, TEST_LIBRARY_ID, 2, &own_author)
+        // Generation 2 is protected because it is the just-published generation.
+        // Generation 1 is superseded within this device's keyspace.
+        delete_superseded_generations(&storage, 2, &own_author)
             .await
-            .expect("sweep returns Ok, having skipped");
-        let mut after = storage
+            .expect("sweep runs");
+        let after = storage
             .list_own_snapshot_generations(&own_author)
             .await
             .unwrap();
-        after.sort_unstable();
         assert_eq!(
             after,
-            vec![1, 2],
-            "an unverifiable pointer makes the sweep skip, keeping every generation",
+            vec![2],
+            "the superseded generation is reclaimed without reading the pointer",
         );
     }
 
