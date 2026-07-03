@@ -36,11 +36,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::{Method, Request};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use quick_xml::de::from_str;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqsign_aws_v4::{RequestSigner, StaticCredentialProvider};
 use reqsign_core::{Context, Signer};
 use reqwest::Response;
+use serde::Deserialize;
 use tracing::warn;
 
 use super::s3_common::{
@@ -427,35 +429,19 @@ fn complete_multipart_response_error(xml: &str) -> Result<Option<String>, CloudH
     }
 }
 
-/// Extract `<UploadId>` from an `InitiateMultipartUploadResult` body. The body is
-/// an untrusted S3 response, so it goes through quick-xml like the list parser.
+#[derive(Deserialize)]
+struct InitiateMultipartUploadResult {
+    #[serde(rename = "UploadId")]
+    upload_id: Option<String>,
+}
+
+/// Extract `<UploadId>` from an `InitiateMultipartUploadResult` body.
 fn parse_upload_id(xml: &str) -> Result<String, CloudHomeError> {
-    let mut reader = Reader::from_str(xml);
-    let mut in_upload_id = false;
-    let mut value = String::new();
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(start)) => {
-                in_upload_id = start.local_name().as_ref() == b"UploadId";
-            }
-            Ok(Event::Text(chunk)) if in_upload_id => {
-                let piece = chunk
-                    .decode()
-                    .map_err(|e| CloudHomeError::Storage(format!("parse upload id: {e}")))?;
-                value.push_str(&piece);
-            }
-            Ok(Event::End(_)) => in_upload_id = false,
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(e) => return Err(CloudHomeError::Storage(format!("parse upload id: {e}"))),
-        }
-    }
-    if value.is_empty() {
-        return Err(CloudHomeError::Storage(
-            "multipart create: no UploadId in response".to_string(),
-        ));
-    }
-    Ok(value)
+    let parsed: InitiateMultipartUploadResult =
+        from_str(xml).map_err(|e| CloudHomeError::Storage(format!("parse upload id: {e}")))?;
+    parsed.upload_id.filter(|id| !id.is_empty()).ok_or_else(|| {
+        CloudHomeError::Storage("multipart create: no UploadId in response".to_string())
+    })
 }
 
 /// Resolve the base URL for path-style requests. A configured endpoint is used
@@ -559,110 +545,40 @@ struct ListPage {
     next_continuation_token: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ListBucketResult {
+    #[serde(rename = "Contents", default)]
+    contents: Vec<ListBucketObject>,
+    #[serde(rename = "IsTruncated", default)]
+    is_truncated: bool,
+    #[serde(rename = "NextContinuationToken")]
+    next_continuation_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ListBucketObject {
+    #[serde(rename = "Key")]
+    key: Option<String>,
+}
+
 /// Parse a ListObjectsV2 `ListBucketResult` XML body into its keys and the next
 /// continuation token. Each `<Contents><Key>…</Key></Contents>` yields one key;
 /// `<NextContinuationToken>` is returned only when `<IsTruncated>true</IsTruncated>`,
 /// matching S3's contract that the token is meaningful exactly when more pages
 /// remain.
-///
-/// The body is an untrusted S3 response, so parsing goes through quick-xml: it
-/// expands entities, tolerates namespaces and attributes, and reports malformed
-/// input as an error instead of mis-scanning it. The element names matched here
-/// are matched on their local name, so a namespace-prefixed response parses the
-/// same as a bare one.
 fn parse_list_objects_v2(xml: &str) -> Result<ListPage, CloudHomeError> {
-    /// Which leaf element's text the reader is currently inside, if any. Only the
-    /// elements whose text this parser consumes are tracked.
-    enum In {
-        Key,
-        IsTruncated,
-        NextContinuationToken,
-        Other,
-    }
-
-    let mut reader = Reader::from_str(xml);
-    let mut keys = Vec::new();
-    let mut is_truncated = false;
-    let mut next_continuation_token: Option<String> = None;
-    let mut current = In::Other;
-    // An element's text can arrive as several `Text` events — quick-xml splits the
-    // run at each entity reference (`a&amp;b` → `a`, `&`, `b`). Accumulate the
-    // pieces and consume the whole on the matching `End`.
-    let mut text = String::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(start)) => {
-                current = match start.local_name().as_ref() {
-                    b"Key" => In::Key,
-                    b"IsTruncated" => In::IsTruncated,
-                    b"NextContinuationToken" => In::NextContinuationToken,
-                    _ => In::Other,
-                };
-                text.clear();
-            }
-            Ok(Event::Text(chunk)) => {
-                // quick-xml 0.40 emits text runs verbatim (no entities inside) and
-                // reports each `&entity;` as a separate `GeneralRef` event, so the
-                // text is plain — decode the bytes, no unescaping here.
-                let piece = chunk
-                    .decode()
-                    .map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?;
-                text.push_str(&piece);
-            }
-            Ok(Event::GeneralRef(reference)) => {
-                let resolved = if let Some(ch) = reference
-                    .resolve_char_ref()
-                    .map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?
-                {
-                    // A numeric character reference (`&#49;` / `&#x31;`).
-                    ch.to_string()
-                } else {
-                    // A named reference; S3 emits only the five XML predefined
-                    // entities. Anything else is malformed S3 output.
-                    let name = reference
-                        .decode()
-                        .map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?;
-                    match quick_xml::escape::resolve_predefined_entity(&name) {
-                        Some(value) => value.to_string(),
-                        None => {
-                            return Err(CloudHomeError::Storage(format!(
-                                "parse list XML: unknown entity &{name};"
-                            )));
-                        }
-                    }
-                };
-                text.push_str(&resolved);
-            }
-            Ok(Event::End(_)) => {
-                match current {
-                    In::Key => keys.push(std::mem::take(&mut text)),
-                    In::IsTruncated => is_truncated = text.trim().eq_ignore_ascii_case("true"),
-                    In::NextContinuationToken => {
-                        next_continuation_token = Some(std::mem::take(&mut text))
-                    }
-                    In::Other => {}
-                }
-                current = In::Other;
-                text.clear();
-            }
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(e) => {
-                return Err(CloudHomeError::Storage(format!("parse list XML: {e}")));
-            }
-        }
-    }
-
-    // The token is meaningful only when the result is truncated; a server may
-    // echo a stale token on the final page.
-    if !is_truncated {
-        next_continuation_token = None;
-    }
-
+    let parsed: ListBucketResult =
+        from_str(xml).map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?;
     Ok(ListPage {
-        keys,
-        next_continuation_token,
+        keys: parsed
+            .contents
+            .into_iter()
+            .filter_map(|object| object.key)
+            .collect(),
+        next_continuation_token: parsed
+            .is_truncated
+            .then_some(parsed.next_continuation_token)
+            .flatten(),
     })
 }
 

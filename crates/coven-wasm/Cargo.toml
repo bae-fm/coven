@@ -23,7 +23,7 @@ getrandom_legacy = { package = "getrandom", version = "0.2", features = ["js"] }
 hex = "0.4"
 http = "1"
 percent-encoding = "2.3"
-quick-xml = "0.40"
+quick-xml = { version = "0.40", features = ["serialize"] }
 rand = "0.9"
 reqsign-core = "3"
 reqsign-aws-v4 = "3"
