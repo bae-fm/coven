@@ -67,7 +67,8 @@ use std::ptr;
 // Reach the SQLite C FFI through rusqlite so it resolves to the right backend
 // per target: libsqlite3-sys natively, sqlite-wasm-rs on wasm32.
 use rusqlite::ffi;
-use rusqlite::Connection;
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OptionalExtension, Params};
 use tracing::{debug, warn};
 
 use super::session::{quote_ident, SyncedTable};
@@ -317,21 +318,14 @@ impl Gates {
     /// schema (`PRAGMA table_info` for gate-column indices, `PRAGMA
     /// foreign_key_list` for FK edges).
     ///
-    /// Runs on the connection coven owns; the session FFI the gate uses needs the
-    /// raw handle, so this borrows it once via [`Connection::handle`].
     pub fn from_tables(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, GateError> {
         #[cfg(test)]
         FROM_TABLES_CALLS.with(|calls| calls.set(calls.get() + 1));
 
-        unsafe { Self::from_tables_raw(conn.handle(), tables) }
+        Self::from_tables_conn(conn, tables)
     }
 
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    unsafe fn from_tables_raw(
-        db: *mut ffi::sqlite3,
-        tables: &[SyncedTable],
-    ) -> Result<Self, GateError> {
+    fn from_tables_conn(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, GateError> {
         let ancestors: HashSet<&str> = tables
             .iter()
             .filter(|t| t.is_gated_by_descendants())
@@ -358,7 +352,7 @@ impl Gates {
                 continue;
             }
 
-            let cols = column_names(db, t.name())?;
+            let cols = column_names(conn, t.name())?;
 
             if t.is_remote_root() {
                 gate_map.insert(t.name().to_string(), TableGate::RemoteRoot);
@@ -377,7 +371,7 @@ impl Gates {
             // parent. Inheritance flows ONLY through declared FKs, toward synced
             // parents, and (for a multi-FK join row) toward the gated side, never
             // up an ancestor back-edge.
-            if let Some((fk_name, parent)) = select_parent_fk(db, t.name(), tables, &ancestors)? {
+            if let Some((fk_name, parent)) = select_parent_fk(conn, t.name(), tables, &ancestors)? {
                 let fk_col = cols.iter().position(|c| c == &fk_name).ok_or_else(|| {
                     GateError::MissingFkColumn(t.name().to_string(), fk_name.clone())
                 })?;
@@ -416,7 +410,7 @@ impl Gates {
                 }
                 // Otherwise, if this table has an FK referencing the ancestor, it
                 // is a keep-child: record the FK column index in that child.
-                if let Some(fk_col) = fk_col_referencing(db, t.name(), ancestor)? {
+                if let Some(fk_col) = fk_col_referencing(conn, t.name(), ancestor)? {
                     children.push((t.name().to_string(), fk_col));
                 }
             }
@@ -459,13 +453,8 @@ impl Gates {
     /// itself kept *by* them — so only a real topological sort over the FK edges
     /// among the gated tables produces a valid order.
     ///
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    unsafe fn gated_tables_parent_first(
-        &self,
-        db: *mut ffi::sqlite3,
-    ) -> Result<Vec<String>, GateError> {
-        fk_topological_order(db, &self.tables)
+    fn gated_tables_parent_first(&self, conn: &Connection) -> Result<Vec<String>, GateError> {
+        fk_topological_order(conn, &self.tables)
     }
 
     /// Delete from `db` every row the gate excludes: each gated root row whose
@@ -487,15 +476,11 @@ impl Gates {
     /// (never deleted), so deleting gated-false rows can never flip a kept row to
     /// not-kept. The final row set is therefore independent of deletion order.
     ///
-    /// Runs on the snapshot copy's owned connection; borrows the raw handle once
-    /// for the FK-walk SQL.
     pub fn delete_gated_false(&self, conn: &Connection) -> Result<(), GateError> {
-        unsafe { self.delete_gated_false_raw(conn.handle()) }
+        self.delete_gated_false_conn(conn)
     }
 
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    unsafe fn delete_gated_false_raw(&self, db: *mut ffi::sqlite3) -> Result<(), GateError> {
+    fn delete_gated_false_conn(&self, conn: &Connection) -> Result<(), GateError> {
         // The final row set is order-independent (the prune is monotonic, above).
         // The only caller is the snapshot scope, whose copy connection opens with
         // `foreign_keys` OFF, so no FK would reject deleting a parent before its
@@ -504,12 +489,12 @@ impl Gates {
         // `foreign_keys=ON` too: a parent FK without `ON DELETE CASCADE` would
         // otherwise reject deleting a parent a child still references. Child-first
         // is order-safe regardless of the copy's FK setting.
-        let mut order = self.gated_tables_parent_first(db)?;
+        let mut order = self.gated_tables_parent_first(conn)?;
         order.reverse();
         for tbl in order {
-            let keep = self.keep_clause(db, &tbl)?;
+            let keep = self.keep_clause(conn, &tbl)?;
             let sql = format!("DELETE FROM {} WHERE NOT ({keep})", quote_ident(&tbl));
-            exec_sql(db, &sql)?;
+            execute_batch(conn, &sql)?;
         }
         Ok(())
     }
@@ -532,15 +517,13 @@ impl Gates {
     /// loop. Revisiting a table in the current path yields `FALSE` rather than
     /// recursing again.
     ///
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    unsafe fn keep_clause(&self, db: *mut ffi::sqlite3, tbl: &str) -> Result<String, GateError> {
-        self.keep_clause_guarded(db, tbl, &mut HashSet::new())
+    fn keep_clause(&self, conn: &Connection, tbl: &str) -> Result<String, GateError> {
+        self.keep_clause_guarded(conn, tbl, &mut HashSet::new())
     }
 
-    unsafe fn keep_clause_guarded(
+    fn keep_clause_guarded(
         &self,
-        db: *mut ffi::sqlite3,
+        conn: &Connection,
         tbl: &str,
         visiting: &mut HashSet<String>,
     ) -> Result<String, GateError> {
@@ -551,13 +534,13 @@ impl Gates {
         }
         let clause = match self.tables.get(tbl) {
             Some(TableGate::Root { gate_col }) => {
-                let gate = nth_column_name(db, tbl, *gate_col)?;
+                let gate = nth_column_name(conn, tbl, *gate_col)?;
                 truthy_sql(&format!("{}.{}", quote_ident(tbl), quote_ident(&gate)))
             }
             Some(TableGate::RemoteRoot) => "TRUE".to_string(),
             Some(TableGate::Child { fk_col, parent }) => {
-                let fk = nth_column_name(db, tbl, *fk_col)?;
-                let inner = self.keep_clause_guarded(db, parent, visiting)?;
+                let fk = nth_column_name(conn, tbl, *fk_col)?;
+                let inner = self.keep_clause_guarded(conn, parent, visiting)?;
                 // Join up the FK to the parent's keep: parent.id = child.fk.
                 fk_exists_clause(parent, "id", tbl, &fk, &inner)
             }
@@ -570,8 +553,8 @@ impl Gates {
                 }
                 let mut disjuncts = Vec::with_capacity(children.len());
                 for (child, fk_col) in children {
-                    let fk = nth_column_name(db, child, *fk_col)?;
-                    let inner = self.keep_clause_guarded(db, child, visiting)?;
+                    let fk = nth_column_name(conn, child, *fk_col)?;
+                    let inner = self.keep_clause_guarded(conn, child, visiting)?;
                     // Join down to each child's keep: child.fk = parent.id.
                     disjuncts.push(fk_exists_clause(child, &fk, tbl, "id", &inner));
                 }
@@ -593,24 +576,14 @@ impl Gates {
     /// kept child) — a property of the live child tables, not of the ancestor
     /// row's own columns.
     ///
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    unsafe fn row_kept(
-        &self,
-        db: *mut ffi::sqlite3,
-        tbl: &str,
-        id: &str,
-    ) -> Result<bool, GateError> {
-        let keep = self.keep_clause(db, tbl)?;
+    fn row_kept(&self, conn: &Connection, tbl: &str, id: &str) -> Result<bool, GateError> {
+        let keep = self.keep_clause(conn, tbl)?;
         let sql = format!(
             "SELECT 1 FROM {t} WHERE {t}.{id_col} = ? AND ({keep})",
             t = quote_ident(tbl),
             id_col = quote_ident("id"),
         );
-        let stmt = prepare(db, &sql)?;
-        bind_text(stmt, 1, id);
-        let present = ffi::sqlite3_step(stmt) == ffi::SQLITE_ROW as c_int;
-        ffi::sqlite3_finalize(stmt);
+        let present = query_row_optional(conn, &sql, [id], |_| Ok(()))?.is_some();
         Ok(present)
     }
 
@@ -629,10 +602,7 @@ impl Gates {
         table: &str,
         id: &str,
     ) -> Result<Option<(String, String)>, GateError> {
-        unsafe {
-            Ok(resolve_root(conn.handle(), self, table, id)?
-                .map(|r| (r.terminus_table, r.terminus_id)))
-        }
+        Ok(resolve_root(conn, self, table, id)?.map(|r| (r.terminus_table, r.terminus_id)))
     }
 
     /// Whether the blob-bearing row `(table, id)` resolves to Remote locality:
@@ -651,7 +621,7 @@ impl Gates {
         table: &str,
         id: &str,
     ) -> Result<Option<bool>, GateError> {
-        unsafe { Ok(resolve_root(conn.handle(), self, table, id)?.map(|r| r.kept)) }
+        Ok(resolve_root(conn, self, table, id)?.map(|r| r.kept))
     }
 
     /// Every row in the gated subtree rooted at `(root_table, root_id)`: the root
@@ -670,21 +640,19 @@ impl Gates {
         root_table: &str,
         root_id: &str,
     ) -> Result<HashSet<(String, String)>, GateError> {
-        unsafe { self.subtree_rows_raw(conn.handle(), root_table, root_id) }
+        self.subtree_rows_conn(conn, root_table, root_id)
     }
 
-    /// # Safety
-    /// `db` must be a valid, open sqlite3 connection holding the synced schema.
-    unsafe fn subtree_rows_raw(
+    fn subtree_rows_conn(
         &self,
-        db: *mut ffi::sqlite3,
+        conn: &Connection,
         root_table: &str,
         root_id: &str,
     ) -> Result<HashSet<(String, String)>, GateError> {
         // The down-edges (parent table -> its gated children + FK column), the same
         // map the re-emit/retract closure walks; here we follow only this map (down,
         // never up) from the single root so the result is one subtree.
-        let down_edges = gated_fk_child_edges(db, &self.tables)?;
+        let down_edges = gated_fk_child_edges(conn, &self.tables)?;
         let mut out: HashSet<(String, String)> = HashSet::new();
         let mut work = vec![(root_table.to_string(), root_id.to_string())];
         while let Some((table, id)) = work.pop() {
@@ -693,7 +661,7 @@ impl Gates {
             }
             if let Some(children) = down_edges.get(table.as_str()) {
                 for (child_table, fk) in children {
-                    for child_id in rows_referencing(db, child_table, fk, &id)? {
+                    for child_id in rows_referencing(conn, child_table, fk, &id)? {
                         work.push((child_table.clone(), child_id));
                     }
                 }
@@ -790,15 +758,13 @@ fn reaches_gate_terminus(gate_map: &HashMap<String, TableGate>, name: &str) -> b
 /// column) so the parent-first order is derived from one definition, not a second
 /// parallel FK scan.
 ///
-/// # Safety
-/// `db` must be a valid, open sqlite3 connection holding the synced schema.
-unsafe fn gated_fk_child_edges(
-    db: *mut ffi::sqlite3,
+fn gated_fk_child_edges(
+    conn: &Connection,
     gate_map: &HashMap<String, TableGate>,
 ) -> Result<HashMap<String, Vec<(String, String)>>, GateError> {
     let mut edges: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for referrer in gate_map.keys() {
-        for (fk_col, target) in foreign_keys(db, referrer)? {
+        for (fk_col, target) in foreign_keys(conn, referrer)? {
             // Self-FKs and FKs to ungated tables are not cross-table gate edges.
             if target == *referrer {
                 continue;
@@ -826,10 +792,8 @@ unsafe fn gated_fk_child_edges(
 /// valid order. Deterministic Kahn: among the ready (zero-indegree) tables,
 /// always take the lexicographically smallest, so the order is stable.
 ///
-/// # Safety
-/// `db` must be a valid, open sqlite3 connection holding the synced schema.
-unsafe fn fk_topological_order(
-    db: *mut ffi::sqlite3,
+fn fk_topological_order(
+    conn: &Connection,
     gate_map: &HashMap<String, TableGate>,
 ) -> Result<Vec<String>, GateError> {
     // Edge parent -> child means "parent must precede child". A table's FK to a
@@ -841,7 +805,7 @@ unsafe fn fk_topological_order(
     let mut edges: HashMap<String, Vec<String>> =
         names.iter().map(|n| (n.clone(), Vec::new())).collect();
 
-    let child_edges = gated_fk_child_edges(db, gate_map)?;
+    let child_edges = gated_fk_child_edges(conn, gate_map)?;
     for (parent, children) in &child_edges {
         for (child, _fk_col) in children {
             edges.get_mut(parent).unwrap().push(child.clone());
@@ -895,17 +859,18 @@ pub fn gate_outbound(
     changeset: &[u8],
     gates: &Gates,
 ) -> Result<Vec<u8>, GateError> {
-    unsafe { gate_outbound_raw(conn.handle(), changeset, gates) }
+    unsafe { gate_outbound_raw(conn, changeset, gates) }
 }
 
 /// # Safety
-/// `db` must be the valid, open connection the changeset was captured on, with
+/// `conn` must be the valid, open connection the changeset was captured on, with
 /// no live session attached (gating reads current row state from it).
 unsafe fn gate_outbound_raw(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     changeset: &[u8],
     gates: &Gates,
 ) -> Result<Vec<u8>, GateError> {
+    let db = conn.handle();
     let group = Changegroup::new()?;
     group.set_schema(db)?;
 
@@ -992,7 +957,7 @@ unsafe fn gate_outbound_raw(
         let keep = if row.op == ffi::SQLITE_DELETE {
             match row.pk() {
                 Some(pk) => was_shared(
-                    db,
+                    conn,
                     gates,
                     &deleted,
                     &row.table,
@@ -1006,26 +971,26 @@ unsafe fn gate_outbound_raw(
                 }
             }
         } else {
-            effective_gate(db, gates, &row)?
+            effective_gate(conn, gates, &row)?
         };
         if keep {
             group.add_change(iter)?;
             // A kept row that repoints an FK onto a gated parent drags that parent's
             // (possibly never-shared) subtree into visibility.
-            reparent_seeds.extend(reparent_targets(db, gates, &row)?);
+            reparent_seeds.extend(reparent_targets(conn, gates, &row)?);
         }
         Ok(())
     })?;
 
     // Pass 2: re-emit full subtrees for flipped roots and reparent targets.
     if !flipped_roots.is_empty() || !reparent_seeds.is_empty() {
-        reemit_subtrees(db, gates, &flipped_roots, &reparent_seeds, &group)?;
+        reemit_subtrees(conn, gates, &flipped_roots, &reparent_seeds, &group)?;
     }
 
     // Pass 2 (retract): emit DELETEs for the rows leaving the shared set of any
     // root that flipped true→false this cycle. The mirror of reemit_subtrees.
     if !retracted_roots.is_empty() {
-        reemit_retract_deletes(db, gates, &retracted_roots, &group)?;
+        reemit_retract_deletes(conn, gates, &retracted_roots, &group)?;
     }
 
     group.output()
@@ -1038,10 +1003,8 @@ unsafe fn gate_outbound_raw(
 /// a missing parent. Returns `(parent_table, new_parent_id)` per changed FK to a
 /// gated table; the caller seeds the re-emit with them.
 ///
-/// # Safety
-/// `db` must be the valid, open connection the changeset was captured on.
-unsafe fn reparent_targets(
-    db: *mut ffi::sqlite3,
+fn reparent_targets(
+    conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<Vec<(String, String)>, GateError> {
@@ -1051,9 +1014,9 @@ unsafe fn reparent_targets(
     if row.op != ffi::SQLITE_UPDATE {
         return Ok(Vec::new());
     }
-    let cols = column_names(db, &row.table)?;
+    let cols = column_names(conn, &row.table)?;
     let mut out = Vec::new();
-    for (fk_col, parent) in foreign_keys(db, &row.table)? {
+    for (fk_col, parent) in foreign_keys(conn, &row.table)? {
         if parent == row.table || !gates.tables.contains_key(&parent) {
             continue;
         }
@@ -1093,7 +1056,7 @@ unsafe fn reparent_targets(
 /// has is idempotent. Under-emitting is the only failure, so the closure is
 /// computed in full rather than as a fixed up-then-one-level-down pass.
 unsafe fn reemit_subtrees(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     gates: &Gates,
     flipped_roots: &HashSet<(String, String)>,
     reparent_seeds: &HashSet<(String, String)>,
@@ -1109,16 +1072,16 @@ unsafe fn reemit_subtrees(
     // parent's whole kept component lands on peers.
     let mut seeds = flipped_roots.clone();
     seeds.extend(reparent_seeds.iter().cloned());
-    let reemit_ids = connected_component(db, gates, &seeds, true)?;
+    let reemit_ids = connected_component(conn, gates, &seeds, true)?;
 
-    let diff_bytes = full_state_diff(db, gates, FullStateDirection::Inserts)?;
+    let diff_bytes = full_state_diff(conn, gates, FullStateDirection::Inserts)?;
     if diff_bytes.is_empty() {
         return Ok(());
     }
 
     for_each_change(&diff_bytes, |iter, row| {
         let in_descendants =
-            gated_root_id(db, gates, &row)?.is_some_and(|key| flipped_roots.contains(&key));
+            gated_root_id(conn, gates, &row)?.is_some_and(|key| flipped_roots.contains(&key));
         let in_kept_component = row
             .pk()
             .is_some_and(|pk| reemit_ids.contains(&(row.table.clone(), pk.to_string())));
@@ -1153,12 +1116,12 @@ unsafe fn reemit_subtrees(
 /// DELETE. That diff only carries rows still present in `main`, so a row the
 /// captured changeset already removed never collides here.
 unsafe fn reemit_retract_deletes(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     gates: &Gates,
     retracted_roots: &HashSet<(String, String)>,
     group: &Changegroup,
 ) -> Result<(), GateError> {
-    let component = connected_component(db, gates, retracted_roots, false)?;
+    let component = connected_component(conn, gates, retracted_roots, false)?;
 
     // Keep only the rows no longer kept under the post-flip live state. The live db
     // already reflects the gate flip when gate_outbound runs, so the retracted
@@ -1166,7 +1129,7 @@ unsafe fn reemit_retract_deletes(
     // sibling still held by another managed root reads kept and is spared.
     let mut to_delete: HashSet<(String, String)> = HashSet::new();
     for (table, id) in component {
-        if !gates.row_kept(db, &table, &id)? {
+        if !gates.row_kept(conn, &table, &id)? {
             to_delete.insert((table, id));
         }
     }
@@ -1174,7 +1137,7 @@ unsafe fn reemit_retract_deletes(
         return Ok(());
     }
 
-    let delete_bytes = full_state_diff(db, gates, FullStateDirection::Deletes)?;
+    let delete_bytes = full_state_diff(conn, gates, FullStateDirection::Deletes)?;
     if delete_bytes.is_empty() {
         return Ok(());
     }
@@ -1217,8 +1180,8 @@ unsafe fn reemit_retract_deletes(
 /// duplicate INSERT by LWW; retract filters by `row_kept` before emitting); only
 /// under-collecting fails, so the closure is computed in full rather than as a
 /// fixed up-then-one-level-down pass.
-unsafe fn connected_component(
-    db: *mut ffi::sqlite3,
+fn connected_component(
+    conn: &Connection,
     gates: &Gates,
     seeds: &HashSet<(String, String)>,
     restrict_to_kept: bool,
@@ -1227,7 +1190,7 @@ unsafe fn connected_component(
     // referencing it, paired with the referrer's FK column name. Built once from
     // the shared FK-edge scan so the per-row down-expansion is a map lookup, not a
     // schema scan, and the same edges drive `fk_topological_order`.
-    let down_edges = gated_fk_child_edges(db, &gates.tables)?;
+    let down_edges = gated_fk_child_edges(conn, &gates.tables)?;
 
     let mut out: HashSet<(String, String)> = HashSet::new();
     let mut work: Vec<(String, String)> = seeds.iter().cloned().collect();
@@ -1236,11 +1199,11 @@ unsafe fn connected_component(
             continue; // already visited: cycle-guard and dedup.
         }
         // Up: every gated FK parent of this row.
-        for (fk_col_name, parent) in foreign_keys(db, &table)? {
+        for (fk_col_name, parent) in foreign_keys(conn, &table)? {
             if parent == table || !gates.tables.contains_key(&parent) {
                 continue;
             }
-            if let Some(parent_id) = query_column_text(db, &table, &fk_col_name, &id)? {
+            if let Some(parent_id) = query_column_text(conn, &table, &fk_col_name, &id)? {
                 work.push((parent, parent_id));
             }
         }
@@ -1248,8 +1211,8 @@ unsafe fn connected_component(
         // for re-emit, taken structurally (every live FK edge) for retract.
         if let Some(children) = down_edges.get(table.as_str()) {
             for (child_table, fk) in children {
-                for child_id in rows_referencing(db, child_table, fk, &id)? {
-                    if !restrict_to_kept || gates.row_kept(db, child_table, &child_id)? {
+                for child_id in rows_referencing(conn, child_table, fk, &id)? {
+                    if !restrict_to_kept || gates.row_kept(conn, child_table, &child_id)? {
                         work.push((child_table.clone(), child_id));
                     }
                 }
@@ -1260,8 +1223,8 @@ unsafe fn connected_component(
 }
 
 /// The ids of rows in `table` whose `fk` column equals `value`.
-unsafe fn rows_referencing(
-    db: *mut ffi::sqlite3,
+fn rows_referencing(
+    conn: &Connection,
     table: &str,
     fk: &str,
     value: &str,
@@ -1272,24 +1235,16 @@ unsafe fn rows_referencing(
         t = quote_ident(table),
         fk = quote_ident(fk),
     );
-    let stmt = prepare(db, &sql)?;
-    bind_text(stmt, 1, value);
     let mut ids = Vec::new();
-    while ffi::sqlite3_step(stmt) == ffi::SQLITE_ROW as c_int {
-        let p = ffi::sqlite3_column_text(stmt, 0);
-        if p.is_null() {
+    for id in query_mapped_rows(conn, &sql, [value], |row| row_value_to_string(row, 0))? {
+        let Some(id) = id else {
             // `id` is a NOT NULL primary key, so a NULL here is a genuine schema
             // anomaly, not a row we may quietly drop from the kept component.
             warn!("gate: row in {table} referencing {fk}={value} has a NULL id; skipping it from the kept component");
             continue;
-        }
-        ids.push(
-            CStr::from_ptr(p as *const c_char)
-                .to_string_lossy()
-                .into_owned(),
-        );
+        };
+        ids.push(id);
     }
-    ffi::sqlite3_finalize(stmt);
     Ok(ids)
 }
 
@@ -1299,23 +1254,23 @@ unsafe fn rows_referencing(
 /// directions share this setup; they differ only in which schema the diff session
 /// binds to. `f` receives the clone alias and the gated tables in parent-first
 /// order. A unique alias avoids colliding with any host-attached db.
-unsafe fn with_empty_clone<R>(
-    db: *mut ffi::sqlite3,
+fn with_empty_clone<R>(
+    conn: &Connection,
     gates: &Gates,
     f: impl FnOnce(&str, &[String]) -> Result<R, GateError>,
 ) -> Result<R, GateError> {
     let alias = "coven_gate_empty";
     let attach = format!("ATTACH DATABASE ':memory:' AS {alias}");
-    exec_sql(db, &attach)?;
+    execute_batch(conn, &attach)?;
 
-    let tables = gates.gated_tables_parent_first(db)?;
+    let tables = gates.gated_tables_parent_first(conn)?;
     let result = (|| {
         for tbl in &tables {
-            let create = create_table_sql(db, tbl)?;
+            let create = create_table_sql(conn, tbl)?;
             // The CREATE statement names the bare table; run it in the attached
             // db by qualifying via the schema-aware exec on the alias.
             let in_alias = rewrite_create_into_schema(&create, tbl, alias);
-            exec_sql(db, &in_alias)?;
+            execute_batch(conn, &in_alias)?;
         }
         f(alias, &tables)
     })();
@@ -1323,8 +1278,11 @@ unsafe fn with_empty_clone<R>(
     // Always detach, even on error. A failed detach leaves the clone attached
     // under `alias`, which would make next cycle's ATTACH collide — surface it.
     let detach = format!("DETACH DATABASE {alias}");
-    if let Err(e) = exec_sql(db, &detach) {
-        warn!("gate: failed to detach the temporary clone db ({alias}): {e}");
+    if let Err(detach_err) = execute_batch(conn, &detach) {
+        if result.is_ok() {
+            return Err(detach_err);
+        }
+        warn!("gate: failed to detach the temporary clone db ({alias}): {detach_err}");
     }
 
     result
@@ -1351,11 +1309,12 @@ enum FullStateDirection {
 /// [`FullStateDirection::Inserts`] for the re-emit, [`FullStateDirection::Deletes`]
 /// for the retract.
 unsafe fn full_state_diff(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     gates: &Gates,
     direction: FullStateDirection,
 ) -> Result<Vec<u8>, GateError> {
-    with_empty_clone(db, gates, |alias, tables| {
+    let db = conn.handle();
+    with_empty_clone(conn, gates, |alias, tables| {
         let (session_schema, from_schema) = match direction {
             FullStateDirection::Inserts => ("main", alias),
             FullStateDirection::Deletes => (alias, "main"),
@@ -1371,7 +1330,7 @@ unsafe fn full_state_diff(
 
 /// Whether `row`'s effective gate is true (it should be kept/shared).
 unsafe fn effective_gate(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<bool, GateError> {
@@ -1384,8 +1343,8 @@ unsafe fn effective_gate(
             // resolves the same way (the row may still exist as old-state).
             None => match row.pk() {
                 Some(pk) => {
-                    let col = nth_column_name(db, &row.table, *gate_col)?;
-                    match query_truth(db, &row.table, &col, pk)? {
+                    let col = nth_column_name(conn, &row.table, *gate_col)?;
+                    match query_truth(conn, &row.table, &col, pk)? {
                         Some(t) => Ok(t),
                         None => {
                             warn!(
@@ -1408,12 +1367,16 @@ unsafe fn effective_gate(
         },
         Some(TableGate::RemoteRoot) => Ok(true),
         Some(TableGate::Child { fk_col, parent }) => {
-            let Some(parent_id) =
-                changeset_child_parent_id(db, row, *fk_col, ChildParentResolution::ShareDecision)?
+            let Some(parent_id) = changeset_child_parent_id(
+                conn,
+                row,
+                *fk_col,
+                ChildParentResolution::ShareDecision,
+            )?
             else {
                 return Ok(false);
             };
-            Ok(resolve_root(db, gates, parent, &parent_id)?
+            Ok(resolve_root(conn, gates, parent, &parent_id)?
                 .map(|r| r.kept)
                 .unwrap_or(false))
         }
@@ -1424,7 +1387,7 @@ unsafe fn effective_gate(
             // keep-clause against the live db for this row's pk. An album in the
             // changeset with no managed release is thereby cut.
             match row.pk() {
-                Some(pk) => gates.row_kept(db, &row.table, pk),
+                Some(pk) => gates.row_kept(conn, &row.table, pk),
                 None => {
                     warn!(
                         "gate: ancestor row in {} has no primary key; treating as not-shared",
@@ -1537,7 +1500,7 @@ unsafe fn collect_deletes(
 ///
 /// Memoized and cycle-guarded on `(table, id)`.
 unsafe fn was_shared(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     gates: &Gates,
     deleted: &HashMap<(String, String), ChangeRow>,
     table: &str,
@@ -1575,8 +1538,8 @@ unsafe fn was_shared(
                 }
             },
             None => {
-                let col = nth_column_name(db, table, *gate_col)?;
-                match query_truth(db, table, &col, id)? {
+                let col = nth_column_name(conn, table, *gate_col)?;
+                match query_truth(conn, table, &col, id)? {
                     Some(t) => t,
                     None => {
                         warn!(table, id, "gate: live root absent while resolving a descendant's pre-delete share; treating as not shared");
@@ -1589,10 +1552,10 @@ unsafe fn was_shared(
         Some(TableGate::Child { fk_col, parent }) => {
             let parent_id = match deleted.get(&key) {
                 Some(row) => row.fk_value(*fk_col).map(str::to_string),
-                None => lookup_fk_in_db(db, table, *fk_col, id)?,
+                None => lookup_fk_in_db(conn, table, *fk_col, id)?,
             };
             match parent_id {
-                Some(pid) => was_shared(db, gates, deleted, parent, &pid, memo, visiting)?,
+                Some(pid) => was_shared(conn, gates, deleted, parent, &pid, memo, visiting)?,
                 None => {
                     warn!(table, id, "gate: child has no FK parent while resolving pre-delete share; treating as not shared");
                     false
@@ -1604,7 +1567,7 @@ unsafe fn was_shared(
             // deleted but the ancestor and a sibling remain). For a deleted ancestor
             // the cascade leaves no live child, so the kept child is found among the
             // changeset's deletes instead.
-            if gates.row_kept(db, table, id)? {
+            if gates.row_kept(conn, table, id)? {
                 true
             } else {
                 let mut found = false;
@@ -1612,7 +1575,7 @@ unsafe fn was_shared(
                     for ((dt, dpk), drow) in deleted {
                         if dt == child_table
                             && drow.fk_value(*child_fk_col) == Some(id)
-                            && was_shared(db, gates, deleted, child_table, dpk, memo, visiting)?
+                            && was_shared(conn, gates, deleted, child_table, dpk, memo, visiting)?
                         {
                             found = true;
                             break 'children;
@@ -1633,7 +1596,7 @@ unsafe fn was_shared(
 /// `(root table, root id)` of its gated-ancestor root, or `None` if the row is
 /// ungated/unrooted or not shared.
 unsafe fn gated_root_id(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<Option<(String, String)>, GateError> {
@@ -1649,11 +1612,11 @@ unsafe fn gated_root_id(
         Some(TableGate::RemoteRoot) => Ok(row.pk().map(|pk| (row.table.clone(), pk.to_string()))),
         Some(TableGate::Child { fk_col, parent }) => {
             let Some(parent_id) =
-                changeset_child_parent_id(db, row, *fk_col, ChildParentResolution::ReemitScope)?
+                changeset_child_parent_id(conn, row, *fk_col, ChildParentResolution::ReemitScope)?
             else {
                 return Ok(None);
             };
-            Ok(resolve_root(db, gates, parent, &parent_id)?
+            Ok(resolve_root(conn, gates, parent, &parent_id)?
                 .filter(|r| r.kept)
                 .map(|r| (r.terminus_table, r.terminus_id)))
         }
@@ -1672,7 +1635,7 @@ enum ChildParentResolution {
 /// The parent id for a child changeset row. The changeset carries the FK when it
 /// changed; when it omits the FK, read the live row by primary key.
 unsafe fn changeset_child_parent_id(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     row: &ChangeRow,
     fk_col: usize,
     resolution: ChildParentResolution,
@@ -1695,7 +1658,7 @@ unsafe fn changeset_child_parent_id(
         return Ok(None);
     };
 
-    match lookup_fk_in_db(db, &row.table, fk_col, pk)? {
+    match lookup_fk_in_db(conn, &row.table, fk_col, pk)? {
         Some(id) => Ok(Some(id)),
         None => {
             match resolution {
@@ -1726,16 +1689,16 @@ struct ResolvedGate {
 /// returning that terminus and its keep truth. `None` if the chain never reaches a
 /// terminus, or a row along it is missing from the live db (an anomaly the caller
 /// treats as not-shared).
-unsafe fn resolve_root(
-    db: *mut ffi::sqlite3,
+fn resolve_root(
+    conn: &Connection,
     gates: &Gates,
     table: &str,
     id: &str,
 ) -> Result<Option<ResolvedGate>, GateError> {
     match gates.tables.get(table) {
         Some(TableGate::Root { gate_col }) => {
-            let col = nth_column_name(db, table, *gate_col)?;
-            match query_truth(db, table, &col, id)? {
+            let col = nth_column_name(conn, table, *gate_col)?;
+            match query_truth(conn, table, &col, id)? {
                 Some(truth) => Ok(Some(ResolvedGate {
                     terminus_table: table.to_string(),
                     terminus_id: id.to_string(),
@@ -1747,7 +1710,7 @@ unsafe fn resolve_root(
                 }
             }
         }
-        Some(TableGate::RemoteRoot) => match query_column_text(db, table, "id", id)? {
+        Some(TableGate::RemoteRoot) => match query_column_text(conn, table, "id", id)? {
             Some(_) => Ok(Some(ResolvedGate {
                 terminus_table: table.to_string(),
                 terminus_id: id.to_string(),
@@ -1759,9 +1722,9 @@ unsafe fn resolve_root(
             }
         },
         Some(TableGate::Child { fk_col, parent }) => {
-            let col = nth_column_name(db, table, *fk_col)?;
-            match query_column_text(db, table, &col, id)? {
-                Some(parent_id) => resolve_root(db, gates, parent, &parent_id),
+            let col = nth_column_name(conn, table, *fk_col)?;
+            match query_column_text(conn, table, &col, id)? {
+                Some(parent_id) => resolve_root(conn, gates, parent, &parent_id),
                 None => {
                     warn!("gate: {table}.{id} has no FK parent in live db; cannot resolve gate");
                     Ok(None)
@@ -1774,7 +1737,7 @@ unsafe fn resolve_root(
         Some(TableGate::Parent { .. }) => Ok(Some(ResolvedGate {
             terminus_table: table.to_string(),
             terminus_id: id.to_string(),
-            kept: gates.row_kept(db, table, id)?,
+            kept: gates.row_kept(conn, table, id)?,
         })),
         // A child whose parent is not itself gated/inheriting was pruned from the
         // map, so this is unreachable for retained tables; treat as ungated.
@@ -1875,34 +1838,17 @@ fn truthy(s: &str) -> bool {
     s.trim().parse::<i64>().map(|n| n != 0).unwrap_or(false)
 }
 
-// ---- small schema/query helpers (FFI) --------------------------------------
+// ---- small schema/query helpers -------------------------------------------
 
 /// Column names of `table`, in declared order, via `PRAGMA table_info`.
-unsafe fn column_names(db: *mut ffi::sqlite3, table: &str) -> Result<Vec<String>, GateError> {
+fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>, GateError> {
     let sql = format!("PRAGMA table_info({})", quote_ident(table));
-    let stmt = prepare(db, &sql)?;
-    let mut names = Vec::new();
-    while ffi::sqlite3_step(stmt) == ffi::SQLITE_ROW as c_int {
-        let name_ptr = ffi::sqlite3_column_text(stmt, 1);
-        if !name_ptr.is_null() {
-            names.push(
-                CStr::from_ptr(name_ptr as *const c_char)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
-    }
-    ffi::sqlite3_finalize(stmt);
-    Ok(names)
+    query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(1))
 }
 
 /// The name of column `idx` of `table`.
-unsafe fn nth_column_name(
-    db: *mut ffi::sqlite3,
-    table: &str,
-    idx: usize,
-) -> Result<String, GateError> {
-    column_names(db, table)?
+fn nth_column_name(conn: &Connection, table: &str, idx: usize) -> Result<String, GateError> {
+    column_names(conn, table)?
         .into_iter()
         .nth(idx)
         .ok_or_else(|| GateError::MissingFkColumn(table.to_string(), format!("col#{idx}")))
@@ -1911,48 +1857,94 @@ unsafe fn nth_column_name(
 /// Every foreign key on `table`, as `(child column name, parent table name)`
 /// pairs, via `PRAGMA foreign_key_list`. Composite keys contribute one pair per
 /// row; the gate only ever uses the column, so the granularity matches.
-unsafe fn foreign_keys(
-    db: *mut ffi::sqlite3,
-    table: &str,
-) -> Result<Vec<(String, String)>, GateError> {
+fn foreign_keys(conn: &Connection, table: &str) -> Result<Vec<(String, String)>, GateError> {
     let sql = format!("PRAGMA foreign_key_list({})", quote_ident(table));
-    let stmt = prepare(db, &sql)?;
+    let rows = query_mapped_rows(conn, &sql, [], |row| {
+        Ok((
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
     let mut fks = Vec::new();
-    while ffi::sqlite3_step(stmt) == ffi::SQLITE_ROW as c_int {
-        // columns: id, seq, table(parent), from(child col), to, on_update, ...
-        let parent_ptr = ffi::sqlite3_column_text(stmt, 2);
-        let from_ptr = ffi::sqlite3_column_text(stmt, 3);
-        if parent_ptr.is_null() || from_ptr.is_null() {
+    for (from, parent) in rows {
+        let Some(from) = from else {
+            warn!(
+                table,
+                "gate: foreign_key_list row has no child column; skipping it"
+            );
             continue;
-        }
-        let parent = CStr::from_ptr(parent_ptr as *const c_char)
-            .to_string_lossy()
-            .into_owned();
-        let from = CStr::from_ptr(from_ptr as *const c_char)
-            .to_string_lossy()
-            .into_owned();
+        };
+        let Some(parent) = parent else {
+            warn!(
+                table,
+                from, "gate: foreign_key_list row has no parent table; skipping it"
+            );
+            continue;
+        };
         fks.push((from, parent));
     }
-    ffi::sqlite3_finalize(stmt);
     Ok(fks)
+}
+
+fn execute_batch(conn: &Connection, sql: &str) -> Result<(), GateError> {
+    conn.execute_batch(sql)
+        .map_err(|e| GateError::Sql(format!("execute batch: {sql}"), e))
+}
+
+fn query_mapped_rows<T, P, F>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mut mapper: F,
+) -> Result<Vec<T>, GateError>
+where
+    P: Params,
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| GateError::Sql(format!("prepare: {sql}"), e))?;
+    let rows = stmt
+        .query_map(params, |row| mapper(row))
+        .map_err(|e| GateError::Sql(format!("query: {sql}"), e))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| GateError::Sql(format!("query row: {sql}"), e))?);
+    }
+    Ok(out)
+}
+
+fn query_row_optional<T, P, F>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mapper: F,
+) -> Result<Option<T>, GateError>
+where
+    P: Params,
+    F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.query_row(sql, params, mapper)
+        .optional()
+        .map_err(|e| GateError::Sql(format!("query: {sql}"), e))
 }
 
 /// The index in `child`'s column list of the FK column that references `parent`,
 /// or `None` if `child` has no FK to `parent`. Used to wire an ancestor to a
 /// keep-child: the inference names the child *table*, and this resolves which of
 /// its columns holds the ancestor's id.
-unsafe fn fk_col_referencing(
-    db: *mut ffi::sqlite3,
+fn fk_col_referencing(
+    conn: &Connection,
     child: &str,
     parent: &str,
 ) -> Result<Option<usize>, GateError> {
-    let from = foreign_keys(db, child)?
+    let from = foreign_keys(conn, child)?
         .into_iter()
         .find(|(_, p)| p == parent)
         .map(|(from, _)| from);
     match from {
         Some(from) => {
-            let cols = column_names(db, child)?;
+            let cols = column_names(conn, child)?;
             cols.iter()
                 .position(|c| c == &from)
                 .map(Some)
@@ -1978,14 +1970,14 @@ unsafe fn fk_col_referencing(
 ///    containment DAG). So `album_artists` → albums, since albums is a descendant
 ///    of artists (albums.artist_id → artists).
 /// 3. **Else break ties lexicographically** by parent name.
-unsafe fn select_parent_fk(
-    db: *mut ffi::sqlite3,
+fn select_parent_fk(
+    conn: &Connection,
     table: &str,
     tables: &[SyncedTable],
     ancestors: &HashSet<&str>,
 ) -> Result<Option<(String, String)>, GateError> {
     let synced: HashSet<&str> = tables.iter().map(|t| t.name()).collect();
-    let candidates: Vec<(String, String)> = foreign_keys(db, table)?
+    let candidates: Vec<(String, String)> = foreign_keys(conn, table)?
         .into_iter()
         .filter(|(_, parent)| synced.contains(parent.as_str()))
         .collect();
@@ -2014,7 +2006,7 @@ unsafe fn select_parent_fk(
     }
     let mut keyed = Vec::with_capacity(candidates.len());
     for (fk, parent) in candidates {
-        let tier = if parent_reaches_root(db, tables, ancestors, &parent, &mut HashSet::new())? {
+        let tier = if parent_reaches_root(conn, tables, ancestors, &parent, &mut HashSet::new())? {
             0u8
         } else if ancestors.contains(parent.as_str()) {
             1
@@ -2022,7 +2014,7 @@ unsafe fn select_parent_fk(
             2
         };
         let specificity = if tier == 1 {
-            -(ancestor_depth(db, ancestors, &parent, &mut HashSet::new())? as isize)
+            -(ancestor_depth(conn, ancestors, &parent, &mut HashSet::new())? as isize)
         } else {
             0
         };
@@ -2043,7 +2035,7 @@ unsafe fn select_parent_fk(
 /// iff its own selected parent FK does; an ancestor is NOT a downward root path (its
 /// keep is the separate upward relation). Cycle-guarded by `visiting`.
 fn parent_reaches_root(
-    db: *mut ffi::sqlite3,
+    conn: &Connection,
     tables: &[SyncedTable],
     ancestors: &HashSet<&str>,
     parent: &str,
@@ -2058,9 +2050,9 @@ fn parent_reaches_root(
         // An ancestor is not a downward root path.
         Some(t) if t.is_gated_by_descendants() => false,
         // A plain (or unknown) parent reaches a root iff its own chain does.
-        _ => match unsafe { select_parent_fk(db, parent, tables, ancestors)? } {
+        _ => match select_parent_fk(conn, parent, tables, ancestors)? {
             Some((_, grandparent)) => {
-                parent_reaches_root(db, tables, ancestors, &grandparent, visiting)?
+                parent_reaches_root(conn, tables, ancestors, &grandparent, visiting)?
             }
             // No synced-parent FK: the chain ends here without a root.
             None => false,
@@ -2074,8 +2066,8 @@ fn parent_reaches_root(
 /// references no other ancestor, else 1 + the max depth of the ancestors it has
 /// an FK to. A deeper ancestor is more specific (e.g. albums references artists,
 /// so albums is depth 1 and artists depth 0). Cycle-guarded by `visiting`.
-unsafe fn ancestor_depth(
-    db: *mut ffi::sqlite3,
+fn ancestor_depth(
+    conn: &Connection,
     ancestors: &HashSet<&str>,
     ancestor: &str,
     visiting: &mut HashSet<String>,
@@ -2084,9 +2076,9 @@ unsafe fn ancestor_depth(
         return Ok(0); // defensive against a malformed ancestor cycle.
     }
     let mut depth = 0;
-    for (_, parent) in foreign_keys(db, ancestor)? {
+    for (_, parent) in foreign_keys(conn, ancestor)? {
         if parent != ancestor && ancestors.contains(parent.as_str()) {
-            depth = depth.max(1 + ancestor_depth(db, ancestors, &parent, visiting)?);
+            depth = depth.max(1 + ancestor_depth(conn, ancestors, &parent, visiting)?);
         }
     }
     visiting.remove(ancestor);
@@ -2094,28 +2086,12 @@ unsafe fn ancestor_depth(
 }
 
 /// `CREATE TABLE` text for `table` from `sqlite_master`.
-unsafe fn create_table_sql(db: *mut ffi::sqlite3, table: &str) -> Result<String, GateError> {
-    let sql = format!(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='{}'",
-        table.replace('\'', "''")
-    );
-    let stmt = prepare(db, &sql)?;
-    let step = ffi::sqlite3_step(stmt);
-    if step != ffi::SQLITE_ROW as c_int {
-        ffi::sqlite3_finalize(stmt);
-        return Err(GateError::NoSchema(table.to_string()));
-    }
-    let text_ptr = ffi::sqlite3_column_text(stmt, 0);
-    let create = if text_ptr.is_null() {
-        ffi::sqlite3_finalize(stmt);
-        return Err(GateError::NoSchema(table.to_string()));
-    } else {
-        CStr::from_ptr(text_ptr as *const c_char)
-            .to_string_lossy()
-            .into_owned()
-    };
-    ffi::sqlite3_finalize(stmt);
-    Ok(create)
+fn create_table_sql(conn: &Connection, table: &str) -> Result<String, GateError> {
+    let sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?1";
+    let create = query_row_optional(conn, sql, [table], |row| row.get::<_, Option<String>>(0))?;
+    create
+        .flatten()
+        .ok_or_else(|| GateError::NoSchema(table.to_string()))
 }
 
 /// Qualify a `CREATE TABLE <name> ...` statement so it builds the table inside
@@ -2153,8 +2129,8 @@ fn rewrite_create_into_schema(create: &str, table: &str, alias: &str) -> String 
 }
 
 /// Query a single text column value for the row with id `id`.
-unsafe fn query_column_text(
-    db: *mut ffi::sqlite3,
+fn query_column_text(
+    conn: &Connection,
     table: &str,
     column: &str,
     id: &str,
@@ -2165,77 +2141,39 @@ unsafe fn query_column_text(
         quote_ident(table),
         quote_ident("id"),
     );
-    let stmt = prepare(db, &sql)?;
-    bind_text(stmt, 1, id);
-    let step = ffi::sqlite3_step(stmt);
-    let out = if step == ffi::SQLITE_ROW as c_int {
-        let p = ffi::sqlite3_column_text(stmt, 0);
-        if p.is_null() {
-            None
-        } else {
-            Some(
-                CStr::from_ptr(p as *const c_char)
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        }
-    } else {
-        None
-    };
-    ffi::sqlite3_finalize(stmt);
-    Ok(out)
+    query_row_optional(conn, &sql, [id], |row| row_value_to_string(row, 0)).map(|row| row.flatten())
 }
 
 /// Query a single boolean gate column for the row with id `id`.
-unsafe fn query_truth(
-    db: *mut ffi::sqlite3,
+fn query_truth(
+    conn: &Connection,
     table: &str,
     column: &str,
     id: &str,
 ) -> Result<Option<bool>, GateError> {
-    Ok(query_column_text(db, table, column, id)?.map(|s| truthy(&s)))
+    Ok(query_column_text(conn, table, column, id)?.map(|s| truthy(&s)))
 }
 
 /// Read the FK value (`column` at index `fk_col`) for the live row `pk`.
-unsafe fn lookup_fk_in_db(
-    db: *mut ffi::sqlite3,
+fn lookup_fk_in_db(
+    conn: &Connection,
     table: &str,
     fk_col: usize,
     pk: &str,
 ) -> Result<Option<String>, GateError> {
-    let column = nth_column_name(db, table, fk_col)?;
-    query_column_text(db, table, &column, pk)
+    let column = nth_column_name(conn, table, fk_col)?;
+    query_column_text(conn, table, &column, pk)
 }
 
-unsafe fn prepare(db: *mut ffi::sqlite3, sql: &str) -> Result<*mut ffi::sqlite3_stmt, GateError> {
-    let c_sql = CString::new(sql).map_err(|_| GateError::BadSql(sql.to_string()))?;
-    let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-    let rc = ffi::sqlite3_prepare_v2(db, c_sql.as_ptr(), -1, &mut stmt, ptr::null_mut());
-    if rc != ffi::SQLITE_OK as c_int {
-        return Err(GateError::Prepare(sql.to_string(), rc));
+fn row_value_to_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Integer(i) => Ok(Some(i.to_string())),
+        ValueRef::Real(r) => Ok(Some(r.to_string())),
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+        }
     }
-    Ok(stmt)
-}
-
-unsafe fn bind_text(stmt: *mut ffi::sqlite3_stmt, idx: c_int, val: &str) {
-    // SQLITE_TRANSIENT tells SQLite to copy the bytes; they outlive this call.
-    let transient = std::mem::transmute::<isize, ffi::sqlite3_destructor_type>(-1isize);
-    ffi::sqlite3_bind_text(
-        stmt,
-        idx,
-        val.as_ptr() as *const c_char,
-        val.len() as c_int,
-        transient,
-    );
-}
-
-unsafe fn exec_sql(db: *mut ffi::sqlite3, sql: &str) -> Result<(), GateError> {
-    let c_sql = CString::new(sql).map_err(|_| GateError::BadSql(sql.to_string()))?;
-    let rc = ffi::sqlite3_exec(db, c_sql.as_ptr(), None, ptr::null_mut(), ptr::null_mut());
-    if rc != ffi::SQLITE_OK as c_int {
-        return Err(GateError::Exec(sql.to_string(), rc));
-    }
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -2254,9 +2192,7 @@ pub enum GateError {
     /// The gated tables form an FK cycle, so no parent-first apply order exists.
     FkCycle(Vec<String>),
     NoSchema(String),
-    BadSql(String),
-    Prepare(String, c_int),
-    Exec(String, c_int),
+    Sql(String, rusqlite::Error),
 }
 
 impl std::fmt::Display for GateError {
@@ -2286,9 +2222,7 @@ impl std::fmt::Display for GateError {
                 write!(f, "gated tables form an FK cycle: {}", tables.join(", "))
             }
             GateError::NoSchema(tbl) => write!(f, "no CREATE TABLE schema for {tbl}"),
-            GateError::BadSql(sql) => write!(f, "SQL not representable as a C string: {sql}"),
-            GateError::Prepare(sql, rc) => write!(f, "prepare failed (rc={rc}): {sql}"),
-            GateError::Exec(sql, rc) => write!(f, "exec failed (rc={rc}): {sql}"),
+            GateError::Sql(op, err) => write!(f, "{op} failed: {err}"),
         }
     }
 }
@@ -2594,6 +2528,84 @@ mod tests {
     }
 
     #[test]
+    fn ancestor_keep_resolution_surfaces_step_errors() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("gate-step-error.db");
+        let c = Connection::open(&path).expect("open gate db");
+        c.busy_timeout(std::time::Duration::from_millis(1))
+            .expect("busy timeout");
+        exec(
+            &c,
+            "CREATE TABLE albums (
+                id TEXT PRIMARY KEY,
+                _updated_at TEXT NOT NULL
+            );
+            CREATE TABLE releases (
+                id TEXT PRIMARY KEY,
+                album_id TEXT NOT NULL,
+                managed INTEGER NOT NULL DEFAULT 0,
+                _updated_at TEXT NOT NULL,
+                FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE
+            );
+            INSERT INTO albums (id, _updated_at)
+            VALUES ('a1', '0000000001000-0000-dev1');
+            INSERT INTO releases (id, album_id, managed, _updated_at)
+            VALUES ('r1', 'a1', 1, '0000000001000-0000-dev1');",
+        );
+        let tables = vec![
+            SyncedTable::new("releases").gated_by("managed"),
+            SyncedTable::new("albums").gated_by_descendants(),
+        ];
+        let gates = Gates::from_tables(&c, &tables).expect("gates");
+
+        let blocker = Connection::open(&path).expect("open blocker");
+        blocker
+            .execute_batch(
+                "BEGIN EXCLUSIVE; UPDATE albums SET _updated_at = _updated_at WHERE id = 'a1';",
+            )
+            .expect("hold exclusive write lock");
+
+        let err = gates
+            .root_kept_of(&c, "albums", "a1")
+            .expect_err("locked step must surface as a gate error");
+        assert!(
+            matches!(err, GateError::Sql(_, _)),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_clone_surfaces_detach_failure() {
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                _updated_at TEXT NOT NULL
+            );",
+        );
+        let gates =
+            Gates::from_tables(&c, &[SyncedTable::new("notes").remote_root()]).expect("gates");
+
+        let err = with_empty_clone(&c, &gates, |alias, _tables| {
+            c.execute_batch(&format!(
+                "BEGIN;
+                 INSERT INTO {alias}.notes (id, _updated_at)
+                 VALUES ('n1', '0000000001000-0000-dev1');"
+            ))
+            .map_err(|e| GateError::Sql("write clone".to_string(), e))?;
+            Ok(())
+        })
+        .expect_err("detach failure must surface");
+        assert!(
+            matches!(err, GateError::Sql(_, _)),
+            "unexpected error: {err}"
+        );
+        c.execute_batch("ROLLBACK; DETACH DATABASE coven_gate_empty")
+            .expect("cleanup clone");
+    }
+
+    #[test]
     fn flip_false_to_true_reemits_full_subtree() {
         let c = conn();
         create_synced_schema(&c);
@@ -2863,12 +2875,7 @@ mod tests {
             Some(TableGate::Parent { children }) => {
                 let mut out: Vec<(String, String)> = children
                     .iter()
-                    .map(|(ch, idx)| {
-                        (
-                            ch.clone(),
-                            unsafe { nth_column_name(c.handle(), ch, *idx) }.expect("fk col"),
-                        )
-                    })
+                    .map(|(ch, idx)| (ch.clone(), nth_column_name(c, ch, *idx).expect("fk col")))
                     .collect();
                 out.sort();
                 out
@@ -2884,7 +2891,7 @@ mod tests {
         match gates.tables.get(tbl) {
             Some(TableGate::Child { fk_col, parent }) => (
                 parent.clone(),
-                unsafe { nth_column_name(c.handle(), tbl, *fk_col) }.expect("fk col"),
+                nth_column_name(c, tbl, *fk_col).expect("fk col"),
             ),
             other => panic!(
                 "{tbl} must be an inheriting Child, got present={}",
@@ -2964,7 +2971,7 @@ mod tests {
         let c = conn();
         create_album_schema(&c);
         let gates = Gates::from_tables(&c, &album_tables()).expect("gates");
-        let order = unsafe { gates.gated_tables_parent_first(c.handle()) }.expect("topo order");
+        let order = gates.gated_tables_parent_first(&c).expect("topo order");
         let pos = |t: &str| order.iter().position(|x| *x == t).unwrap();
         assert!(pos("artists") < pos("albums"), "artist before album");
         assert!(pos("albums") < pos("releases"), "album before release");
