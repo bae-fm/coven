@@ -40,18 +40,14 @@ pub enum InviteError {
     LastOwner,
 }
 
-/// Determine the next seq for an author's membership entries in the storage.
-async fn next_membership_seq(
-    storage: &dyn SyncStorage,
-    author_pubkey_hex: &str,
-) -> Result<u64, InviteError> {
-    let existing_entries = storage.list_membership_entries().await?;
-    Ok(existing_entries
+/// Determine the next seq for an author's membership entries from a listed key set.
+fn next_membership_seq(entry_keys: &[(String, u64)], author_pubkey_hex: &str) -> u64 {
+    entry_keys
         .iter()
         .filter(|(author, _)| author == author_pubkey_hex)
         .map(|(_, seq)| seq)
         .max()
-        .map_or(1, |max| max + 1))
+        .map_or(1, |max| max + 1)
 }
 
 /// Decode and convert an Ed25519 hex pubkey to X25519 for sealed box encryption.
@@ -107,10 +103,11 @@ fn signed_wrapped_key(
 /// Upload a signed membership entry to the storage.
 async fn upload_membership_entry(
     storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
     entry: &MembershipEntry,
     author_pubkey_hex: &str,
 ) -> Result<(), InviteError> {
-    let next_seq = next_membership_seq(storage, author_pubkey_hex).await?;
+    let next_seq = next_membership_seq(entry_keys, author_pubkey_hex);
 
     let entry_bytes =
         serde_json::to_vec(entry).map_err(|e| InviteError::Crypto(format!("serialize: {e}")))?;
@@ -131,6 +128,7 @@ pub async fn create_invitation(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
     chain: &mut MembershipChain,
+    entry_keys: Vec<(String, u64)>,
     owner_keypair: &UserKeypair,
     invitee_ed25519_pubkey: &str,
     invitee_email: Option<&str>,
@@ -197,7 +195,9 @@ pub async fn create_invitation(
     }
 
     let author_pubkey_hex = hex::encode(owner_keypair.public_key);
-    if let Err(original) = upload_membership_entry(storage, &entry, &author_pubkey_hex).await {
+    if let Err(original) =
+        upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await
+    {
         let mut rollback_errors = Vec::new();
         if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await {
             rollback_errors.push(rollback.to_string());
@@ -286,6 +286,7 @@ pub async fn revoke_member(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
     chain: &mut MembershipChain,
+    entry_keys: Vec<(String, u64)>,
     owner_keypair: &UserKeypair,
     revokee_pubkey: &str,
     library_id: &str,
@@ -335,7 +336,7 @@ pub async fn revoke_member(
 
     // Upload the Remove entry.
     let author_pubkey_hex = hex::encode(owner_keypair.public_key);
-    upload_membership_entry(storage, &entry, &author_pubkey_hex).await?;
+    upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await?;
 
     // Generate a new random encryption key.
     let new_key = encryption::generate_random_key();
@@ -529,6 +530,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&invitee),
             None,
@@ -579,6 +581,7 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &invitee_pubkey,
             Some("a@b.com"),
@@ -612,6 +615,7 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &invitee_pubkey,
             None,
@@ -755,6 +759,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &second_owner,
             &pubkey_hex(&invitee),
             None,
@@ -810,6 +815,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&invitee),
             None,
@@ -844,6 +850,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             "not-valid-hex",
             None,
@@ -872,6 +879,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             None,
@@ -888,6 +896,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &member,
             &pubkey_hex(&invitee),
             None,
@@ -914,6 +923,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&invitee),
             None,
@@ -955,6 +965,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             None,
@@ -982,6 +993,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             LIB_ID,
@@ -1041,6 +1053,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member1),
             None,
@@ -1056,6 +1069,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member2),
             None,
@@ -1072,6 +1086,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member1),
             LIB_ID,
@@ -1121,6 +1136,7 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &member_pubkey,
             Some("first@example.com"),
@@ -1136,6 +1152,7 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &member_pubkey,
             Some("second@example.com"),
@@ -1151,6 +1168,7 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &member_pubkey,
             LIB_ID,
@@ -1180,6 +1198,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&outsider),
             LIB_ID,
@@ -1203,6 +1222,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             None,
@@ -1219,6 +1239,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&owner),
             LIB_ID,
@@ -1243,6 +1264,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member1),
             None,
@@ -1258,6 +1280,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member2),
             None,
@@ -1274,6 +1297,7 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
+            storage.list_membership_entries().await.unwrap(),
             &member1,
             &pubkey_hex(&member2),
             LIB_ID,

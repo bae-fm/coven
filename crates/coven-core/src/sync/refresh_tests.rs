@@ -162,6 +162,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         &storage,
         &storage,
         &mut chain,
+        storage.list_membership_entries().await.unwrap(),
         &owner,
         &pubkey_hex(&victim),
         LIB_ID,

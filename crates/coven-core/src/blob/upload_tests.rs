@@ -24,6 +24,7 @@ use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::hlc::Hlc;
 use crate::sync::invite::{create_invitation, unwrap_library_key};
 use crate::sync::membership::MemberRole;
+use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
 use rusqlite::OptionalExtension;
 
@@ -658,6 +659,7 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         &membership,
         &membership,
         &mut chain,
+        membership.list_membership_entries().await.unwrap(),
         &owner,
         &pubkey_hex(&joiner),
         None,

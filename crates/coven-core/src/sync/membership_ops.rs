@@ -105,6 +105,7 @@ pub async fn invite_member(
         storage,
         cloud_home,
         &mut chain,
+        entry_keys,
         user_keypair,
         public_key_hex,
         invitee_email,
@@ -171,6 +172,7 @@ pub async fn remove_member(
         storage,
         cloud_home,
         &mut chain,
+        entry_keys,
         user_keypair,
         public_key_hex,
         library_id,
@@ -481,5 +483,46 @@ mod tests {
             pubkey_hex(&second_owner),
             "not the inviting owner's pubkey",
         );
+    }
+
+    #[tokio::test]
+    async fn invite_and_remove_reuse_their_loaded_membership_listing() {
+        let owner = UserKeypair::generate();
+        let invitee = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let owner_pk = pubkey_hex(&owner);
+        let invitee_pk = pubkey_hex(&invitee);
+        storage
+            .put_membership_entry(
+                &owner_pk,
+                1,
+                serde_json::to_vec(&founder_entry(&owner, "0000000001000-0000-f")).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let hlc = Hlc::new("f".to_string());
+        invite_member(
+            &storage,
+            &storage,
+            &owner,
+            &hlc,
+            &invitee_pk,
+            None,
+            MemberRole::Member,
+            &[7u8; 32],
+            "lib-1",
+            "Lib One",
+        )
+        .await
+        .expect("invite");
+
+        assert_eq!(storage.membership_list_count(), 1);
+
+        remove_member(&storage, &storage, &owner, &hlc, &invitee_pk, "lib-1")
+            .await
+            .expect("remove");
+
+        assert_eq!(storage.membership_list_count(), 2);
     }
 }
