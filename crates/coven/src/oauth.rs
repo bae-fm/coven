@@ -191,6 +191,39 @@ impl TokenResponse {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+fn oauth_callback_html(title: &str, message: &str) -> String {
+    include_str!("oauth_success.html")
+        .replace("{{title}}", title)
+        .replace("{{message}}", message)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+async fn post_token_request(
+    config: &OAuthConfig,
+    params: Vec<(&str, String)>,
+    clock: &dyn crate::clock::Clock,
+) -> Result<OAuthTokens, OAuthError> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&config.token_url)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| OAuthError::TokenExchange(format!("request failed: {e}")))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| OAuthError::TokenExchange(format!("read body: {e}")))?;
+
+    let token_resp: TokenResponse = serde_json::from_str(&body)
+        .map_err(|e| OAuthError::TokenExchange(format!("parse response: {e} (body: {body})")))?;
+
+    token_resp.into_tokens(status, &body, clock)
+}
+
 /// Generate a random PKCE code verifier (43-128 URL-safe characters).
 #[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
 pub fn generate_code_verifier() -> String {
@@ -310,14 +343,15 @@ pub async fn authorize(
                         }
                     }
                     let html = if is_error {
-                        include_str!("oauth_success.html")
-                            .replace("Authorization complete", "Authorization denied")
-                            .replace(
-                                "You can close this window and return to the app.",
-                                "Authorization was denied. You can close this window and try again in the app.",
-                            )
+                        oauth_callback_html(
+                            "Authorization denied",
+                            "Authorization was denied. You can close this window and try again in the app.",
+                        )
                     } else {
-                        include_str!("oauth_success.html").to_string()
+                        oauth_callback_html(
+                            "Authorization complete",
+                            "You can close this window and return to the app.",
+                        )
                     };
                     (
                         [
@@ -409,38 +443,18 @@ pub async fn exchange_code(
     redirect_uri: &str,
     clock: &dyn crate::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
-    let client = reqwest::Client::new();
     let mut params = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", &config.client_id),
-        ("code_verifier", verifier),
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("client_id", config.client_id.clone()),
+        ("code_verifier", verifier.to_string()),
     ];
-
-    let secret_ref;
-    if let Some(ref secret) = config.client_secret {
-        secret_ref = secret.clone();
-        params.push(("client_secret", &secret_ref));
+    if let Some(secret) = &config.client_secret {
+        params.push(("client_secret", secret.clone()));
     }
 
-    let resp = client
-        .post(&config.token_url)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| OAuthError::TokenExchange(format!("request failed: {e}")))?;
-
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| OAuthError::TokenExchange(format!("read body: {e}")))?;
-
-    let token_resp: TokenResponse = serde_json::from_str(&body)
-        .map_err(|e| OAuthError::TokenExchange(format!("parse response: {e} (body: {body})")))?;
-
-    token_resp.into_tokens(status, &body, clock)
+    post_token_request(config, params, clock).await
 }
 
 /// Refresh an expired access token using a refresh token.
@@ -450,35 +464,16 @@ pub async fn refresh(
     refresh_token: &str,
     clock: &dyn crate::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
-    let client = reqwest::Client::new();
     let mut params = vec![
-        ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("client_id", &config.client_id),
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token.to_string()),
+        ("client_id", config.client_id.clone()),
     ];
-
-    let secret_ref;
-    if let Some(ref secret) = config.client_secret {
-        secret_ref = secret.clone();
-        params.push(("client_secret", &secret_ref));
+    if let Some(secret) = &config.client_secret {
+        params.push(("client_secret", secret.clone()));
     }
 
-    let resp = client
-        .post(&config.token_url)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| OAuthError::TokenExchange(format!("refresh request failed: {e}")))?;
-
-    let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| OAuthError::TokenExchange(format!("read body: {e}")))?;
-
-    let token_resp: TokenResponse = serde_json::from_str(&body)
-        .map_err(|e| OAuthError::TokenExchange(format!("parse response: {e} (body: {body})")))?;
-    let mut tokens = token_resp.into_tokens(status, &body, clock)?;
+    let mut tokens = post_token_request(config, params, clock).await?;
     // Provider didn't return a new refresh token (common — many providers
     // only rotate it on the initial exchange). Reuse the existing one so the
     // session can refresh again next cycle.
@@ -613,6 +608,158 @@ mod tests {
 
     fn parse_token_response(body: &str) -> TokenResponse {
         serde_json::from_str(body).expect("parse TokenResponse")
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    async fn serve_token_response(
+        response_body: &'static str,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<std::collections::HashMap<String, String>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::Arc;
+
+        use axum::{extract::Form, routing::post, Router};
+        use tokio::sync::{oneshot, Mutex};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind token server");
+        let url = format!(
+            "http://{}/token",
+            listener.local_addr().expect("local addr")
+        );
+
+        let (request_tx, request_rx) = oneshot::channel();
+        let request_tx = Arc::new(Mutex::new(Some(request_tx)));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
+
+        let app = Router::new().route(
+            "/token",
+            post(
+                move |Form(params): Form<std::collections::HashMap<String, String>>| {
+                    let request_tx = request_tx.clone();
+                    let shutdown_tx = shutdown_tx.clone();
+                    async move {
+                        if let Some(tx) = request_tx.lock().await.take() {
+                            let _ = tx.send(params);
+                        }
+                        if let Some(tx) = shutdown_tx.lock().await.take() {
+                            let _ = tx.send(());
+                        }
+                        ([("content-type", "application/json")], response_body)
+                    }
+                },
+            ),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve token response");
+        });
+        (url, request_rx, server)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    fn oauth_config(token_url: String) -> OAuthConfig {
+        OAuthConfig {
+            client_id: "client-id".to_string(),
+            client_secret: Some("client-secret".to_string()),
+            auth_url: "http://auth.example/authorize".to_string(),
+            token_url,
+            scopes: vec![],
+            redirect_port: 19284,
+            extra_auth_params: vec![],
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[test]
+    fn oauth_callback_html_renders_result_text() {
+        let html = oauth_callback_html("Authorization denied", "Denied message");
+
+        assert!(html.contains("<h1>Authorization denied</h1>"));
+        assert!(html.contains("<p>Denied message</p>"));
+        assert!(!html.contains("{{title}}"));
+        assert!(!html.contains("{{message}}"));
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[tokio::test]
+    async fn exchange_code_posts_authorization_code_params() {
+        let (token_url, request_body, server) = serve_token_response(
+            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+        )
+        .await;
+        let config = oauth_config(token_url);
+
+        let tokens = exchange_code(
+            &config,
+            "auth-code",
+            "pkce-verifier",
+            "http://localhost/callback",
+            &crate::clock::SystemClock,
+        )
+        .await
+        .expect("exchange code");
+
+        let body = request_body.await.expect("request body");
+        server.await.expect("token server");
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(body.get("code").map(String::as_str), Some("auth-code"));
+        assert_eq!(
+            body.get("redirect_uri").map(String::as_str),
+            Some("http://localhost/callback")
+        );
+        assert_eq!(body.get("client_id").map(String::as_str), Some("client-id"));
+        assert_eq!(
+            body.get("code_verifier").map(String::as_str),
+            Some("pkce-verifier")
+        );
+        assert_eq!(
+            body.get("client_secret").map(String::as_str),
+            Some("client-secret")
+        );
+        assert_eq!(tokens.access_token, "new-access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("new-refresh"));
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[tokio::test]
+    async fn refresh_posts_refresh_token_params_and_reuses_existing_refresh_token() {
+        let (token_url, request_body, server) =
+            serve_token_response(r#"{"access_token":"refreshed-access","expires_in":3600}"#).await;
+        let config = oauth_config(token_url);
+
+        let tokens = refresh(&config, "existing-refresh", &crate::clock::SystemClock)
+            .await
+            .expect("refresh");
+
+        let body = request_body.await.expect("request body");
+        server.await.expect("token server");
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            body.get("refresh_token").map(String::as_str),
+            Some("existing-refresh")
+        );
+        assert_eq!(body.get("client_id").map(String::as_str), Some("client-id"));
+        assert_eq!(
+            body.get("client_secret").map(String::as_str),
+            Some("client-secret")
+        );
+        assert_eq!(tokens.access_token, "refreshed-access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("existing-refresh"));
     }
 
     #[test]
