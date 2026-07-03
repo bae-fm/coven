@@ -376,7 +376,7 @@ impl CloudHome for CloudKitCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cloud::BlobBody;
+    use crate::storage::cloud::{no_progress, BlobBody};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -491,12 +491,6 @@ mod tests {
 
     fn make_cloud_home() -> CloudKitCloudHome {
         CloudKitCloudHome::new(Arc::new(MockCloudKitOps::new()))
-    }
-
-    /// A progress sink that discards its reports, for tests that only assert
-    /// the stored bytes round-trip.
-    fn no_progress() -> impl Fn(u64) + Send + Sync {
-        |_| {}
     }
 
     #[tokio::test]

@@ -182,15 +182,9 @@ impl CloudHome for InMemoryCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cloud::BlobBody;
+    use crate::storage::cloud::{no_progress, BlobBody};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-
-    /// A progress sink that does nothing — for tests that don't assert on
-    /// progress reporting.
-    fn no_progress() -> impl Fn(u64) + Send + Sync {
-        |_| {}
-    }
 
     #[tokio::test]
     async fn write_then_read_roundtrips() {
