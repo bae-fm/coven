@@ -182,82 +182,6 @@ impl Drop for Changegroup {
     }
 }
 
-/// A raw-FFI session wrapper used only by [`full_state_diff`] (the re-emit
-/// INSERTs and the retract DELETEs), which runs entirely against the raw
-/// `*mut sqlite3` the gate
-/// already holds (alongside the changegroup, also raw FFI). The capture session
-/// that records host writes lives in [`crate::database`] on `rusqlite::session`;
-/// this is a throwaway diff session, not that one.
-struct DiffSession {
-    raw: *mut ffi::sqlite3_session,
-}
-
-impl DiffSession {
-    /// Create a diff session bound to the schema named `schema` (`"main"` for the
-    /// re-emit direction, the empty-clone alias for the retract direction). The
-    /// diff transforms the `from_db` table into this bound schema's table, so
-    /// which schema the session binds to picks the direction: bound to `main` with
-    /// `from = empty` yields INSERTs; bound to `empty` with `from = "main"` yields
-    /// DELETEs.
-    unsafe fn new(db: *mut ffi::sqlite3, schema: &str) -> Result<Self, GateError> {
-        let db_name = CString::new(schema).unwrap();
-        let mut raw: *mut ffi::sqlite3_session = ptr::null_mut();
-        let rc = ffi::sqlite3session_create(db, db_name.as_ptr(), &mut raw);
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(GateError::SessionCreate(rc));
-        }
-        Ok(DiffSession { raw })
-    }
-
-    unsafe fn attach(&self, table: &str) -> Result<(), GateError> {
-        let c_table = CString::new(table).unwrap();
-        let rc = ffi::sqlite3session_attach(self.raw, c_table.as_ptr());
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(GateError::SessionCreate(rc));
-        }
-        Ok(())
-    }
-
-    /// Record the changes that would transform `from_db.tbl` into the table of the
-    /// schema this session is bound to. Bound to `main` with an empty `from_db`,
-    /// that is a full-state INSERT per current row; bound to the empty clone with
-    /// `from_db = "main"`, it is a full-state DELETE per current row.
-    unsafe fn diff(&self, from_db: &str, tbl: &str) -> Result<(), GateError> {
-        let from = CString::new(from_db).unwrap();
-        let table = CString::new(tbl).unwrap();
-        let mut errmsg: *mut c_char = ptr::null_mut();
-        let rc = ffi::sqlite3session_diff(self.raw, from.as_ptr(), table.as_ptr(), &mut errmsg);
-        if rc != ffi::SQLITE_OK as c_int {
-            let detail = if errmsg.is_null() {
-                None
-            } else {
-                let s = CStr::from_ptr(errmsg).to_string_lossy().into_owned();
-                ffi::sqlite3_free(errmsg as *mut c_void);
-                Some(s)
-            };
-            return Err(GateError::Diff(tbl.to_string(), rc, detail));
-        }
-        Ok(())
-    }
-
-    /// Extract the recorded changeset bytes.
-    unsafe fn changeset(&self) -> Result<Vec<u8>, GateError> {
-        let mut len: c_int = 0;
-        let mut buf: *mut c_void = ptr::null_mut();
-        let rc = ffi::sqlite3session_changeset(self.raw, &mut len, &mut buf);
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(GateError::ChangesetExtract(rc));
-        }
-        Ok(copy_sqlite_bytes_and_free(buf, len))
-    }
-}
-
-impl Drop for DiffSession {
-    fn drop(&mut self) {
-        unsafe { ffi::sqlite3session_delete(self.raw) };
-    }
-}
-
 /// SQLite hands session/changegroup output back in sqlite3-managed memory; copy
 /// the bytes before freeing the buffer.
 unsafe fn copy_sqlite_bytes_and_free(buf: *mut c_void, len: c_int) -> Vec<u8> {
@@ -1308,24 +1232,43 @@ enum FullStateDirection {
 /// full-state changeset for all currently-present rows of those tables —
 /// [`FullStateDirection::Inserts`] for the re-emit, [`FullStateDirection::Deletes`]
 /// for the retract.
-unsafe fn full_state_diff(
+fn full_state_diff(
     conn: &Connection,
     gates: &Gates,
     direction: FullStateDirection,
 ) -> Result<Vec<u8>, GateError> {
-    let db = conn.handle();
     with_empty_clone(conn, gates, |alias, tables| {
         let (session_schema, from_schema) = match direction {
             FullStateDirection::Inserts => ("main", alias),
             FullStateDirection::Deletes => (alias, "main"),
         };
-        let session = DiffSession::new(db, session_schema)?;
+        let mut session = rusqlite::session::Session::new_with_name(conn, session_schema).map_err(
+            session_error(format!("create diff session on schema {session_schema}")),
+        )?;
         for tbl in tables {
-            session.attach(tbl)?;
-            session.diff(from_schema, tbl)?;
+            session
+                .attach(Some(tbl.as_str()))
+                .map_err(session_error(format!(
+                    "attach table {session_schema}.{tbl}"
+                )))?;
+            session
+                .diff::<&str, &str>(from_schema, tbl.as_str())
+                .map_err(session_error(format!(
+                    "diff {from_schema}.{tbl} into {session_schema}.{tbl}"
+                )))?;
         }
-        session.changeset()
+        let mut out = Vec::new();
+        session
+            .changeset_strm(&mut out)
+            .map_err(session_error(format!(
+                "extract changeset from diff session on schema {session_schema}"
+            )))?;
+        Ok(out)
     })
+}
+
+fn session_error(operation: String) -> impl FnOnce(rusqlite::Error) -> GateError {
+    |source| GateError::Session { operation, source }
 }
 
 /// Whether `row`'s effective gate is true (it should be kept/shared).
@@ -2179,9 +2122,10 @@ fn row_value_to_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<
 #[derive(Debug)]
 pub enum GateError {
     Ffi(&'static str, c_int),
-    Diff(String, c_int, Option<String>),
-    SessionCreate(i32),
-    ChangesetExtract(i32),
+    Session {
+        operation: String,
+        source: rusqlite::Error,
+    },
     MissingGateColumn(String, String),
     MissingFkColumn(String, String),
     /// A `gated_by_descendants` ancestor (the table) has no inferred gated
@@ -2199,12 +2143,9 @@ impl std::fmt::Display for GateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GateError::Ffi(func, rc) => write!(f, "{func} failed (rc={rc})"),
-            GateError::Diff(tbl, rc, msg) => match msg {
-                Some(m) => write!(f, "session_diff failed for {tbl} (rc={rc}): {m}"),
-                None => write!(f, "session_diff failed for {tbl} (rc={rc})"),
-            },
-            GateError::SessionCreate(rc) => write!(f, "session create failed (rc={rc})"),
-            GateError::ChangesetExtract(rc) => write!(f, "changeset extract failed (rc={rc})"),
+            GateError::Session { operation, source } => {
+                write!(f, "session {operation} failed: {source}")
+            }
             GateError::MissingGateColumn(tbl, col) => {
                 write!(f, "gated table {tbl} has no gate column {col}")
             }
