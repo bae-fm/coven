@@ -1,10 +1,11 @@
-//! The device-local plaintext-file primitives behind coven's blob cache.
+//! The OPFS backend for coven's device-local plaintext-file primitives.
 //!
 //! coven reads a blob file on push (then encrypts and uploads it) and writes it on
-//! pull (after downloading and decrypting); the cache ([`crate::blob::cache`])
+//! pull (after downloading and decrypting); the cache ([`coven_core::blob::cache`])
 //! decides where each file lives (`storage/pinned/<id>` or `storage/cache/<id>`,
-//! built from the validated blob id). This module is just the read / write / exists
-//! primitives over the browser's Origin Private File System.
+//! built from the validated blob id). `coven_core::local_blob` is the public
+//! facade; this module registers its browser implementation over the Origin
+//! Private File System.
 //!
 //! wasm has no `std::fs`, so this module uses OPFS through the dedicated DB
 //! Worker's *synchronous* access handles — the same stable OPFS API the SQLite
@@ -13,7 +14,7 @@
 //! `/coven/images/ab/cd/<id>` maps to nested OPFS directories ending in the file,
 //! so the on-disk layout the host names is preserved under the OPFS root.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use coven_core::local_blob::{PlatformLocalBlobBackend, PlatformPlaintextReader};
@@ -27,199 +28,64 @@ pub fn install_platform_backend() {
 struct OpfsLocalBlobBackend;
 
 #[async_trait(?Send)]
-impl PlatformPlaintextReader for PlaintextReader {
+impl PlatformPlaintextReader for imp::PlaintextReader {
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
-        PlaintextReader::next_chunk(self, max).await
+        imp::PlaintextReader::next_chunk(self, max).await
     }
 }
 
 #[async_trait(?Send)]
 impl PlatformLocalBlobBackend for OpfsLocalBlobBackend {
     async fn open_reader(&self, path: &Path) -> Result<Box<dyn PlatformPlaintextReader>, String> {
-        open_reader(path)
+        imp::open_reader(path)
             .await
             .map(|reader| Box::new(reader) as Box<dyn PlatformPlaintextReader>)
     }
 
     async fn file_len(&self, path: &Path) -> Result<u64, String> {
-        file_len(path).await
+        imp::file_len(path).await
     }
 
     async fn copy_atomic(&self, src: &Path, dst: &Path) -> Result<(), String> {
-        copy_atomic(src, dst).await
+        imp::copy_atomic(src, dst).await
     }
 
     async fn read(&self, path: &Path) -> Result<Vec<u8>, String> {
-        read(path).await
+        imp::read(path).await
     }
 
     async fn read_range(&self, path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
-        read_range(path, offset, len).await
+        imp::read_range(path, offset, len).await
     }
 
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
-        write_atomic(path, bytes).await
+        imp::write_atomic(path, bytes).await
     }
 
     async fn exists(&self, path: &Path) -> Result<bool, String> {
-        exists(path).await
+        imp::exists(path).await
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> Result<(), String> {
-        rename(from, to).await
+        imp::rename(from, to).await
     }
 
     async fn remove_file(&self, path: &Path) -> Result<bool, String> {
-        remove_file(path).await
+        imp::remove_file(path).await
+    }
+
+    #[cfg(test)]
+    async fn remove_dir_all(&self, path: &Path) -> Result<bool, String> {
+        imp::remove_dir_all(path).await
     }
 
     async fn create_dir_all(&self, path: &Path) -> Result<(), String> {
-        create_dir_all(path).await
+        imp::create_dir_all(path).await
     }
 
-    async fn walk_files(&self, dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)>, String> {
-        walk_files(dir).await
+    async fn walk_files(&self, dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
+        imp::walk_files(dir).await
     }
-}
-
-/// An incremental reader over a local plaintext file, handing out the bytes in
-/// bounded chunks so a large blob is sealed-and-uploaded without ever holding the
-/// whole plaintext in memory. The streaming analogue of [`read`], driven by
-/// [`crate::storage::cloud::BlobBody`]: each [`next_chunk`](PlaintextReader::next_chunk)
-/// returns up to `max` more bytes, and an empty result marks end of file.
-///
-/// Backed by an OPFS sync-access handle read at a running offset; the handle is
-/// held open for the reader's life and closed on drop.
-pub struct PlaintextReader(imp::PlaintextReader);
-
-impl PlaintextReader {
-    /// Read up to `max` more bytes from the file (`max` must be positive). Returns
-    /// fewer than `max` only at end of file; an empty vec means the file is fully
-    /// drained. The reader fills a `max`-sized window (looping over short reads) so
-    /// a non-final chunk is always exactly `max` bytes — the property the chunked
-    /// sealer depends on to frame each 64 KiB plaintext chunk.
-    pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
-        self.0.next_chunk(max).await
-    }
-}
-
-/// Open an incremental reader over the plaintext file at `path`. `Err` if it is
-/// missing or unopenable — the streaming sibling of [`read`].
-pub async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
-    imp::open_reader(path).await.map(PlaintextReader)
-}
-
-/// The byte length of the local file at `path` — the plaintext length a streaming
-/// upload needs up front to announce the encrypted object size (via
-/// [`crate::encryption::chunked_encrypted_len`]) before sealing a byte.
-pub async fn file_len(path: &Path) -> Result<u64, String> {
-    imp::file_len(path).await
-}
-
-/// Copy the plaintext file at `src` to `dst`, creating `dst`'s parent
-/// directories. Used to pin a just-uploaded blob into the protected cache
-/// folder. OPFS has no cross-file rename, so this is a whole-file read followed
-/// by [`write_atomic`].
-pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
-    imp::copy_atomic(src, dst).await
-}
-
-/// Read the whole local file at `path`. `Err` if it is missing or unreadable — a
-/// caller (the push read, the outbox drain) treats that as a failed upload, never
-/// as empty bytes.
-pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
-    imp::read(path).await
-}
-
-/// Read exactly `len` bytes starting at byte `offset` from the local file at
-/// `path`. The cache stores plaintext, so a ranged read of a cached blob seeks and
-/// reads the slice straight off disk — no decryption — the local analogue of
-/// [`crate::sync::cloud_storage::BlobRangeReader::read`] for a cache hit.
-///
-/// `Err` if the file is missing, unreadable, or shorter than `offset + len`: the
-/// read is exact, never a silent short read. A cached blob's file is the whole
-/// plaintext (cache writes are whole-file and atomic), so a caller that has
-/// already checked the requested range against the blob's plaintext length never
-/// trips the short-file case; if it somehow does, the file is torn and the loud
-/// error is correct. `len == 0` returns an empty vec without opening past the
-/// seek.
-pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
-    imp::read_range(path, offset, len).await
-}
-
-/// Write `bytes` to `path` through OPFS's sync-access-handle path, creating any
-/// missing parent directories. OPFS exposes no cross-file rename for the native
-/// temp→rename shape, so this delegates to [`write`]: truncate, write the whole
-/// payload, then flush the handle. The cache remains a re-fetchable mirror of
-/// cloud blobs on this platform.
-pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    imp::write_atomic(path, bytes).await
-}
-
-/// Whether a local file exists at `path`. `Ok(true)`/`Ok(false)` is a definite
-/// answer; `Err` is a real backend failure (a broken filesystem, an OPFS API
-/// error) — never collapsed into "absent", so a caller can tell "the file isn't
-/// there" apart from "I couldn't find out". The pull skip-check (don't re-download
-/// a blob already on disk) and the push presence-check (don't upload a file that
-/// isn't here) each decide what a failure means in their context.
-pub async fn exists(path: &Path) -> Result<bool, String> {
-    imp::exists(path).await
-}
-
-/// Move the file at `from` to `to` within coven's storage. The cache's pin/unpin
-/// promote a blob between `storage/cache/<id>` and `storage/pinned/<id>`; the
-/// destination's parent directories must already exist (the cache creates them via
-/// [`create_dir_all`] first).
-///
-/// OPFS has no cross-directory rename, so this is copy-then-delete and is NOT
-/// atomic; see the implementation for why a transient duplicate is benign for a
-/// re-fetchable cache.
-pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
-    imp::rename(from, to).await
-}
-
-/// Remove the file at `path`. `Ok(true)` if it was there and is now gone,
-/// `Ok(false)` if it was already absent — the expected case when a blob lives in
-/// only one cache folder, or a sweep races a concurrent delete. `Err` is a real
-/// backend failure, never collapsed into "absent", so a caller can tell "nothing
-/// to remove" apart from "couldn't remove it".
-pub async fn remove_file(path: &Path) -> Result<bool, String> {
-    imp::remove_file(path).await
-}
-
-/// Remove the directory tree at `path` and everything under it. `Ok(true)` if it
-/// was there and is now gone, `Ok(false)` if it was already absent. `Err` is a
-/// real backend failure — a tree the
-/// caller asked to clear must actually be gone, never reported clear over a failed
-/// delete.
-///
-/// Test-only: production cache eviction sweeps individual files via
-/// [`remove_file`]. Cache clearing and tests that reset an OPFS subtree use this.
-#[cfg(test)]
-pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
-    imp::remove_dir_all(path).await
-}
-
-/// Create the directory at `path` and any missing parents. Used before a [`rename`]
-/// into a cache folder a blob has never lived in yet (its `{ab}/{cd}` shard).
-pub async fn create_dir_all(path: &Path) -> Result<(), String> {
-    imp::create_dir_all(path).await
-}
-
-/// Enumerate every file in the tree rooted at `dir`, returning `(path, recency,
-/// size)` per file — the input to a budget eviction sweep over `storage/cache/`.
-/// `recency` is milliseconds since the Unix epoch (`File.lastModified`),
-/// larger meaning more recently written, so the
-/// caller evicts the smallest `recency` first. `size` is the file's byte length.
-///
-/// An absent `dir` is an empty result, not an error: nothing has been cached yet,
-/// so there is nothing to measure. A directory or file that vanishes mid-walk (a
-/// concurrent sweep or test reset removed it) is dropped from the result, logged at
-/// debug — the one legitimate skip. Every other failure to read a directory or stat
-/// a file is surfaced: a cache that cannot be fully measured fails loudly rather
-/// than under-counting and silently drifting over budget.
-pub async fn walk_files(dir: &Path) -> Result<Vec<(std::path::PathBuf, u64, u64)>, String> {
-    imp::walk_files(dir).await
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -525,7 +391,7 @@ mod imp {
         Ok(buf)
     }
 
-    async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         // `create = true`, so a component is created rather than reported missing —
         // not-found can't arise here, but fold it into a message for completeness.
         let fh = file_handle(path, true)
@@ -607,7 +473,6 @@ mod imp {
         remove_entry(path, false).await
     }
 
-    #[cfg(test)]
     pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
         remove_entry(path, true).await
     }

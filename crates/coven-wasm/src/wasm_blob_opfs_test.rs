@@ -3,8 +3,8 @@
 //!
 //! Two layers are covered:
 //!
-//! 1. [`local_blob`](crate::local_blob) directly — atomic write/read/exists/overwrite
-//!    against OPFS, the unit that replaces `std::fs` on wasm.
+//! 1. [`local_blob`](coven_core::local_blob) directly — write/read/exists/overwrite
+//!    through the registered OPFS backend.
 //! 2. The real sync cycle end to end — device A writes a photo blob to OPFS and
 //!    pushes a changeset referencing it (`SyncService` reads the file through
 //!    `local_blob` and uploads it); device B pulls the changeset and
@@ -95,6 +95,7 @@ async fn run_cycle(
 #[wasm_bindgen_test]
 async fn local_blob_round_trips_through_opfs() {
     console_error_panic_hook::set_once();
+    crate::install_platform();
 
     let path = Path::new("/coven-blob-test/unit/ab/cd/blob-1");
 
@@ -102,38 +103,38 @@ async fn local_blob_round_trips_through_opfs() {
     // and reading it is an error (not empty bytes) — the upload paths rely on both.
     let absent = Path::new("/coven-blob-test/unit/definitely/absent");
     assert_eq!(
-        crate::local_blob::exists(absent).await,
+        coven_core::local_blob::exists(absent).await,
         Ok(false),
         "an unwritten path is reported absent, not as an error",
     );
     assert!(
-        crate::local_blob::read(absent).await.is_err(),
+        coven_core::local_blob::read(absent).await.is_err(),
         "reading a missing OPFS file is an error, not empty bytes",
     );
 
     // Write creates the nested directories and the file.
     let payload = b"the quick brown fox jumps over the lazy dog".to_vec();
-    crate::local_blob::write_atomic(path, &payload)
+    coven_core::local_blob::write_atomic(path, &payload)
         .await
         .expect("write blob to OPFS");
     assert_eq!(
-        crate::local_blob::exists(path).await,
+        coven_core::local_blob::exists(path).await,
         Ok(true),
         "a written path exists",
     );
     assert_eq!(
-        crate::local_blob::read(path).await.expect("read back"),
+        coven_core::local_blob::read(path).await.expect("read back"),
         payload,
         "OPFS read returns exactly what was written",
     );
 
     // Overwriting with shorter content must not leave any tail of the old bytes.
     let shorter = b"short".to_vec();
-    crate::local_blob::write_atomic(path, &shorter)
+    coven_core::local_blob::write_atomic(path, &shorter)
         .await
         .expect("overwrite blob");
     assert_eq!(
-        crate::local_blob::read(path)
+        coven_core::local_blob::read(path)
             .await
             .expect("read after overwrite"),
         shorter,
@@ -141,11 +142,11 @@ async fn local_blob_round_trips_through_opfs() {
     );
 
     // Empty content round-trips too.
-    crate::local_blob::write_atomic(path, b"")
+    coven_core::local_blob::write_atomic(path, b"")
         .await
         .expect("write empty");
     assert!(
-        crate::local_blob::read(path)
+        coven_core::local_blob::read(path)
             .await
             .expect("read empty")
             .is_empty(),
@@ -204,7 +205,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         .cache_blob_path("photos", "photo-1")
         .expect("cache blob path");
     assert_eq!(
-        crate::local_blob::exists(&b_cache).await,
+        coven_core::local_blob::exists(&b_cache).await,
         Ok(false),
         "the photo must not be in B's cache before B syncs",
     );
@@ -235,7 +236,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 
     // ...and so did the blob bytes, written into B's evictable cache by the pull.
     assert_eq!(
-        crate::local_blob::read(&b_cache)
+        coven_core::local_blob::read(&b_cache)
             .await
             .expect("read photo from B's OPFS"),
         photo_bytes,
@@ -248,25 +249,28 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 /// `rename` moves a file across directories (copy-then-delete, since OPFS has no
 /// native rename), `remove_file` drops one file, and `remove_dir_all` drops a whole
 /// subtree. Absence is reported as `Ok(false)` / an empty list, never an error —
-/// the contract `evict_to_budget` and test cache resets rely on. Disjoint path
-/// prefix from the other tests so a shared OPFS within one run doesn't collide.
+/// the contract `evict_to_budget` and `clear_cache` rely on. Disjoint path prefix
+/// from the other tests so a shared OPFS within one run doesn't collide.
 #[wasm_bindgen_test]
 async fn local_blob_dir_ops_round_trip_through_opfs() {
     console_error_panic_hook::set_once();
+    crate::install_platform();
 
     let root = Path::new("/coven-blob-dirops");
     // Two files under a two-level shard, mirroring the cache's `{ab}/{cd}/<id>`.
     let a = root.join("ab/cd/blob-a");
     let b = root.join("ef/01/blob-b");
-    crate::local_blob::write_atomic(&a, b"aaaa")
+    coven_core::local_blob::write_atomic(&a, b"aaaa")
         .await
         .expect("write blob-a");
-    crate::local_blob::write_atomic(&b, b"bbbbbb")
+    coven_core::local_blob::write_atomic(&b, b"bbbbbb")
         .await
         .expect("write blob-b");
 
     // walk_files descends both shards and returns every leaf file with its size.
-    let listed = crate::local_blob::walk_files(root).await.expect("walk");
+    let listed = coven_core::local_blob::walk_files(root)
+        .await
+        .expect("walk");
     assert_eq!(listed.len(), 2, "walk_files found both leaf files");
     assert!(
         listed.iter().any(|(p, _, size)| p == &a && *size == 4),
@@ -280,16 +284,16 @@ async fn local_blob_dir_ops_round_trip_through_opfs() {
     // rename moves blob-a into a fresh shard: the destination has the bytes (its
     // parent dirs created along the way), the source is gone.
     let a_moved = root.join("99/88/blob-a");
-    crate::local_blob::rename(&a, &a_moved)
+    coven_core::local_blob::rename(&a, &a_moved)
         .await
         .expect("rename blob-a");
     assert_eq!(
-        crate::local_blob::exists(&a).await,
+        coven_core::local_blob::exists(&a).await,
         Ok(false),
         "the rename source is gone (copy-then-delete completed)",
     );
     assert_eq!(
-        crate::local_blob::read(&a_moved)
+        coven_core::local_blob::read(&a_moved)
             .await
             .expect("read the moved blob"),
         b"aaaa",
@@ -299,12 +303,12 @@ async fn local_blob_dir_ops_round_trip_through_opfs() {
     // remove_file drops a present file (Ok(true)); a second remove is Ok(false), not
     // an error — the already-gone case eviction tolerates.
     assert_eq!(
-        crate::local_blob::remove_file(&a_moved).await,
+        coven_core::local_blob::remove_file(&a_moved).await,
         Ok(true),
         "removing a present file reports it was there",
     );
     assert_eq!(
-        crate::local_blob::remove_file(&a_moved).await,
+        coven_core::local_blob::remove_file(&a_moved).await,
         Ok(false),
         "removing an already-absent file is Ok(false), not an error",
     );
@@ -312,17 +316,17 @@ async fn local_blob_dir_ops_round_trip_through_opfs() {
     // remove_dir_all drops the whole subtree (blob-b and its shards with it); a
     // second sweep over the now-absent root is Ok(false), the empty-cache case.
     assert_eq!(
-        crate::local_blob::remove_dir_all(root).await,
+        coven_core::local_blob::remove_dir_all(root).await,
         Ok(true),
         "removing a present tree reports it was there",
     );
     assert_eq!(
-        crate::local_blob::exists(&b).await,
+        coven_core::local_blob::exists(&b).await,
         Ok(false),
         "a file under the removed subtree is gone",
     );
     assert_eq!(
-        crate::local_blob::remove_dir_all(root).await,
+        coven_core::local_blob::remove_dir_all(root).await,
         Ok(false),
         "removing an already-absent tree is Ok(false), not an error",
     );
@@ -330,7 +334,7 @@ async fn local_blob_dir_ops_round_trip_through_opfs() {
     // walk_files over an absent tree is an empty list, not an error — the
     // nothing-cached-yet case `evict_to_budget` returns early on.
     assert!(
-        crate::local_blob::walk_files(root)
+        coven_core::local_blob::walk_files(root)
             .await
             .expect("walk an absent tree")
             .is_empty(),
