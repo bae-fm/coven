@@ -1228,16 +1228,21 @@ pub fn register_platform_connection_opener(opener: PlatformConnectionOpener) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub fn open_native_connection(path: &Path) -> Result<Connection, DbError> {
+    let conn = Connection::open(path).map_err(DbError::from)?;
+    conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
+        .map_err(DbError::from)?;
+    Ok(conn)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn open_connection(path: &Path) -> Result<Connection, DbError> {
     if let Some(opener) = PLATFORM_CONNECTION_OPENER.get() {
         opener(path)
     } else {
         #[cfg(any(test, feature = "test-utils"))]
         {
-            let conn = Connection::open(path).map_err(DbError::from)?;
-            conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
-                .map_err(DbError::from)?;
-            Ok(conn)
+            open_native_connection(path)
         }
         #[cfg(not(any(test, feature = "test-utils")))]
         {
