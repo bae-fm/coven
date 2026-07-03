@@ -78,7 +78,7 @@ impl super::PartSink for RangePutSink {
                 "Content-Range",
                 range_content_header(offset, end, self.total),
             )
-            .body(part.to_vec())
+            .body(part)
             .send()
             .await
             .map_err(|e| CloudHomeError::Storage(format!("upload chunk {}: {e}", self.key)))?;

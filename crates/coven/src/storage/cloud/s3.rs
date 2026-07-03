@@ -217,7 +217,7 @@ impl super::PartSink for S3PartSink {
                 .key(&key)
                 .upload_id(&upload_id)
                 .part_number(part_number)
-                .body(part.to_vec().into())
+                .body(part.into())
                 .send()
                 .await
                 .map_err(|e| {
@@ -242,9 +242,9 @@ impl super::PartSink for S3PartSink {
         }
     }
 
-    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+    async fn finish(mut self: Box<Self>) -> Result<(), CloudHomeError> {
         let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
-            .set_parts(Some(self.completed.clone()))
+            .set_parts(Some(std::mem::take(&mut self.completed)))
             .build();
         let client = self.client.clone();
         let bucket = self.bucket.clone();

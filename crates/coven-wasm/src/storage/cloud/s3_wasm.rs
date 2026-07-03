@@ -33,6 +33,7 @@
 //! set per request.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use http::{Method, Request};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use quick_xml::events::Event;
@@ -111,8 +112,8 @@ impl S3WasmCloudHome {
     /// signature test on the same code path requests take in flight.
     async fn signed_request(
         &self,
-        request: Request<Vec<u8>>,
-    ) -> Result<Request<Vec<u8>>, CloudHomeError> {
+        request: Request<Bytes>,
+    ) -> Result<Request<Bytes>, CloudHomeError> {
         let (mut parts, body) = request.into_parts();
         self.signer
             .sign(&mut parts, None)
@@ -123,7 +124,7 @@ impl S3WasmCloudHome {
 
     /// Sign `request` with SigV4 and send it. Returns the reqwest response without
     /// inspecting its status — callers map status codes to their own semantics.
-    async fn send(&self, request: Request<Vec<u8>>) -> Result<Response, CloudHomeError> {
+    async fn send(&self, request: Request<Bytes>) -> Result<Response, CloudHomeError> {
         let signed = self.signed_request(request).await?;
         let req = reqwest::Request::try_from(signed)
             .map_err(|e| CloudHomeError::Storage(format!("build request: {e}")))?;
@@ -138,8 +139,8 @@ impl S3WasmCloudHome {
         &self,
         method: Method,
         full_key: &str,
-        body: Vec<u8>,
-    ) -> Result<Request<Vec<u8>>, CloudHomeError> {
+        body: Bytes,
+    ) -> Result<Request<Bytes>, CloudHomeError> {
         let url = object_url(&self.base_url, &self.bucket, full_key);
         Request::builder()
             .method(method)
@@ -181,7 +182,7 @@ impl WasmS3PartSink<'_> {
         let request = match Request::builder()
             .method(Method::DELETE)
             .uri(url)
-            .body(Vec::new())
+            .body(Bytes::new())
         {
             Ok(r) => r,
             Err(e) => {
@@ -224,7 +225,7 @@ impl super::PartSink for WasmS3PartSink<'_> {
         let request = Request::builder()
             .method(Method::PUT)
             .uri(url)
-            .body(part.to_vec())
+            .body(part)
             .map_err(|e| {
                 CloudHomeError::Storage(format!(
                     "build multipart part {part_number} {}: {e}",
@@ -282,7 +283,7 @@ impl super::PartSink for WasmS3PartSink<'_> {
         let request = Request::builder()
             .method(Method::POST)
             .uri(url)
-            .body(body.into_bytes())
+            .body(Bytes::from(body))
             .map_err(|e| {
                 CloudHomeError::Storage(format!("build multipart complete {}: {e}", self.full_key))
             })?;
@@ -293,14 +294,18 @@ impl super::PartSink for WasmS3PartSink<'_> {
                 return Err(e);
             }
         };
-        // S3 can return a 200 carrying an `<Error>` body for a completion failure,
-        // but a non-2xx status is the common failure; treat non-success as an error.
         if !resp.status().is_success() {
             let err = status_error(&format!("multipart complete {}", self.full_key), resp).await;
             self.abort().await;
             return Err(err);
         }
-        Ok(())
+        let body_result = resp.text().await.map_err(|e| {
+            CloudHomeError::Storage(format!(
+                "read multipart complete {} response: {e}",
+                self.full_key
+            ))
+        });
+        finish_complete_response(&self.full_key, body_result, || self.abort()).await
     }
 }
 
@@ -316,6 +321,110 @@ fn complete_multipart_xml(parts: &[(i32, String)]) -> String {
     }
     xml.push_str("</CompleteMultipartUpload>");
     xml
+}
+
+async fn finish_complete_response<F, Fut>(
+    full_key: &str,
+    body_result: Result<String, CloudHomeError>,
+    abort: F,
+) -> Result<(), CloudHomeError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let body = match body_result {
+        Ok(body) => body,
+        Err(e) => {
+            abort().await;
+            return Err(e);
+        }
+    };
+    let complete_error = match complete_multipart_response_error(&body) {
+        Ok(error) => error,
+        Err(e) => {
+            abort().await;
+            return Err(e);
+        }
+    };
+    if let Some(error) = complete_error {
+        abort().await;
+        return Err(CloudHomeError::Storage(format!(
+            "multipart complete {full_key}: {error}"
+        )));
+    }
+    Ok(())
+}
+
+fn complete_multipart_response_error(xml: &str) -> Result<Option<String>, CloudHomeError> {
+    enum Field {
+        Code,
+        Message,
+        Other,
+    }
+
+    let mut reader = Reader::from_str(xml);
+    let mut in_error = false;
+    let mut error_depth = 0usize;
+    let mut field = Field::Other;
+    let mut code = String::new();
+    let mut message = String::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                if start.local_name().as_ref() == b"Error" {
+                    in_error = true;
+                    error_depth = 1;
+                    field = Field::Other;
+                    continue;
+                }
+                if in_error {
+                    error_depth += 1;
+                    field = match start.local_name().as_ref() {
+                        b"Code" => Field::Code,
+                        b"Message" => Field::Message,
+                        _ => Field::Other,
+                    };
+                }
+            }
+            Ok(Event::Text(chunk)) if in_error => {
+                let piece = chunk
+                    .decode()
+                    .map_err(|e| CloudHomeError::Storage(format!("parse complete XML: {e}")))?;
+                match field {
+                    Field::Code => code.push_str(&piece),
+                    Field::Message => message.push_str(&piece),
+                    Field::Other => {}
+                }
+            }
+            Ok(Event::End(end)) if in_error => {
+                field = Field::Other;
+                if end.local_name().as_ref() == b"Error" {
+                    let detail = match (code.trim(), message.trim()) {
+                        ("", "") => "S3 completion returned an empty Error body".to_string(),
+                        (code, "") => format!("S3 {code}"),
+                        ("", message) => message.to_string(),
+                        (code, message) => format!("S3 {code}: {message}"),
+                    };
+                    return Ok(Some(detail));
+                }
+                error_depth = error_depth.saturating_sub(1);
+                if error_depth == 0 {
+                    in_error = false;
+                }
+            }
+            Ok(Event::Eof) if in_error => {
+                return Err(CloudHomeError::Storage(
+                    "parse complete XML: unterminated Error body".to_string(),
+                ));
+            }
+            Ok(Event::Eof) => return Ok(None),
+            Ok(_) => {}
+            Err(e) => {
+                return Err(CloudHomeError::Storage(format!("parse complete XML: {e}")));
+            }
+        }
+    }
 }
 
 /// Extract `<UploadId>` from an `InitiateMultipartUploadResult` body. The body is
@@ -566,7 +675,7 @@ impl CloudHome for S3WasmCloudHome {
         let request = Request::builder()
             .method(Method::HEAD)
             .uri(url)
-            .body(Vec::new())
+            .body(Bytes::new())
             .map_err(|e| CloudHomeError::Storage(format!("build probe request: {e}")))?;
         let resp = self.send(request).await?;
         let status = resp.status();
@@ -581,7 +690,7 @@ impl CloudHome for S3WasmCloudHome {
 
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
-        let request = self.object_request(Method::PUT, &full, data)?;
+        let request = self.object_request(Method::PUT, &full, Bytes::from(data))?;
         let resp = self.send(request).await?;
         if !resp.status().is_success() {
             return Err(status_error(&format!("put {key}"), resp).await);
@@ -604,7 +713,7 @@ impl CloudHome for S3WasmCloudHome {
         let request = Request::builder()
             .method(Method::POST)
             .uri(url)
-            .body(Vec::new())
+            .body(Bytes::new())
             .map_err(|e| CloudHomeError::Storage(format!("build multipart create {key}: {e}")))?;
         let resp = self.send(request).await?;
         if !resp.status().is_success() {
@@ -630,7 +739,7 @@ impl CloudHome for S3WasmCloudHome {
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         let full = self.full_key(key);
-        let request = self.object_request(Method::GET, &full, Vec::new())?;
+        let request = self.object_request(Method::GET, &full, Bytes::new())?;
         let resp = self.send(request).await?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -649,7 +758,7 @@ impl CloudHome for S3WasmCloudHome {
             .method(Method::GET)
             .uri(url)
             .header(http::header::RANGE, range_header(start, end))
-            .body(Vec::new())
+            .body(Bytes::new())
             .map_err(|e| CloudHomeError::Storage(format!("build range request for {key}: {e}")))?;
         let resp = self.send(request).await?;
         let status = resp.status();
@@ -681,7 +790,7 @@ impl CloudHome for S3WasmCloudHome {
             let request = Request::builder()
                 .method(Method::GET)
                 .uri(url)
-                .body(Vec::new())
+                .body(Bytes::new())
                 .map_err(|e| CloudHomeError::Storage(format!("build list request: {e}")))?;
             let resp = self.send(request).await?;
             let status = resp.status();
@@ -722,7 +831,7 @@ impl CloudHome for S3WasmCloudHome {
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
-        let request = self.object_request(Method::DELETE, &full, Vec::new())?;
+        let request = self.object_request(Method::DELETE, &full, Bytes::new())?;
         let resp = self.send(request).await?;
         let status = resp.status();
         // S3 returns 204 for a deleted key and also 204 for an already-absent key,
@@ -736,7 +845,7 @@ impl CloudHome for S3WasmCloudHome {
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
         let full = self.full_key(key);
-        let request = self.object_request(Method::HEAD, &full, Vec::new())?;
+        let request = self.object_request(Method::HEAD, &full, Bytes::new())?;
         let resp = self.send(request).await?;
         let status = resp.status();
         if status.is_success() {
@@ -938,6 +1047,98 @@ mod tests {
         );
     }
 
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn complete_multipart_response_error_accepts_success_body() {
+        let xml = r#"<CompleteMultipartUploadResult>
+  <Location>https://example.com/b/k</Location>
+  <Bucket>b</Bucket>
+  <Key>k</Key>
+  <ETag>"etag"</ETag>
+</CompleteMultipartUploadResult>"#;
+        assert_eq!(
+            complete_multipart_response_error(xml).expect("parse complete response"),
+            None,
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn complete_multipart_response_error_extracts_accepted_error_body() {
+        let xml = r#"<Error>
+  <Code>InvalidPart</Code>
+  <Message>One or more parts could not be found</Message>
+  <RequestId>abc</RequestId>
+</Error>"#;
+        assert_eq!(
+            complete_multipart_response_error(xml)
+                .expect("parse complete response")
+                .as_deref(),
+            Some("S3 InvalidPart: One or more parts could not be found"),
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn finish_complete_response_aborts_on_body_read_failure() {
+        let aborted = std::cell::Cell::new(false);
+        let err = finish_complete_response(
+            "objects/a",
+            Err(CloudHomeError::Storage("read failed".to_string())),
+            || async {
+                aborted.set(true);
+            },
+        )
+        .await
+        .expect_err("body read failure");
+        let msg = err.to_string();
+
+        assert!(aborted.get(), "abort did not run");
+        assert!(msg.contains("read failed"), "missing read failure: {msg}");
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn finish_complete_response_aborts_on_malformed_error_xml() {
+        let aborted = std::cell::Cell::new(false);
+        let err = finish_complete_response(
+            "objects/a",
+            Ok("<Error><Code>InvalidPart</Code>".to_string()),
+            || async {
+                aborted.set(true);
+            },
+        )
+        .await
+        .expect_err("malformed complete response");
+        let msg = err.to_string();
+
+        assert!(aborted.get(), "abort did not run");
+        assert!(
+            msg.contains("unterminated Error body"),
+            "missing parse failure: {msg}"
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn finish_complete_response_aborts_on_accepted_error_body() {
+        let aborted = std::cell::Cell::new(false);
+        let err = finish_complete_response(
+            "objects/a",
+            Ok(
+                "<Error><Code>InvalidPart</Code><Message>part missing</Message></Error>"
+                    .to_string(),
+            ),
+            || async {
+                aborted.set(true);
+            },
+        )
+        .await
+        .expect_err("complete error response");
+        let msg = err.to_string();
+
+        assert!(aborted.get(), "abort did not run");
+        assert!(
+            msg.contains("multipart complete objects/a: S3 InvalidPart: part missing"),
+            "missing completion error: {msg}"
+        );
+    }
+
     #[test]
     fn parse_list_empty_result() {
         let xml = r#"<ListBucketResult><KeyCount>0</KeyCount><IsTruncated>false</IsTruncated></ListBucketResult>"#;
@@ -978,7 +1179,7 @@ mod tests {
         let request = Request::builder()
             .method(Method::GET)
             .uri(url)
-            .body(Vec::<u8>::new())
+            .body(Bytes::new())
             .expect("build request");
         let signed = home.signed_request(request).await.expect("sign request");
         let headers = signed.headers();

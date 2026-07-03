@@ -7,6 +7,7 @@
 //! a `Dropbox-API-Arg` header), the page parser, the upload session, and sharing.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use reqwest::StatusCode;
 
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
@@ -204,7 +205,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
                         .bearer_auth(token)
                         .header("Dropbox-API-Arg", &arg)
                         .header("Content-Type", "application/octet-stream")
-                        .body(part.to_vec())
+                        .body(part.clone())
                 })
                 .await?
         } else {
@@ -222,7 +223,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
                         .bearer_auth(token)
                         .header("Dropbox-API-Arg", &arg)
                         .header("Content-Type", "application/octet-stream")
-                        .body(part.to_vec())
+                        .body(part.clone())
                 })
                 .await?
         };
@@ -390,6 +391,7 @@ impl OAuthRestHome for DropboxCloudHome {
 #[async_trait]
 impl CloudHome for DropboxCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let body = Bytes::from(data);
         let api_arg = serde_json::json!({
             "path": self.full_path(key),
             "mode": { ".tag": "overwrite" },
@@ -405,7 +407,7 @@ impl CloudHome for DropboxCloudHome {
                     .bearer_auth(token)
                     .header("Dropbox-API-Arg", &api_arg)
                     .header("Content-Type", "application/octet-stream")
-                    .body(data.clone())
+                    .body(body.clone())
             })
             .await?;
         let status = resp.status();

@@ -7,6 +7,7 @@
 //! parser, the upload paths, and sharing.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::key_encoding::{decode_key, encode_key};
@@ -196,6 +197,7 @@ impl OAuthRestHome for OneDriveCloudHome {
 #[async_trait]
 impl CloudHome for OneDriveCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let body = Bytes::from(data);
         let url = format!("{}/content", self.item_path_url(key));
         let resp = self
             .session
@@ -204,7 +206,7 @@ impl CloudHome for OneDriveCloudHome {
                     .put(&url)
                     .bearer_auth(token)
                     .header("Content-Type", "application/octet-stream")
-                    .body(data.clone())
+                    .body(body.clone())
             })
             .await?;
         let status = resp.status();

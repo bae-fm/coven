@@ -7,6 +7,7 @@
 //! request shapes, the page parser, the upload paths, and sharing.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 
 use super::http::{self, ensure_ok, ok_json, NotFound};
 use super::key_encoding::{decode_key, encode_key};
@@ -25,6 +26,7 @@ use crate::oauth::{OAuthConfig, OAuthTokens};
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
+const CREATE_TOKEN_PROPERTY: &str = "covenCreateToken";
 
 /// Google Drive cloud home backend.
 pub struct GoogleDriveCloudHome {
@@ -106,11 +108,8 @@ impl GoogleDriveCloudHome {
         key: &str,
         encoded: &str,
     ) -> Result<String, CloudHomeError> {
-        let metadata = serde_json::json!({
-            "name": encoded,
-            "parents": [self.folder_id],
-        })
-        .to_string();
+        let create_token = uuid::Uuid::new_v4().to_string();
+        let metadata = create_file_metadata_body(encoded, &self.folder_id, &create_token);
         let resp = self
             .session
             .api_call(|token| {
@@ -140,17 +139,48 @@ impl GoogleDriveCloudHome {
         finish_create_metadata_response(
             key,
             id_result,
-            || self.find_file_id(encoded),
+            || self.find_created_file_id(encoded, &create_token),
             |file_id| async move { self.delete_created_file(key, &file_id).await },
         )
         .await
+    }
+
+    async fn find_created_file_id(
+        &self,
+        encoded_name: &str,
+        create_token: &str,
+    ) -> Result<Option<String>, CloudHomeError> {
+        let query = format!(
+            "'{}' in parents and name = '{}' and appProperties has {{ key='{}' and value='{}' }} and trashed = false",
+            self.folder_id, encoded_name, CREATE_TOKEN_PROPERTY, create_token
+        );
+        let resp = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(format!("{}/files", DRIVE_API))
+                    .bearer_auth(token)
+                    .query(&[
+                        ("q", query.as_str()),
+                        ("fields", "files(id)"),
+                        ("pageSize", "1"),
+                    ])
+            })
+            .await?;
+        let resp = ensure_ok(resp, "list created files", NotFound::Status).await?;
+        let json: serde_json::Value = ok_json(resp, "parse created file list response").await?;
+        Ok(json["files"]
+            .as_array()
+            .and_then(|files| files.first())
+            .and_then(|first| first["id"].as_str())
+            .map(String::from))
     }
 
     async fn upload_file_media(
         &self,
         key: &str,
         file_id: &str,
-        data: Vec<u8>,
+        body: Bytes,
         op: &str,
     ) -> Result<(), CloudHomeError> {
         let resp = self
@@ -160,7 +190,7 @@ impl GoogleDriveCloudHome {
                     .patch(format!("{}/files/{}?uploadType=media", UPLOAD_API, file_id))
                     .bearer_auth(token)
                     .header("Content-Type", "application/octet-stream")
-                    .body(data.clone())
+                    .body(body.clone())
             })
             .await?;
         let status = resp.status();
@@ -271,25 +301,18 @@ fn parse_create_file_id(body: &str, key: &str) -> Result<String, CloudHomeError>
     }
 }
 
-async fn finish_create_media_upload<F, Fut>(
-    key: &str,
-    upload_result: Result<(), CloudHomeError>,
-    delete_created_file: F,
-) -> Result<(), CloudHomeError>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), CloudHomeError>>,
-{
-    let upload_error = match upload_result {
-        Ok(()) => return Ok(()),
-        Err(e) => e,
-    };
-    match delete_created_file().await {
-        Ok(()) => Err(upload_error),
-        Err(delete_error) => Err(CloudHomeError::Storage(format!(
-            "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
-        ))),
-    }
+fn create_file_metadata_body(encoded_name: &str, folder_id: &str, create_token: &str) -> String {
+    let mut app_properties = serde_json::Map::new();
+    app_properties.insert(
+        CREATE_TOKEN_PROPERTY.to_string(),
+        serde_json::Value::String(create_token.to_string()),
+    );
+    serde_json::json!({
+        "name": encoded_name,
+        "parents": [folder_id],
+        "appProperties": app_properties,
+    })
+    .to_string()
 }
 
 async fn finish_create_metadata_response<F, FFut, D, DFut>(
@@ -320,6 +343,46 @@ where
             "create {key}: metadata response id failure: {id_error}; rollback lookup failed: {lookup_error}"
         ))),
     }
+}
+
+async fn finish_create_media_upload<F, Fut>(
+    key: &str,
+    upload_result: Result<(), CloudHomeError>,
+    delete_created_file: F,
+) -> Result<(), CloudHomeError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), CloudHomeError>>,
+{
+    let upload_error = match upload_result {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    match delete_created_file().await {
+        Ok(()) => Err(upload_error),
+        Err(delete_error) => Err(CloudHomeError::Storage(format!(
+            "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
+        ))),
+    }
+}
+
+async fn create_file_with_media<Create, CreateFut, Upload, UploadFut, Delete, DeleteFut>(
+    key: &str,
+    create_metadata: Create,
+    upload_media: Upload,
+    delete_created_file: Delete,
+) -> Result<(), CloudHomeError>
+where
+    Create: FnOnce() -> CreateFut,
+    CreateFut: std::future::Future<Output = Result<String, CloudHomeError>>,
+    Upload: FnOnce(String) -> UploadFut,
+    UploadFut: std::future::Future<Output = Result<(), CloudHomeError>>,
+    Delete: FnOnce(String) -> DeleteFut,
+    DeleteFut: std::future::Future<Output = Result<(), CloudHomeError>>,
+{
+    let file_id = create_metadata().await?;
+    let upload_result = upload_media(file_id.clone()).await;
+    finish_create_media_upload(key, upload_result, || delete_created_file(file_id)).await
 }
 
 /// First `error.errors[].reason` in a Google API error body (the shape Drive,
@@ -468,16 +531,21 @@ impl OAuthRestHome for GoogleDriveCloudHome {
 #[async_trait]
 impl CloudHome for GoogleDriveCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let media_body = Bytes::from(data);
         let encoded = encode_key(key);
         if let Some(file_id) = self.find_file_id(&encoded).await? {
-            self.upload_file_media(key, &file_id, data, "update")
+            self.upload_file_media(key, &file_id, media_body, "update")
                 .await?;
         } else {
-            let file_id = self.create_file_metadata(key, &encoded).await?;
-            let upload_result = self.upload_file_media(key, &file_id, data, "create").await;
-            finish_create_media_upload(key, upload_result, || {
-                self.delete_created_file(key, &file_id)
-            })
+            create_file_with_media(
+                key,
+                || self.create_file_metadata(key, &encoded),
+                |file_id| {
+                    let body = media_body.clone();
+                    async move { self.upload_file_media(key, &file_id, body, "create").await }
+                },
+                |file_id| async move { self.delete_created_file(key, &file_id).await },
+            )
             .await?;
         }
         Ok(())
@@ -662,8 +730,21 @@ mod tests {
         assert!(msg.contains("missing id"), "missing id reason: {msg}");
     }
 
+    #[test]
+    fn create_file_metadata_body_carries_rollback_token() {
+        let body = create_file_metadata_body("objects__a", "folder-1", "create-token-1");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("metadata json");
+
+        assert_eq!(json["name"].as_str(), Some("objects__a"));
+        assert_eq!(json["parents"][0].as_str(), Some("folder-1"));
+        assert_eq!(
+            json["appProperties"][CREATE_TOKEN_PROPERTY].as_str(),
+            Some("create-token-1"),
+        );
+    }
+
     #[tokio::test]
-    async fn create_metadata_id_error_rolls_back_file_found_by_lookup() {
+    async fn create_metadata_id_error_rolls_back_token_matched_file() {
         let delete_called_with = std::cell::RefCell::new(None);
         let id_error = CloudHomeError::Storage("response missing id".to_string());
         let err = finish_create_metadata_response(
@@ -690,7 +771,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_metadata_id_error_reports_lookup_failure() {
+    async fn create_metadata_id_error_reports_token_lookup_failure() {
         let id_error = CloudHomeError::Storage("response missing id".to_string());
         let err = finish_create_metadata_response(
             "objects/a",
@@ -713,7 +794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_metadata_id_error_reports_delete_failure() {
+    async fn create_metadata_id_error_reports_token_delete_failure() {
         let id_error = CloudHomeError::Storage("response missing id".to_string());
         let err = finish_create_metadata_response(
             "objects/a",
@@ -732,6 +813,55 @@ mod tests {
         assert!(
             msg.contains("delete failed"),
             "missing delete failure: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_file_with_media_does_not_delete_on_metadata_failure() {
+        let delete_called = std::cell::Cell::new(false);
+        let err = create_file_with_media(
+            "objects/a",
+            || async { Err(CloudHomeError::Storage("metadata failed".to_string())) },
+            |_| async { Ok(()) },
+            |_| async {
+                delete_called.set(true);
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("metadata failure");
+        let msg = err.to_string();
+
+        assert!(!delete_called.get(), "delete ran without a created file id");
+        assert!(
+            msg.contains("metadata failed"),
+            "missing metadata failure: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_file_with_media_deletes_created_id_on_media_failure() {
+        let deleted_id = std::cell::RefCell::new(None);
+        let err = create_file_with_media(
+            "objects/a",
+            || async { Ok("created-file-id".to_string()) },
+            |file_id| async move {
+                assert_eq!(file_id, "created-file-id");
+                Err(CloudHomeError::Storage("media upload failed".to_string()))
+            },
+            |file_id| async {
+                deleted_id.replace(Some(file_id));
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("media failure");
+        let msg = err.to_string();
+
+        assert_eq!(deleted_id.into_inner().as_deref(), Some("created-file-id"));
+        assert!(
+            msg.contains("media upload failed"),
+            "missing media failure: {msg}"
         );
     }
 
