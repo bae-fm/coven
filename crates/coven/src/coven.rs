@@ -12,7 +12,6 @@ use crate::clock::{ClockRef, SystemClock};
 use crate::config::Config;
 use crate::database::{Database, DbError};
 use crate::handle::CovenHandle;
-use crate::id_provider::{IdRef, UuidProvider};
 use crate::keys::KeyService;
 use crate::library_dir::PathTokenError;
 use crate::migration::Migration;
@@ -108,7 +107,6 @@ impl Coven {
             key_service: KeyService::new(current.library_id),
             cloudkit_ops: None,
             observer: None,
-            stage_blob_ids: Arc::new(UuidProvider),
         }
     }
 }
@@ -121,7 +119,6 @@ pub struct CovenBuilder {
     key_service: KeyService,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
-    stage_blob_ids: IdRef,
 }
 
 impl CovenBuilder {
@@ -169,11 +166,6 @@ impl CovenBuilder {
         self
     }
 
-    pub fn stage_blob_ids(mut self, ids: IdRef) -> Self {
-        self.stage_blob_ids = ids;
-        self
-    }
-
     pub fn open(self) -> CovenResult<CovenHandle> {
         crate::install_platform();
         let config = self.config.current();
@@ -192,7 +184,6 @@ impl CovenBuilder {
             self.key_service,
             self.clock,
             self.cloudkit_ops,
-            self.stage_blob_ids,
             self.observer,
         ))
     }
@@ -390,8 +381,7 @@ impl CovenHandle {
                 .storage_dir()
                 .join("local-staging")
                 .join(&blob.namespace);
-            let staged_path =
-                stage_dir.join(format!("{}.{}", blob.id, self.stage_blob_ids().new_id()));
+            let staged_path = stage_dir.join(format!("{}.{}", blob.id, uuid::Uuid::new_v4()));
             if let Err(e) = crate::local_blob::write_atomic(&staged_path, &blob.bytes).await {
                 remove_staged_files(&staged).await?;
                 return Err(CovenError::Blob(e));

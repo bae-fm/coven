@@ -41,7 +41,6 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
-use crate::id_provider::IdRef;
 use crate::keys::KeyService;
 use crate::library_dir::LibraryDir;
 #[cfg(any(test, feature = "test-utils"))]
@@ -107,7 +106,6 @@ pub struct CovenHandle {
     key_service: KeyService,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    stage_blob_ids: IdRef,
 
     /// Host bookkeeping for blob transitions (upload progress, materialize
     /// progress, completion). Passed to the [`SyncManager`] and to the upload
@@ -138,7 +136,6 @@ impl CovenHandle {
         key_service: KeyService,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-        stage_blob_ids: IdRef,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
         Self {
@@ -149,7 +146,6 @@ impl CovenHandle {
             key_service,
             clock,
             cloudkit_ops,
-            stage_blob_ids,
             observer,
             sync: Arc::new(RwLock::new(None)),
         }
@@ -176,10 +172,6 @@ impl CovenHandle {
 
     pub(crate) fn library_dir(&self) -> LibraryDir {
         self.library_dir.clone()
-    }
-
-    pub(crate) fn stage_blob_ids(&self) -> IdRef {
-        self.stage_blob_ids.clone()
     }
 
     // =========================================================================
@@ -733,7 +725,6 @@ mod tests {
             KeyService::new("lib-test".to_string()),
             Arc::new(SystemClock),
             None,
-            Arc::new(crate::id_provider::UuidProvider),
             None,
         );
 
