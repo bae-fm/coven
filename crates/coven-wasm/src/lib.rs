@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 #[cfg(target_arch = "wasm32")]
 pub mod local_blob;
@@ -88,16 +88,29 @@ pub use wasm_keystore::BrowserKeystore;
 use coven_core::{Hlc, UpdatedAtStamper};
 use wasm_bindgen::prelude::*;
 
+thread_local! {
+    static STANDALONE_HLCS: RefCell<HashMap<String, Arc<Hlc>>> = RefCell::new(HashMap::new());
+}
+
 #[wasm_bindgen]
 pub fn stamp(device_id: String) -> Result<String, JsValue> {
-    install_platform();
     if device_id.is_empty() {
         return Err(JsValue::from_str(
             "invalid browser config: device_id must not be empty",
         ));
     }
-    let stamper = UpdatedAtStamper::new(Arc::new(Hlc::new(device_id)));
+    install_platform();
+    let stamper = UpdatedAtStamper::new(standalone_hlc_for_device(device_id));
     Ok(stamper.stamp())
+}
+
+fn standalone_hlc_for_device(device_id: String) -> Arc<Hlc> {
+    STANDALONE_HLCS.with(|hlcs| {
+        hlcs.borrow_mut()
+            .entry(device_id.clone())
+            .or_insert_with(|| Arc::new(Hlc::new(device_id)))
+            .clone()
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -136,14 +149,39 @@ mod wasm_sync_test;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use coven_core::Timestamp;
 
-    use super::stamp;
+    use super::{stamp, standalone_hlc_for_device};
 
     #[test]
     fn stamp_returns_a_core_hlc_stamp() {
         let stamp = stamp("browser-device".to_string()).expect("stamp");
         let parsed = Timestamp::parse(&stamp).expect("parse stamp");
         assert_eq!(parsed.device_id, "browser-device");
+    }
+
+    #[test]
+    fn same_device_stamps_are_strictly_increasing() {
+        let mut previous = stamp("browser-device-monotonic".to_string()).expect("first stamp");
+        for _ in 0..1024 {
+            let next = stamp("browser-device-monotonic".to_string()).expect("next stamp");
+            assert!(
+                next > previous,
+                "stamp {next} must sort after previous stamp {previous}"
+            );
+            previous = next;
+        }
+    }
+
+    #[test]
+    fn standalone_hlc_is_shared_per_device() {
+        let first = standalone_hlc_for_device("shared-hlc-device".to_string());
+        let second = standalone_hlc_for_device("shared-hlc-device".to_string());
+        let other = standalone_hlc_for_device("other-shared-hlc-device".to_string());
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
     }
 }
