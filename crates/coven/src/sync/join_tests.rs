@@ -84,7 +84,7 @@ async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Co
 /// Every traversal-shaped `library_id` is refused at the decode boundary: `decode`
 /// returns `JoinCodeError::InvalidLibraryId`, so a decoded `InviteCode` never
 /// carries a traversal id. Driven end to end, the decode error propagates as
-/// `JoinError::Database` and the join creates nothing outside the libraries root.
+/// `JoinError::InvalidCode` and the join creates nothing outside the libraries root.
 ///
 /// The cases share one mechanism and differ only in the malicious id and the
 /// directory it would escape to, so they run as a table:
@@ -119,7 +119,7 @@ async fn join_rejects_traversal_library_id_at_decode() {
 
         let result = join_result_for(&encoded, app_dir).await;
         assert!(
-            matches!(result, Err(JoinError::Database(_))),
+            matches!(result, Err(JoinError::InvalidCode(_))),
             "`{library_id}` must fail the join with the propagated decode error, got {result:?}",
         );
         if let Some(target) = escape_target {

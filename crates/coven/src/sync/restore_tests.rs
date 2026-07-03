@@ -72,7 +72,7 @@ async fn restore_result_for(
 /// Every traversal-shaped `lid` is refused at the decode boundary:
 /// `decode_restore_code` returns `RestoreCodeError::InvalidLibraryId`, so a decoded
 /// `RestoreCode` never carries a traversal id. Driven end to end, the decode error
-/// propagates as `RestoreError::Database` and the restore creates nothing outside
+/// propagates as `RestoreError::InvalidCode` and the restore creates nothing outside
 /// the libraries root.
 ///
 /// The cases share one mechanism and differ only in the malicious id and the
@@ -108,7 +108,7 @@ async fn restore_rejects_traversal_lid_at_decode() {
 
         let result = restore_result_for(&encoded, app_dir).await;
         assert!(
-            matches!(result, Err(RestoreError::Database(_))),
+            matches!(result, Err(RestoreError::InvalidCode(_))),
             "`{lid}` must fail the restore with the propagated decode error, got {result:?}",
         );
         if let Some(target) = escape_target {

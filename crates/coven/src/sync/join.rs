@@ -41,6 +41,14 @@ pub enum JoinError {
     Key(#[from] KeyError),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+    #[error("invalid invite code: {0}")]
+    InvalidCode(String),
+    #[error("provider: {0}")]
+    Provider(String),
+    #[error("membership: {0}")]
+    Membership(String),
+    #[error("serialize: {0}")]
+    Serialize(#[from] serde_json::Error),
     #[error("database: {0}")]
     Database(String),
 }
@@ -53,7 +61,7 @@ fn require_join_oauth(
     provider_name: &str,
 ) -> Result<crate::oauth::OAuthTokens, JoinError> {
     oauth_tokens
-        .ok_or_else(|| JoinError::Database(format!("{provider_name} join requires an OAuth token")))
+        .ok_or_else(|| JoinError::Provider(format!("{provider_name} join requires an OAuth token")))
 }
 
 /// Build a CloudHome from a JoinInfo for the join flow.
@@ -98,8 +106,7 @@ async fn build_cloud_home_for_join(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
-            let token_json = serde_json::to_string(&tokens)
-                .map_err(|e| JoinError::Database(format!("Failed to serialize tokens: {e}")))?;
+            let token_json = serde_json::to_string(&tokens)?;
             lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
             Ok(Box::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
@@ -112,8 +119,7 @@ async fn build_cloud_home_for_join(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
-            let token_json = serde_json::to_string(&tokens)
-                .map_err(|e| JoinError::Database(format!("Failed to serialize tokens: {e}")))?;
+            let token_json = serde_json::to_string(&tokens)?;
             lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
             Ok(Box::new(dropbox::DropboxCloudHome::new(
                 shared_folder_id.clone(),
@@ -129,8 +135,7 @@ async fn build_cloud_home_for_join(
             folder_id,
         } => {
             let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
-            let token_json = serde_json::to_string(&tokens)
-                .map_err(|e| JoinError::Database(format!("Failed to serialize tokens: {e}")))?;
+            let token_json = serde_json::to_string(&tokens)?;
             lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
             Ok(Box::new(onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
@@ -144,12 +149,12 @@ async fn build_cloud_home_for_join(
         #[cfg(not(feature = "oauth-providers"))]
         CloudHomeJoinInfo::GoogleDrive { .. }
         | CloudHomeJoinInfo::Dropbox { .. }
-        | CloudHomeJoinInfo::OneDrive { .. } => Err(JoinError::Database(
+        | CloudHomeJoinInfo::OneDrive { .. } => Err(JoinError::Provider(
             "OAuth cloud providers are not supported in this build".to_string(),
         )),
         CloudHomeJoinInfo::CloudKit => {
             let ops = cloudkit_ops
-                .ok_or_else(|| JoinError::Database("CloudKit driver not provided".to_string()))?;
+                .ok_or_else(|| JoinError::Provider("CloudKit driver not provided".to_string()))?;
             Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(ops)))
         }
         CloudHomeJoinInfo::CloudKitShare {
@@ -158,10 +163,10 @@ async fn build_cloud_home_for_join(
             zone_name,
         } => {
             let ops = cloudkit_ops
-                .ok_or_else(|| JoinError::Database("CloudKit driver not provided".to_string()))?;
+                .ok_or_else(|| JoinError::Provider("CloudKit driver not provided".to_string()))?;
             let accepted = cloudkit::accept_share(ops.clone(), share_url.clone()).await?;
             if accepted.owner_name != *owner_name || accepted.zone_name != *zone_name {
-                return Err(JoinError::Database(format!(
+                return Err(JoinError::Provider(format!(
                     "CloudKit accepted share zone mismatch: invite owner/zone {owner_name}/{zone_name}, accepted {}/{}",
                     accepted.owner_name, accepted.zone_name
                 )));
@@ -193,7 +198,7 @@ pub async fn join_from_invite_code(
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
     let code = crate::join_code::decode(invite_code_str)
-        .map_err(|e| JoinError::Database(format!("Invalid invite code: {e}")))?;
+        .map_err(|e| JoinError::InvalidCode(e.to_string()))?;
 
     let global_ks = KeyService::new("global".to_string());
     let lib_ks = KeyService::new(code.library_id.clone());
@@ -238,7 +243,7 @@ pub async fn join_library(
     // Guard the destructive `libraries/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::library_dir::validate_path_token(&code.library_id)
-        .map_err(|e| JoinError::Database(format!("invalid library id: {e}")))?;
+        .map_err(|e| JoinError::InvalidCode(format!("invalid library id: {e}")))?;
 
     // Load user keypair (must already exist — the inviter wrapped the
     // library key for this public key).
@@ -478,7 +483,7 @@ pub(crate) async fn open_db_and_pull(
     // Join already pinned its owner from the invite, so it skips this.
     if owner_pubkey.is_none() {
         let entries = storage.list_membership_entries().await.map_err(|e| {
-            JoinError::Database(format!(
+            JoinError::Membership(format!(
                 "restore: failed to list membership to pin owner: {e}"
             ))
         })?;
@@ -490,12 +495,14 @@ pub(crate) async fn open_db_and_pull(
             let chain = crate::sync::membership_ops::download_chain(storage, &entries)
                 .await
                 .map_err(|e| {
-                    JoinError::Database(format!("restore: failed to load chain to pin owner: {e}"))
+                    JoinError::Membership(format!(
+                        "restore: failed to load chain to pin owner: {e}"
+                    ))
                 })?;
             // A validated chain always has a founder (validation rejects an empty
             // chain), so this is defensive — but fail loud rather than skip the pin.
             let founder = chain.founder_pubkey().ok_or_else(|| {
-                JoinError::Database("restore: loaded chain has no founder to pin".to_string())
+                JoinError::Membership("restore: loaded chain has no founder to pin".to_string())
             })?;
             db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
                 .await

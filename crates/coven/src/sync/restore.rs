@@ -15,7 +15,7 @@ use crate::keys::{KeyError, KeyService, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::migration::{supported_version, Migration};
 use crate::oauth::OAuthTokens;
-use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
+use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::join::{build_config, derive_credentials, open_db_and_pull, JoinError};
 use crate::sync::pull::PullError;
@@ -67,8 +67,14 @@ pub enum RestoreError {
     Io(#[from] std::io::Error),
     #[error("join: {0}")]
     Join(#[from] JoinError),
-    #[error("database: {0}")]
-    Database(String),
+    #[error("cloud home: {0}")]
+    CloudHome(#[from] CloudHomeError),
+    #[error("invalid restore code: {0}")]
+    InvalidCode(String),
+    #[error("invalid signing key: {0}")]
+    InvalidSigningKey(String),
+    #[error("provider: {0}")]
+    Provider(String),
 }
 
 /// Build a `(JoinInfo, Box<dyn CloudHome>)` from a `RestoreSource`.
@@ -99,8 +105,7 @@ async fn build_cloud_home(
                 secret_key.clone(),
                 None,
             )
-            .await
-            .map_err(|e| RestoreError::Database(format!("Failed to connect to S3: {e}")))?;
+            .await?;
 
             let info = CloudHomeJoinInfo::S3 {
                 bucket,
@@ -165,7 +170,7 @@ async fn build_cloud_home(
         #[cfg(not(feature = "oauth-providers"))]
         RestoreSource::GoogleDrive { .. }
         | RestoreSource::Dropbox { .. }
-        | RestoreSource::OneDrive { .. } => Err(RestoreError::Database(
+        | RestoreSource::OneDrive { .. } => Err(RestoreError::Provider(
             "OAuth cloud providers are not supported in this build".to_string(),
         )),
     }
@@ -195,7 +200,7 @@ pub async fn restore_from_cloud(
     // Guard the destructive `libraries/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::library_dir::validate_path_token(library_id)
-        .map_err(|e| RestoreError::Database(format!("invalid library id: {e}")))?;
+        .map_err(|e| RestoreError::InvalidCode(format!("invalid library id: {e}")))?;
 
     // The key's presence is the home's storage mode: a key present ⇒ an opaque
     // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
@@ -289,18 +294,18 @@ pub async fn restore_from_code(
     use crate::sync::restore_code::{self, RestoreProvider};
 
     let parsed = restore_code::decode_restore_code(code)
-        .map_err(|e| RestoreError::Database(format!("Invalid restore code: {e}")))?;
+        .map_err(|e| RestoreError::InvalidCode(e.to_string()))?;
 
     // Decode signing key upfront so we fail fast on bad encoding.
     let signing_key_bytes = URL_SAFE_NO_PAD
         .decode(&parsed.sk)
-        .map_err(|e| RestoreError::Database(format!("Invalid signing key encoding: {e}")))?;
+        .map_err(|e| RestoreError::InvalidSigningKey(format!("invalid encoding: {e}")))?;
     // The restored device's identity. Rebuilt here (not imported yet) so the
     // storage can sign its control objects during restore, while the keyring
     // import still happens only after restore succeeds.
     let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
         signing_key_bytes.clone().try_into().map_err(|_| {
-            RestoreError::Database(format!(
+            RestoreError::InvalidSigningKey(format!(
                 "Signing key must be {} bytes",
                 crate::keys::SIGN_SECRETKEYBYTES
             ))
@@ -309,7 +314,7 @@ pub async fn restore_from_code(
 
     let require_oauth = |provider_name: &str| -> Result<crate::oauth::OAuthTokens, RestoreError> {
         oauth_tokens.clone().ok_or_else(|| {
-            RestoreError::Database(format!("{provider_name} restore requires OAuth token"))
+            RestoreError::Provider(format!("{provider_name} restore requires OAuth token"))
         })
     };
 
@@ -330,7 +335,7 @@ pub async fn restore_from_code(
         },
         RestoreProvider::CloudKit => {
             let ops = cloudkit_ops.ok_or_else(|| {
-                RestoreError::Database("CloudKit driver not provided".to_string())
+                RestoreError::Provider("CloudKit driver not provided".to_string())
             })?;
             RestoreSource::CloudKit { ops }
         }
