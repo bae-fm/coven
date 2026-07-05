@@ -65,7 +65,7 @@ impl super::PartSink for RangePutSink {
         &mut self,
         part: Bytes,
         offset: u64,
-        _is_last: bool,
+        is_last: bool,
     ) -> Result<(), CloudHomeError> {
         let end = offset + part.len() as u64 - 1;
         // The session URL is already a signed one-time URL, so the part PUTs carry
@@ -85,7 +85,7 @@ impl super::PartSink for RangePutSink {
         let status = resp.status();
         // Intermediate parts return the provider's "incomplete" status; the final
         // part returns 200/201. Anything else is a failure.
-        if status.is_success() || status.as_u16() == self.intermediate_status {
+        if status.is_success() || (!is_last && status.as_u16() == self.intermediate_status) {
             Ok(())
         } else {
             let body = super::http::body_text(resp).await;
@@ -95,5 +95,71 @@ impl super::PartSink for RangePutSink {
 
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::cloud::PartSink;
+    use axum::body::Body;
+    use axum::http::{Method, Response, StatusCode};
+    use axum::Router;
+
+    async fn incomplete_upload_endpoint(method: Method) -> Response<Body> {
+        if method != Method::PUT {
+            return Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .body(Body::from("expected PUT"))
+                .expect("build method response");
+        }
+        Response::builder()
+            .status(StatusCode::PERMANENT_REDIRECT)
+            .body(Body::from("upload incomplete"))
+            .expect("build incomplete response")
+    }
+
+    async fn spawn_incomplete_upload_endpoint() -> (String, tokio::sync::oneshot::Sender<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upload endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let app = Router::new().fallback(incomplete_upload_endpoint);
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("upload endpoint failed");
+        });
+
+        (endpoint, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn final_part_rejects_incomplete_status() {
+        let (endpoint, shutdown) = spawn_incomplete_upload_endpoint().await;
+        let mut sink = RangePutSink::new(
+            reqwest::Client::new(),
+            endpoint,
+            StatusCode::PERMANENT_REDIRECT.as_u16(),
+            4,
+            4,
+            "objects/blob".to_string(),
+            Box::new(|status, body| CloudHomeError::Storage(format!("{status}: {body}"))),
+        );
+
+        let err = sink
+            .send_part(Bytes::from_static(b"data"), 0, true)
+            .await
+            .expect_err("final incomplete status must fail");
+        assert_eq!(
+            err.to_string(),
+            "storage error: 308 Permanent Redirect: upload incomplete"
+        );
+        let _ = shutdown.send(());
     }
 }
