@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use rusqlite::session::{ConflictAction, ConflictType};
 use rusqlite::Connection;
+use tracing::warn;
 
 use super::conflict::{lww_conflict_handler, TableSchema};
 #[cfg(any(test, feature = "test-utils"))]
@@ -87,7 +88,10 @@ pub fn apply_changeset_lww_with_schema(
             // (needed to find the `_updated_at` column) is readable.
             let table = match item.op() {
                 Ok(op) => op.table_name().to_string(),
-                Err(_) => return ConflictAction::SQLITE_CHANGESET_OMIT,
+                Err(error) => {
+                    warn!(error = %error, "failed to read changeset conflict operation; aborting apply");
+                    return ConflictAction::SQLITE_CHANGESET_ABORT;
+                }
             };
             lww_conflict_handler(
                 conflict_type,
