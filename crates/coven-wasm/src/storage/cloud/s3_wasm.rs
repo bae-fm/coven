@@ -45,7 +45,9 @@ use reqwest::Response;
 use serde::Deserialize;
 use tracing::warn;
 
-use super::s3_common::{apply_prefix, normalize_prefix, probe_error, strip_listed_key_prefix};
+use super::s3_common::{
+    apply_prefix, is_range_success, normalize_prefix, probe_error, strip_listed_key_prefix,
+};
 use super::{
     range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
 };
@@ -679,10 +681,9 @@ impl CloudHome for S3WasmCloudHome {
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(CloudHomeError::NotFound(key.to_string()));
         }
-        // A range request succeeds with 206 Partial Content; a server that ignores
-        // the range answers 200 with the whole object, which is still the bytes the
-        // caller asked to start at, so accept any success.
-        if status != reqwest::StatusCode::PARTIAL_CONTENT && !status.is_success() {
+        // A range request succeeds only with 206 Partial Content. A 200 means the
+        // server ignored Range and returned the object from byte 0.
+        if !is_range_success(status.as_u16()) {
             return Err(status_error(&format!("get range {key}"), resp).await);
         }
         resp_bytes(resp, &format!("read range body for {key}")).await

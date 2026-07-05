@@ -79,6 +79,11 @@ pub fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeEr
         CloudHomeError::Storage(format!("S3 probe failed (status {status}, code {code:?})"))
     }
 }
+
+pub fn is_range_success(status: u16) -> bool {
+    status == 206
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +130,11 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn range_status_requires_partial_content() {
+        assert!(is_range_success(206));
+        assert!(!is_range_success(200));
     }
 }
