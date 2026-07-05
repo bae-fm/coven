@@ -125,7 +125,7 @@ impl KeyService {
         self.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn cloud_home_credentials_entry_for_test(
         &self,
     ) -> keyring_core::Result<keyring_core::Entry> {

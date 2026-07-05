@@ -48,32 +48,6 @@ fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<(), String> {
     Ok(())
 }
 
-fn sync_enabled(config: &Config, key_service: &KeyService) -> bool {
-    use crate::config::CloudProvider;
-    use crate::keys::CloudHomeCredentials;
-
-    let creds = key_service
-        .get_cloud_home_credentials()
-        .unwrap_or_else(|e| {
-            tracing::warn!("reading cloud home credentials for sync_enabled: {e}");
-            None
-        });
-    let has_s3 = matches!(creds, Some(CloudHomeCredentials::S3 { .. }));
-    let has_oauth = matches!(creds, Some(CloudHomeCredentials::OAuth { .. }));
-
-    let ch = &config.cloud_home;
-    match ch.provider {
-        Some(CloudProvider::S3) => ch.s3_bucket.is_some() && ch.s3_region.is_some() && has_s3,
-        Some(CloudProvider::GoogleDrive) => ch.google_drive_folder_id.is_some() && has_oauth,
-        Some(CloudProvider::Dropbox) => ch.dropbox_folder_path.is_some() && has_oauth,
-        Some(CloudProvider::OneDrive) => {
-            ch.onedrive_drive_id.is_some() && ch.onedrive_folder_id.is_some() && has_oauth
-        }
-        Some(CloudProvider::CloudKit) => true,
-        None => false,
-    }
-}
-
 /// High-level sync manager.
 ///
 /// Holds an `EncryptionService` for an opaque home and `None` for a browsable
@@ -175,13 +149,20 @@ impl SyncManager {
     /// Called at startup (if already configured) and after connecting a provider.
     ///
     /// Two outcomes are success: a configured provider whose home builds and whose
-    /// loop starts, and a not-yet-enabled library (no keys / sync off) that
-    /// legitimately starts no loop — the latter is a logged `Ok(())` no-op. A
-    /// cloud-home build that *fails* (missing credentials, a bad provider config)
-    /// is an `Err`, not "no provider connected": the caller must not install a
-    /// manager that reports success with nothing started.
+    /// loop starts, and a library with no configured provider that legitimately
+    /// starts no loop — the latter is a logged `Ok(())` no-op. A cloud-home build
+    /// that *fails* (missing credentials, a bad provider config) is an `Err`, not
+    /// "no provider connected": the caller must not install a manager that reports
+    /// success with nothing started.
     pub async fn start_sync(&self) -> Result<(), String> {
         let config = (self.config_provider)();
+
+        if config.cloud_home.provider.is_none() {
+            // Not a failure: a library with no configured provider starts no
+            // cloud home or sync loop.
+            info!("start_sync: sync not configured; no loop started");
+            return Ok(());
+        }
 
         // Build the cloud home. A failure here is a real fault — surface it so the
         // caller never installs a manager that started nothing.
@@ -194,15 +175,6 @@ impl SyncManager {
         .await
         .map_err(|e| format!("failed to build cloud home: {e}"))?;
         let cloud_home: Arc<dyn CloudHome> = Arc::from(cloud_home);
-
-        *self.cloud_home.write().unwrap() = Some(cloud_home.clone());
-
-        if !sync_enabled(&config, &self.key_service) {
-            // Not a failure: a configured-but-not-yet-enabled library (e.g. no
-            // keys) legitimately starts no loop. Logged so the no-op is visible.
-            info!("start_sync: sync not enabled; cloud home built but loop not started");
-            return Ok(());
-        }
 
         // The home's at-rest cipher: an opaque home seals under the manager's
         // library key, a browsable home stores in the clear. Built here so the
@@ -225,7 +197,7 @@ impl SyncManager {
         let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
             &self.key_service,
-            cloud_home,
+            cloud_home.clone(),
             Some(cipher.clone()),
         )
         .map_err(|e| format!("failed to create sync storage: {e}"))?;
@@ -241,6 +213,7 @@ impl SyncManager {
         .await
         .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
 
+        *self.cloud_home.write().unwrap() = Some(cloud_home);
         self.install_sync_loop(components, config.library_dir.clone());
 
         Ok(())
@@ -280,9 +253,7 @@ impl SyncManager {
     /// starts the loop. A bootstrap failure is an `Err`, the same fail-loud
     /// discipline `start_sync` keeps — and commit-whole: the home and loop handle
     /// are installed only after the keypair load and bootstrap both succeed, so a
-    /// failure leaves nothing installed (unlike production `start_sync`, which sets
-    /// `cloud_home` before its `sync_enabled` gate for the not-enabled case; the
-    /// test path has no such gate, so it commits both at the end together).
+    /// failure leaves nothing installed.
     ///
     /// After this returns, the connected loop's storage is reachable via
     /// [`sync_loop_handle`](Self::sync_loop_handle)`().storage()`, so the handle's
@@ -463,7 +434,8 @@ impl SyncManager {
 
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, String> {
         let config = (self.config_provider)();
-        if !sync_enabled(&config, &self.key_service) {
+        if config.cloud_home.provider.is_none() {
+            info!("get_members: sync not configured; returning no members");
             return Ok(Vec::new());
         }
 
@@ -597,5 +569,60 @@ impl SyncManager {
         )?;
 
         Ok(fingerprint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::clock::SystemClock;
+    use crate::keys::{test_keyring, KeyService};
+    use crate::library_dir::LibraryDir;
+    use crate::storage::cloud::CloudHomeJoinInfo;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn get_members_surfaces_malformed_cloud_credentials() {
+        test_keyring::install();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let library_id = "sync-enabled-malformed-credentials";
+        let key_service = KeyService::new(library_id.to_string());
+        key_service
+            .cloud_home_credentials_entry_for_test()
+            .expect("create credentials entry")
+            .set_password("{")
+            .expect("write malformed credentials");
+        let join_info = CloudHomeJoinInfo::S3 {
+            bucket: "bucket".to_string(),
+            region: "region".to_string(),
+            endpoint: None,
+            access_key: "access".to_string(),
+            secret_key: "secret".to_string(),
+            key_prefix: None,
+        };
+        let config = crate::sync::join::build_config(
+            library_id,
+            "device",
+            &LibraryDir::new(tmp.path()),
+            "library",
+            &join_info,
+            &CloudCipher::Plaintext,
+        );
+        let manager = SyncManager::new(
+            Arc::new(move || config.clone()),
+            key_service,
+            None,
+            crate::sync::test_helpers::open_test_db(),
+            Arc::new(SystemClock),
+            None,
+            None,
+        );
+
+        let error = manager
+            .get_members()
+            .await
+            .expect_err("malformed stored credentials must fail");
+        assert!(error.contains("malformed cloud home credentials JSON"));
     }
 }
