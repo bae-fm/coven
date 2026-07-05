@@ -6,11 +6,11 @@
 //! `OAuthSession` and routes its requests through `api_call`.
 
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::CloudHomeError;
 use crate::clock::ClockRef;
-use crate::keys::{CloudHomeCredentials, KeyService};
+use crate::keys::KeyService;
 use crate::oauth::{self, OAuthConfig, OAuthTokens};
 
 /// Owns a provider's OAuth tokens (refreshing them as needed) and the
@@ -92,14 +92,9 @@ impl OAuthSession {
                 other => CloudHomeError::Storage(format!("OAuth refresh failed: {other}")),
             })?;
 
-        let json = serde_json::to_string(&new_tokens)
-            .map_err(|e| CloudHomeError::Storage(format!("serialize tokens: {e}")))?;
-        if let Err(e) = self
-            .key_service
-            .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json: json })
-        {
-            warn!("Failed to persist refreshed OAuth tokens: {e}");
-        }
+        self.key_service
+            .set_cloud_home_oauth_tokens(&new_tokens)
+            .map_err(|e| CloudHomeError::Storage(format!("persist refreshed OAuth tokens: {e}")))?;
 
         let access_token = new_tokens.access_token.clone();
         *tokens = new_tokens;
@@ -129,5 +124,63 @@ impl OAuthSession {
         } else {
             Ok(resp)
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+mod tests {
+    use super::*;
+    use crate::clock::FixedClock;
+    use crate::oauth::test_support::{oauth_config, serve_token_response};
+    use chrono::{TimeZone, Utc};
+    use std::sync::Arc;
+
+    fn fail_next_cloud_credentials_write(key_service: &KeyService) {
+        let entry = key_service
+            .cloud_home_credentials_entry_for_test()
+            .expect("create mock keyring entry");
+        let credential = entry
+            .as_any()
+            .downcast_ref::<keyring_core::mock::Cred>()
+            .expect("mock keyring credential");
+        credential.set_error(keyring_core::Error::Invalid(
+            "keyring unavailable".to_string(),
+            "test failure".to_string(),
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_returns_error_when_token_persist_fails() {
+        let (token_url, request_body, server) = serve_token_response(
+            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+        )
+        .await;
+        crate::keys::test_keyring::install();
+        let key_service = KeyService::new("oauth-persist-failure".to_string());
+        fail_next_cloud_credentials_write(&key_service);
+        let session = OAuthSession::new(
+            OAuthTokens {
+                access_token: "old-access".to_string(),
+                refresh_token: Some("old-refresh".to_string()),
+                expires_at: Some(1_700_000_000),
+            },
+            key_service,
+            Arc::new(FixedClock(Utc.timestamp_opt(1_700_000_120, 0).unwrap())),
+            oauth_config(token_url),
+            "Provider",
+        );
+
+        let error = session
+            .refresh()
+            .await
+            .expect_err("persist failure returns an error");
+        assert!(error.to_string().contains("keyring unavailable"));
+
+        let tokens = session.tokens.read().await;
+        assert_eq!(tokens.access_token, "old-access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("old-refresh"));
+
+        let _request = request_body.await.expect("receive refresh request");
+        server.await.expect("token server exits");
     }
 }

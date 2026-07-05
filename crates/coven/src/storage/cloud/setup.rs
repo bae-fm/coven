@@ -20,10 +20,8 @@ use std::sync::Arc;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 fn save_oauth_tokens(key_service: &KeyService, tokens: &OAuthTokens) -> Result<(), SetupError> {
-    let token_json = serde_json::to_string(tokens)
-        .map_err(|e| SetupError(format!("Failed to serialize tokens: {e}")))?;
     key_service
-        .set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
+        .set_cloud_home_oauth_tokens(tokens)
         .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))
 }
 

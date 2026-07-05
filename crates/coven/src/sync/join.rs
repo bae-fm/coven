@@ -47,8 +47,6 @@ pub enum JoinError {
     Provider(String),
     #[error("membership: {0}")]
     Membership(String),
-    #[error("serialize: {0}")]
-    Serialize(#[from] serde_json::Error),
     #[error("database: {0}")]
     Database(String),
 }
@@ -143,8 +141,7 @@ async fn build_cloud_home_for_join(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
-            let token_json = serde_json::to_string(&tokens)?;
-            lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
+            lib_ks.set_cloud_home_oauth_tokens(&tokens)?;
             Ok(Box::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
                 tokens,
@@ -156,8 +153,7 @@ async fn build_cloud_home_for_join(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
-            let token_json = serde_json::to_string(&tokens)?;
-            lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
+            lib_ks.set_cloud_home_oauth_tokens(&tokens)?;
             Ok(Box::new(dropbox::DropboxCloudHome::new(
                 shared_folder_id.clone(),
                 tokens,
@@ -172,8 +168,7 @@ async fn build_cloud_home_for_join(
             folder_id,
         } => {
             let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
-            let token_json = serde_json::to_string(&tokens)?;
-            lib_ks.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })?;
+            lib_ks.set_cloud_home_oauth_tokens(&tokens)?;
             Ok(Box::new(onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),

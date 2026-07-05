@@ -115,6 +115,23 @@ impl KeyService {
         Ok(())
     }
 
+    #[cfg(feature = "oauth-providers")]
+    pub fn set_cloud_home_oauth_tokens(
+        &self,
+        tokens: &crate::oauth::OAuthTokens,
+    ) -> Result<(), KeyError> {
+        let token_json = serde_json::to_string(tokens)
+            .map_err(|e| KeyError::Crypto(format!("serialize OAuth tokens: {e}")))?;
+        self.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    pub(crate) fn cloud_home_credentials_entry_for_test(
+        &self,
+    ) -> keyring_core::Result<keyring_core::Entry> {
+        keyring_core::Entry::new(keyring_service(), &self.account("cloud_home_credentials"))
+    }
+
     pub fn delete_cloud_home_credentials(&self) -> Result<(), KeyError> {
         if delete_keyring(&self.account("cloud_home_credentials"))? {
             info!("Cloud home credentials deleted from keyring");
