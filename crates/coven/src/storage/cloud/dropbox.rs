@@ -379,11 +379,20 @@ impl OAuthRestHome for DropboxCloudHome {
                 }
             }
         }
-        let next = json["has_more"]
-            .as_bool()
-            .unwrap_or(false)
-            .then(|| json["cursor"].as_str().map(String::from))
-            .flatten();
+        let next = if json["has_more"].as_bool() == Some(true) {
+            Some(
+                json["cursor"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        CloudHomeError::Storage(
+                            "Dropbox list response has_more without cursor".to_string(),
+                        )
+                    })?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         Ok(ListPage { keys, next })
     }
 }
@@ -613,5 +622,14 @@ mod tests {
         assert!(msg.contains("HTTP 409"), "{msg}");
         assert!(msg.contains("changes/dev1/1.enc"), "{msg}");
         assert!(!msg.contains("storage is full"), "{msg}");
+    }
+
+    #[test]
+    fn parse_list_page_rejects_has_more_without_cursor() {
+        let body = r#"{"entries":[],"has_more":true}"#;
+        match home().parse_list_page(body, "") {
+            Ok(_) => panic!("has_more without cursor must fail"),
+            Err(err) => assert!(err.to_string().contains("cursor"), "{err}"),
+        }
     }
 }
