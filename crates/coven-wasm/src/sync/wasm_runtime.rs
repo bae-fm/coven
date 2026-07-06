@@ -7,9 +7,9 @@
 //! holds the connection behind an `Rc<RefCell>`), so the loop runs as a
 //! single-threaded task on the event loop: [`wasm_bindgen_futures::spawn_local`]
 //! schedules it, and a [`gloo_timers::future::TimeoutFuture`] is the idle/backoff
-//! wait between cycles in place of `tokio::time::sleep`. The loop holds only
-//! single-threaded types — `Rc`/`Cell` and the clone-shareable [`Database`] /
-//! `CloudSyncStorage` (no `Send`, no `Arc`, no threads).
+//! wait between cycles in place of `tokio::time::sleep`. The loop holds the
+//! clone-shareable [`Database`] / `CloudSyncStorage`, browser-local `Rc` control
+//! state, and shared core handles such as the database's `Arc<Hlc>`.
 //!
 //! The loop mirrors the native one's shape: an initial delay so it does not race
 //! page startup, then run-cycle → wait → repeat. Shared loop policy resets or
@@ -52,13 +52,14 @@ pub struct WasmSyncSchedule {
 /// What a sync cycle needs, owned together so the loop re-borrows them each
 /// iteration. The wasm counterpart of the native loop's `SyncLoopInner`, but with
 /// single-threaded types: the clone-shareable [`Database`] and
-/// [`CloudSyncStorage`] are held directly, the rest behind `Rc`.
+/// [`CloudSyncStorage`] are held directly, while browser-local loop state stays
+/// behind `Rc`.
 ///
 /// The whole bundle lives behind one `Rc` so [`WasmSyncRuntime::start`] can move a
 /// clone into the spawned task without moving the runtime itself.
 struct CycleInputs {
     storage: CloudSyncStorage,
-    hlc: Rc<Hlc>,
+    hlc: Arc<Hlc>,
     library_id: String,
     device_id: String,
     /// The at-rest cipher, shared with `storage` (the same `Arc<RwLock<CloudCipher>>`
@@ -102,7 +103,7 @@ impl WasmSyncRuntime {
         storage: CloudSyncStorage,
         library_id: String,
         device_id: String,
-        hlc: Rc<Hlc>,
+        hlc: Arc<Hlc>,
         cipher: Arc<RwLock<CloudCipher>>,
         db: Database,
         user_keypair: UserKeypair,
@@ -233,6 +234,11 @@ impl WasmSyncRuntime {
     #[cfg(all(test, target_arch = "wasm32"))]
     pub(crate) fn active_token_for_test(&self) -> Option<Rc<Cell<bool>>> {
         self.active.borrow().clone()
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub(crate) fn hlc_is_for_test(&self, expected: &Arc<Hlc>) -> bool {
+        Arc::ptr_eq(&self.inputs.hlc, expected)
     }
 }
 

@@ -30,7 +30,6 @@ use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::hlc::Hlc;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
 
@@ -77,7 +76,7 @@ fn runtime_for_device(device_id: &str, db: Database, cloud: &InMemoryCloudHome) 
         storage,
         "test-lib".to_string(),
         device_id.to_string(),
-        Rc::new(Hlc::new(device_id.to_string())),
+        db.hlc(),
         cipher,
         db,
         keypair,

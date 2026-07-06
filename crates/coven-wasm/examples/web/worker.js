@@ -16,7 +16,7 @@
 //
 // The pkg/ directory is the coven-wasm wasm-pack output (see README).
 
-import init, { stamp, CovenLibrary } from "../../pkg/coven_wasm.js";
+import init, { CovenLibrary } from "../../pkg/coven_wasm.js";
 
 let library = null;
 
@@ -35,8 +35,6 @@ const migrations = [
 
 const syncedTables = [{ name: "notes" }];
 
-let deviceId = "";
-
 async function handle(message) {
   const data = message.data;
   switch (data.type) {
@@ -45,7 +43,6 @@ async function handle(message) {
       // page collected. `CovenLibrary.open` installs the OPFS VFS, opens the
       // database, and builds the sync runtime; `start_sync` begins the loop.
       await init();
-      deviceId = data.config.device_id;
       library = await CovenLibrary.open(data.config, migrations, syncedTables);
       library.start_sync();
       self.postMessage({ type: "opened" });
@@ -54,7 +51,7 @@ async function handle(message) {
       break;
     }
     case "addNote": {
-      const updatedAt = stamp(deviceId);
+      const updatedAt = library.stamp();
       const createdAt = new Date().toISOString();
       // Parameterized through coven's `exec`. The values are escaped here for the
       // demo's single-quote-free inputs; a real app would pass bound parameters.

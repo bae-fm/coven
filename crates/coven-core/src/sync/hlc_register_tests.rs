@@ -304,22 +304,92 @@ async fn register_seeds_from_persisted_high_water() {
 /// own un-flushed rows and loses LWW to them.
 #[tokio::test]
 async fn register_seeds_from_on_disk_rows_above_high_water() {
-    let row_stamp = "9999999999000-0011-dev-a";
-    let db = open_test_db_with_hlc(Arc::new(Hlc::new("dev-a".into())), move |conn| {
-        conn.execute(
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n0', 'row', NULL, ?1, '2026-01-01')",
-            [row_stamp],
-        )
-        .map(|_| ())
-        .map_err(crate::database::DbError::from)
-    });
+    let row_stamp = "9000000000000-0011-dev-a";
+    let db = open_test_db_with_hlc(
+        Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000_000_000_000)),
+        move |conn| {
+            conn.execute(
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('n0', 'row', NULL, ?1, '2026-01-01')",
+                [row_stamp],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        },
+    );
 
     let stamp = db.hlc().now().to_string();
     assert!(
         stamp.as_str() > row_stamp,
         "first stamp {stamp} must sort after the on-disk row {row_stamp}; \
          seeding from the flushed high-water alone misses un-flushed local rows",
+    );
+}
+
+/// Restart seeding uses the greatest synced-row register stamp an honest device
+/// could have produced, so a grossly-future row already on disk cannot drag the
+/// clock past every later local write.
+#[tokio::test]
+async fn restart_does_not_seed_past_grossly_future_synced_row() {
+    let wall: u64 = 1_700_000_000_000;
+    let honest = format!("{wall:013}-0000-dev-a");
+    let poison_ms = wall + 60 * 24 * 60 * 60 * 1000;
+    let poison = format!("{poison_ms:013}-0000-dev-b");
+    let honest_seed = honest.clone();
+    let poison_seed = poison.clone();
+    let db = open_test_db_with_hlc(
+        Arc::new(Hlc::with_wall_clock("dev-local".into(), move || wall)),
+        move |conn| {
+            conn.execute(
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('honest', 'row', NULL, ?1, '2026-01-01')",
+                [honest_seed.as_str()],
+            )
+            .map_err(crate::database::DbError::from)?;
+            conn.execute(
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('poison', 'row', NULL, ?1, '2026-01-01')",
+                [poison_seed.as_str()],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        },
+    );
+
+    let stamp = db.hlc().now().to_string();
+    assert!(
+        stamp.as_str() > honest.as_str(),
+        "first stamp {stamp} must sort after honest on-disk row {honest}",
+    );
+    assert!(
+        stamp.as_str() < poison.as_str(),
+        "first stamp {stamp} must not seed past grossly-future on-disk row {poison}",
+    );
+}
+
+#[tokio::test]
+async fn restart_seeds_past_within_bound_synced_row() {
+    let wall: u64 = 1_700_000_000_000;
+    let within_ms = wall + 60 * 60 * 1000;
+    let within = format!("{within_ms:013}-0000-dev-a");
+    let within_seed = within.clone();
+    let db = open_test_db_with_hlc(
+        Arc::new(Hlc::with_wall_clock("dev-local".into(), move || wall)),
+        move |conn| {
+            conn.execute(
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('within', 'row', NULL, ?1, '2026-01-01')",
+                [within_seed.as_str()],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        },
+    );
+
+    let stamp = db.hlc().now().to_string();
+    assert!(
+        stamp.as_str() > within.as_str(),
+        "first stamp {stamp} must sort after within-bound on-disk row {within}",
     );
 }
 
@@ -331,7 +401,7 @@ async fn register_seeds_from_on_disk_rows_above_high_water() {
 /// strictly monotonic.
 #[tokio::test]
 async fn returned_stamper_shares_seeded_clock() {
-    let seeded_floor = "9999999999000-0005-dev-a";
+    let seeded_floor = "9000000000000-0005-dev-a";
     let migrations = vec![crate::migration::Migration::run(
         1,
         "test-schema",
@@ -349,7 +419,7 @@ async fn returned_stamper_shares_seeded_clock() {
     let (db, stamper) = crate::database::Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        Arc::new(Hlc::new("dev-a".into())),
+        Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000_000_000_000)),
         &migrations,
     )
     .expect("open db");

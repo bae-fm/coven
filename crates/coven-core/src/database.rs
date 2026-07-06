@@ -20,7 +20,7 @@ use crate::blob::decl::BlobDecls;
 use crate::db::{ExternalBlob, OutboxEntry, OutboxOperation, MIGRATION_SQL};
 use crate::migration::{run_migrations, Migration};
 use crate::sync::gate::Gates;
-use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY};
+use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
 
 /// An error from the owned database.
@@ -118,7 +118,9 @@ impl DatabaseCore {
             .optional()
             .map_err(DbError::from)?;
         seed_from(&hlc, persisted, "HLC high-water mark in sync_state")?;
-        let on_disk = scan_max_updated_at(&conn, &synced_tables)?;
+        let seed_wall_ms = hlc.wall_now_ms();
+        let seed_bound_ms = seed_wall_ms.saturating_add(MAX_FUTURE_SKEW_MS);
+        let on_disk = scan_max_updated_at(&conn, &synced_tables, seed_bound_ms)?;
         seed_from(&hlc, on_disk, "`_updated_at` in synced tables")?;
 
         let stamper = UpdatedAtStamper::new(hlc.clone());
@@ -335,11 +337,8 @@ impl Database {
         self.state.schema_version
     }
 
-    /// The shared register clock. coven's sync layer advances it past pulled rows
-    /// and stamps envelopes off it; it is the same `Arc<Hlc>` the stamper wraps.
-    ///
-    /// Native-only: the sole consumer is the native-only [`crate::sync::sync_manager::SyncManager`].
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The shared register clock. coven's sync layer records pulled rows as its
+    /// floor and stamps envelopes off it; it is the same `Arc<Hlc>` the stamper wraps.
     pub fn hlc(&self) -> Arc<Hlc> {
         self.state.hlc.clone()
     }
@@ -351,8 +350,7 @@ impl Database {
     /// The receiver's current wall-clock millis, read from this database's
     /// register clock. The pull reads it once and passes it down to bound an
     /// incoming `_updated_at`'s physical component (a grossly-future stamp must not
-    /// win last-writer-wins or ratchet the clock). Available on both targets — pull
-    /// runs on wasm too — unlike [`Self::hlc`], whose only caller is native.
+    /// win last-writer-wins or ratchet the clock).
     pub(crate) fn receive_wall_ms(&self) -> u64 {
         self.state.hlc.wall_now_ms()
     }
@@ -1143,21 +1141,23 @@ fn seed_from(hlc: &Hlc, value: Option<String>, context: &str) -> Result<(), DbEr
     Ok(())
 }
 
-/// `SELECT MAX(_updated_at)` over every synced table, taking the overall
-/// lexicographic max. A registered table that does not exist is a host
+/// Greatest `_updated_at` within the restart seed's honest future bound, scanned
+/// across every synced table. A registered table that does not exist is a host
 /// integration error and surfaces as `Err`.
 fn scan_max_updated_at(
     conn: &Connection,
     synced_tables: &[SyncedTable],
+    seed_bound_ms: u64,
 ) -> Result<Option<String>, DbError> {
     let mut overall: Option<String> = None;
+    let seed_bound = format!("{seed_bound_ms:013}");
     for t in synced_tables {
         let sql = format!(
-            "SELECT MAX(_updated_at) FROM {}",
+            "SELECT MAX(_updated_at) FROM {} WHERE substr(_updated_at, 1, 13) <= ?1",
             crate::sync::session::quote_ident(t.name())
         );
         let value: Option<String> = conn
-            .query_row(&sql, [], |r| r.get::<_, Option<String>>(0))
+            .query_row(&sql, [&seed_bound], |r| r.get::<_, Option<String>>(0))
             .map_err(|e| {
                 DbError(format!(
                     "register-floor scan over synced table {}: {e}",

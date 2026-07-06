@@ -1,9 +1,8 @@
 /// Hybrid Logical Clock (HLC) for causal ordering of writes across devices.
 ///
 /// This clock is coven's `_updated_at` register: native hosts stamp every synced
-/// row's `_updated_at` with [`crate::SqlContext::stamp`], and pull advances the
-/// clock past every
-/// applied row's `_updated_at` so a subsequent local write sorts causally
+/// row's `_updated_at` with [`crate::SqlContext::stamp`], and pull records every
+/// applied row's `_updated_at` as a floor so a subsequent local write sorts causally
 /// after anything just pulled. Row-level last-writer-wins (`conflict.rs`)
 /// compares these strings lexicographically. Because the clock never mints a
 /// stamp behind a value it has already seen — even under wall-clock skew or a
@@ -39,6 +38,10 @@ pub const HIGHWATER_STATE_KEY: &str = "hlc_highwater";
 /// one-sided: only grossly-*future* stamps are rejected; a stamp in the past is
 /// always honest (an offline device's older edits) and is never bounded.
 pub const MAX_FUTURE_SKEW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Largest counter value whose zero-padded four-digit field preserves lexical
+/// ordering.
+pub const COUNTER_MAX: u16 = 9999;
 
 /// A parsed HLC timestamp.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -76,6 +79,9 @@ impl Timestamp {
         if device_id.is_empty() {
             return None;
         }
+        if counter > COUNTER_MAX {
+            return None;
+        }
         Some(Self {
             millis,
             counter,
@@ -97,6 +103,17 @@ impl std::fmt::Display for Timestamp {
 struct HlcState {
     millis: u64,
     counter: u16,
+}
+
+fn increment(state: &mut HlcState) {
+    if state.counter < COUNTER_MAX {
+        state.counter += 1;
+    } else if let Some(next_millis) = state.millis.checked_add(1) {
+        state.millis = next_millis;
+        state.counter = 0;
+    } else {
+        state.counter = COUNTER_MAX;
+    }
 }
 
 /// Hybrid Logical Clock.
@@ -168,22 +185,21 @@ impl Hlc {
             state.millis = wall;
             state.counter = 0;
         } else {
-            state.counter += 1;
+            increment(&mut state);
         }
 
         Timestamp::new(state.millis, state.counter, self.device_id.clone())
     }
 
-    /// Advance the clock past an applied row's `_updated_at`, so the next local
+    /// Record an applied row's `_updated_at` as the clock floor, so the next local
     /// stamp sorts causally after it. `remote` is an authoritative register
     /// value the LWW layer already accepted and wrote to disk — never an
-    /// untrusted peer wall clock — so the advance is **unconditional**: no skew
+    /// untrusted peer wall clock — so recording it is **unconditional**: no skew
     /// cap. Capping here would let the next local edit mint a stamp below an
     /// already-stored applied row and lose LWW to it.
     ///
-    /// Monotonic: a `remote` at or behind the current state only bumps the
-    /// counter; a `remote` ahead adopts its time. Either way the next [`now`]
-    /// outranks `remote`.
+    /// Monotonic: a `remote` ahead of the current state becomes the state floor;
+    /// one behind it is ignored. Either way the next [`now`] outranks `remote`.
     pub fn advance_past(&self, remote: &Timestamp) {
         let wall = (self.wall_clock)();
         let mut state = self.state.lock().unwrap();
@@ -193,15 +209,12 @@ impl Hlc {
             state.millis = wall;
             state.counter = 0;
         } else if remote.millis > state.millis {
-            // Remote is ahead of local: adopt remote's time, increment counter.
+            // Remote is ahead of local: adopt remote's register floor.
             state.millis = remote.millis;
-            state.counter = remote.counter + 1;
-        } else if state.millis > remote.millis {
-            // Local is ahead: keep local time, increment counter.
-            state.counter += 1;
-        } else {
-            // Same millis: take the higher counter + 1.
-            state.counter = state.counter.max(remote.counter) + 1;
+            state.counter = remote.counter;
+        } else if state.millis == remote.millis && remote.counter > state.counter {
+            // Same millis: keep the higher register floor.
+            state.counter = remote.counter;
         }
     }
 
@@ -525,6 +538,70 @@ mod tests {
         assert!(Timestamp::parse("1000-0000-").is_none()); // empty device_id
         assert!(Timestamp::parse("abc-0000-dev").is_none()); // non-numeric millis
         assert!(Timestamp::parse("1000-xyz-dev").is_none()); // non-numeric counter
+    }
+
+    #[test]
+    fn parse_rejects_counter_above_format_width() {
+        assert!(Timestamp::parse("0000000001000-10000-dev").is_none());
+        assert!(Timestamp::parse("0000000001000-65535-dev").is_none());
+    }
+
+    #[test]
+    fn advance_past_counter_bound_carries_into_millis() {
+        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        let observed = Timestamp::new(1000, 9999, "dev-remote".into());
+
+        hlc.advance_past(&observed);
+        let next = hlc.now();
+
+        assert!(
+            next.to_string() > observed.to_string(),
+            "next stamp {next} must sort after observed stamp {observed}",
+        );
+        assert_eq!(next.millis, 1001);
+        assert_eq!(next.counter, 0);
+    }
+
+    #[test]
+    fn now_counter_bound_carries_into_millis() {
+        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        hlc.seed(&Timestamp::new(1000, 9999, "dev-remote".into()));
+
+        let next = hlc.now();
+
+        assert_eq!(next.millis, 1001);
+        assert_eq!(next.counter, 0);
+        assert_eq!(next.to_string(), "0000000001001-0000-dev-local");
+    }
+
+    #[test]
+    fn minted_counters_keep_fixed_width_lexical_order() {
+        let hlc = Hlc::with_wall_clock("dev-local".into(), fixed_clock(1000));
+        hlc.seed(&Timestamp::new(1000, 9998, "dev-remote".into()));
+
+        let stamps = [hlc.now(), hlc.now(), hlc.now()];
+        for stamp in &stamps {
+            let rendered = stamp.to_string();
+            let counter = rendered
+                .split('-')
+                .nth(1)
+                .expect("timestamp has a counter field");
+            assert_eq!(counter.len(), 4);
+        }
+        for pair in stamps.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "timestamp ordering must advance from {} to {}",
+                pair[0],
+                pair[1],
+            );
+            assert!(
+                pair[1].to_string() > pair[0].to_string(),
+                "string ordering must advance from {} to {}",
+                pair[0],
+                pair[1],
+            );
+        }
     }
 
     #[test]

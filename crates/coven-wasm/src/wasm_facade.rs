@@ -21,7 +21,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::rc::Rc;
 
 use futures_util::FutureExt;
 use rusqlite::types::ValueRef;
@@ -39,7 +38,6 @@ use crate::migration::Migration;
 use crate::storage::cloud::s3_wasm::S3WasmCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::hlc::Hlc;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
 use crate::wasm::install_browser_storage;
@@ -212,9 +210,8 @@ impl CovenLibrary {
     /// This is the host's write path: the attached capture session records these
     /// writes into the outgoing changeset, so [`start_sync`](Self::start_sync)
     /// publishes them. Synced rows must carry the `_updated_at` register stamp the
-    /// synced-table contract requires; the demo schema's `notes` table uses
-    /// SQLite defaults for the facade's demo writes, while native hosts mint
-    /// stamps with [`crate::SqlContext::stamp`].
+    /// synced-table contract requires; wasm hosts with an open library mint those
+    /// stamps with [`stamp`](Self::stamp).
     pub fn exec(&self, sql: String) -> Result<(), JsValue> {
         // The wasm `Database::call` runs the closure synchronously on the borrowed
         // connection and returns an already-complete future, so `now_or_never`
@@ -268,6 +265,13 @@ impl CovenLibrary {
     /// Whether the sync loop is running.
     pub fn is_syncing(&self) -> bool {
         self.runtime.is_running()
+    }
+
+    /// Mint the next `_updated_at` register stamp for a synced-row write through
+    /// this open library. This stamp uses the database's seeded clock, the same
+    /// clock the sync runtime records pulled rows on.
+    pub fn stamp(&self) -> String {
+        self.db.stamper().stamp()
     }
 }
 
@@ -339,7 +343,7 @@ impl CovenLibrary {
             storage,
             library_id.to_string(),
             device_id.clone(),
-            Rc::new(Hlc::new(device_id)),
+            db.hlc(),
             cipher,
             db.clone(),
             // The device's signing identity. `open` loads it from the persistent
@@ -362,6 +366,16 @@ impl CovenLibrary {
             runtime,
             _open_guard: open_guard,
         })
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub(crate) fn runtime_hlc_is_database_hlc_for_test(&self) -> bool {
+        self.runtime.hlc_is_for_test(&self.db.hlc())
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub(crate) fn db_hlc_for_test(&self) -> std::sync::Arc<crate::sync::hlc::Hlc> {
+        self.db.hlc()
     }
 }
 

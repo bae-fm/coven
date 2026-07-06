@@ -26,6 +26,7 @@ use crate::migration::Migration;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
+use crate::sync::hlc::Timestamp;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::WasmSyncSchedule;
 use crate::wasm_facade::CovenLibrary;
@@ -223,4 +224,40 @@ async fn second_open_of_one_library_id_is_refused_until_the_first_handle_drops()
     assemble_library(&library_id, "device-c", &cloud)
         .await
         .expect("open succeeds after the first handle drops");
+}
+
+#[wasm_bindgen_test]
+async fn runtime_and_open_share_one_clock() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let cloud = InMemoryCloudHome::new();
+    let lib = assemble_library(&format!("shared-clock-{run}"), "device-a", &cloud)
+        .await
+        .expect("assemble library");
+
+    assert!(
+        lib.runtime_hlc_is_database_hlc_for_test(),
+        "runtime must hold the database HLC instance opened and seeded by Database::open",
+    );
+}
+
+#[wasm_bindgen_test]
+async fn library_stamp_uses_pull_advanced_clock() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let cloud = InMemoryCloudHome::new();
+    let lib = assemble_library(&format!("pull-advanced-stamp-{run}"), "device-a", &cloud)
+        .await
+        .expect("assemble library");
+
+    let pulled = Timestamp::new(9_000_000_000_000, 7, "device-b".to_string());
+    lib.db_hlc_for_test().advance_past(&pulled);
+
+    let stamp = lib.stamp();
+    assert!(
+        stamp > pulled.to_string(),
+        "library stamp {stamp} must sort after pulled stamp {pulled}",
+    );
 }

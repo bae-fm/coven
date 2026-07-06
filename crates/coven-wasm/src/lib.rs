@@ -92,6 +92,11 @@ thread_local! {
     static STANDALONE_HLCS: RefCell<HashMap<String, Arc<Hlc>>> = RefCell::new(HashMap::new());
 }
 
+/// Mint an HLC stamp for callers that do not have an open [`CovenLibrary`].
+///
+/// This process-local clock is monotonic per `device_id`, but it is not seeded
+/// from an open database and is not advanced by pull. Synced-row writes through an
+/// open library use [`CovenLibrary::stamp`].
 #[wasm_bindgen]
 pub fn stamp(device_id: String) -> Result<String, JsValue> {
     if device_id.is_empty() {
