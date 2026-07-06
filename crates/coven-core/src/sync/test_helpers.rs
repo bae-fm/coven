@@ -412,6 +412,8 @@ pub struct MockSyncStorage {
     hidden_from_listing: Mutex<std::collections::HashSet<(String, u64)>>,
     fail_blob_puts: std::sync::atomic::AtomicUsize,
     fail_changeset_puts: std::sync::atomic::AtomicUsize,
+    wrapped_key_put_count: std::sync::atomic::AtomicUsize,
+    fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize,
 }
 
 impl MockSyncStorage {
@@ -435,6 +437,8 @@ impl MockSyncStorage {
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
             fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
             fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
+            wrapped_key_put_count: std::sync::atomic::AtomicUsize::new(0),
+            fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -477,6 +481,14 @@ impl MockSyncStorage {
     pub fn fail_next_changeset_puts(&self, count: usize) {
         self.fail_changeset_puts
             .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn fail_wrapped_key_put_on_call(&self, call_number: usize) {
+        assert!(call_number > 0, "wrapped-key put call numbers are 1-based");
+        self.wrapped_key_put_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.fail_wrapped_key_put_on
+            .store(call_number, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Remove a blob object from the mock cloud, keyed the same flat
@@ -906,6 +918,21 @@ impl SyncStorage for MockSyncStorage {
     }
 
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
+        let call = self
+            .wrapped_key_put_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self
+            .fail_wrapped_key_put_on
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == call
+        {
+            self.fail_wrapped_key_put_on
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+            return Err(StorageError::Storage(format!(
+                "forced wrapped-key upload failure for {user_pubkey}"
+            )));
+        }
         let key = format!("keys/{user_pubkey}.enc");
         self.objects.lock().unwrap().insert(key, data);
         Ok(())

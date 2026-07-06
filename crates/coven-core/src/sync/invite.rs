@@ -10,8 +10,8 @@ use crate::storage::cloud::{
 };
 
 use super::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
-    MembershipError,
+    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
+    MembershipEntry, MembershipError,
 };
 use super::signed_control::WrappedLibraryKey;
 use super::storage::{StorageError, SyncStorage};
@@ -28,6 +28,8 @@ pub enum InviteError {
     CloudHome(#[from] CloudHomeError),
     #[error("Crypto error: {0}")]
     Crypto(String),
+    #[error("wrapped library key activation is not visible: {activation:?}")]
+    InactiveWrappedKey { activation: MembershipCoord },
     #[error("{operation} failed: {original}; rollback failed: {rollback}")]
     Rollback {
         operation: &'static str,
@@ -84,12 +86,35 @@ fn signed_wrapped_key(
     encryption: &EncryptionService,
     owner_keypair: &UserKeypair,
 ) -> Result<Vec<u8>, InviteError> {
+    signed_wrapped_key_with_activation(
+        library_id,
+        recipient_ed25519_pubkey,
+        recipient_x25519_pk,
+        encryption,
+        owner_keypair,
+        None,
+    )
+}
+
+fn signed_wrapped_key_with_activation(
+    library_id: &str,
+    recipient_ed25519_pubkey: &str,
+    recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
+    encryption: &EncryptionService,
+    owner_keypair: &UserKeypair,
+    activation: Option<MembershipCoord>,
+) -> Result<Vec<u8>, InviteError> {
     let payload = encryption
         .to_keyring_payload()
         .map_err(|e| InviteError::Crypto(format!("serialize keyring payload: {e}")))?;
     let sealed = keys::seal_box_encrypt(&payload, recipient_x25519_pk);
-    let wrapped =
-        WrappedLibraryKey::signed(library_id, recipient_ed25519_pubkey, sealed, owner_keypair);
+    let wrapped = WrappedLibraryKey::signed(
+        library_id,
+        recipient_ed25519_pubkey,
+        activation,
+        sealed,
+        owner_keypair,
+    );
     serde_json::to_vec(&wrapped)
         .map_err(|e| InviteError::Crypto(format!("serialize wrapped key: {e}")))
 }
@@ -102,12 +127,32 @@ pub(crate) fn signed_wrapped_key_for_test(
     encryption_key: &[u8; 32],
     owner_keypair: &UserKeypair,
 ) -> Vec<u8> {
-    signed_wrapped_key(
+    signed_wrapped_keyring_for_test(
         library_id,
         recipient_ed25519_pubkey,
         recipient_x25519_pk,
         &EncryptionService::from_key(*encryption_key),
         owner_keypair,
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn signed_wrapped_keyring_for_test(
+    library_id: &str,
+    recipient_ed25519_pubkey: &str,
+    recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
+    encryption: &EncryptionService,
+    owner_keypair: &UserKeypair,
+    activation: Option<MembershipCoord>,
+) -> Vec<u8> {
+    signed_wrapped_key_with_activation(
+        library_id,
+        recipient_ed25519_pubkey,
+        recipient_x25519_pk,
+        encryption,
+        owner_keypair,
+        activation,
     )
     .expect("signed wrapped key")
 }
@@ -311,6 +356,23 @@ pub(crate) async fn unwrap_library_keyring_for_owners<'a>(
     library_id: &str,
     expected_owners: impl IntoIterator<Item = &'a str>,
 ) -> Result<EncryptionService, InviteError> {
+    unwrap_library_keyring_for_owners_with_activation(
+        cloud_home,
+        keypair,
+        library_id,
+        expected_owners,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
+    cloud_home: &dyn CloudHome,
+    keypair: &UserKeypair,
+    library_id: &str,
+    expected_owners: impl IntoIterator<Item = &'a str>,
+    visible_membership_entries: Option<&[MembershipCoord]>,
+) -> Result<EncryptionService, InviteError> {
     let pubkey_hex = hex::encode(keypair.public_key());
 
     // Download the wrapped key directly off the cloud home (not through
@@ -323,6 +385,19 @@ pub(crate) async fn unwrap_library_keyring_for_owners<'a>(
 
     let wrapped: WrappedLibraryKey = serde_json::from_slice(&wrapped_bytes)
         .map_err(|e| InviteError::Crypto(format!("malformed wrapped key: {e}")))?;
+
+    if let Some(activation) = wrapped.activation.as_ref() {
+        let Some(entries) = visible_membership_entries else {
+            return Err(InviteError::Crypto(
+                "wrapped library key requires membership activation".to_string(),
+            ));
+        };
+        if !entries.iter().any(|entry| entry == activation) {
+            return Err(InviteError::InactiveWrappedKey {
+                activation: activation.clone(),
+            });
+        }
+    }
 
     // Authenticate the wrapped key against the supplied authorized owner set
     // before adopting anything. A failure here is a substituted, forged,
@@ -341,11 +416,9 @@ pub(crate) async fn unwrap_library_keyring_for_owners<'a>(
 
 /// Revoke a member from the library. This:
 /// 1. Revokes access on the cloud home
-/// 2. Creates a Remove membership entry signed by the owner
-/// 3. Generates a new library encryption key
-/// 4. Re-wraps the new key to all remaining members
-/// 5. Deletes the revoked member's wrapped key
-/// 6. Uploads updated entries and keys
+/// 2. Re-wraps a new library key to all remaining members
+/// 3. Deletes the revoked member's wrapped key
+/// 4. Publishes the signed Remove membership entry as the visible commit point
 ///
 /// Returns the new encryption key (caller must persist it and start using it).
 pub async fn revoke_member(
@@ -360,18 +433,21 @@ pub async fn revoke_member(
     current_encryption: &EncryptionService,
 ) -> Result<EncryptionService, InviteError> {
     let members = chain.current_members();
-
-    // Verify the revokee is a current member.
-    if !members.iter().any(|(pk, _)| pk == revokee_pubkey) {
+    let revokee_is_current = members.iter().any(|(pk, _)| pk == revokee_pubkey);
+    let revokee_was_removed = chain.entries().iter().any(|entry| {
+        entry.action == MembershipAction::Remove && entry.user_pubkey == revokee_pubkey
+    });
+    if !revokee_is_current && !revokee_was_removed {
         return Err(InviteError::NotAMember(revokee_pubkey.to_string()));
     }
 
     // Ensure at least one owner would remain after the removal.
-    let remaining_owners = members
+    let current_owners = members
         .iter()
         .filter(|(pk, role)| pk != revokee_pubkey && *role == MemberRole::Owner)
-        .count();
-    if remaining_owners == 0 {
+        .map(|(pk, _)| pk.clone())
+        .collect::<Vec<_>>();
+    if current_owners.is_empty() {
         return Err(InviteError::LastOwner);
     }
 
@@ -386,6 +462,25 @@ pub async fn revoke_member(
         })
         .await?;
 
+    if !revokee_is_current {
+        let visible_coords = membership_coords(&entry_keys);
+        let keyring = unwrap_library_keyring_for_owners_with_activation(
+            cloud_home,
+            owner_keypair,
+            library_id,
+            current_owners.iter().map(String::as_str),
+            Some(&visible_coords),
+        )
+        .await?;
+        storage.delete_wrapped_key(revokee_pubkey).await?;
+        return Ok(keyring);
+    }
+
+    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
+    let remove_coord = MembershipCoord {
+        author_pubkey: author_pubkey_hex.clone(),
+        seq: next_membership_seq(&entry_keys, &author_pubkey_hex),
+    };
     // Create and sign a Remove entry.
     let mut entry = MembershipEntry {
         action: MembershipAction::Remove,
@@ -398,12 +493,10 @@ pub async fn revoke_member(
     };
     sign_membership_entry(&mut entry, owner_keypair);
 
-    // Validate against the local chain BEFORE any storage writes.
-    chain.add_entry(entry.clone())?;
-
-    // Upload the Remove entry.
-    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
-    upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await?;
+    // Validate against a clone before any storage writes. The caller's chain
+    // advances only after the Remove entry is uploaded as the commit point.
+    let mut validated_chain = chain.clone();
+    validated_chain.add_entry(entry.clone())?;
 
     // Generate a new random encryption key.
     let new_key = encryption::generate_random_key();
@@ -413,20 +506,17 @@ pub async fn revoke_member(
         .map_err(|e| InviteError::Crypto(format!("append key generation: {e}")))?;
 
     // Re-wrap the new key to all remaining members, each signed so a joiner that
-    // later adopts it can authenticate it the same way an invite's key is. As at
-    // invite time, an adopting device verifies against the founder the invite
-    // pinned, so `owner_keypair` must be the founder's for the rotated key to be
-    // adoptable on a fresh device (see `signed_wrapped_key`); a non-founder Owner's
-    // rotation re-wraps keys no joiner will accept (it fails closed, not silently).
-    let remaining_members = chain.current_members();
+    // later adopts it can authenticate the signer against the current Owner set.
+    let remaining_members = validated_chain.current_members();
     for (member_pubkey, _) in &remaining_members {
         let x25519_pk = ed25519_hex_to_x25519(member_pubkey)?;
-        let wrapped = signed_wrapped_key(
+        let wrapped = signed_wrapped_key_with_activation(
             library_id,
             member_pubkey,
             &x25519_pk,
             &new_keyring,
             owner_keypair,
+            Some(remove_coord.clone()),
         )?;
         storage.put_wrapped_key(member_pubkey, wrapped).await?;
     }
@@ -434,7 +524,20 @@ pub async fn revoke_member(
     // Delete the revoked member's wrapped key.
     storage.delete_wrapped_key(revokee_pubkey).await?;
 
+    upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await?;
+    *chain = validated_chain;
+
     Ok(new_keyring)
+}
+
+fn membership_coords(entry_keys: &[(String, u64)]) -> Vec<MembershipCoord> {
+    entry_keys
+        .iter()
+        .map(|(author_pubkey, seq)| MembershipCoord {
+            author_pubkey: author_pubkey.clone(),
+            seq: *seq,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -442,6 +545,7 @@ mod tests {
     use super::*;
     use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
     use crate::sync::membership::MemberRole;
+    use crate::sync::membership_ops::download_entries;
     use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
     use async_trait::async_trait;
 
@@ -586,6 +690,41 @@ mod tests {
     /// The library id every invite test wraps keys under. The wrapped-key
     /// signature binds it, so the same id must be passed to `unwrap_library_key`.
     const LIB_ID: &str = "lib-test";
+
+    async fn stored_membership_entries(storage: &MockSyncStorage) -> Vec<MembershipEntry> {
+        let entry_keys = storage.list_membership_entries().await.unwrap();
+        download_entries(storage, &entry_keys)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect()
+    }
+
+    async fn invite_member_for_test(
+        storage: &MockSyncStorage,
+        chain: &mut MembershipChain,
+        owner: &UserKeypair,
+        member: &UserKeypair,
+        key: &[u8; 32],
+        timestamp: &str,
+    ) {
+        create_invitation(
+            storage,
+            &MockCloudHome,
+            chain,
+            storage.list_membership_entries().await.unwrap(),
+            owner,
+            &pubkey_hex(member),
+            None,
+            MemberRole::Member,
+            key,
+            LIB_ID,
+            timestamp,
+        )
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn create_and_unwrap_library_key() {
@@ -1096,14 +1235,18 @@ mod tests {
         assert!(result.is_err());
 
         // Owner can still unwrap the new key.
-        let owner_unwrapped = unwrap_library_key(
+        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let owner_pk = pubkey_hex(&owner);
+        let owner_unwrapped = unwrap_library_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &owner,
             LIB_ID,
-            &pubkey_hex(&owner),
+            std::iter::once(owner_pk.as_str()),
+            Some(&visible_entries),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .key_bytes();
         assert_eq!(owner_unwrapped, new_key.key_bytes());
 
         // The Remove entry was uploaded to the storage.
@@ -1175,29 +1318,331 @@ mod tests {
         .unwrap();
 
         // Both remaining members (owner + member2) can unwrap the new key.
-        let owner_key = unwrap_library_key(
+        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let owner_pk = pubkey_hex(&owner);
+        let owner_key = unwrap_library_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &owner,
             LIB_ID,
-            &pubkey_hex(&owner),
+            std::iter::once(owner_pk.as_str()),
+            Some(&visible_entries),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .key_bytes();
         assert_eq!(owner_key, new_key.key_bytes());
 
-        let member2_key = unwrap_library_key(
+        let member2_key = unwrap_library_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &member2,
             LIB_ID,
-            &pubkey_hex(&owner),
+            std::iter::once(owner_pk.as_str()),
+            Some(&visible_entries),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .key_bytes();
         assert_eq!(member2_key, new_key.key_bytes());
 
         // member1 cannot get a wrapped key.
         let result = storage.get_wrapped_key(&pubkey_hex(&member1)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn unwrap_refuses_removal_key_before_activation_entry_is_visible() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let old_key: [u8; 32] = [14u8; 32];
+        let new_key: [u8; 32] = [15u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &member,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+
+        let owner_pk = pubkey_hex(&owner);
+        let activation = MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 2,
+        };
+        let keyring = EncryptionService::from_key(old_key)
+            .with_appended_generation(2, new_key)
+            .unwrap();
+        let member_x25519 = member.to_x25519_public_key();
+        let wrapped = signed_wrapped_keyring_for_test(
+            LIB_ID,
+            &pubkey_hex(&member),
+            &member_x25519,
+            &keyring,
+            &owner,
+            Some(activation.clone()),
+        );
+        storage
+            .put_wrapped_key(&pubkey_hex(&member), wrapped)
+            .await
+            .unwrap();
+
+        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let result = unwrap_library_keyring_for_owners_with_activation(
+            &storage as &dyn CloudHome,
+            &member,
+            LIB_ID,
+            std::iter::once(owner_pk.as_str()),
+            Some(&visible_entries),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(InviteError::InactiveWrappedKey { activation: seen }) if seen == activation
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoke_member_does_not_publish_remove_before_rewrap() {
+        let owner = gen_keypair();
+        let revokee = gen_keypair();
+        let remaining = gen_keypair();
+        let old_key: [u8; 32] = [11u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &revokee,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &remaining,
+            &old_key,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+
+        storage.fail_wrapped_key_put_on_call(1);
+        let result = revoke_member(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&revokee),
+            LIB_ID,
+            "0000000004000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await;
+
+        assert!(result.is_err(), "injected re-wrap failure must surface");
+        assert!(
+            chain
+                .current_members()
+                .iter()
+                .any(|(pk, _)| pk == &pubkey_hex(&revokee)),
+            "the caller's chain must not advance before the Remove commit point",
+        );
+        let stored_entries = stored_membership_entries(&storage).await;
+        assert!(
+            !stored_entries.iter().any(|entry| {
+                entry.action == MembershipAction::Remove
+                    && entry.user_pubkey == pubkey_hex(&revokee)
+            }),
+            "the Remove entry must not be published before all re-wraps land",
+        );
+        assert!(
+            storage.get_wrapped_key(&pubkey_hex(&revokee)).await.is_ok(),
+            "the revokee key is deleted only after remaining members are re-wrapped",
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_member_completes_on_retry_after_partial_rewrap() {
+        let owner = gen_keypair();
+        let revokee = gen_keypair();
+        let remaining_a = gen_keypair();
+        let remaining_b = gen_keypair();
+        let old_key: [u8; 32] = [12u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &revokee,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &remaining_a,
+            &old_key,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &remaining_b,
+            &old_key,
+            "0000000004000-0000-dev1",
+        )
+        .await;
+
+        storage.fail_wrapped_key_put_on_call(3);
+        let first = revoke_member(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&revokee),
+            LIB_ID,
+            "0000000005000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await;
+        assert!(first.is_err(), "injected partial re-wrap must fail loud");
+
+        let new_key = revoke_member(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&revokee),
+            LIB_ID,
+            "0000000005000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await
+        .expect("retry completes the removal");
+
+        assert!(
+            !chain
+                .current_members()
+                .iter()
+                .any(|(pk, _)| pk == &pubkey_hex(&revokee)),
+            "retry commits the Remove to the caller's chain",
+        );
+        assert!(
+            storage
+                .get_wrapped_key(&pubkey_hex(&revokee))
+                .await
+                .is_err(),
+            "retry deletes the revokee's wrapped key",
+        );
+
+        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let owner_pk = pubkey_hex(&owner);
+        for member in [&owner, &remaining_a, &remaining_b] {
+            let unwrapped = unwrap_library_keyring_for_owners_with_activation(
+                &storage as &dyn CloudHome,
+                member,
+                LIB_ID,
+                std::iter::once(owner_pk.as_str()),
+                Some(&visible_entries),
+            )
+            .await
+            .unwrap()
+            .key_bytes();
+            assert_eq!(unwrapped, new_key.key_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_member_retry_after_visible_remove_keeps_existing_rotation() {
+        let owner = gen_keypair();
+        let revokee = gen_keypair();
+        let remaining = gen_keypair();
+        let old_key: [u8; 32] = [13u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &revokee,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &remaining,
+            &old_key,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+
+        let committed_key = revoke_member(
+            &storage,
+            &storage,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&revokee),
+            LIB_ID,
+            "0000000004000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await
+        .unwrap();
+
+        let retry_key = revoke_member(
+            &storage,
+            &storage,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&revokee),
+            LIB_ID,
+            "0000000004000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(retry_key.key_bytes(), committed_key.key_bytes());
+
+        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let owner_pk = pubkey_hex(&owner);
+        let remaining_key = unwrap_library_keyring_for_owners_with_activation(
+            &storage as &dyn CloudHome,
+            &remaining,
+            LIB_ID,
+            std::iter::once(owner_pk.as_str()),
+            Some(&visible_entries),
+        )
+        .await
+        .unwrap()
+        .key_bytes();
+        assert_eq!(remaining_key, committed_key.key_bytes());
     }
 
     #[tokio::test]

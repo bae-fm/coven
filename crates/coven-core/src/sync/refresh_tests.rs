@@ -20,8 +20,11 @@ use crate::library_dir::LibraryDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::invite::{revoke_member, signed_wrapped_key_for_test, unwrap_library_key};
-use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+use crate::sync::invite::{
+    revoke_member, signed_wrapped_key_for_test, signed_wrapped_keyring_for_test,
+    unwrap_library_keyring_for_owners_with_activation,
+};
+use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
@@ -239,10 +242,101 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // And the rotated key B now holds is exactly the one the owner re-wrapped for
     // it — i.e. B can independently unwrap keys/{B} to the same bytes.
-    let reunwrapped = unwrap_library_key(&storage, &device_b, LIB_ID, &owner_pk)
-        .await
-        .expect("B can unwrap its re-wrapped key");
+    let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+    let reunwrapped = unwrap_library_keyring_for_owners_with_activation(
+        &storage,
+        &device_b,
+        LIB_ID,
+        std::iter::once(owner_pk.as_str()),
+        Some(&visible_entries),
+    )
+    .await
+    .expect("B can unwrap its re-wrapped key")
+    .key_bytes();
     assert_eq!(reunwrapped, new_key.key_bytes());
+}
+
+#[tokio::test]
+async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
+    let owner = UserKeypair::generate();
+    let device_b = UserKeypair::generate();
+    let victim = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let old_key: [u8; 32] = [31u8; 32];
+    let rotated_key: [u8; 32] = [32u8; 32];
+
+    let storage = MockSyncStorage::new();
+    let mut chain = bootstrap_chain(&owner);
+    chain
+        .add_entry(make_entry(
+            &owner,
+            MembershipAction::Add,
+            &device_b,
+            MemberRole::Member,
+            "0000000002000-0000-A",
+        ))
+        .unwrap();
+    chain
+        .add_entry(make_entry(
+            &owner,
+            MembershipAction::Add,
+            &victim,
+            MemberRole::Member,
+            "0000000003000-0000-A",
+        ))
+        .unwrap();
+    upload_chain(&storage, &chain).await;
+
+    let activation = MembershipCoord {
+        author_pubkey: owner_pk.clone(),
+        seq: 4,
+    };
+    let pending_keyring = EncryptionService::from_key(old_key)
+        .with_appended_generation(2, rotated_key)
+        .unwrap();
+    let b_x = device_b.to_x25519_public_key();
+    let pending_wrapped = signed_wrapped_keyring_for_test(
+        LIB_ID,
+        &pubkey_hex(&device_b),
+        &b_x,
+        &pending_keyring,
+        &owner,
+        Some(activation),
+    );
+    storage
+        .put_wrapped_key(&pubkey_hex(&device_b), pending_wrapped)
+        .await
+        .unwrap();
+
+    let db_b = open_test_db();
+    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(old_key);
+    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+    let (_tmp_b, ld_b) = temp_library_dir();
+
+    let result = run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a removal key whose Remove entry is absent must abort the cycle",
+    );
+    assert_eq!(
+        cipher_key(&cipher_b),
+        old_key,
+        "the inactive key must not replace the live cipher",
+    );
 }
 
 #[tokio::test]
@@ -709,6 +803,16 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
 
 /// The raw 32-byte key inside an `Encrypted` cipher (panics on a plaintext cipher —
 /// these tests only ever build encrypted ones).
+fn membership_coords(entry_keys: &[(String, u64)]) -> Vec<MembershipCoord> {
+    entry_keys
+        .iter()
+        .map(|(author_pubkey, seq)| MembershipCoord {
+            author_pubkey: author_pubkey.clone(),
+            seq: *seq,
+        })
+        .collect()
+}
+
 fn cipher_key(cipher: &RwLock<CloudCipher>) -> [u8; 32] {
     match &*cipher.read().unwrap() {
         CloudCipher::Encrypted(enc) => enc.key_bytes(),

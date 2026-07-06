@@ -857,6 +857,13 @@ async fn refresh_authorization_state(
             (role == super::membership::MemberRole::Owner).then_some(pubkey)
         })
         .collect();
+    let visible_membership_coords = entries
+        .iter()
+        .map(|(author_pubkey, seq)| super::membership::MembershipCoord {
+            author_pubkey: author_pubkey.clone(),
+            seq: *seq,
+        })
+        .collect::<Vec<_>>();
 
     // 2. Adopt a rotated library key. Read this device's own re-wrapped key at
     //    `keys/{self}` and authenticate it against the current Owners from the
@@ -873,11 +880,12 @@ async fn refresh_authorization_state(
             )
         }
     };
-    match super::invite::unwrap_library_keyring_for_owners(
+    match super::invite::unwrap_library_keyring_for_owners_with_activation(
         cloud_home,
         user_keypair,
         library_id,
         current_owners.iter().map(String::as_str),
+        Some(&visible_membership_coords),
     )
     .await
     {
@@ -910,6 +918,12 @@ async fn refresh_authorization_state(
             crate::storage::cloud::CloudHomeError::NotFound(_),
         )) => {
             debug!("refresh: no wrapped key for this device; keeping the live key");
+        }
+        Err(super::invite::InviteError::InactiveWrappedKey { activation }) => {
+            return Err(format!(
+                "refresh: wrapped library key activation is not visible: {}/{}",
+                activation.author_pubkey, activation.seq
+            ));
         }
         Err(e) => return Err(format!("refresh: read this device's wrapped key: {e}")),
     }

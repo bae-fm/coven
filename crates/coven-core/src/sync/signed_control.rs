@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::keys::{self, UserKeypair};
+use crate::sync::membership::MembershipCoord;
 
 /// Serialized form of a device head stored in `heads/{device_id}.json{suffix}`.
 ///
@@ -471,6 +472,10 @@ fn snapshot_pointer_signing_payload(library_id: &str, seq: u64, db_hash: &str) -
 pub struct WrappedLibraryKey {
     /// Hex-encoded Ed25519 public key of the Owner that signed this wrapped key.
     pub author_pubkey: String,
+    /// Membership entry that must be visible before an existing member adopts
+    /// this keyring. Invitation keys have no activation coordinate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<MembershipCoord>,
     /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the library key.
     pub sealed: String,
     /// Hex-encoded detached signature over [`WrappedKeyFields`], produced by the owner.
@@ -485,6 +490,8 @@ pub struct WrappedLibraryKey {
 struct WrappedKeyFields<'a> {
     library_id: &'a str,
     recipient_pubkey: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation: Option<&'a MembershipCoord>,
     author_pubkey: &'a str,
     sealed: &'a str,
 }
@@ -517,16 +524,23 @@ impl WrappedLibraryKey {
     pub fn signed(
         library_id: &str,
         recipient_pubkey: &str,
+        activation: Option<MembershipCoord>,
         sealed: Vec<u8>,
         owner: &UserKeypair,
     ) -> Self {
         let author_pubkey = hex::encode(owner.public_key());
         let sealed_hex = hex::encode(sealed);
-        let payload =
-            wrapped_key_signing_payload(library_id, recipient_pubkey, &author_pubkey, &sealed_hex);
+        let payload = wrapped_key_signing_payload(
+            library_id,
+            recipient_pubkey,
+            activation.as_ref(),
+            &author_pubkey,
+            &sealed_hex,
+        );
         let (_, signature) = keys::sign_hex(owner, &payload);
         WrappedLibraryKey {
             author_pubkey,
+            activation,
             sealed: sealed_hex,
             signature,
         }
@@ -549,6 +563,7 @@ impl WrappedLibraryKey {
         let payload = wrapped_key_signing_payload(
             library_id,
             recipient_pubkey,
+            self.activation.as_ref(),
             &self.author_pubkey,
             &self.sealed,
         );
@@ -570,12 +585,14 @@ impl WrappedLibraryKey {
 fn wrapped_key_signing_payload(
     library_id: &str,
     recipient_pubkey: &str,
+    activation: Option<&MembershipCoord>,
     author_pubkey: &str,
     sealed_hex: &str,
 ) -> Vec<u8> {
     let fields = WrappedKeyFields {
         library_id,
         recipient_pubkey,
+        activation,
         author_pubkey,
         sealed: sealed_hex,
     };
@@ -876,7 +893,8 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![1u8, 2, 3, 4, 5];
-        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed.clone(), &owner);
+        let wrapped =
+            WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed.clone(), &owner);
 
         // Round-trips through JSON and yields the sealed bytes back.
         let json = serde_json::to_vec(&wrapped).expect("serialize wrapped key");
@@ -899,7 +917,7 @@ mod tests {
         let pinned_owner = UserKeypair::generate();
         let pinned_owner_hex = hex::encode(pinned_owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed, &signer);
+        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed, &signer);
 
         assert!(
             matches!(
@@ -919,7 +937,7 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed, &owner);
+        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed, &owner);
 
         // The signature binds the library and the recipient slot: changing either
         // at verify time fails, so a key can't be replayed cross-library or
@@ -955,7 +973,7 @@ mod tests {
         let owner_hex = hex::encode(owner.public_key());
         let other_owner_hex = hex::encode(other_owner.public_key());
         let sealed = vec![9u8; 32];
-        let mut wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", sealed, &owner);
+        let mut wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed, &owner);
         assert!(
             wrapped
                 .verify_and_unwrap("lib", "recipient-pk", std::iter::once(owner_hex.as_str()))
@@ -981,7 +999,8 @@ mod tests {
     fn wrapped_key_malformed_signature_fails_closed() {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
-        let mut wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", vec![1u8; 4], &owner);
+        let mut wrapped =
+            WrappedLibraryKey::signed("lib", "recipient-pk", None, vec![1u8; 4], &owner);
 
         // A signature that isn't valid hex can't verify against the owner.
         wrapped.signature = "not-hex!!".to_string();
@@ -1002,12 +1021,14 @@ mod tests {
 
         let mut wrapped = WrappedLibraryKey {
             author_pubkey: owner_hex.clone(),
+            activation: None,
             sealed: "not-hex!!".to_string(),
             signature: String::new(),
         };
         let payload = wrapped_key_signing_payload(
             "lib",
             "recipient-pk",
+            wrapped.activation.as_ref(),
             &wrapped.author_pubkey,
             &wrapped.sealed,
         );
