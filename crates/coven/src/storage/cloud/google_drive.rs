@@ -711,9 +711,10 @@ impl CloudHome for GoogleDriveCloudHome {
     async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
         let email = revoke.require_provider_email("Google Drive")?;
         let list_url = format!(
-            "{}/files/{}/permissions?fields=permissions(id,emailAddress)",
+            "{}/files/{}/permissions?fields=permissions(id,emailAddress),nextPageToken",
             DRIVE_API, self.folder_id
         );
+        let list_url_for_next = list_url.clone();
         let folder_id = self.folder_id.clone();
         sharing::revoke_by_email(
             &self.session,
@@ -722,9 +723,23 @@ impl CloudHome for GoogleDriveCloudHome {
             "permissions",
             |p| p["emailAddress"].as_str().map(String::from),
             |perm_id| format!("{}/files/{}/permissions/{}", DRIVE_API, folder_id, perm_id),
+            move |page| drive_permissions_next_page_url(&list_url_for_next, page),
         )
         .await
     }
+}
+
+fn drive_permissions_next_page_url(
+    list_url: &str,
+    page: &serde_json::Value,
+) -> Result<Option<String>, CloudHomeError> {
+    let Some(token) = page["nextPageToken"].as_str() else {
+        return Ok(None);
+    };
+    let query = serde_urlencoded::to_string([("pageToken", token)])
+        .map_err(|e| CloudHomeError::Storage(format!("encode Drive page token: {e}")))?;
+    let separator = if list_url.contains('?') { '&' } else { '?' };
+    Ok(Some(format!("{list_url}{separator}{query}")))
 }
 
 #[cfg(test)]
@@ -784,6 +799,21 @@ mod tests {
 
         assert!(query.contains("name contains '61727469737427732d6c6976652f'"));
         assert!(!query.contains("artist's-live"));
+    }
+
+    #[test]
+    fn drive_permissions_next_page_url_appends_encoded_page_token() {
+        let page = serde_json::json!({"nextPageToken": "tok/en+1"});
+
+        assert_eq!(
+            drive_permissions_next_page_url(
+                "https://www.googleapis.com/drive/v3/files/folder/permissions?fields=permissions(id,emailAddress),nextPageToken",
+                &page,
+            )
+            .expect("encode next page")
+            .as_deref(),
+            Some("https://www.googleapis.com/drive/v3/files/folder/permissions?fields=permissions(id,emailAddress),nextPageToken&pageToken=tok%2Fen%2B1")
+        );
     }
 
     #[test]

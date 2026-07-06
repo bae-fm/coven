@@ -398,6 +398,11 @@ impl CloudHome for OneDriveCloudHome {
                     .map(String::from)
             },
             |perm_id| format!("{delete_base}/{perm_id}"),
+            |page| {
+                Ok(page["@odata.nextLink"]
+                    .as_str()
+                    .map(std::string::ToString::to_string))
+            },
         )
         .await
     }

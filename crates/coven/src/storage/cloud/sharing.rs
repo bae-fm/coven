@@ -3,8 +3,9 @@
 //! Both revoke a member the same way: list the folder's permissions, find the
 //! entry whose email matches the member, and DELETE it (tolerating a 404 if it is
 //! already gone). They differ only in the list/delete URLs, the JSON array field
-//! holding the permissions, and where each entry keeps the email — so the
-//! algorithm lives here and each backend supplies those four differences.
+//! holding the permissions, where each entry keeps the email, and how the next
+//! permissions page is named — so the algorithm lives here and each backend
+//! supplies those differences.
 
 use super::http::{ensure_ok, ok_json, NotFound};
 use super::oauth_session::OAuthSession;
@@ -14,8 +15,9 @@ use super::CloudHomeError;
 /// permissions; `permissions_field` is the JSON array holding them
 /// (`"permissions"` for Drive, `"value"` for OneDrive); `email_of` pulls a
 /// permission entry's email; `delete_url` builds the DELETE URL for a permission
-/// id. A member with no matching permission is an error (nothing to revoke); a
-/// 404 on the delete is success (already gone).
+/// id; `next_page` extracts the next permissions URL from a page. A member with
+/// no matching permission is an error (nothing to revoke); a 404 on the delete
+/// is success (already gone).
 pub async fn revoke_by_email(
     session: &OAuthSession,
     member_id: &str,
@@ -23,26 +25,34 @@ pub async fn revoke_by_email(
     permissions_field: &str,
     email_of: impl Fn(&serde_json::Value) -> Option<String>,
     delete_url: impl Fn(&str) -> String,
+    next_page: impl Fn(&serde_json::Value) -> Result<Option<String>, CloudHomeError>,
 ) -> Result<(), CloudHomeError> {
-    let resp = session
-        .api_call(|token| session.client().get(list_url).bearer_auth(token))
-        .await?;
-    let resp = ensure_ok(resp, "list permissions", NotFound::Status).await?;
-    let json: serde_json::Value = ok_json(resp, "parse permissions").await?;
+    let mut page_url = list_url.to_string();
+    let permission_id = loop {
+        let resp = session
+            .api_call(|token| session.client().get(&page_url).bearer_auth(token))
+            .await?;
+        let resp = ensure_ok(resp, "list permissions", NotFound::Status).await?;
+        let json: serde_json::Value = ok_json(resp, "parse permissions").await?;
 
-    let permission_id = json[permissions_field].as_array().and_then(|perms| {
-        perms.iter().find_map(|p| {
-            if email_of(p).map(|e| e.eq_ignore_ascii_case(member_id)) == Some(true) {
-                p["id"].as_str().map(String::from)
-            } else {
-                None
-            }
-        })
-    });
-    let Some(permission_id) = permission_id else {
-        return Err(CloudHomeError::Storage(format!(
-            "no permission found for {member_id}"
-        )));
+        if let Some(permission_id) = json[permissions_field].as_array().and_then(|perms| {
+            perms.iter().find_map(|p| {
+                if email_of(p).map(|e| e.eq_ignore_ascii_case(member_id)) == Some(true) {
+                    p["id"].as_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+        }) {
+            break permission_id;
+        }
+
+        let Some(next_url) = next_page(&json)? else {
+            return Err(CloudHomeError::Storage(format!(
+                "no permission found for {member_id}"
+            )));
+        };
+        page_url = next_url;
     };
 
     let url = delete_url(&permission_id);
@@ -62,5 +72,193 @@ pub async fn revoke_by_email(
             Ok(())
         }
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+mod tests {
+    use super::*;
+    use crate::clock::FixedClock;
+    use crate::keys::KeyService;
+    use crate::oauth::test_support::oauth_config;
+    use crate::oauth::OAuthTokens;
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{Method, Response, StatusCode, Uri};
+    use axum::Router;
+    use chrono::{TimeZone, Utc};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct FakePermissionsState {
+        requests: Arc<Mutex<Vec<String>>>,
+        target_on_second_page: bool,
+        delete_status: StatusCode,
+    }
+
+    async fn fake_permissions_endpoint(
+        State(state): State<FakePermissionsState>,
+        method: Method,
+        uri: Uri,
+    ) -> Response<Body> {
+        state
+            .requests
+            .lock()
+            .unwrap()
+            .push(format!("{method} {}", uri));
+
+        match (method, uri.path(), uri.query()) {
+            (Method::GET, "/permissions", None) => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"permissions":[{"id":"first","email":"other@example.com"}],"next":"/permissions?page=2"}"#,
+                ))
+                .expect("build page one response"),
+            (Method::GET, "/permissions", Some("page=2")) => {
+                let body = if state.target_on_second_page {
+                    r#"{"permissions":[{"id":"target","email":"target@example.com"}]}"#
+                } else {
+                    r#"{"permissions":[{"id":"second","email":"second@example.com"}]}"#
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build page two response")
+            }
+            (Method::DELETE, "/permissions/target", None) => Response::builder()
+                .status(state.delete_status)
+                .body(Body::empty())
+                .expect("build delete response"),
+            _ => Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!("unexpected request: {uri}")))
+                .expect("build bad request response"),
+        }
+    }
+
+    async fn spawn_permissions_endpoint(
+        target_on_second_page: bool,
+        delete_status: StatusCode,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<String>>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake permissions endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = FakePermissionsState {
+            requests: requests.clone(),
+            target_on_second_page,
+            delete_status,
+        };
+        let app = Router::new()
+            .fallback(fake_permissions_endpoint)
+            .with_state(state);
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("fake permissions endpoint failed");
+        });
+
+        (endpoint, requests, shutdown_tx)
+    }
+
+    fn session(label: &str) -> OAuthSession {
+        crate::keys::test_keyring::install();
+        OAuthSession::new(
+            OAuthTokens {
+                access_token: "access-token".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            },
+            KeyService::new(format!("sharing-pagination-{label}")),
+            Arc::new(FixedClock(Utc.timestamp_opt(1_700_000_000, 0).unwrap())),
+            oauth_config("http://127.0.0.1/token".to_string()),
+            "Provider",
+        )
+    }
+
+    async fn revoke_against_fake(
+        label: &str,
+        target_on_second_page: bool,
+        delete_status: StatusCode,
+    ) -> Result<(Arc<Mutex<Vec<String>>>, tokio::sync::oneshot::Sender<()>), CloudHomeError> {
+        let (endpoint, requests, shutdown) =
+            spawn_permissions_endpoint(target_on_second_page, delete_status).await;
+        let session = session(label);
+        let list_url = format!("{endpoint}/permissions");
+        let next_base = endpoint.clone();
+        revoke_by_email(
+            &session,
+            "target@example.com",
+            &list_url,
+            "permissions",
+            |permission| permission["email"].as_str().map(str::to_string),
+            |permission_id| format!("{endpoint}/permissions/{permission_id}"),
+            move |page| {
+                Ok(page["next"]
+                    .as_str()
+                    .map(|next_path| format!("{next_base}{next_path}")))
+            },
+        )
+        .await
+        .map(|()| (requests, shutdown))
+    }
+
+    #[tokio::test]
+    async fn revoke_by_email_finds_permission_on_second_page() {
+        let (requests, shutdown) = revoke_against_fake("found", true, StatusCode::NO_CONTENT)
+            .await
+            .expect("revoke target on second page");
+
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            [
+                "GET /permissions",
+                "GET /permissions?page=2",
+                "DELETE /permissions/target",
+            ]
+        );
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn revoke_by_email_absent_member_scans_all_pages() {
+        let err = revoke_against_fake("absent", false, StatusCode::NO_CONTENT)
+            .await
+            .expect_err("absent target returns an error");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("no permission found for target@example.com"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_by_email_delete_404_is_success_after_pagination() {
+        let (requests, shutdown) = revoke_against_fake("delete-404", true, StatusCode::NOT_FOUND)
+            .await
+            .expect("404 delete means already absent");
+
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            [
+                "GET /permissions",
+                "GET /permissions?page=2",
+                "DELETE /permissions/target",
+            ]
+        );
+        let _ = shutdown.send(());
     }
 }
