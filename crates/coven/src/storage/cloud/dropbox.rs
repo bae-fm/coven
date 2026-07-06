@@ -122,44 +122,108 @@ impl DropboxCloudHome {
 
     /// Poll `check_share_job_status` until the share operation completes.
     async fn poll_share_job(&self, job_id: &str) -> Result<String, CloudHomeError> {
-        let body = serde_json::json!({ "async_job_id": job_id });
+        self.poll_dropbox_job(
+            job_id,
+            "sharing/check_share_job_status",
+            "share folder",
+            |json| {
+                json["shared_folder_id"]
+                    .as_str()
+                    .map(String::from)
+                    .ok_or_else(|| {
+                        CloudHomeError::Storage(
+                            "share job completed but no shared_folder_id".to_string(),
+                        )
+                    })
+            },
+        )
+        .await
+    }
+
+    async fn poll_remove_member_job(&self, job_id: &str) -> Result<(), CloudHomeError> {
+        self.poll_dropbox_job(
+            job_id,
+            "sharing/check_remove_member_job_status",
+            "remove folder member",
+            |_| Ok(()),
+        )
+        .await
+    }
+
+    async fn poll_dropbox_job<T>(
+        &self,
+        job_id: &str,
+        endpoint: &str,
+        operation: &str,
+        complete: impl Fn(&serde_json::Value) -> Result<T, CloudHomeError>,
+    ) -> Result<T, CloudHomeError> {
+        let request_body = serde_json::json!({ "async_job_id": job_id });
         for _ in 0..30 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let resp = self
                 .session
                 .api_call(|token| {
                     self.client()
-                        .post(format!("{}/sharing/check_share_job_status", API_BASE))
+                        .post(format!("{API_BASE}/{endpoint}"))
                         .bearer_auth(token)
-                        .json(&body)
+                        .json(&request_body)
                 })
                 .await?;
+            let status = resp.status();
             let resp_body = http::body_text(resp).await;
+            if !status.is_success() {
+                return Err(CloudHomeError::Storage(format!(
+                    "{operation} job status (HTTP {status}): {resp_body}"
+                )));
+            }
             let json: serde_json::Value = serde_json::from_str(&resp_body).map_err(|e| {
                 CloudHomeError::Storage(format!(
-                    "share job status: unparseable response: {e}: {resp_body}"
+                    "{operation} job status: unparseable response: {e}: {resp_body}"
                 ))
             })?;
             match json[".tag"].as_str() {
-                Some("complete") => {
-                    if let Some(id) = json["shared_folder_id"].as_str() {
-                        return Ok(id.to_string());
-                    }
-                    return Err(CloudHomeError::Storage(
-                        "share job completed but no shared_folder_id".to_string(),
-                    ));
-                }
+                Some("complete") => return complete(&json),
                 Some("failed") => {
                     return Err(CloudHomeError::Storage(format!(
-                        "share folder job failed: {resp_body}"
+                        "{operation} job failed: {resp_body}"
                     )));
                 }
-                _ => continue, // "in_progress" — keep polling
+                Some("in_progress") => continue,
+                _ => {
+                    return Err(CloudHomeError::Storage(format!(
+                        "{operation} job status returned an unexpected tag: {resp_body}"
+                    )));
+                }
             }
         }
-        Err(CloudHomeError::Storage(
-            "share folder timed out after 30 seconds".to_string(),
-        ))
+        Err(CloudHomeError::Storage(format!(
+            "{operation} timed out after 30 seconds"
+        )))
+    }
+}
+
+enum DropboxRevokeLaunch {
+    Complete,
+    AsyncJob(String),
+}
+
+fn parse_dropbox_revoke_launch(body: &str) -> Result<DropboxRevokeLaunch, CloudHomeError> {
+    let json: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+        CloudHomeError::Storage(format!("revoke access: unparseable response: {e}: {body}"))
+    })?;
+    match json[".tag"].as_str() {
+        Some("complete") => Ok(DropboxRevokeLaunch::Complete),
+        Some("async_job_id") => json["async_job_id"]
+            .as_str()
+            .map(|id| DropboxRevokeLaunch::AsyncJob(id.to_string()))
+            .ok_or_else(|| {
+                CloudHomeError::Storage(format!(
+                    "revoke access: async_job_id response missing async_job_id: {body}"
+                ))
+            }),
+        _ => Err(CloudHomeError::Storage(format!(
+            "revoke access: unexpected launch response: {body}"
+        ))),
     }
 }
 
@@ -185,6 +249,12 @@ fn strip_dropbox_folder_prefix<'a>(path_display: &'a str, folder_path: &str) -> 
         return None;
     }
     path_display.get(folder_path.len()..)?.strip_prefix('/')
+}
+
+fn dropbox_revoke_error_is_already_absent(body: &str) -> bool {
+    parse_dropbox_error_summary(body)
+        .as_deref()
+        .is_some_and(|summary| summary.starts_with("member_error/not_a_member"))
 }
 
 /// A [`PartSink`](super::PartSink) over a Dropbox upload session: `append_v2` adds
@@ -570,17 +640,20 @@ impl CloudHome for DropboxCloudHome {
             })
             .await?;
         let status = resp.status();
+        let body = http::body_text(resp).await;
         if !status.is_success() {
-            let body = http::body_text(resp).await;
             // A member who isn't there is already revoked.
-            if body.contains("not_found") || body.contains("member_error") {
+            if dropbox_revoke_error_is_already_absent(&body) {
                 return Ok(());
             }
             return Err(CloudHomeError::Storage(format!(
                 "revoke access for {email} (HTTP {status}): {body}"
             )));
         }
-        Ok(())
+        match parse_dropbox_revoke_launch(&body)? {
+            DropboxRevokeLaunch::Complete => Ok(()),
+            DropboxRevokeLaunch::AsyncJob(job_id) => self.poll_remove_member_job(&job_id).await,
+        }
     }
 }
 
@@ -667,6 +740,44 @@ mod tests {
         assert!(msg.contains("HTTP 409"), "{msg}");
         assert!(msg.contains("changes/dev1/1.enc"), "{msg}");
         assert!(!msg.contains("storage is full"), "{msg}");
+    }
+
+    #[test]
+    fn revoke_error_accepts_only_not_a_member_as_absent() {
+        let absent = r#"{
+            "error_summary": "member_error/not_a_member/...",
+            "error": {
+                ".tag": "member_error",
+                "member_error": { ".tag": "not_a_member" }
+            }
+        }"#;
+        assert!(dropbox_revoke_error_is_already_absent(absent));
+
+        let ambiguous = r#"{
+            "error_summary": "member_error/invalid_dropbox_id/...",
+            "error": {
+                ".tag": "member_error",
+                "member_error": { ".tag": "invalid_dropbox_id" }
+            }
+        }"#;
+        assert!(!dropbox_revoke_error_is_already_absent(ambiguous));
+    }
+
+    #[test]
+    fn revoke_launch_response_requires_completion_or_polling() {
+        assert!(matches!(
+            parse_dropbox_revoke_launch(r#"{".tag":"complete"}"#).expect("parse complete launch"),
+            DropboxRevokeLaunch::Complete,
+        ));
+
+        match parse_dropbox_revoke_launch(r#"{".tag":"async_job_id","async_job_id":"job-123"}"#)
+            .expect("parse async launch")
+        {
+            DropboxRevokeLaunch::AsyncJob(job_id) => assert_eq!(job_id, "job-123"),
+            DropboxRevokeLaunch::Complete => panic!("async launch must carry the job id"),
+        }
+
+        assert!(parse_dropbox_revoke_launch(r#"{".tag":"async_job_id"}"#).is_err(),);
     }
 
     #[test]
