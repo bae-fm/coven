@@ -719,11 +719,14 @@ impl SyncStorage for CloudSyncStorage {
 
         for key in &keys {
             // key = "heads/{device_id}.json{suffix}"
-            let device_id = key
+            let Some(device_id) = key
                 .strip_prefix("heads/")
                 .and_then(|s| s.strip_suffix(suffix))
                 .and_then(|s| s.strip_suffix(".json"))
-                .ok_or_else(|| StorageError::Parse(format!("unexpected head key format: {key}")))?;
+            else {
+                warn!("skipping head with unexpected key format: {key}");
+                continue;
+            };
 
             let stored = self.home.read(key).await?;
             // A head we can't open is not ours: a head a *different* library
@@ -1411,6 +1414,44 @@ mod tests {
             vec!["ours"],
             "the decryptable head is returned; the foreign one is skipped",
         );
+    }
+
+    /// A stray key under `heads/` that is not shaped like
+    /// `heads/{device_id}.json{suffix}` is not this library's head. A browsable
+    /// cloud folder can pick up conflicted-copy and editor files, and those must
+    /// not abort every sync cycle for the valid heads beside them.
+    #[tokio::test]
+    async fn list_heads_skips_keys_with_unexpected_format() {
+        let storage = CloudSyncStorage::new(
+            Arc::new(InMemoryCloudHome::new()),
+            CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32])),
+            BlobPathScheme::Hashed,
+            "test-lib",
+            UserKeypair::generate(),
+        );
+        storage
+            .put_head("ours", 5, None, "2026-01-01T00:00:00Z")
+            .await
+            .expect("put our head");
+
+        for key in ["heads/.DS_Store", "heads/ours.json (conflicted copy).enc"] {
+            storage
+                .cloud_home()
+                .write(
+                    key,
+                    BlobBody::from_bytes(b"not a coven head".to_vec()),
+                    &crate::storage::cloud::no_progress(),
+                )
+                .await
+                .expect("write stray head key");
+        }
+
+        let heads = storage
+            .list_heads()
+            .await
+            .expect("list_heads must not abort on stray head keys");
+        let ids: Vec<&str> = heads.iter().map(|h| h.device_id.as_str()).collect();
+        assert_eq!(ids, vec!["ours"]);
     }
 
     /// A head with a valid signature round-trips through `put_head` / `list_heads`
