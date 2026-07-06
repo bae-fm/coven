@@ -19,6 +19,8 @@
 //! wasm [`Database`](crate::database::Database) is `!Send`. The page talks to this
 //! object across the Worker boundary (e.g. via `wasm-bindgen`'s worker glue).
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use futures_util::FutureExt;
@@ -42,6 +44,10 @@ use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
 use crate::wasm::install_browser_storage;
 use crate::wasm_keystore::BrowserKeystore;
+
+thread_local! {
+    static OPEN_LIBRARIES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
 
 /// The config object JavaScript passes to [`CovenLibrary::open`].
 ///
@@ -98,6 +104,35 @@ struct JsSyncedTable {
 pub struct CovenLibrary {
     db: Database,
     runtime: WasmSyncRuntime,
+    _open_guard: WasmLibraryOpenGuard,
+}
+
+struct WasmLibraryOpenGuard {
+    library_id: String,
+}
+
+impl WasmLibraryOpenGuard {
+    fn acquire(library_id: &str) -> Result<Self, String> {
+        OPEN_LIBRARIES.with(|libraries| {
+            let mut libraries = libraries.borrow_mut();
+            if !libraries.insert(library_id.to_string()) {
+                return Err(format!(
+                    "library {library_id} is already open in this worker"
+                ));
+            }
+            Ok(Self {
+                library_id: library_id.to_string(),
+            })
+        })
+    }
+}
+
+impl Drop for WasmLibraryOpenGuard {
+    fn drop(&mut self) {
+        OPEN_LIBRARIES.with(|libraries| {
+            libraries.borrow_mut().remove(&self.library_id);
+        });
+    }
 }
 
 #[wasm_bindgen]
@@ -265,6 +300,8 @@ impl CovenLibrary {
         user_keypair: UserKeypair,
         schedule: WasmSyncSchedule,
     ) -> Result<CovenLibrary, String> {
+        let open_guard = WasmLibraryOpenGuard::acquire(library_id)?;
+
         install_browser_storage()
             .await
             .map_err(|e| format!("install browser storage: {e}"))?;
@@ -320,7 +357,11 @@ impl CovenLibrary {
             schedule,
         );
 
-        Ok(CovenLibrary { db, runtime })
+        Ok(CovenLibrary {
+            db,
+            runtime,
+            _open_guard: open_guard,
+        })
     }
 }
 

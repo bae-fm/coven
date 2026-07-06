@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::blob::transition::{self, MakeLocalError, MakeRemoteError};
 use crate::blob::BlobTransitionObserver;
@@ -158,11 +158,14 @@ impl SyncManager {
         let config = (self.config_provider)();
 
         if config.cloud_home.provider.is_none() {
+            self.stop_sync()?;
             // Not a failure: a library with no configured provider starts no
             // cloud home or sync loop.
             info!("start_sync: sync not configured; no loop started");
             return Ok(());
         }
+
+        self.stop_current_connection()?;
 
         // Build the cloud home. A failure here is a real fault — surface it so the
         // caller never installs a manager that started nothing.
@@ -213,8 +216,8 @@ impl SyncManager {
         .await
         .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
 
+        let _handle = self.install_sync_loop(components, config.library_dir.clone())?;
         *self.cloud_home.write().unwrap() = Some(cloud_home);
-        self.install_sync_loop(components, config.library_dir.clone());
 
         Ok(())
     }
@@ -224,7 +227,11 @@ impl SyncManager {
     /// [`start_sync_with_home`](Self::start_sync_with_home): both reach it only
     /// after the bootstrap has produced [`SyncComponents`], so the loop handle is
     /// installed whole, never on a half-built bootstrap.
-    fn install_sync_loop(&self, components: SyncComponents, library_dir: LibraryDir) {
+    fn install_sync_loop(
+        &self,
+        components: SyncComponents,
+        library_dir: LibraryDir,
+    ) -> Result<Arc<SyncLoopHandle>, String> {
         let handle = Arc::new(SyncLoopHandle::new(
             components,
             self.db.clone(),
@@ -233,10 +240,11 @@ impl SyncManager {
             library_dir,
             self.observer.clone(),
         ));
-        handle.start();
+        handle.start()?;
 
         info!("Sync loop started");
-        *self.sync_loop_handle.write().unwrap() = Some(handle);
+        *self.sync_loop_handle.write().unwrap() = Some(handle.clone());
+        Ok(handle)
     }
 
     /// Test-only: stand the sync loop over an injected `home`/`cipher` instead of
@@ -265,6 +273,7 @@ impl SyncManager {
         cipher: CloudCipher,
     ) -> Result<(), String> {
         let config = (self.config_provider)();
+        self.stop_current_connection()?;
 
         let keypair = self
             .key_service
@@ -288,20 +297,42 @@ impl SyncManager {
         .await
         .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
 
-        // Commit-whole: everything above succeeded, so install the home and the
-        // loop together — a failure earlier left nothing installed.
+        let _handle = self.install_sync_loop(components, config.library_dir.clone())?;
         *self.cloud_home.write().unwrap() = Some(home);
-        self.install_sync_loop(components, config.library_dir.clone());
 
         Ok(())
     }
 
     /// Tear down the sync loop and cloud home.
-    pub fn stop_sync(&self) {
+    pub fn stop_sync(&self) -> Result<(), String> {
+        let stop_result = self.stop_current_loop();
         *self.sync_loop_handle.write().unwrap() = None;
         *self.cloud_home.write().unwrap() = None;
 
-        info!("Sync loop stopped");
+        match stop_result {
+            Ok(()) => {
+                info!("Sync loop stopped");
+                Ok(())
+            }
+            Err(error) => {
+                error!("Sync loop stop failed: {error}");
+                Err(error)
+            }
+        }
+    }
+
+    fn stop_current_loop(&self) -> Result<(), String> {
+        let handle = self.sync_loop_handle.write().unwrap().take();
+        if let Some(handle) = handle {
+            handle.stop()?;
+        }
+        Ok(())
+    }
+
+    fn stop_current_connection(&self) -> Result<(), String> {
+        let stop_result = self.stop_current_loop();
+        *self.cloud_home.write().unwrap() = None;
+        stop_result
     }
 
     // =========================================================================
@@ -402,6 +433,9 @@ impl SyncManager {
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
+        if !self.is_sync_ready() {
+            return Err(MakeLocalError::SyncNotReady);
+        }
         let sync_loop = self
             .sync_loop_handle()
             .ok_or(MakeLocalError::SyncNotReady)?;
@@ -577,8 +611,10 @@ mod tests {
     use super::*;
 
     use crate::clock::SystemClock;
+    use crate::config::CloudProvider;
     use crate::keys::{test_keyring, KeyService};
     use crate::library_dir::LibraryDir;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeJoinInfo;
     use std::sync::Arc;
 
@@ -624,5 +660,106 @@ mod tests {
             .await
             .expect_err("malformed stored credentials must fail");
         assert!(error.contains("malformed cloud home credentials JSON"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn start_sync_with_home_stops_the_previous_loop_before_replacement() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
+        let config = Config::with_defaults(
+            "lib-manager-restart".to_string(),
+            "test-device".to_string(),
+            library_dir,
+            "Test Library".to_string(),
+        );
+        let manager = SyncManager::new(
+            Arc::new(move || config.clone()),
+            KeyService::new("lib-manager-restart".to_string()),
+            None,
+            crate::sync::test_helpers::open_test_db(),
+            Arc::new(SystemClock),
+            None,
+            None,
+        );
+
+        manager
+            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("first test home starts");
+        let first_loop = manager
+            .sync_loop_handle()
+            .expect("first loop handle installed");
+        assert!(first_loop.is_running(), "first loop starts running");
+
+        manager
+            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("replacement test home starts");
+        let replacement_loop = manager
+            .sync_loop_handle()
+            .expect("replacement loop handle installed");
+
+        assert!(
+            !first_loop.is_running(),
+            "starting sync again stops the previous loop before replacement",
+        );
+        assert!(
+            replacement_loop.is_running(),
+            "replacement loop remains running",
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn failed_restart_leaves_no_stale_cloud_home() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
+        let config = Arc::new(RwLock::new(Config::with_defaults(
+            "lib-manager-failed-restart".to_string(),
+            "test-device".to_string(),
+            library_dir,
+            "Test Library".to_string(),
+        )));
+        let manager = SyncManager::new(
+            {
+                let config = config.clone();
+                Arc::new(move || config.read().unwrap().clone())
+            },
+            KeyService::new("lib-manager-failed-restart".to_string()),
+            None,
+            crate::sync::test_helpers::open_test_db(),
+            Arc::new(SystemClock),
+            None,
+            None,
+        );
+
+        manager
+            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("injected home starts");
+        assert!(manager.cloud_home().is_some(), "injected home is installed");
+
+        config.write().unwrap().cloud_home.provider = Some(CloudProvider::S3);
+        let error = manager
+            .start_sync()
+            .await
+            .expect_err("invalid configured provider fails restart");
+        assert!(
+            error.contains("failed to build cloud home"),
+            "restart failure surfaces the provider setup error: {error}",
+        );
+        assert!(
+            manager.sync_loop_handle().is_none(),
+            "failed restart leaves no loop installed",
+        );
+        assert!(
+            manager.cloud_home().is_none(),
+            "failed restart must not leave the previous cloud home installed",
+        );
     }
 }

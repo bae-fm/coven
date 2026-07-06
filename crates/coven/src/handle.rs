@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::watch;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::blob::cache::BlobCacheError;
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
@@ -39,6 +39,7 @@ use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::ClockRef;
 use crate::config::Config;
+use crate::coven::LibraryOpenGuard;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
@@ -112,10 +113,17 @@ pub struct CovenHandle {
     /// drain. `None` for a host that doesn't surface transition progress.
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
+    /// Holds the native library-directory lock for this handle and every clone.
+    _open_guard: Arc<LibraryOpenGuard>,
+
     /// Built lazily by [`connect_sync`](Self::connect_sync) when a provider is
     /// connected; `None` for a home-less, all-Local library. Shared behind a lock
     /// so a connect/disconnect mutates it in place without rebuilding the handle.
     sync: Arc<RwLock<Option<Arc<SyncManager>>>>,
+
+    /// Serializes async lifecycle replacement so concurrent connects/restarts
+    /// cannot each start a loop and race to install the survivor.
+    sync_lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CovenHandle {
@@ -137,6 +145,7 @@ impl CovenHandle {
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
+        open_guard: Arc<LibraryOpenGuard>,
     ) -> Self {
         Self {
             db,
@@ -147,7 +156,9 @@ impl CovenHandle {
             clock,
             cloudkit_ops,
             observer,
+            _open_guard: open_guard,
             sync: Arc::new(RwLock::new(None)),
+            sync_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -211,9 +222,11 @@ impl CovenHandle {
         &self,
         encryption_service: Option<EncryptionService>,
     ) -> Result<(), String> {
-        self.build_and_install_sync(encryption_service, |manager| async move {
-            manager.start_sync().await
-        })
+        self.build_and_install_sync(
+            encryption_service,
+            self.cloudkit_ops.clone(),
+            |manager| async move { manager.start_sync().await },
+        )
         .await?;
         info!("coven handle: sync manager connected");
         Ok(())
@@ -224,17 +237,12 @@ impl CovenHandle {
         encryption_service: Option<EncryptionService>,
         cloudkit_ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<(), String> {
-        let manager = Arc::new(SyncManager::new(
-            self.config_provider.clone(),
-            self.key_service.clone(),
+        self.build_and_install_sync(
             encryption_service,
-            self.db.clone(),
-            self.clock.clone(),
             Some(cloudkit_ops),
-            self.observer.clone(),
-        ));
-        manager.start_sync().await?;
-        *self.sync.write().unwrap() = Some(manager);
+            |manager| async move { manager.start_sync().await },
+        )
+        .await?;
         info!("coven handle: sync manager connected with CloudKit driver");
         Ok(())
     }
@@ -253,19 +261,26 @@ impl CovenHandle {
     async fn build_and_install_sync<F, Fut>(
         &self,
         encryption_service: Option<EncryptionService>,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         start: F,
     ) -> Result<Arc<SyncManager>, String>
     where
         F: FnOnce(Arc<SyncManager>) -> Fut,
         Fut: std::future::Future<Output = Result<(), String>>,
     {
+        let _lifecycle = self.sync_lifecycle.lock().await;
+        let previous = self.sync.write().unwrap().take();
+        if let Some(manager) = previous {
+            manager.stop_sync()?;
+        }
+
         let manager = Arc::new(SyncManager::new(
             self.config_provider.clone(),
             self.key_service.clone(),
             encryption_service,
             self.db.clone(),
             self.clock.clone(),
-            self.cloudkit_ops.clone(),
+            cloudkit_ops,
             self.observer.clone(),
         ));
         start(manager.clone()).await?;
@@ -305,9 +320,11 @@ impl CovenHandle {
             CloudCipher::Encrypted(service) => Some(service.clone()),
             CloudCipher::Plaintext => None,
         };
-        self.build_and_install_sync(encryption_service, move |manager| async move {
-            manager.start_sync_with_home(home, cipher).await
-        })
+        self.build_and_install_sync(
+            encryption_service,
+            self.cloudkit_ops.clone(),
+            move |manager| async move { manager.start_sync_with_home(home, cipher).await },
+        )
         .await?;
         info!("coven handle: sync manager connected over an injected test cloud home");
         Ok(())
@@ -317,6 +334,7 @@ impl CovenHandle {
     /// when no provider is connected — a home-less library has nothing to start.
     /// Errors if the installed manager's cloud home fails to build.
     pub async fn start_sync(&self) -> Result<(), String> {
+        let _lifecycle = self.sync_lifecycle.lock().await;
         match self.sync_manager() {
             Some(manager) => manager.start_sync().await,
             None => {
@@ -331,7 +349,11 @@ impl CovenHandle {
     /// provider is connected.
     pub fn stop_sync(&self) {
         match self.sync_manager() {
-            Some(manager) => manager.stop_sync(),
+            Some(manager) => {
+                if let Err(stop_error) = manager.stop_sync() {
+                    error!("stop_sync failed: {stop_error}");
+                }
+            }
             None => debug!("stop_sync: no provider connected; nothing to stop"),
         }
     }
@@ -341,7 +363,9 @@ impl CovenHandle {
     /// [`connect_sync`](Self::connect_sync).
     pub fn disconnect_sync(&self) {
         if let Some(manager) = self.sync_manager() {
-            manager.stop_sync();
+            if let Err(stop_error) = manager.stop_sync() {
+                error!("disconnect_sync failed to stop sync: {stop_error}");
+            }
         }
         *self.sync.write().unwrap() = None;
         info!("coven handle: sync manager disconnected");
@@ -714,6 +738,10 @@ mod tests {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
     }
 
+    fn open_guard(library_dir: &LibraryDir) -> Arc<LibraryOpenGuard> {
+        Arc::new(LibraryOpenGuard::acquire(library_dir).expect("acquire library open guard"))
+    }
+
     impl TestCloudKitOps {
         fn new() -> Self {
             Self {
@@ -836,12 +864,13 @@ mod tests {
         let handle = CovenHandle::new(
             db.clone(),
             stamper,
-            library_dir,
+            library_dir.clone(),
             config_provider,
             KeyService::new("lib-test".to_string()),
             Arc::new(SystemClock),
             None,
             None,
+            open_guard(&library_dir),
         );
 
         // Inject the mock home; the host hands over only the home + cipher.
@@ -933,12 +962,13 @@ mod tests {
         let handle = CovenHandle::new(
             db.clone(),
             db.stamper(),
-            library_dir,
+            library_dir.clone(),
             config_provider,
             KeyService::new("lib-cloudkit-home-reuse".to_string()),
             Arc::new(SystemClock),
             Some(Arc::new(TestCloudKitOps::new())),
             None,
+            open_guard(&library_dir),
         );
 
         handle
@@ -958,6 +988,116 @@ mod tests {
             std::ptr::addr_eq(stored_home.as_ref(), loop_handle.storage().cloud_home()),
             "the sync loop storage must wrap the same cloud home stored on the manager",
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn reconnect_sync_stops_the_previous_loop() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+        let config = Config::with_defaults(
+            "lib-reconnect-loop".to_string(),
+            "test-device".to_string(),
+            library_dir.clone(),
+            "Test Library".to_string(),
+        );
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let handle = CovenHandle::new(
+            db.clone(),
+            db.stamper(),
+            library_dir.clone(),
+            config_provider,
+            KeyService::new("lib-reconnect-loop".to_string()),
+            Arc::new(SystemClock),
+            None,
+            None,
+            open_guard(&library_dir),
+        );
+
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("first connect over injected home");
+        let first_loop = handle
+            .sync_manager()
+            .expect("first manager installed")
+            .sync_loop_handle()
+            .expect("first loop installed");
+        assert!(first_loop.is_running(), "first loop starts running");
+
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("second connect over injected home");
+        let replacement_loop = handle
+            .sync_manager()
+            .expect("replacement manager installed")
+            .sync_loop_handle()
+            .expect("replacement loop installed");
+
+        assert!(
+            !first_loop.is_running(),
+            "reconnect must stop the old loop before installing a replacement",
+        );
+        assert!(
+            replacement_loop.is_running(),
+            "reconnect leaves the replacement loop running",
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn stopped_installed_loop_blocks_blob_transitions() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+        let config = Config::with_defaults(
+            "lib-stopped-loop-readiness".to_string(),
+            "test-device".to_string(),
+            library_dir.clone(),
+            "Test Library".to_string(),
+        );
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let handle = CovenHandle::new(
+            db.clone(),
+            db.stamper(),
+            library_dir.clone(),
+            config_provider,
+            KeyService::new("lib-stopped-loop-readiness".to_string()),
+            Arc::new(SystemClock),
+            None,
+            None,
+            open_guard(&library_dir),
+        );
+
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("connect over injected home");
+        let manager = handle.sync_manager().expect("manager installed");
+        let loop_handle = manager.sync_loop_handle().expect("loop installed");
+
+        loop_handle.stop().expect("stop installed loop");
+
+        let make_remote = manager.make_remote("notes", "note-1", false).await;
+        assert!(matches!(make_remote, Err(MakeRemoteError::SyncNotReady)));
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let make_local = manager
+            .make_local("notes", "note-1", &HashMap::new(), &cancel_rx)
+            .await;
+        assert!(matches!(make_local, Err(MakeLocalError::SyncNotReady)));
     }
 
     // The user keypair is one process-wide keyring account, so the guard is held
@@ -987,12 +1127,13 @@ mod tests {
         let handle = CovenHandle::new(
             db.clone(),
             db.stamper(),
-            library_dir,
+            library_dir.clone(),
             config_provider,
             KeyService::new("lib-test".to_string()),
             Arc::new(SystemClock),
             None,
             None,
+            open_guard(&library_dir),
         );
 
         let home = Arc::new(InMemoryCloudHome::new());

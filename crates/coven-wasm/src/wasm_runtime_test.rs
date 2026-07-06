@@ -52,10 +52,10 @@ fn open_device(device_id: &str) -> Database {
     db
 }
 
-/// Build a started [`WasmSyncRuntime`] for `device_id` over a clone of the shared
-/// cloud. The schedule is fast (short startup grace and idle interval) so the test
-/// converges quickly; everything else mirrors a real device's wiring.
-fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> WasmSyncRuntime {
+/// Build a [`WasmSyncRuntime`] for `device_id` over a clone of the shared cloud.
+/// The schedule is fast (short startup grace and idle interval) so tests converge
+/// quickly; everything else mirrors a real device's wiring.
+fn runtime_for_device(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> WasmSyncRuntime {
     // One identity for both the storage (signs the head it writes) and the
     // runtime's cycle, as a real device has a single signing keypair.
     let keypair = UserKeypair::generate();
@@ -92,6 +92,12 @@ fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> Wa
             backoff_cap_secs: 1,
         },
     );
+    runtime
+}
+
+/// Build a started [`WasmSyncRuntime`] for `device_id`.
+fn start_runtime(device_id: &str, db: Database, cloud: &InMemoryCloudHome) -> WasmSyncRuntime {
+    let runtime = runtime_for_device(device_id, db, cloud);
     runtime.start();
     runtime
 }
@@ -185,4 +191,86 @@ async fn runtime_drives_two_devices_to_convergence() {
         Some("hello from A"),
         "the converged row must carry A's column values",
     );
+}
+
+#[wasm_bindgen_test]
+fn start_while_running_keeps_the_same_loop_token() {
+    console_error_panic_hook::set_once();
+
+    let cloud = InMemoryCloudHome::new();
+    let runtime = runtime_for_device(
+        "device-token-noop",
+        open_device("device-token-noop"),
+        &cloud,
+    );
+
+    runtime.start();
+    let first = runtime
+        .active_token_for_test()
+        .expect("runtime has active token after start");
+    runtime.start();
+    let second = runtime
+        .active_token_for_test()
+        .expect("runtime still has active token after second start");
+
+    assert!(
+        Rc::ptr_eq(&first, &second),
+        "starting an already-running runtime keeps the active token",
+    );
+
+    runtime.stop();
+}
+
+#[wasm_bindgen_test]
+fn stop_then_start_uses_a_new_loop_token() {
+    console_error_panic_hook::set_once();
+
+    let cloud = InMemoryCloudHome::new();
+    let runtime = runtime_for_device(
+        "device-token-restart",
+        open_device("device-token-restart"),
+        &cloud,
+    );
+
+    runtime.start();
+    let old = runtime
+        .active_token_for_test()
+        .expect("runtime has active token after start");
+    runtime.stop();
+    assert!(!old.get(), "stop clears the token captured by the old task");
+
+    runtime.start();
+    let new = runtime
+        .active_token_for_test()
+        .expect("runtime has active token after restart");
+
+    assert!(
+        !Rc::ptr_eq(&old, &new),
+        "restart installs a token distinct from the stopped task's token",
+    );
+    assert!(
+        !old.get(),
+        "restart must not set the stopped task's token true again",
+    );
+    assert!(new.get(), "replacement token is running");
+
+    runtime.stop();
+}
+
+#[wasm_bindgen_test]
+fn is_running_tracks_the_active_loop_token() {
+    console_error_panic_hook::set_once();
+
+    let cloud = InMemoryCloudHome::new();
+    let runtime = runtime_for_device(
+        "device-token-running",
+        open_device("device-token-running"),
+        &cloud,
+    );
+
+    assert!(!runtime.is_running(), "runtime starts inactive");
+    runtime.start();
+    assert!(runtime.is_running(), "start installs an active token");
+    runtime.stop();
+    assert!(!runtime.is_running(), "stop removes the active token");
 }

@@ -10,11 +10,12 @@
 //! sized stack so S3 sync doesn't `SIGBUS` in `resolve_endpoint`.
 //! Emits [`SyncLoopStatus`] events through a broadcast channel.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::error::TrySendError;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info};
 
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
@@ -50,8 +51,11 @@ pub struct SyncLoopHandle {
     library_dir: LibraryDir,
     trigger_tx: tokio::sync::mpsc::Sender<()>,
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    stop_rx: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     event_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    running: Arc<AtomicBool>,
 }
 
 struct SyncLoopInner {
@@ -76,6 +80,7 @@ impl SyncLoopHandle {
         observer: Option<Arc<dyn BlobTransitionObserver>>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
         Self {
@@ -94,8 +99,11 @@ impl SyncLoopHandle {
             library_dir,
             trigger_tx,
             trigger_rx: std::sync::Mutex::new(Some(trigger_rx)),
+            stop_tx,
+            stop_rx: std::sync::Mutex::new(Some(stop_rx)),
             event_tx,
             thread_handle: std::sync::Mutex::new(None),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -110,19 +118,27 @@ impl SyncLoopHandle {
     /// Everything the loop holds is `Send`; database access goes through async
     /// calls on the [`Database`] handle, so nothing here is bound to this thread
     /// except by choice of stack size.
-    pub fn start(&self) {
-        {
-            let guard = self.thread_handle.lock().unwrap();
-            if guard.is_some() {
-                return;
-            }
+    pub fn start(&self) -> Result<(), String> {
+        if self.running.swap(true, Ordering::AcqRel) {
+            return Ok(());
         }
 
         let mut trigger_rx = match self.trigger_rx.lock().unwrap().take() {
             Some(rx) => rx,
             None => {
-                warn!("Sync trigger receiver already taken");
-                return;
+                self.running.store(false, Ordering::Release);
+                return Err(
+                    "sync loop cannot be restarted after its receiver was taken".to_string()
+                );
+            }
+        };
+        let mut stop_rx = match self.stop_rx.lock().unwrap().take() {
+            Some(rx) => rx,
+            None => {
+                self.running.store(false, Ordering::Release);
+                return Err(
+                    "sync loop cannot be restarted after its stop receiver was taken".to_string(),
+                );
             }
         };
 
@@ -130,6 +146,7 @@ impl SyncLoopHandle {
         let event_tx = self.event_tx.clone();
         let clock = self.clock.clone();
         let library_dir = self.library_dir.clone();
+        let running = Arc::clone(&self.running);
 
         let handle = std::thread::Builder::new()
             .name("coven-sync-loop".to_string())
@@ -139,23 +156,47 @@ impl SyncLoopHandle {
             // sync doesn't overflow it.
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
+                let _running_guard = RunningGuard {
+                    running: Arc::clone(&running),
+                };
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                 {
                     Ok(rt) => rt,
                     Err(e) => {
-                        warn!("Failed to create sync loop runtime: {e}");
+                        let error = format!("failed to create sync loop runtime: {e}");
+                        error!("{error}");
+                        let status = SyncLoopStatus {
+                            configured: true,
+                            syncing: false,
+                            last_sync_time: None,
+                            error: Some(error),
+                            device_count: 0,
+                            data_changed: false,
+                            row_changes: None,
+                        };
+                        if event_tx.send(status).is_err() {
+                            debug!("sync loop runtime failure had no status subscribers");
+                        }
                         return;
                     }
                 };
 
                 rt.block_on(async move {
                     // Short delay to avoid racing with app startup.
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                        changed = stop_rx.changed() => {
+                            if changed.is_err() || *stop_rx.borrow() {
+                                info!("Sync loop stopped before first cycle");
+                                return;
+                            }
+                        }
+                    }
 
                     let mut consecutive_failures: u32 = 0;
-                    loop {
+                    while running.load(Ordering::Acquire) && !*stop_rx.borrow() {
                         let decision = match run_single_cycle(&inner, clock.as_ref(), &library_dir).await {
                             Ok(result) => loop_policy::after_success(result),
                             Err(error) => loop_policy::after_failure(error, consecutive_failures, 300),
@@ -173,7 +214,9 @@ impl SyncLoopHandle {
                                     data_changed: success.data_changed,
                                     row_changes: success.row_changes,
                                 };
-                                let _ = event_tx.send(status);
+                                if event_tx.send(status).is_err() {
+                                    debug!("sync loop success status had no subscribers");
+                                }
                             }
                             SyncLoopReport::Failure(error) => {
                                 let status = SyncLoopStatus {
@@ -185,7 +228,9 @@ impl SyncLoopHandle {
                                     data_changed: false,
                                     row_changes: None,
                                 };
-                                let _ = event_tx.send(status);
+                                if event_tx.send(status).is_err() {
+                                    debug!("sync loop failure status had no subscribers");
+                                }
                             }
                         }
 
@@ -201,6 +246,12 @@ impl SyncLoopHandle {
                         }
                         tokio::select! {
                             _ = tokio::time::sleep(wait) => {}
+                            changed = stop_rx.changed() => {
+                                if changed.is_err() || *stop_rx.borrow() {
+                                    info!("Sync loop stop requested");
+                                    break;
+                                }
+                            }
                             msg = trigger_rx.recv() => {
                                 if msg.is_none() {
                                     info!("Sync trigger channel closed, stopping sync loop");
@@ -211,14 +262,42 @@ impl SyncLoopHandle {
                     }
                 });
             })
-            .expect("Failed to spawn sync loop thread");
+            .map_err(|e| {
+                self.running.store(false, Ordering::Release);
+                format!("failed to spawn sync loop thread: {e}")
+            })?;
 
         *self.thread_handle.lock().unwrap() = Some(handle);
+        Ok(())
     }
 
     /// Whether the background sync thread is running.
     pub fn is_running(&self) -> bool {
-        self.thread_handle.lock().unwrap().is_some()
+        self.running.load(Ordering::Acquire)
+    }
+
+    /// Request loop shutdown and join the sync thread.
+    pub fn stop(&self) -> Result<(), String> {
+        let handle = {
+            let mut guard = self.thread_handle.lock().unwrap();
+            if guard.is_none() && !self.running.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if self.stop_tx.send(true).is_err() {
+                debug!("sync loop stop requested after stop receiver closed");
+            }
+            self.trigger();
+            guard.take()
+        };
+
+        if let Some(handle) = handle {
+            if handle.join().is_err() {
+                self.running.store(false, Ordering::Release);
+                return Err("sync loop thread panicked".to_string());
+            }
+        }
+        self.running.store(false, Ordering::Release);
+        Ok(())
     }
 
     /// Signal the sync loop to run a cycle immediately.
@@ -256,6 +335,16 @@ impl SyncLoopHandle {
 
     pub fn cipher(&self) -> &Arc<std::sync::RwLock<CloudCipher>> {
         &self.inner.cipher
+    }
+}
+
+struct RunningGuard {
+    running: Arc<AtomicBool>,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
     }
 }
 

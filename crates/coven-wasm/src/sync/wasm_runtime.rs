@@ -17,7 +17,7 @@
 //! for a prompt re-run while an outbox drain is mid-batch. A trigger wakes the
 //! wait immediately; a `stop()` flag ends the loop after the in-flight cycle.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
@@ -82,7 +82,7 @@ struct CycleInputs {
 pub struct WasmSyncRuntime {
     inputs: Rc<CycleInputs>,
     schedule: WasmSyncSchedule,
-    running: Rc<Cell<bool>>,
+    active: RefCell<Option<Rc<Cell<bool>>>>,
     /// Wakes a sleeping wait. `notify_one` stores at most one permit, so many
     /// triggers between waits collapse into a single wake — the same effect as the
     /// native loop's capacity-1 trigger channel. A permit fired while a cycle is
@@ -125,7 +125,7 @@ impl WasmSyncRuntime {
                 observer,
             }),
             schedule,
-            running: Rc::new(Cell::new(false)),
+            active: RefCell::new(None),
             wake: Rc::new(tokio::sync::Notify::new()),
         }
     }
@@ -138,12 +138,17 @@ impl WasmSyncRuntime {
     /// input bundle and control state move into the task; the runtime keeps its
     /// own clones so its control methods keep working after the task is spawned.
     pub fn start(&self) {
-        if self.running.replace(true) {
-            return;
-        }
+        let running = {
+            let mut active = self.active.borrow_mut();
+            if active.is_some() {
+                return;
+            }
+            let running = Rc::new(Cell::new(true));
+            *active = Some(Rc::clone(&running));
+            running
+        };
 
         let inputs = Rc::clone(&self.inputs);
-        let running = Rc::clone(&self.running);
         let wake = Rc::clone(&self.wake);
         let schedule = self.schedule.clone();
 
@@ -196,7 +201,7 @@ impl WasmSyncRuntime {
 
     /// Whether the loop is running.
     pub fn is_running(&self) -> bool {
-        self.running.get()
+        self.active.borrow().is_some()
     }
 
     /// Wake the loop to run a cycle immediately. Collapses with any pending wake.
@@ -217,10 +222,17 @@ impl WasmSyncRuntime {
     /// the loop so a sleeping wait returns at once rather than riding out the idle
     /// interval; the loop then sees the cleared flag and exits. Idempotent.
     pub fn stop(&self) {
-        self.running.set(false);
+        if let Some(running) = self.active.borrow_mut().take() {
+            running.set(false);
+        }
         // Wake a sleeping wait so it returns now; the loop re-checks `running`
         // after the wait and exits on the cleared flag.
         self.wake.notify_one();
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub(crate) fn active_token_for_test(&self) -> Option<Rc<Cell<bool>>> {
+        self.active.borrow().clone()
     }
 }
 

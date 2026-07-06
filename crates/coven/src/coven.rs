@@ -35,6 +35,10 @@ pub enum CovenError {
     MissingMigrations,
     #[error("blob {namespace}/{id} is still referenced by a row after the write")]
     BlobStillReferenced { namespace: String, id: String },
+    #[error("library is already open: {}", library_dir.display())]
+    AlreadyOpen { library_dir: PathBuf },
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 impl From<LocalBlobError> for CovenError {
@@ -106,6 +110,36 @@ pub struct CovenBuilder {
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
+pub(crate) struct LibraryOpenGuard {
+    _file: std::fs::File,
+}
+
+impl LibraryOpenGuard {
+    pub(crate) fn acquire(library_dir: &crate::library_dir::LibraryDir) -> CovenResult<Self> {
+        let db_path = library_dir.db_path();
+        let Some(dir) = db_path.parent() else {
+            return Err(CovenError::Blob(format!(
+                "library database path has no parent: {}",
+                db_path.display()
+            )));
+        };
+        std::fs::create_dir_all(dir)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(".coven-lock"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(CovenError::AlreadyOpen {
+                library_dir: dir.to_path_buf(),
+            }),
+            Err(std::fs::TryLockError::Error(error)) => Err(CovenError::Io(error)),
+        }
+    }
+}
+
 impl CovenBuilder {
     pub fn synced_tables(mut self, tables: Vec<SyncedTable>) -> Self {
         self.synced_tables = Some(tables);
@@ -159,6 +193,7 @@ impl CovenBuilder {
         let db_path = config.library_dir.db_path();
         let provider = self.config.provider();
         let library_dir = config.library_dir.clone();
+        let open_guard = Arc::new(LibraryOpenGuard::acquire(&library_dir)?);
         let (db, stamper) =
             Database::open(&db_path, tables, config.device_id.clone(), &migrations)?;
         Ok(CovenHandle::new(
@@ -170,6 +205,7 @@ impl CovenBuilder {
             self.clock,
             self.cloudkit_ops,
             self.observer,
+            open_guard,
         ))
     }
 }
@@ -526,6 +562,46 @@ mod tests {
             .open()
             .expect("open handle");
         (tmp, handle)
+    }
+
+    #[tokio::test]
+    async fn second_open_of_one_library_is_refused_until_the_first_handle_drops() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let first = Coven::builder(config(dir.clone()))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open()
+            .expect("first open succeeds");
+        let clone = first.clone();
+
+        let second = Coven::builder(config(dir.clone()))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open();
+        assert!(matches!(
+            second,
+            Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+        ));
+
+        drop(first);
+
+        let still_locked = Coven::builder(config(dir.clone()))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open();
+        assert!(matches!(
+            still_locked,
+            Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+        ));
+
+        drop(clone);
+
+        Coven::builder(config(dir))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open()
+            .expect("open succeeds after the first handle drops");
     }
 
     fn open_remote_root_files_handle() -> (tempfile::TempDir, CovenHandle) {

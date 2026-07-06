@@ -70,6 +70,29 @@ async fn open_library(
     lib
 }
 
+async fn assemble_library(
+    library_id: &str,
+    device_id: &str,
+    cloud: &InMemoryCloudHome,
+) -> Result<CovenLibrary, String> {
+    CovenLibrary::from_home(
+        Box::new(cloud.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        library_id,
+        device_id.to_string(),
+        demo_migrations(),
+        demo_synced_tables(),
+        crate::keys::UserKeypair::generate(),
+        WasmSyncSchedule {
+            initial_delay_ms: 10,
+            idle_interval_ms: 50,
+            backoff_cap_secs: 1,
+        },
+    )
+    .await
+}
+
 fn demo_migrations() -> Vec<Migration> {
     vec![Migration::sql(
         1,
@@ -172,4 +195,32 @@ async fn two_libraries_converge_a_note_through_the_facade() {
         Some("hello from tab A"),
         "the converged row must carry tab A's column values",
     );
+}
+
+#[wasm_bindgen_test]
+async fn second_open_of_one_library_id_is_refused_until_the_first_handle_drops() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let library_id = format!("double-open-{run}");
+    let cloud = InMemoryCloudHome::new();
+
+    let first = assemble_library(&library_id, "device-a", &cloud)
+        .await
+        .expect("first open succeeds");
+    let second = assemble_library(&library_id, "device-b", &cloud).await;
+
+    match second {
+        Ok(_) => panic!("second open of the same library id must fail"),
+        Err(error) => assert!(
+            error.contains("already open"),
+            "second open error names the open library: {error}",
+        ),
+    }
+
+    drop(first);
+
+    assemble_library(&library_id, "device-c", &cloud)
+        .await
+        .expect("open succeeds after the first handle drops");
 }
