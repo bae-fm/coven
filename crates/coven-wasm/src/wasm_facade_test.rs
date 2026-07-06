@@ -261,3 +261,27 @@ async fn library_stamp_uses_pull_advanced_clock() {
         "library stamp {stamp} must sort after pulled stamp {pulled}",
     );
 }
+
+#[wasm_bindgen_test]
+async fn free_without_stop_sync_halts_syncing() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let cloud = InMemoryCloudHome::new();
+    let lib = assemble_library(&format!("free-stops-sync-{run}"), "device-a", &cloud)
+        .await
+        .expect("assemble library");
+
+    lib.start_sync();
+    let token = lib
+        .runtime_active_token_for_test()
+        .expect("library runtime has active token after start_sync");
+    assert!(token.get(), "start_sync marks the loop token running");
+
+    drop(lib);
+
+    assert!(
+        !token.get(),
+        "dropping the library stops the sync loop token"
+    );
+}

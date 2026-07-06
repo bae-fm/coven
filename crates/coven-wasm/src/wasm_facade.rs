@@ -383,6 +383,13 @@ impl CovenLibrary {
     pub(crate) fn db_hlc_for_test(&self) -> std::sync::Arc<crate::sync::hlc::Hlc> {
         self.db.hlc()
     }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub(crate) fn runtime_active_token_for_test(
+        &self,
+    ) -> Option<std::rc::Rc<std::cell::Cell<bool>>> {
+        self.runtime.active_token_for_test()
+    }
 }
 
 /// The sync loop's real cadence: a 3 s startup grace so the loop does not race

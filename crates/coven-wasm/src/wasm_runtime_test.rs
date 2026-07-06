@@ -274,3 +274,25 @@ fn is_running_tracks_the_active_loop_token() {
     runtime.stop();
     assert!(!runtime.is_running(), "stop removes the active token");
 }
+
+#[wasm_bindgen_test]
+fn dropping_the_runtime_stops_the_loop() {
+    console_error_panic_hook::set_once();
+
+    let cloud = InMemoryCloudHome::new();
+    let runtime = runtime_for_device(
+        "device-token-drop",
+        open_device("device-token-drop"),
+        &cloud,
+    );
+
+    runtime.start();
+    let token = runtime
+        .active_token_for_test()
+        .expect("runtime has active token after start");
+    assert!(token.get(), "start marks the loop token running");
+
+    drop(runtime);
+
+    assert!(!token.get(), "dropping the runtime stops the loop token");
+}

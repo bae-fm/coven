@@ -242,6 +242,12 @@ impl WasmSyncRuntime {
     }
 }
 
+impl Drop for WasmSyncRuntime {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Run one sync cycle over the owned inputs. Re-borrows each input per call (the
 /// loop owns them); no borrow spans the awaits inside the cycle.
 async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleResult, String> {
