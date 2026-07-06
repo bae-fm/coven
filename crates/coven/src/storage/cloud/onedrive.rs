@@ -1,7 +1,7 @@
 //! OneDrive `CloudHome` implementation.
 //!
 //! Uses the Microsoft Graph API. Files are stored flat in a single folder — path
-//! separators are encoded as `__` (see [`super::key_encoding`]). The
+//! separators are escaped by [`super::key_encoding`]. The
 //! `read`/`read_range`/`list`/`delete` methods are the shared [`OAuthRestHome`]
 //! implementations; this file supplies only the Graph request shapes, the page
 //! parser, the upload paths, and sharing.
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
-use super::key_encoding::{decode_key, encode_key};
+use super::key_encoding::{decode_listed_key, encode_key};
 use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
@@ -182,7 +182,10 @@ impl OAuthRestHome for OneDriveCloudHome {
             for item in items {
                 if let Some(name) = item["name"].as_str() {
                     if name.starts_with(&encoded_prefix) {
-                        keys.push(decode_key(name));
+                        let Some(decoded) = decode_listed_key("OneDrive", name) else {
+                            continue;
+                        };
+                        keys.push(decoded)
                     }
                 }
             }
@@ -423,7 +426,7 @@ mod tests {
     fn item_path_url_encodes_key() {
         assert_eq!(
             home().item_path_url("changes/dev1/42.enc"),
-            "https://graph.microsoft.com/v1.0/drives/drive123/items/folder456:/changes__dev1__42.enc:"
+            "https://graph.microsoft.com/v1.0/drives/drive123/items/folder456:/6368616e6765732f646576312f34322e656e63:"
         );
     }
 
@@ -433,6 +436,22 @@ mod tests {
             home().children_url(),
             "https://graph.microsoft.com/v1.0/drives/drive123/items/folder456/children"
         );
+    }
+
+    #[test]
+    fn parse_list_page_skips_malformed_flat_names() {
+        let valid = encode_key("changes/dev1/1.enc");
+        let malformed = format!("{}zz", encode_key("changes/"));
+        let body = format!(
+            r#"{{"value":[{{"name":"{valid}"}},{{"name":"{malformed}"}},{{"name":"{}"}}]}}"#,
+            encode_key("heads/dev1.json.enc"),
+        );
+
+        let page = home()
+            .parse_list_page(&body, "changes/")
+            .expect("parse list page");
+
+        assert_eq!(page.keys, vec!["changes/dev1/1.enc"]);
     }
 
     #[test]

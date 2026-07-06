@@ -1,7 +1,7 @@
 //! Google Drive `CloudHome` implementation.
 //!
 //! Uses the Google Drive REST API v3 with OAuth 2.0 tokens. Files are stored flat
-//! in a single folder — path separators are encoded as `__` (see
+//! in a single folder — path separators are escaped by
 //! [`super::key_encoding`]). The `read`/`read_range`/`list`/`delete` methods are
 //! the shared [`OAuthRestHome`] implementations; this file supplies only the Drive
 //! request shapes, the page parser, the upload paths, and sharing.
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::http::{self, ensure_ok, ok_json, NotFound};
-use super::key_encoding::{decode_key, encode_key};
+use super::key_encoding::{decode_listed_key, encode_key};
 use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
@@ -582,7 +582,9 @@ impl OAuthRestHome for GoogleDriveCloudHome {
         if let Some(files) = json["files"].as_array() {
             for file in files {
                 if let Some(name) = file["name"].as_str() {
-                    let decoded = decode_key(name);
+                    let Some(decoded) = decode_listed_key("Google Drive", name) else {
+                        continue;
+                    };
                     // The `contains` query may match mid-string, so filter to the
                     // actual prefix.
                     if decoded.starts_with(prefix) {
@@ -728,6 +730,20 @@ impl CloudHome for GoogleDriveCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn home() -> GoogleDriveCloudHome {
+        GoogleDriveCloudHome::new(
+            "folder123".to_string(),
+            OAuthTokens {
+                access_token: "test".to_string(),
+                refresh_token: None,
+                expires_at: None,
+            },
+            KeyService::new("test".to_string()),
+            Arc::new(crate::clock::SystemClock),
+        )
+    }
 
     #[test]
     fn parse_google_api_error_reason_extracts_storage_quota() {
@@ -747,11 +763,11 @@ mod tests {
 
     #[test]
     fn find_file_query_escapes_encoded_name_and_folder() {
-        let query = find_file_query("folder'1", &encode_key("artist's-live/cover.jpg"));
+        let query = find_file_query("folder'1", "encoded'name");
 
         assert!(query.contains("'folder\\'1' in parents"));
-        assert!(query.contains("name = 'artist\\'s-live__cover.jpg'"));
-        assert!(!query.contains("artist's-live__cover.jpg"));
+        assert!(query.contains("name = 'encoded\\'name'"));
+        assert!(!query.contains("encoded'name"));
     }
 
     #[test]
@@ -766,8 +782,23 @@ mod tests {
     fn list_file_query_escapes_encoded_prefix() {
         let query = list_file_query("folder-id", "artist's-live/");
 
-        assert!(query.contains("name contains 'artist\\'s-live__'"));
-        assert!(!query.contains("artist's-live__"));
+        assert!(query.contains("name contains '61727469737427732d6c6976652f'"));
+        assert!(!query.contains("artist's-live"));
+    }
+
+    #[test]
+    fn parse_list_page_skips_malformed_flat_names() {
+        let valid = encode_key("changes/dev1/1.enc");
+        let other_prefix = encode_key("heads/dev1.json.enc");
+        let body = format!(
+            r#"{{"files":[{{"name":"{valid}"}},{{"name":"not-hex"}},{{"name":"{other_prefix}"}}]}}"#
+        );
+
+        let page = home()
+            .parse_list_page(&body, "changes/")
+            .expect("parse list page");
+
+        assert_eq!(page.keys, vec!["changes/dev1/1.enc"]);
     }
 
     #[test]
@@ -822,7 +853,7 @@ mod tests {
 
     #[test]
     fn parse_create_file_id_errors_when_id_is_missing() {
-        let err = parse_create_file_id(r#"{"name":"objects__a"}"#, "objects/a")
+        let err = parse_create_file_id(r#"{"name":"encoded-object-name"}"#, "objects/a")
             .expect_err("missing created file id");
         let msg = err.to_string();
 
@@ -835,10 +866,10 @@ mod tests {
 
     #[test]
     fn create_file_metadata_body_carries_rollback_token() {
-        let body = create_file_metadata_body("objects__a", "folder-1", "create-token-1");
+        let body = create_file_metadata_body("encoded-object-name", "folder-1", "create-token-1");
         let json: serde_json::Value = serde_json::from_str(&body).expect("metadata json");
 
-        assert_eq!(json["name"].as_str(), Some("objects__a"));
+        assert_eq!(json["name"].as_str(), Some("encoded-object-name"));
         assert_eq!(json["parents"][0].as_str(), Some("folder-1"));
         assert_eq!(
             json["appProperties"][CREATE_TOKEN_PROPERTY].as_str(),
