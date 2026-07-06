@@ -53,7 +53,7 @@ use crate::sync::membership::MemberRole;
 use crate::sync::storage::{StorageError, SyncStorage};
 use crate::sync::sync_loop::SyncLoopStatus;
 use crate::sync::sync_manager::MemberInfo;
-use crate::sync::sync_manager::{ConfigProvider, SyncManager};
+use crate::sync::sync_manager::{ConfigProvider, SyncError, SyncManager};
 
 /// The native handle over one coven library.
 ///
@@ -199,13 +199,11 @@ impl CovenHandle {
 
     pub fn subscribe_sync_status(
         &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<SyncLoopStatus>, String> {
-        let manager = self
-            .sync_manager()
-            .ok_or_else(|| "sync is not configured".to_string())?;
+    ) -> Result<tokio::sync::broadcast::Receiver<SyncLoopStatus>, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         let loop_handle = manager
             .sync_loop_handle()
-            .ok_or_else(|| "sync loop is not running".to_string())?;
+            .ok_or(SyncError::LoopNotRunning)?;
         Ok(loop_handle.subscribe())
     }
 
@@ -221,7 +219,7 @@ impl CovenHandle {
     pub async fn connect_sync(
         &self,
         encryption_service: Option<EncryptionService>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         self.build_and_install_sync(
             encryption_service,
             self.cloudkit_ops.clone(),
@@ -236,7 +234,7 @@ impl CovenHandle {
         &self,
         encryption_service: Option<EncryptionService>,
         cloudkit_ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         self.build_and_install_sync(
             encryption_service,
             Some(cloudkit_ops),
@@ -263,10 +261,10 @@ impl CovenHandle {
         encryption_service: Option<EncryptionService>,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         start: F,
-    ) -> Result<Arc<SyncManager>, String>
+    ) -> Result<Arc<SyncManager>, SyncError>
     where
         F: FnOnce(Arc<SyncManager>) -> Fut,
-        Fut: std::future::Future<Output = Result<(), String>>,
+        Fut: std::future::Future<Output = Result<(), SyncError>>,
     {
         let _lifecycle = self.sync_lifecycle.lock().await;
         let previous = self.sync.write().unwrap().take();
@@ -312,7 +310,7 @@ impl CovenHandle {
         &self,
         home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         // The test supplies encryption through the cipher, not a separate service;
         // derive the manager's service from it so `blob_cipher` and the membership
         // path agree with the at-rest protection the loop and storage seal under.
@@ -333,7 +331,7 @@ impl CovenHandle {
     /// Start (or restart) the sync loop of the installed [`SyncManager`]. A no-op
     /// when no provider is connected — a home-less library has nothing to start.
     /// Errors if the installed manager's cloud home fails to build.
-    pub async fn start_sync(&self) -> Result<(), String> {
+    pub async fn start_sync(&self) -> Result<(), SyncError> {
         let _lifecycle = self.sync_lifecycle.lock().await;
         match self.sync_manager() {
             Some(manager) => manager.start_sync().await,
@@ -617,36 +615,17 @@ impl CovenHandle {
     /// connected home, against coven's own register clock and the handle's
     /// observer. Errors when no provider is connected (there is no cloud to write
     /// to).
-    pub async fn drain_uploads(&self) -> Result<DrainOutcome, String> {
-        let manager = self
-            .sync_manager()
-            .ok_or("drain_uploads: no provider connected")?;
+    pub async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         let hlc = self.db.hlc();
-        if let Some(sync_loop) = manager.sync_loop_handle() {
-            let storage = sync_loop.storage().clone();
-            let cipher = sync_loop.cipher().clone();
-            return crate::blob::upload::drain_uploads(
-                &self.db,
-                storage.cloud_home(),
-                cipher.as_ref(),
-                &self.config().library_id,
-                &self.library_dir,
-                self.clock.as_ref(),
-                &hlc,
-                self.observer.as_deref(),
-            )
-            .await;
-        }
-
-        let cloud_home = manager
-            .cloud_home()
-            .ok_or("drain_uploads: no cloud home connected")?;
-        let cipher = manager
-            .no_loop_upload_drain_cipher_lock()
-            .ok_or("drain_uploads: no blob cipher (locked library)")?;
+        let sync_loop = manager
+            .sync_loop_handle()
+            .ok_or(SyncError::LoopNotRunning)?;
+        let storage = sync_loop.storage().clone();
+        let cipher = sync_loop.cipher().clone();
         crate::blob::upload::drain_uploads(
             &self.db,
-            cloud_home.as_ref(),
+            storage.cloud_home(),
             cipher.as_ref(),
             &self.config().library_id,
             &self.library_dir,
@@ -655,6 +634,7 @@ impl CovenHandle {
             self.observer.as_deref(),
         )
         .await
+        .map_err(SyncError::BlobUpload)
     }
 
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, crate::DbError> {
@@ -677,22 +657,20 @@ impl CovenHandle {
         self.db.item_key(item_id).await
     }
 
-    pub fn get_user_pubkey(&self) -> Result<Option<String>, String> {
+    pub fn get_user_pubkey(&self) -> Result<Option<String>, SyncError> {
         self.key_service
             .get_user_public_key()
             .map(|opt| opt.map(hex::encode))
-            .map_err(|e| format!("Failed to read user public key: {e}"))
+            .map_err(SyncError::from)
     }
 
-    pub fn generate_restore_code(&self) -> Result<String, String> {
+    pub fn generate_restore_code(&self) -> Result<String, SyncError> {
         crate::storage::cloud::setup::generate_restore_code(&self.config(), &self.key_service)
-            .map_err(|e| e.to_string())
+            .map_err(SyncError::from)
     }
 
-    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, String> {
-        let manager = self
-            .sync_manager()
-            .ok_or_else(|| "sync is not configured".to_string())?;
+    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         manager.get_members().await
     }
 
@@ -701,19 +679,15 @@ impl CovenHandle {
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: MemberRole,
-    ) -> Result<String, String> {
-        let manager = self
-            .sync_manager()
-            .ok_or_else(|| "sync is not configured".to_string())?;
+    ) -> Result<String, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         manager
             .invite_member(public_key_hex, invitee_email, role)
             .await
     }
 
-    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, String> {
-        let manager = self
-            .sync_manager()
-            .ok_or_else(|| "sync is not configured".to_string())?;
+    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         manager.remove_member(public_key_hex).await
     }
 }
@@ -731,7 +705,7 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeError;
     use crate::sync::cloud_storage::CloudCipher;
-    use crate::sync::sync_manager::ConfigProvider;
+    use crate::sync::sync_manager::{ConfigProvider, SyncError};
     use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_library_dir};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -742,6 +716,27 @@ mod tests {
 
     fn open_guard(library_dir: &LibraryDir) -> Arc<LibraryOpenGuard> {
         Arc::new(LibraryOpenGuard::acquire(library_dir).expect("acquire library open guard"))
+    }
+
+    fn test_handle(library_id: &str, library_dir: LibraryDir, db: Database) -> CovenHandle {
+        let config = Config::with_defaults(
+            library_id.to_string(),
+            "test-device".to_string(),
+            library_dir.clone(),
+            "Test Library".to_string(),
+        );
+        let config_provider: ConfigProvider = Arc::new(move || config.clone());
+        CovenHandle::new(
+            db.clone(),
+            db.stamper(),
+            library_dir.clone(),
+            config_provider,
+            KeyService::new(library_id.to_string()),
+            Arc::new(SystemClock),
+            None,
+            None,
+            open_guard(&library_dir),
+        )
     }
 
     impl TestCloudKitOps {
@@ -990,6 +985,41 @@ mod tests {
             std::ptr::addr_eq(stored_home.as_ref(), loop_handle.storage().cloud_home()),
             "the sync loop storage must wrap the same cloud home stored on the manager",
         );
+    }
+
+    #[tokio::test]
+    async fn sync_not_configured_is_typed() {
+        let (_tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+        let handle = test_handle("lib-no-sync", library_dir, db);
+
+        let result = handle.get_members().await;
+
+        assert!(matches!(result, Err(SyncError::NotConfigured)));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn plaintext_membership_operations_are_typed() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+        let handle = test_handle("lib-plaintext-membership", library_dir, db);
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("connect plaintext home");
+
+        let public_key_hex = hex::encode(crate::keys::UserKeypair::generate().public_key());
+        let invite = handle
+            .invite_member(&public_key_hex, None, MemberRole::Member)
+            .await;
+        let remove = handle.remove_member(&public_key_hex).await;
+
+        assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
+        assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
     }
 
     #[tokio::test]

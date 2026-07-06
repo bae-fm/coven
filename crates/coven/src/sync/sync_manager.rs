@@ -18,13 +18,14 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
-use crate::keys::KeyService;
+use crate::keys::{KeyError, KeyService};
 use crate::library_dir::LibraryDir;
-use crate::storage::cloud::CloudHome;
+use crate::storage::cloud::setup::SetupError;
+use crate::storage::cloud::{CloudHome, CloudHomeError};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
-use crate::sync::cycle::SyncComponents;
+use crate::sync::cycle::{InitSyncError, SyncComponents};
 use crate::sync::hlc::Hlc;
 /// `MemberInfo` lives next to [`MemberRole`] in the membership module; coven's
 /// public path reaches it through here (re-exported from `lib.rs`).
@@ -38,14 +39,40 @@ use crate::sync::sync_loop::SyncLoopHandle;
 /// changes without rebuilding the manager.
 pub type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("sync is not configured")]
+    NotConfigured,
+    #[error("sync loop is not running")]
+    LoopNotRunning,
+    #[error("sharing requires an encrypted cloud home")]
+    NotEncryptedHome,
+    #[error("failed to build cloud home: {0}")]
+    CloudHome(#[from] CloudHomeError),
+    #[error("failed to create sync storage: {0}")]
+    StorageSetup(String),
+    #[error("key error: {0}")]
+    Key(#[from] KeyError),
+    #[error("sync initialization error: {0}")]
+    Init(#[from] InitSyncError),
+    #[error("{0}")]
+    Setup(#[from] SetupError),
+    #[error("membership error: {0}")]
+    Membership(String),
+    #[error("blob upload error: {0}")]
+    BlobUpload(String),
+    #[error("sync loop error: {0}")]
+    Loop(String),
+}
+
 /// Refuse a membership operation on a plaintext home. Inviting wraps the library
 /// key to a member and removing rotates it — both meaningless without a key — so
 /// the caller must bail before mutating the membership chain or re-wrapping keys.
-fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<(), String> {
-    if cipher.read().unwrap().is_plaintext() {
-        return Err("sharing requires an encrypted cloud home".to_string());
+fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<EncryptionService, SyncError> {
+    match &*cipher.read().unwrap() {
+        CloudCipher::Encrypted(encryption) => Ok(encryption.clone()),
+        CloudCipher::Plaintext => Err(SyncError::NotEncryptedHome),
     }
-    Ok(())
 }
 
 /// High-level sync manager.
@@ -134,13 +161,6 @@ impl SyncManager {
         self.sync_loop_handle.read().unwrap().clone()
     }
 
-    /// Standalone cipher lock for the configured-home/no-loop drain path.
-    pub fn no_loop_upload_drain_cipher_lock(&self) -> Option<Arc<RwLock<CloudCipher>>> {
-        let config = (self.config_provider)();
-        CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
-            .map(|cipher| Arc::new(RwLock::new(cipher)))
-    }
-
     // =========================================================================
     // Sync lifecycle
     // =========================================================================
@@ -154,7 +174,7 @@ impl SyncManager {
     /// that *fails* (missing credentials, a bad provider config) is an `Err`, not
     /// "no provider connected": the caller must not install a manager that reports
     /// success with nothing started.
-    pub async fn start_sync(&self) -> Result<(), String> {
+    pub async fn start_sync(&self) -> Result<(), SyncError> {
         let config = (self.config_provider)();
 
         if config.cloud_home.provider.is_none() {
@@ -176,7 +196,7 @@ impl SyncManager {
             self.cloudkit_ops.clone(),
         )
         .await
-        .map_err(|e| format!("failed to build cloud home: {e}"))?;
+        .map_err(SyncError::from)?;
         let cloud_home: Arc<dyn CloudHome> = Arc::from(cloud_home);
 
         // The home's at-rest cipher: an opaque home seals under the manager's
@@ -193,17 +213,14 @@ impl SyncManager {
         // tables, storage/keypair/auth/membership bootstrap) that init_sync already
         // logged — surface it so the caller never installs a manager whose loop
         // never started.
-        let user_keypair = self
-            .key_service
-            .get_or_create_user_keypair()
-            .map_err(|e| format!("failed to load user keypair for sync: {e}"))?;
+        let user_keypair = self.key_service.get_or_create_user_keypair()?;
         let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
             &self.key_service,
             cloud_home.clone(),
             Some(cipher.clone()),
         )
-        .map_err(|e| format!("failed to create sync storage: {e}"))?;
+        .map_err(SyncError::StorageSetup)?;
 
         let components = crate::sync::cycle::init_sync_over_storage(
             &config,
@@ -214,7 +231,7 @@ impl SyncManager {
             storage,
         )
         .await
-        .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
+        .map_err(SyncError::from)?;
 
         let _handle = self.install_sync_loop(components, config.library_dir.clone())?;
         *self.cloud_home.write().unwrap() = Some(cloud_home);
@@ -231,7 +248,7 @@ impl SyncManager {
         &self,
         components: SyncComponents,
         library_dir: LibraryDir,
-    ) -> Result<Arc<SyncLoopHandle>, String> {
+    ) -> Result<Arc<SyncLoopHandle>, SyncError> {
         let handle = Arc::new(SyncLoopHandle::new(
             components,
             self.db.clone(),
@@ -240,7 +257,7 @@ impl SyncManager {
             library_dir,
             self.observer.clone(),
         ));
-        handle.start()?;
+        handle.start().map_err(SyncError::Loop)?;
 
         info!("Sync loop started");
         *self.sync_loop_handle.write().unwrap() = Some(handle.clone());
@@ -271,14 +288,11 @@ impl SyncManager {
         &self,
         home: std::sync::Arc<dyn CloudHome>,
         cipher: CloudCipher,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let config = (self.config_provider)();
         self.stop_current_connection()?;
 
-        let keypair = self
-            .key_service
-            .get_or_create_user_keypair()
-            .map_err(|e| format!("failed to load user keypair for test sync: {e}"))?;
+        let keypair = self.key_service.get_or_create_user_keypair()?;
         let storage = CloudSyncStorage::new(
             home.clone(),
             cipher.clone(),
@@ -296,7 +310,7 @@ impl SyncManager {
             storage,
         )
         .await
-        .ok_or_else(|| "sync loop initialization failed (see preceding error)".to_string())?;
+        .map_err(SyncError::from)?;
 
         let _handle = self.install_sync_loop(components, config.library_dir.clone())?;
         *self.cloud_home.write().unwrap() = Some(home);
@@ -305,7 +319,7 @@ impl SyncManager {
     }
 
     /// Tear down the sync loop and cloud home.
-    pub fn stop_sync(&self) -> Result<(), String> {
+    pub fn stop_sync(&self) -> Result<(), SyncError> {
         let stop_result = self.stop_current_loop();
         *self.sync_loop_handle.write().unwrap() = None;
         *self.cloud_home.write().unwrap() = None;
@@ -322,15 +336,15 @@ impl SyncManager {
         }
     }
 
-    fn stop_current_loop(&self) -> Result<(), String> {
+    fn stop_current_loop(&self) -> Result<(), SyncError> {
         let handle = self.sync_loop_handle.write().unwrap().take();
         if let Some(handle) = handle {
-            handle.stop()?;
+            handle.stop().map_err(SyncError::Loop)?;
         }
         Ok(())
     }
 
-    fn stop_current_connection(&self) -> Result<(), String> {
+    fn stop_current_connection(&self) -> Result<(), SyncError> {
         let stop_result = self.stop_current_loop();
         *self.cloud_home.write().unwrap() = None;
         stop_result
@@ -467,7 +481,7 @@ impl SyncManager {
     // Membership
     // =========================================================================
 
-    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, String> {
+    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
         let config = (self.config_provider)();
         if config.cloud_home.provider.is_none() {
             info!("get_members: sync not configured; returning no members");
@@ -499,19 +513,17 @@ impl SyncManager {
                     .await
                 }
             }
-            .map_err(|e| format!("Failed to create storage client: {e}"))?;
+            .map_err(SyncError::StorageSetup)?;
             &owned_storage
         };
 
-        let user_pubkey = self
-            .key_service
-            .get_user_public_key()
-            .map_err(|e| format!("Failed to read user public key: {e}"))?;
+        let user_pubkey = self.key_service.get_user_public_key()?;
         crate::sync::membership_ops::get_members(
             storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
         )
         .await
+        .map_err(SyncError::Membership)
     }
 
     pub async fn invite_member(
@@ -519,24 +531,17 @@ impl SyncManager {
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: MemberRole,
-    ) -> Result<String, String> {
+    ) -> Result<String, SyncError> {
         let sync_loop = self
             .sync_loop_handle
             .read()
             .unwrap()
             .clone()
-            .ok_or("Sync is not configured")?;
+            .ok_or(SyncError::LoopNotRunning)?;
 
         // Inviting a member wraps the library key to them, which only an encrypted
         // home has. Refuse before touching the membership chain.
-        require_encrypted_home(sync_loop.cipher())?;
-
-        let encryption = match &*sync_loop.cipher().read().unwrap() {
-            CloudCipher::Encrypted(enc) => enc.clone(),
-            CloudCipher::Plaintext => {
-                return Err("sharing requires an encrypted cloud home".to_string())
-            }
-        };
+        let encryption = require_encrypted_home(sync_loop.cipher())?;
 
         let (library_id, library_name) = {
             let config = (self.config_provider)();
@@ -558,35 +563,29 @@ impl SyncManager {
             &library_id,
             &library_name,
         )
-        .await?;
+        .await
+        .map_err(SyncError::Membership)?;
 
         Ok(crate::join_code::encode(&invite_code))
     }
 
-    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, String> {
+    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
         let sync_loop = self
             .sync_loop_handle
             .read()
             .unwrap()
             .clone()
-            .ok_or("Sync is not configured")?;
+            .ok_or(SyncError::LoopNotRunning)?;
 
         // Removing a member rotates the library key, which only an encrypted home
         // has. Refuse up front so a plaintext home never mutates the membership
         // chain or re-wraps keys before the rotation fails.
-        require_encrypted_home(sync_loop.cipher())?;
+        let current_encryption = require_encrypted_home(sync_loop.cipher())?;
 
         let library_id = (self.config_provider)().library_id.clone();
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
-        let current_encryption = match &*sync_loop.cipher().read().unwrap() {
-            CloudCipher::Encrypted(enc) => enc.clone(),
-            CloudCipher::Plaintext => {
-                return Err("sharing requires an encrypted cloud home".to_string())
-            }
-        };
-
         let new_key = crate::sync::membership_ops::remove_member(
             storage,
             cloud_home,
@@ -596,7 +595,8 @@ impl SyncManager {
             &library_id,
             &current_encryption,
         )
-        .await?;
+        .await
+        .map_err(SyncError::Membership)?;
 
         // Rotate the in-use key; the host records the returned fingerprint and
         // that a key is stored in its own config.
@@ -604,7 +604,8 @@ impl SyncManager {
             new_key,
             &self.key_service,
             sync_loop.cipher(),
-        )?;
+        )
+        .map_err(SyncError::Membership)?;
 
         Ok(fingerprint)
     }
@@ -663,7 +664,10 @@ mod tests {
             .get_members()
             .await
             .expect_err("malformed stored credentials must fail");
-        assert!(error.contains("malformed cloud home credentials JSON"));
+        assert!(matches!(error, SyncError::StorageSetup(_)));
+        assert!(error
+            .to_string()
+            .contains("malformed cloud home credentials JSON"));
     }
 
     #[tokio::test]
@@ -754,7 +758,7 @@ mod tests {
             .await
             .expect_err("invalid configured provider fails restart");
         assert!(
-            error.contains("failed to build cloud home"),
+            error.to_string().contains("failed to build cloud home"),
             "restart failure surfaces the provider setup error: {error}",
         );
         assert!(

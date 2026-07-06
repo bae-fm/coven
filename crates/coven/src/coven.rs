@@ -283,11 +283,6 @@ pub(crate) struct StagedBlob {
     pub final_path: PathBuf,
 }
 
-pub(crate) enum WriteDbOutcome<R> {
-    Committed(R),
-    RolledBack { error: CovenError },
-}
-
 impl CovenHandle {
     pub async fn sql<F, R>(&self, f: F) -> CovenResult<R>
     where
@@ -296,14 +291,18 @@ impl CovenHandle {
     {
         let stamper = self.stamper();
         let tables = self.db().synced_tables().to_vec();
-        self.db()
+        let outcome = self
+            .db()
             .call_with_capture_reset(move |conn| {
-                Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-                    f(SqlContext::new(tx, stamper)).map_err(|e| DbError(e.to_string()))
-                })
+                Ok(Database::run_pending_journaled_transaction_on(
+                    conn,
+                    &tables,
+                    |tx| f(SqlContext::new(tx, stamper)),
+                ))
             })
             .await
-            .map_err(CovenError::from)
+            .map_err(CovenError::from)?;
+        outcome
     }
 
     pub async fn write<F, S, R>(&self, f: F, sql: S) -> CovenResult<R>
@@ -346,7 +345,7 @@ impl CovenHandle {
             }
         };
         match outcome {
-            WriteDbOutcome::Committed(value) => {
+            Ok(value) => {
                 if let Err(error) =
                     drain_local_cleanup_intents(self.db(), &self.library_dir()).await
                 {
@@ -357,7 +356,7 @@ impl CovenHandle {
                 }
                 Ok(value)
             }
-            WriteDbOutcome::RolledBack { error } => {
+            Err(error) => {
                 remove_staged_paths(&staged_paths).await;
                 Err(error)
             }
@@ -586,7 +585,7 @@ fn run_write_batch_on_connection<R>(
     deleted: Vec<BlobRef>,
     tables: Vec<SyncedTable>,
     sql: WriteSql<R>,
-) -> WriteDbOutcome<R> {
+) -> CovenResult<R> {
     let mut moved = Vec::new();
     let result =
         Database::run_pending_journaled_transaction_on(conn, &tables, |tx| -> CovenResult<R> {
@@ -651,12 +650,12 @@ fn run_write_batch_on_connection<R>(
             }
         });
     match result {
-        Ok(value) => WriteDbOutcome::Committed(value),
+        Ok(value) => Ok(value),
         Err(error) => rollback_write_batch(error, moved),
     }
 }
 
-fn rollback_write_batch<R>(error: CovenError, moved: Vec<StagedBlob>) -> WriteDbOutcome<R> {
+fn rollback_write_batch<R>(error: CovenError, moved: Vec<StagedBlob>) -> CovenResult<R> {
     for blob in moved.iter().rev() {
         if let Err(e) = std::fs::remove_file(&blob.final_path) {
             warn!(
@@ -668,7 +667,7 @@ fn rollback_write_batch<R>(error: CovenError, moved: Vec<StagedBlob>) -> WriteDb
             );
         }
     }
-    WriteDbOutcome::RolledBack { error }
+    Err(error)
 }
 
 #[cfg(test)]
@@ -1085,6 +1084,33 @@ mod tests {
             .await
             .expect("count rows");
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn sql_surfaces_sqlite_constraint_typed() {
+        let (_tmp, handle) = open_files_handle();
+        handle
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
+                    params!["duplicate-id", sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed row");
+
+        let result: CovenResult<()> = handle
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
+                    params!["duplicate-id", sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await;
+
+        assert!(matches!(result, Err(CovenError::Sqlite(_))));
     }
 
     #[tokio::test]

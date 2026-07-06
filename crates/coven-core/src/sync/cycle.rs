@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
@@ -1121,8 +1121,16 @@ async fn refresh_authorization_state(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum InitSyncError {
+    #[error("no synced tables configured; pass a non-empty synced-table set before sync starts")]
+    NoSyncedTables,
+    #[error("membership chain bootstrap/anchor failed: {0}")]
+    MembershipAnchor(String),
+}
+
 /// Bootstrap sync over an already-built [`CloudSyncStorage`], returning the
-/// components the sync loop needs (or `None` on a startup failure already logged).
+/// components the sync loop needs.
 pub async fn init_sync_over_storage(
     config: &Config,
     db: &Database,
@@ -1130,17 +1138,13 @@ pub async fn init_sync_over_storage(
     hlc: std::sync::Arc<Hlc>,
     user_keypair: UserKeypair,
     storage: CloudSyncStorage,
-) -> Option<SyncComponents> {
+) -> Result<SyncComponents, InitSyncError> {
     // Integration guard. The host declared its synced tables on the builder; an
     // empty set means a synced library would attach nothing, every changeset would
     // come out empty, and sync would silently become snapshot-only. Refuse loudly
     // instead of pretending to sync.
     if db.synced_tables().is_empty() {
-        error!(
-            "sync init aborted: no synced tables — the host must pass a non-empty \
-             synced-table set to Coven::builder(...).synced_tables(...) before sync starts"
-        );
-        return None;
+        return Err(InitSyncError::NoSyncedTables);
     }
 
     let cipher_lock = storage.shared_cipher();
@@ -1153,14 +1157,13 @@ pub async fn init_sync_over_storage(
     // skipped there.
     if !cipher.is_plaintext() {
         if let Err(e) = ensure_owner_anchored_chain(&storage, db, &user_keypair, &hlc).await {
-            error!("Membership chain bootstrap/anchor failed: {e}");
-            return None;
+            return Err(InitSyncError::MembershipAnchor(e));
         }
     }
 
     info!("Sync initialized (device: {})", config.device_id);
 
-    Some(SyncComponents {
+    Ok(SyncComponents {
         storage: std::sync::Arc::new(storage),
         hlc,
         library_id: config.library_id.clone(),

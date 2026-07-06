@@ -351,7 +351,7 @@ pub use storage::cloud::{
 pub use storage::local::BlobStore;
 pub use sync::join::join_from_invite_code;
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};
-pub use sync::sync_manager::MemberInfo;
+pub use sync::sync_manager::{MemberInfo, SyncError};
 
 #[cfg(feature = "oauth-providers")]
 pub use oauth::{
