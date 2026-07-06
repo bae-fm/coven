@@ -17,7 +17,8 @@ use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoi
 use crate::sync::apply::apply_changeset_lww;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipEntry,
+    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
+    MembershipEntry,
 };
 use crate::sync::pull::pull_changes;
 use crate::sync::session::{BlobDecl, SyncedTable};
@@ -321,9 +322,17 @@ pub fn pubkey_hex(kp: &UserKeypair) -> String {
 /// stamped at the standard test founding time. A test that needs a different
 /// founding timestamp builds the chain from `founder_entry` directly.
 pub fn bootstrap_chain(owner: &UserKeypair) -> MembershipChain {
+    let owner_pubkey = pubkey_hex(owner);
+    let founder = founder_entry(owner, "0000000001000-0000-dev1");
     let mut chain = MembershipChain::new();
     chain
-        .add_entry(founder_entry(owner, "0000000001000-0000-dev1"))
+        .add_entry_at(
+            MembershipCoord {
+                author_pubkey: owner_pubkey,
+                seq: 1,
+            },
+            founder,
+        )
         .unwrap();
     chain
 }
@@ -347,6 +356,7 @@ pub fn make_entry(
         action,
         user_pubkey: pubkey_hex(subject),
         provider_account_email: None,
+        prev_hash: None,
         role,
         timestamp: timestamp.to_string(),
         author_pubkey: pubkey_hex(author),
@@ -354,6 +364,53 @@ pub fn make_entry(
     };
     sign_membership_entry(&mut entry, author);
     entry
+}
+
+pub fn make_linked_entry(
+    chain: &MembershipChain,
+    author: &UserKeypair,
+    action: MembershipAction,
+    subject: &UserKeypair,
+    role: MemberRole,
+    timestamp: &str,
+) -> MembershipEntry {
+    let author_pubkey = pubkey_hex(author);
+    let mut entry = make_entry(author, action, subject, role, timestamp);
+    entry.prev_hash = chain.latest_author_hash(&author_pubkey);
+    sign_membership_entry(&mut entry, author);
+    entry
+}
+
+pub async fn append_membership_entry(
+    storage: &MockSyncStorage,
+    chain: &mut MembershipChain,
+    author_pubkey: &str,
+    seq: u64,
+    entry: MembershipEntry,
+) {
+    chain
+        .add_entry_at(
+            MembershipCoord {
+                author_pubkey: author_pubkey.to_string(),
+                seq,
+            },
+            entry.clone(),
+        )
+        .expect("valid membership test chain");
+    storage
+        .put_membership_entry(author_pubkey, seq, serde_json::to_vec(&entry).unwrap())
+        .await
+        .expect("upload membership entry");
+}
+
+pub async fn publish_membership_chain_head(
+    storage: &MockSyncStorage,
+    chain: &MembershipChain,
+    signer: &UserKeypair,
+) {
+    crate::sync::membership_ops::publish_membership_head(storage, chain, signer)
+        .await
+        .expect("publish membership head");
 }
 
 /// The object key [`MockSyncStorage`] stores a blob under. A plain-scheme blob
@@ -394,6 +451,8 @@ pub struct MockSyncStorage {
     snapshot_objects: Mutex<HashMap<String, Vec<u8>>>,
     /// Signed `min_schema_version.json` bytes (None = no minimum set).
     min_schema_version: Mutex<Option<Vec<u8>>>,
+    /// Signed `membership_head.json` bytes (None = no committed membership set).
+    membership_head: Mutex<Option<Vec<u8>>>,
     /// The device identity this mock signs its head/min_schema with. Defaults to a
     /// fresh keypair; a membership test that needs the head/floor attributed to a
     /// specific member constructs the mock with [`Self::with_keypair`].
@@ -430,6 +489,7 @@ impl MockSyncStorage {
             heads: Mutex::new(HashMap::new()),
             snapshot_objects: Mutex::new(HashMap::new()),
             min_schema_version: Mutex::new(None),
+            membership_head: Mutex::new(None),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
             membership_list_count: std::sync::atomic::AtomicUsize::new(0),
@@ -915,6 +975,19 @@ impl SyncStorage for MockSyncStorage {
         }
 
         Ok(entries)
+    }
+
+    async fn put_membership_head(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        *self.membership_head.lock().unwrap() = Some(data);
+        Ok(())
+    }
+
+    async fn get_membership_head(&self) -> Result<Vec<u8>, StorageError> {
+        self.membership_head
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| StorageError::NotFound("membership_head.json".to_string()))
     }
 
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {

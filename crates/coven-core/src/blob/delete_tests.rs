@@ -23,9 +23,11 @@ use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::CloudCipher;
-use crate::sync::membership::{MemberRole, MembershipAction};
-use crate::sync::storage::SyncStorage;
-use crate::sync::test_helpers::{founder_entry, make_entry, pubkey_hex, MockSyncStorage};
+use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+use crate::sync::test_helpers::{
+    append_membership_entry, founder_entry, make_linked_entry, pubkey_hex,
+    publish_membership_chain_head, MockSyncStorage,
+};
 use rusqlite::OptionalExtension;
 
 const T0: &str = "2024-06-01T00:00:00Z";
@@ -81,26 +83,23 @@ async fn storage_with_chain() -> (MockSyncStorage, UserKeypair, UserKeypair) {
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::new();
 
-    // The founder entry (seq 0) and the member's Add (seq 1). `put_membership_entry`
-    // keys on the entry's author; both are authored by the founder, so they live
-    // under `membership/{founder}/{seq}` where `list_membership_entries` finds them.
+    // The founder entry and the member's Add are both authored by the founder, so
+    // they live under `membership/{founder}/{seq}` where `list_membership_entries`
+    // finds them.
     let f_entry = founder_entry(&founder, "0000000001000-0000-dev1");
-    let m_entry = make_entry(
+    let founder_pk = pubkey_hex(&founder);
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &founder_pk, 1, f_entry).await;
+    let m_entry = make_linked_entry(
+        &chain,
         &founder,
         MembershipAction::Add,
         &member,
         MemberRole::Member,
         "0000000002000-0000-dev1",
     );
-    let founder_pk = pubkey_hex(&founder);
-    storage
-        .put_membership_entry(&founder_pk, 0, serde_json::to_vec(&f_entry).unwrap())
-        .await
-        .expect("put founder entry");
-    storage
-        .put_membership_entry(&founder_pk, 1, serde_json::to_vec(&m_entry).unwrap())
-        .await
-        .expect("put member entry");
+    append_membership_entry(&storage, &mut chain, &founder_pk, 2, m_entry).await;
+    publish_membership_chain_head(&storage, &chain, &founder).await;
 
     (storage, founder, member)
 }
@@ -768,14 +767,10 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     let attacker = UserKeypair::generate();
     let storage = MockSyncStorage::new();
     let forged_founder = founder_entry(&attacker, "0000000001000-0000-evil");
-    storage
-        .put_membership_entry(
-            &pubkey_hex(&attacker),
-            1,
-            serde_json::to_vec(&forged_founder).unwrap(),
-        )
-        .await
-        .expect("plant forged founder");
+    let attacker_pk = pubkey_hex(&attacker);
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &attacker_pk, 1, forged_founder).await;
+    publish_membership_chain_head(&storage, &chain, &attacker).await;
 
     // The victim blob, and a tombstone the attacker signs as their forged founder,
     // backdated well past the grace so only authorization stands between it and the

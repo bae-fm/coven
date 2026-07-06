@@ -7,11 +7,14 @@ use tracing::{debug, info};
 
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyPersistence, UserKeypair};
+#[cfg(test)]
+use crate::storage::cloud::CloudHome;
 
 use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
 use super::membership::{
-    founder_entry, MemberInfo, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
+    founder_entry, MemberInfo, MemberRole, MembershipChain, MembershipChainHead, MembershipCoord,
+    MembershipEntry,
 };
 use super::storage::{StorageError, SyncStorage};
 
@@ -35,7 +38,9 @@ pub async fn get_members(
         return Ok(Vec::new());
     }
 
-    let chain = download_chain(storage, &entry_keys).await?;
+    let chain = load_anchored_chain(storage, &entry_keys, None)
+        .await
+        .map_err(|e| e.to_string())?;
     let user_pubkey_hex = user_pubkey.map(hex::encode);
 
     let current = chain.current_members();
@@ -97,7 +102,9 @@ pub async fn invite_member(
                 .to_string(),
         );
     }
-    let mut chain = download_chain(storage, &entry_keys).await?;
+    let mut chain = load_anchored_chain(storage, &entry_keys, None)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
@@ -165,7 +172,9 @@ pub async fn remove_member(
         return Err("No membership chain exists".to_string());
     }
 
-    let mut chain = download_chain(storage, &entry_keys).await?;
+    let mut chain = load_anchored_chain(storage, &entry_keys, None)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Revoke the member
     let revoke_ts = hlc.now().to_string();
@@ -235,12 +244,23 @@ pub(crate) async fn write_founder_entry(
     timestamp: &str,
 ) -> Result<(), String> {
     let entry = founder_entry(owner, timestamp);
+    let coord = MembershipCoord {
+        author_pubkey: hex::encode(owner.public_key()),
+        seq: 1,
+    };
+    let mut chain = MembershipChain::new();
+    chain
+        .add_entry_at(coord.clone(), entry.clone())
+        .map_err(|e| format!("Failed to validate founder entry: {e}"))?;
     let bytes = serde_json::to_vec(&entry)
         .map_err(|e| format!("Failed to serialize founder entry: {e}"))?;
     storage
-        .put_membership_entry(&hex::encode(owner.public_key()), 1, bytes)
+        .put_membership_entry(&coord.author_pubkey, coord.seq, bytes)
         .await
         .map_err(|e| format!("Failed to upload founder entry: {e}"))?;
+    publish_membership_head(storage, &chain, owner)
+        .await
+        .map_err(|e| format!("Failed to upload founder membership head: {e}"))?;
     info!("Wrote founder Owner entry for the library's membership chain");
     Ok(())
 }
@@ -278,13 +298,25 @@ pub async fn download_chain(
     storage: &dyn SyncStorage,
     entry_keys: &[(String, u64)],
 ) -> Result<MembershipChain, String> {
-    let raw_entries = download_entries(storage, entry_keys)
-        .await?
-        .into_iter()
-        .map(|(_, entry)| entry)
-        .collect();
+    let raw_entries = download_entries(storage, entry_keys).await?;
 
-    MembershipChain::from_entries(raw_entries).map_err(|e| format!("Invalid membership chain: {e}"))
+    MembershipChain::from_entries_with_coords(raw_entries)
+        .map_err(|e| format!("Invalid membership chain: {e}"))
+}
+
+pub async fn publish_membership_head(
+    storage: &dyn SyncStorage,
+    chain: &MembershipChain,
+    signer: &UserKeypair,
+) -> Result<MembershipChainHead, String> {
+    let head = chain.signed_head(signer);
+    let bytes = serde_json::to_vec(&head)
+        .map_err(|e| format!("Failed to serialize membership head: {e}"))?;
+    storage
+        .put_membership_head(bytes)
+        .await
+        .map_err(|e| format!("Failed to upload membership head: {e}"))?;
+    Ok(head)
 }
 
 /// Why [`load_anchored_chain`] refused a chain. Split so each caller renders the
@@ -429,9 +461,27 @@ pub(crate) async fn load_anchored_chain(
     entry_keys: &[(String, u64)],
     owner_pubkey: Option<&str>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let chain = download_chain(storage, entry_keys)
+    let head = match storage.get_membership_head().await {
+        Ok(bytes) => serde_json::from_slice::<MembershipChainHead>(&bytes)
+            .map_err(|e| AnchoredChainError::LoadFailed(format!("parse membership head: {e}")))?,
+        Err(StorageError::NotFound(e)) => {
+            return Err(AnchoredChainError::LoadFailed(format!(
+                "membership head is missing: {e}"
+            )))
+        }
+        Err(e) => {
+            return Err(AnchoredChainError::LoadFailed(format!(
+                "Failed to get membership head: {e}"
+            )))
+        }
+    };
+    let committed_entry_keys = entry_keys_committed_by_head(entry_keys, &head);
+    let chain = download_chain(storage, &committed_entry_keys)
         .await
         .map_err(AnchoredChainError::LoadFailed)?;
+    chain
+        .verify_head(&head)
+        .map_err(|e| AnchoredChainError::LoadFailed(e.to_string()))?;
     if let Some(owner) = owner_pubkey {
         if !chain.is_founded_by(owner) {
             return Err(AnchoredChainError::FounderMismatch {
@@ -443,12 +493,36 @@ pub(crate) async fn load_anchored_chain(
     Ok(chain)
 }
 
+fn entry_keys_committed_by_head(
+    entry_keys: &[(String, u64)],
+    head: &MembershipChainHead,
+) -> Vec<(String, u64)> {
+    let mut keys = Vec::new();
+    for (listed_author, listed_seq) in entry_keys {
+        if head.entries.iter().any(|entry| {
+            entry.coord.author_pubkey == *listed_author && *listed_seq <= entry.coord.seq
+        }) {
+            keys.push((listed_author.clone(), *listed_seq));
+        }
+    }
+    for entry in &head.entries {
+        if !keys.iter().any(|(listed_author, seq)| {
+            listed_author == &entry.coord.author_pubkey && *seq == entry.coord.seq
+        }) {
+            keys.push((entry.coord.author_pubkey.clone(), entry.coord.seq));
+        }
+    }
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sync::hlc::Hlc;
     use crate::sync::membership::MembershipAction;
-    use crate::sync::test_helpers::{founder_entry, make_entry, pubkey_hex, MockSyncStorage};
+    use crate::sync::test_helpers::{
+        append_membership_entry, founder_entry, make_linked_entry, pubkey_hex, MockSyncStorage,
+    };
 
     /// The invite anchors the joiner to the library FOUNDER, regardless of which
     /// Owner sends it. A second Owner inviting must still hand over the founder's
@@ -463,23 +537,19 @@ mod tests {
 
         // Chain: founder, then the founder adds `second_owner` as an Owner.
         let storage = MockSyncStorage::new();
-        storage
-            .put_membership_entry(
-                &founder_pk,
-                1,
-                serde_json::to_vec(&founder_entry(&founder, "0000000001000-0000-f")).unwrap(),
-            )
-            .await
-            .unwrap();
-        let add_owner = make_entry(
+        let mut chain = MembershipChain::new();
+        let founder_entry = founder_entry(&founder, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &founder_pk, 1, founder_entry).await;
+        let add_owner = make_linked_entry(
+            &chain,
             &founder,
             MembershipAction::Add,
             &second_owner,
             MemberRole::Owner,
             "0000000002000-0000-f",
         );
-        storage
-            .put_membership_entry(&founder_pk, 2, serde_json::to_vec(&add_owner).unwrap())
+        append_membership_entry(&storage, &mut chain, &founder_pk, 2, add_owner).await;
+        publish_membership_head(&storage, &chain, &founder)
             .await
             .unwrap();
 
@@ -519,12 +589,10 @@ mod tests {
         let storage = MockSyncStorage::new();
         let owner_pk = pubkey_hex(&owner);
         let invitee_pk = pubkey_hex(&invitee);
-        storage
-            .put_membership_entry(
-                &owner_pk,
-                1,
-                serde_json::to_vec(&founder_entry(&owner, "0000000001000-0000-f")).unwrap(),
-            )
+        let mut chain = MembershipChain::new();
+        let founder = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+        publish_membership_head(&storage, &chain, &owner)
             .await
             .unwrap();
 
@@ -559,5 +627,186 @@ mod tests {
         .expect("remove");
 
         assert_eq!(storage.membership_list_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn suppressed_remove_is_detected() {
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let owner_pk = pubkey_hex(&owner);
+        let member_pk = pubkey_hex(&member);
+        let mut chain = MembershipChain::new();
+
+        let founder = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+        let add_member = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+        let remove_member = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Remove,
+            &member,
+            MemberRole::Member,
+            "0000000003000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+        publish_membership_head(&storage, &chain, &owner)
+            .await
+            .unwrap();
+
+        storage
+            .delete(&format!("membership/{owner_pk}/3"))
+            .await
+            .unwrap();
+        let visible = storage.list_membership_entries().await.unwrap();
+
+        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk)).await;
+        assert!(
+            result.is_err(),
+            "a listed chain missing a signed Remove must be rejected, not read {member_pk} as current"
+        );
+    }
+
+    #[tokio::test]
+    async fn suppressed_middle_entry_breaks_the_link() {
+        let owner = UserKeypair::generate();
+        let member_a = UserKeypair::generate();
+        let member_b = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let owner_pk = pubkey_hex(&owner);
+        let mut chain = MembershipChain::new();
+
+        let founder = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+        let add_a = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Add,
+            &member_a,
+            MemberRole::Member,
+            "0000000002000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_a).await;
+        let add_b = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Add,
+            &member_b,
+            MemberRole::Member,
+            "0000000003000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 3, add_b).await;
+        publish_membership_head(&storage, &chain, &owner)
+            .await
+            .unwrap();
+
+        storage.hide_membership_from_listing(&owner_pk, 2);
+        let visible = storage.list_membership_entries().await.unwrap();
+
+        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk)).await;
+        assert!(
+            result.is_err(),
+            "a successor that names a hidden predecessor must reject the listed chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_chain_still_validates() {
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let owner_pk = pubkey_hex(&owner);
+        let mut chain = MembershipChain::new();
+
+        let founder = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+        let add_member = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+        publish_membership_head(&storage, &chain, &owner)
+            .await
+            .unwrap();
+
+        let visible = storage.list_membership_entries().await.unwrap();
+        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk))
+            .await
+            .expect("complete chain validates");
+
+        assert!(loaded.can_write_now(&pubkey_hex(&member)));
+    }
+
+    #[tokio::test]
+    async fn missing_membership_head_is_rejected() {
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let owner_pk = pubkey_hex(&owner);
+        let mut chain = MembershipChain::new();
+
+        let founder = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+        let visible = storage.list_membership_entries().await.unwrap();
+
+        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk)).await;
+        assert!(
+            result.is_err(),
+            "a non-empty membership chain without a signed head is not committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_beyond_membership_head_is_not_committed() {
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let owner_pk = pubkey_hex(&owner);
+        let mut chain = MembershipChain::new();
+
+        let founder = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+        let add_member = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+        publish_membership_head(&storage, &chain, &owner)
+            .await
+            .unwrap();
+
+        let remove_member = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Remove,
+            &member,
+            MemberRole::Member,
+            "0000000003000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+        let visible = storage.list_membership_entries().await.unwrap();
+
+        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk))
+            .await
+            .expect("unheaded entry is ignored");
+        assert!(
+            loaded.can_write_now(&pubkey_hex(&member)),
+            "membership state follows the signed head, not listed entries past it"
+        );
     }
 }

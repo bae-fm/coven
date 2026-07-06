@@ -2923,8 +2923,11 @@ mod tests {
 mod authorization_tests {
     use super::*;
     use crate::keys::UserKeypair;
-    use crate::sync::membership::{founder_entry, MemberRole, MembershipAction};
-    use crate::sync::test_helpers::{make_entry, pubkey_hex, MockSyncStorage};
+    use crate::sync::membership::{founder_entry, MemberRole, MembershipAction, MembershipChain};
+    use crate::sync::test_helpers::{
+        append_membership_entry, make_linked_entry, pubkey_hex, publish_membership_chain_head,
+        MockSyncStorage,
+    };
 
     /// A minimal snapshot DB image. The authorization checks operate on the
     /// metadata signature, the DB-hash binding, and the chain — none of which need
@@ -2936,12 +2939,13 @@ mod authorization_tests {
     }
 
     /// Seed a one-owner founder chain into the mock and return the owner keypair.
-    async fn found_chain(storage: &MockSyncStorage, owner: &UserKeypair) {
+    async fn found_chain(storage: &MockSyncStorage, owner: &UserKeypair) -> MembershipChain {
+        let owner_pk = pubkey_hex(owner);
+        let mut chain = MembershipChain::new();
         let entry = founder_entry(owner, "0000000001000-0000-owner");
-        storage
-            .put_membership_entry(&pubkey_hex(owner), 1, serde_json::to_vec(&entry).unwrap())
-            .await
-            .unwrap();
+        append_membership_entry(storage, &mut chain, &owner_pk, 1, entry).await;
+        publish_membership_chain_head(storage, &chain, owner).await;
+        chain
     }
 
     /// A snapshot signed by a current member (the owner) bootstraps: the signature
@@ -3159,19 +3163,18 @@ mod authorization_tests {
         let owner = UserKeypair::generate();
         let follower = UserKeypair::generate();
         let storage = MockSyncStorage::new();
-        found_chain(&storage, &owner).await;
+        let mut chain = found_chain(&storage, &owner).await;
         // Owner adds the follower (read-only).
-        let add = make_entry(
+        let add = make_linked_entry(
+            &chain,
             &owner,
             MembershipAction::Add,
             &follower,
             MemberRole::Follower,
             "0000000002000-0000-owner",
         );
-        storage
-            .put_membership_entry(&pubkey_hex(&owner), 2, serde_json::to_vec(&add).unwrap())
-            .await
-            .unwrap();
+        append_membership_entry(&storage, &mut chain, &pubkey_hex(&owner), 2, add).await;
+        publish_membership_chain_head(&storage, &chain, &owner).await;
 
         push_snapshot_without_blob_refs(
             &storage,
@@ -3216,19 +3219,18 @@ mod authorization_tests {
         let owner = UserKeypair::generate();
         let member = UserKeypair::generate();
         let storage = MockSyncStorage::new();
-        found_chain(&storage, &owner).await;
+        let mut chain = found_chain(&storage, &owner).await;
         // The owner adds a write-capable Member.
-        let add = make_entry(
+        let add = make_linked_entry(
+            &chain,
             &owner,
             MembershipAction::Add,
             &member,
             MemberRole::Member,
             "0000000002000-0000-owner",
         );
-        storage
-            .put_membership_entry(&pubkey_hex(&owner), 2, serde_json::to_vec(&add).unwrap())
-            .await
-            .unwrap();
+        append_membership_entry(&storage, &mut chain, &pubkey_hex(&owner), 2, add).await;
+        publish_membership_chain_head(&storage, &chain, &owner).await;
 
         // The owner's snapshot is adopted.
         push_snapshot_without_blob_refs(
@@ -3720,8 +3722,11 @@ mod authorization_tests {
 mod reclaim_tests {
     use super::*;
     use crate::keys::UserKeypair;
-    use crate::sync::membership::{founder_entry, MemberRole, MembershipAction};
-    use crate::sync::test_helpers::{make_entry, pubkey_hex, MockSyncStorage};
+    use crate::sync::membership::{founder_entry, MemberRole, MembershipAction, MembershipChain};
+    use crate::sync::test_helpers::{
+        append_membership_entry, make_linked_entry, pubkey_hex, publish_membership_chain_head,
+        MockSyncStorage,
+    };
 
     /// A device: its head slot (`id`) plus the membership keypair its head and ack
     /// are authored by. Changeset reclamation matches each device's ack author
@@ -3743,14 +3748,14 @@ mod reclaim_tests {
     /// Found a one-owner chain and return the owner keypair. The owner authors the
     /// snapshot (a current owner); it has no head, so it is not itself a
     /// current device.
-    async fn found_chain(storage: &MockSyncStorage) -> UserKeypair {
+    async fn found_chain(storage: &MockSyncStorage) -> (UserKeypair, MembershipChain) {
         let owner = UserKeypair::generate();
+        let owner_pk = pubkey_hex(&owner);
+        let mut chain = MembershipChain::new();
         let entry = founder_entry(&owner, "0000000001000-0000-owner");
-        storage
-            .put_membership_entry(&pubkey_hex(&owner), 1, serde_json::to_vec(&entry).unwrap())
-            .await
-            .unwrap();
-        owner
+        append_membership_entry(storage, &mut chain, &owner_pk, 1, entry).await;
+        publish_membership_chain_head(storage, &chain, &owner).await;
+        (owner, chain)
     }
 
     /// Append a membership entry authored by `owner` at chain seq `seq` (2..=9). A
@@ -3758,17 +3763,16 @@ mod reclaim_tests {
     /// `MembershipChain::from_entries` sorts by.
     async fn append_entry(
         storage: &MockSyncStorage,
+        chain: &mut MembershipChain,
         owner: &UserKeypair,
         action: MembershipAction,
         subject: &Device,
         seq: u64,
     ) {
         let ts = format!("000000000{seq}000-0000-owner");
-        let entry = make_entry(owner, action, &subject.kp, MemberRole::Member, &ts);
-        storage
-            .put_membership_entry(&pubkey_hex(owner), seq, serde_json::to_vec(&entry).unwrap())
-            .await
-            .unwrap();
+        let entry = make_linked_entry(chain, owner, action, &subject.kp, MemberRole::Member, &ts);
+        append_membership_entry(storage, chain, &pubkey_hex(owner), seq, entry).await;
+        publish_membership_chain_head(storage, chain, owner).await;
     }
 
     /// Publish `device`'s pull-ack (`cursors`: peer_id -> seq), signed by its own
@@ -3804,11 +3808,11 @@ mod reclaim_tests {
     #[tokio::test]
     async fn reclaim_loads_snapshot_membership_once() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
         add_log(&storage, "A", 1).await;
         storage.publish_head_as("A", 1, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
@@ -3831,11 +3835,11 @@ mod reclaim_tests {
     #[tokio::test]
     async fn behind_member_pins_the_floor() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
@@ -3853,11 +3857,11 @@ mod reclaim_tests {
     #[tokio::test]
     async fn snapshot_cursor_pins_the_floor_for_bootstrappers() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
@@ -3874,11 +3878,11 @@ mod reclaim_tests {
     #[tokio::test]
     async fn full_reclaim_when_snapshot_and_acks_agree() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
@@ -3895,11 +3899,11 @@ mod reclaim_tests {
     #[tokio::test]
     async fn missing_ack_pauses_reclamation() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
@@ -3920,12 +3924,20 @@ mod reclaim_tests {
     #[tokio::test]
     async fn removed_member_releases_reclamation() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
-        append_entry(&storage, &owner, MembershipAction::Remove, &b, 4).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(
+            &storage,
+            &mut chain,
+            &owner,
+            MembershipAction::Remove,
+            &b,
+            4,
+        )
+        .await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
@@ -3944,11 +3956,11 @@ mod reclaim_tests {
     #[tokio::test]
     async fn non_member_ack_is_ignored() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);
@@ -3976,9 +3988,9 @@ mod reclaim_tests {
     #[tokio::test]
     async fn single_device_floor_is_the_snapshot_cursor() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         publish_signed_generation(&storage, 1, [("A", 3)], vec![0u8], &owner).await;
@@ -3994,11 +4006,11 @@ mod reclaim_tests {
     #[tokio::test]
     async fn device_is_excluded_from_its_own_floor() {
         let storage = MockSyncStorage::new();
-        let owner = found_chain(&storage).await;
+        let (owner, mut chain) = found_chain(&storage).await;
         let a = Device::new("A");
         let b = Device::new("B");
-        append_entry(&storage, &owner, MembershipAction::Add, &a, 2).await;
-        append_entry(&storage, &owner, MembershipAction::Add, &b, 3).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
         add_log(&storage, "A", 5).await;
         storage.publish_head_as("A", 5, &a.kp);
         storage.publish_head_as("B", 0, &b.kp);

@@ -10,7 +10,10 @@
 ///
 /// Each entry records an Add or Remove action, signed by a current owner.
 /// The first entry must be a self-signed Add with role Owner.
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::keys::{self, UserKeypair};
 
@@ -55,6 +58,8 @@ pub struct MembershipEntry {
     pub user_pubkey: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_account_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
     pub role: MemberRole,
     pub timestamp: String,
     pub author_pubkey: String,
@@ -72,10 +77,23 @@ pub struct MembershipEntry {
 /// that one object (a keyed GET is strongly consistent, unlike the LIST that
 /// rebuilds the chain each cycle) and resolve the gap deterministically instead
 /// of dropping the changeset as non-member.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MembershipCoord {
     pub author_pubkey: String,
     pub seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipHeadEntry {
+    pub coord: MembershipCoord,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MembershipChainHead {
+    pub entries: Vec<MembershipHeadEntry>,
+    pub author_pubkey: String,
+    pub signature: String,
 }
 
 /// The coordinate of the entry that grants `pubkey` write access: the most
@@ -110,6 +128,18 @@ pub enum MembershipError {
     NotAnOwner(usize),
     #[error("chain is empty")]
     EmptyChain,
+    #[error("entry at index {index} has predecessor hash {actual:?}, expected {expected:?}")]
+    BrokenAuthorLink {
+        index: usize,
+        expected: Option<String>,
+        actual: Option<String>,
+    },
+    #[error("membership head signature is invalid")]
+    InvalidHeadSignature,
+    #[error("membership head signer {0} is not authorized by the chain")]
+    UnauthorizedHead(String),
+    #[error("membership head does not match the listed membership entries")]
+    HeadMismatch,
 }
 
 /// Canonical bytes of the signed fields (everything except `signature`).
@@ -122,6 +152,8 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
         author_pubkey: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_account_email: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prev_hash: Option<&'a str>,
         role: &'a MemberRole,
         timestamp: &'a str,
         user_pubkey: &'a str,
@@ -130,11 +162,18 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
         action: &entry.action,
         author_pubkey: &entry.author_pubkey,
         provider_account_email: entry.provider_account_email.as_deref(),
+        prev_hash: entry.prev_hash.as_deref(),
         role: &entry.role,
         timestamp: &entry.timestamp,
         user_pubkey: &entry.user_pubkey,
     };
     serde_json::to_vec(&signed).expect("entry fields serialize")
+}
+
+pub fn entry_hash(entry: &MembershipEntry) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(entry).expect("membership entry serialization cannot fail"),
+    ))
 }
 
 /// Build the founder entry of a library's membership chain: a self-signed `Add`
@@ -147,6 +186,7 @@ pub fn founder_entry(owner: &UserKeypair, timestamp: &str) -> MembershipEntry {
         action: MembershipAction::Add,
         user_pubkey: pk_hex.clone(),
         provider_account_email: None,
+        prev_hash: None,
         role: MemberRole::Owner,
         timestamp: timestamp.to_string(),
         author_pubkey: pk_hex,
@@ -200,11 +240,11 @@ fn members_has_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct MembershipChain {
     entries: Vec<MembershipEntry>,
+    coords: Vec<Option<MembershipCoord>>,
 }
 
 impl MembershipChain {
     /// Create an empty chain.
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn new() -> Self {
         Self::default()
     }
@@ -213,14 +253,33 @@ impl MembershipChain {
     /// Entries are sorted by timestamp and validated on construction.
     pub fn from_entries(mut entries: Vec<MembershipEntry>) -> Result<Self, MembershipError> {
         entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        let chain = Self { entries };
+        let coords = vec![None; entries.len()];
+        let chain = Self { entries, coords };
         chain.validate()?;
+        Ok(chain)
+    }
+
+    pub fn from_entries_with_coords(
+        mut entries: Vec<(MembershipCoord, MembershipEntry)>,
+    ) -> Result<Self, MembershipError> {
+        entries.sort_by(|(_, a), (_, b)| a.timestamp.cmp(&b.timestamp));
+        let (coords, entries): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .map(|(coord, entry)| (Some(coord), entry))
+            .unzip();
+        let chain = Self { entries, coords };
+        chain.validate()?;
+        chain.validate_author_links()?;
         Ok(chain)
     }
 
     /// Return the entries in the chain.
     pub fn entries(&self) -> &[MembershipEntry] {
         &self.entries
+    }
+
+    pub fn entry_coords(&self) -> impl Iterator<Item = Option<&MembershipCoord>> {
+        self.coords.iter().map(Option::as_ref)
     }
 
     /// The pubkey of the founder (chain entry #1, the self-signed Owner Add), or
@@ -329,14 +388,207 @@ impl MembershipChain {
     /// Validate and append an entry to the chain.
     pub fn add_entry(&mut self, entry: MembershipEntry) -> Result<(), MembershipError> {
         self.entries.push(entry);
+        self.coords.push(None);
         match self.validate() {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.entries.pop();
+                self.coords.pop();
                 Err(e)
             }
         }
     }
+
+    pub fn add_entry_at(
+        &mut self,
+        coord: MembershipCoord,
+        entry: MembershipEntry,
+    ) -> Result<(), MembershipError> {
+        self.entries.push(entry);
+        self.coords.push(Some(coord));
+        match self.validate().and_then(|()| self.validate_author_links()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.entries.pop();
+                self.coords.pop();
+                Err(e)
+            }
+        }
+    }
+
+    pub fn latest_author_hash(&self, author_pubkey: &str) -> Option<String> {
+        let mut latest: Option<(u64, &MembershipEntry)> = None;
+        for (_, coord, entry) in self.entries_with_effective_coords() {
+            if coord.author_pubkey != author_pubkey {
+                continue;
+            };
+            if latest
+                .as_ref()
+                .is_none_or(|(latest_seq, _)| coord.seq > *latest_seq)
+            {
+                latest = Some((coord.seq, entry));
+            }
+        }
+        latest.map(|(_, entry)| entry_hash(entry))
+    }
+
+    pub fn signed_head(&self, signer: &UserKeypair) -> MembershipChainHead {
+        MembershipChainHead::signed(self.latest_entries_by_author(), signer)
+    }
+
+    pub fn verify_head(&self, head: &MembershipChainHead) -> Result<(), MembershipError> {
+        if !head.verify() {
+            return Err(MembershipError::InvalidHeadSignature);
+        }
+
+        if self.latest_entries_by_author() != head.entries {
+            return Err(MembershipError::HeadMismatch);
+        }
+
+        if !self.head_author_is_authorized(&head.author_pubkey) {
+            return Err(MembershipError::UnauthorizedHead(
+                head.author_pubkey.clone(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn latest_entries_by_author(&self) -> Vec<MembershipHeadEntry> {
+        let mut latest: BTreeMap<String, (MembershipCoord, String)> = BTreeMap::new();
+        for (_, coord, entry) in self.entries_with_effective_coords() {
+            let candidate = (coord.clone(), entry_hash(entry));
+            match latest.get(&coord.author_pubkey) {
+                Some((existing, _)) if existing.seq >= coord.seq => {}
+                _ => {
+                    latest.insert(coord.author_pubkey, candidate);
+                }
+            }
+        }
+        latest
+            .into_values()
+            .map(|(coord, hash)| MembershipHeadEntry { coord, hash })
+            .collect()
+    }
+
+    fn entries_with_effective_coords(&self) -> Vec<(usize, MembershipCoord, &MembershipEntry)> {
+        let mut derived_seq = BTreeMap::<String, u64>::new();
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let coord = match self.coords[index].clone() {
+                    Some(coord) => {
+                        let seq = derived_seq.entry(coord.author_pubkey.clone()).or_insert(0);
+                        *seq = (*seq).max(coord.seq);
+                        coord
+                    }
+                    None => {
+                        let seq = derived_seq.entry(entry.author_pubkey.clone()).or_insert(0);
+                        *seq += 1;
+                        MembershipCoord {
+                            author_pubkey: entry.author_pubkey.clone(),
+                            seq: *seq,
+                        }
+                    }
+                };
+                (index, coord, entry)
+            })
+            .collect()
+    }
+
+    fn validate_author_links(&self) -> Result<(), MembershipError> {
+        let mut by_author: BTreeMap<String, Vec<(usize, u64)>> = BTreeMap::new();
+        for (index, coord, _) in self.entries_with_effective_coords() {
+            by_author
+                .entry(coord.author_pubkey)
+                .or_default()
+                .push((index, coord.seq));
+        }
+
+        for entries in by_author.values_mut() {
+            entries.sort_by_key(|(_, seq)| *seq);
+            let mut expected = None;
+            for (index, _) in entries {
+                let entry = &self.entries[*index];
+                if entry.prev_hash != expected {
+                    return Err(MembershipError::BrokenAuthorLink {
+                        index: *index,
+                        expected,
+                        actual: entry.prev_hash.clone(),
+                    });
+                }
+                expected = Some(entry_hash(entry));
+            }
+        }
+        Ok(())
+    }
+
+    fn head_author_is_authorized(&self, author_pubkey: &str) -> bool {
+        if self.is_owner_now(author_pubkey) {
+            return true;
+        }
+
+        let Some(latest_author_coord) = self
+            .coords
+            .iter()
+            .flatten()
+            .filter(|coord| coord.author_pubkey == author_pubkey)
+            .max_by_key(|coord| coord.seq)
+        else {
+            return false;
+        };
+
+        let mut active: Vec<(String, MemberRole)> = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if index == 0 && self.coords[index].as_ref() == Some(latest_author_coord) {
+                return entry.action == MembershipAction::Add
+                    && entry.role == MemberRole::Owner
+                    && entry.author_pubkey == entry.user_pubkey
+                    && entry.author_pubkey == author_pubkey;
+            }
+            if self.coords[index].as_ref() == Some(latest_author_coord) {
+                return members_has_owner(&active, author_pubkey);
+            }
+            apply_active_member_rule(&mut active, entry);
+        }
+
+        false
+    }
+}
+
+impl MembershipChainHead {
+    pub fn signed(entries: Vec<MembershipHeadEntry>, keypair: &UserKeypair) -> Self {
+        let author_pubkey = keys::public_key_hex(keypair);
+        let payload = membership_head_payload(&entries, &author_pubkey);
+        let (_, signature) = keys::sign_hex(keypair, &payload);
+        MembershipChainHead {
+            entries,
+            author_pubkey,
+            signature,
+        }
+    }
+
+    pub fn verify(&self) -> bool {
+        keys::verify_signature_hex(
+            &self.author_pubkey,
+            &self.signature,
+            &membership_head_payload(&self.entries, &self.author_pubkey),
+        )
+    }
+}
+
+fn membership_head_payload(entries: &[MembershipHeadEntry], author_pubkey: &str) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct HeadFields<'a> {
+        entries: &'a [MembershipHeadEntry],
+        author_pubkey: &'a str,
+    }
+    serde_json::to_vec(&HeadFields {
+        entries,
+        author_pubkey,
+    })
+    .expect("membership head fields serialization cannot fail")
 }
 
 #[cfg(test)]
@@ -839,6 +1091,7 @@ mod tests {
             action: MembershipAction::Add,
             user_pubkey: pk_hex.clone(),
             provider_account_email: None,
+            prev_hash: None,
             role: MemberRole::Member,
             timestamp: "0000000001000-0000-dev1".to_string(),
             author_pubkey: pk_hex,
@@ -980,6 +1233,7 @@ mod tests {
             action: MembershipAction::Add,
             user_pubkey: pubkey_hex(&kp),
             provider_account_email: None,
+            prev_hash: None,
             role: MemberRole::Owner,
             timestamp: "0000000001000-0000-dev1".to_string(),
             author_pubkey: pubkey_hex(&kp),
@@ -1005,6 +1259,7 @@ mod tests {
             action: MembershipAction::Add,
             user_pubkey: "bbbb".to_string(),
             provider_account_email: None,
+            prev_hash: None,
             role: MemberRole::Owner,
             timestamp: "0000000001000-0000-dev1".to_string(),
             author_pubkey: "aaaa".to_string(),

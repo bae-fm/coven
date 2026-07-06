@@ -1012,6 +1012,16 @@ impl SyncStorage for CloudSyncStorage {
         Ok(entries)
     }
 
+    async fn put_membership_head(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        let key = format!("membership_head.json{}", self.suffix());
+        self.write_sealed(&key, data).await
+    }
+
+    async fn get_membership_head(&self) -> Result<Vec<u8>, StorageError> {
+        let key = format!("membership_head.json{}", self.suffix());
+        self.read_sealed(&key, "membership head").await
+    }
+
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
         let key = format!("keys/{user_pubkey}{}", self.suffix());
         // Wrapped keys are already sealed boxes; store as-is. The suffix is kept

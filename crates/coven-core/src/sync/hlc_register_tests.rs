@@ -18,13 +18,12 @@ use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
-use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipEntry};
+use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
 use crate::sync::pull::pull_changes;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version.
 const SCHEMA_VERSION: u32 = 1;
-use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
 /// Store a changeset signed by `author` into the mock storage, stamping the
@@ -52,16 +51,6 @@ fn store_signed_changeset(
     envelope::sign_envelope(&mut env, author, changeset_bytes);
     let packed = envelope::pack(&env, changeset_bytes);
     storage.put_changeset_packed(device_id, seq, packed);
-}
-
-async fn upload_chain(storage: &MockSyncStorage, entries: &[MembershipEntry]) {
-    for (i, entry) in entries.iter().enumerate() {
-        let bytes = serde_json::to_vec(entry).expect("serialize entry");
-        storage
-            .put_membership_entry(&entry.author_pubkey, (i + 1) as u64, bytes)
-            .await
-            .expect("put entry");
-    }
 }
 
 /// The causality-under-skew guarantee, driven through the real sync cycle.
@@ -210,29 +199,33 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     // own keypair, the way a real device signs its own head.
     let storage = MockSyncStorage::with_keypair(member.clone());
 
-    let entries = vec![
-        founder_entry(&owner, "0000000001000-0000-owner"),
-        make_entry(
-            &owner,
-            MembershipAction::Add,
-            &member,
-            MemberRole::Member,
-            "0000000002000-0000-owner",
-        ),
-        make_entry(
-            &owner,
-            MembershipAction::Remove,
-            &member,
-            MemberRole::Member,
-            "0000000004000-0000-owner",
-        ),
-    ];
-    let chain = MembershipChain::from_entries(entries.clone()).expect("valid chain");
+    let owner_pk = pubkey_hex(&owner);
+    let mut chain = MembershipChain::new();
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "0000000002000-0000-owner",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+    let remove_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Remove,
+        &member,
+        MemberRole::Member,
+        "0000000004000-0000-owner",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
     assert!(
         !chain.can_write_now(&hex::encode(member.public_key())),
         "removed member must not be a current writer",
     );
-    upload_chain(&storage, &entries).await;
 
     // Member signs a changeset with an in-window envelope timestamp (t=3000).
     let db1 = open_test_db();

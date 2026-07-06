@@ -15,7 +15,7 @@ use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle;
 use crate::sync::envelope;
-use crate::sync::membership::{MemberRole, MembershipAction, MembershipCoord};
+use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::pull::PullError;
 /// The synthetic test db opens with a single migration, so its
@@ -1539,13 +1539,12 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
     // examine — and reject — the unsigned changeset behind it.
     let founder = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(founder.clone());
+    let founder_pk = hex::encode(founder.public_key());
 
     let entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
-    let entry_bytes = serde_json::to_vec(&entry).expect("serialize founder");
-    storage
-        .put_membership_entry(&hex::encode(founder.public_key()), 1, entry_bytes)
-        .await
-        .expect("put founder entry");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &founder_pk, 1, entry).await;
+    publish_membership_chain_head(&storage, &chain, &founder).await;
 
     let db1 = open_test_db();
     let cs = capture_bytes(
@@ -1590,15 +1589,11 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
 
     // The attacker wiped membership/* and refounded themselves as Owner.
     let attacker = UserKeypair::generate();
+    let attacker_pk = hex::encode(attacker.public_key());
     let forged = founder_entry(&attacker, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(
-            &hex::encode(attacker.public_key()),
-            1,
-            serde_json::to_vec(&forged).unwrap(),
-        )
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &attacker_pk, 1, forged).await;
+    publish_membership_chain_head(&storage, &chain, &attacker).await;
 
     // The puller has the real owner pinned (a different key).
     let owner = UserKeypair::generate();
@@ -1665,10 +1660,9 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_library() {
     // A founder entry + a changeset the owner authored: without the fail-closed
     // guard the cycle would (fail to list, drop to chain=None, then) apply this.
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
     let db1 = open_test_db();
     let cs = capture_bytes(
         &db1,
@@ -1720,10 +1714,9 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // The owner authors a signed changeset.
     let db1 = open_test_db();
@@ -1790,21 +1783,18 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
 
     // Founder at (owner, 1); the owner adds the member as a Member at (owner, 2).
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
-    let add_member = make_entry(
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
         &owner,
         MembershipAction::Add,
         &member,
         MemberRole::Member,
         "2026-03-01T00:01:00Z",
     );
-    storage
-        .put_membership_entry(&owner_pk, 2, serde_json::to_vec(&add_member).unwrap())
-        .await
-        .unwrap();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
     // ...but the LIST hasn't caught up to the member's Add yet. A keyed GET of
     // (owner, 2) still resolves it — the eventual-consistency gap issue #84 closes.
     storage.hide_membership_from_listing(&owner_pk, 2);
@@ -1874,10 +1864,9 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // The outsider authors a signed changeset but, lacking any Add of their own,
     // names the founder entry (owner, 1) as their grant. The signature is valid
@@ -1947,10 +1936,9 @@ async fn pull_skips_and_surfaces_a_changeset_with_an_invalid_signature() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // The owner (a current member) authors a changeset that WOULD be authorized,
     // then its signature is corrupted. The signature check must reject it before
@@ -2023,32 +2011,27 @@ async fn pull_skips_a_removed_members_changeset() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
-    let add_member = make_entry(
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
         &owner,
         MembershipAction::Add,
         &member,
         MemberRole::Member,
         "2026-03-01T00:01:00Z",
     );
-    storage
-        .put_membership_entry(&owner_pk, 2, serde_json::to_vec(&add_member).unwrap())
-        .await
-        .unwrap();
-    let remove_member = make_entry(
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+    let remove_member = make_linked_entry(
+        &chain,
         &owner,
         MembershipAction::Remove,
         &member,
         MemberRole::Member,
         "2026-03-01T00:03:00Z",
     );
-    storage
-        .put_membership_entry(&owner_pk, 3, serde_json::to_vec(&remove_member).unwrap())
-        .await
-        .unwrap();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // The removed member authors a changeset stamping their old grant (owner, 2).
     let db1 = open_test_db();
@@ -2155,10 +2138,9 @@ async fn pull_skips_a_head_authored_by_a_non_member() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // dev1 has a changeset in the bucket (its head is published by the mock,
     // signed by the non-member `outsider`).
@@ -2206,10 +2188,9 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     let db1 = open_test_db();
     let cs = capture_bytes(
@@ -2270,21 +2251,18 @@ async fn pull_ignores_min_schema_version_from_a_non_owner() {
 
     // Chain: owner founds, then adds `member` as a Member.
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
-    let add_member = make_entry(
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
         &owner,
         MembershipAction::Add,
         &member,
         MemberRole::Member,
         "2026-03-01T00:01:00Z",
     );
-    storage
-        .put_membership_entry(&owner_pk, 2, serde_json::to_vec(&add_member).unwrap())
-        .await
-        .unwrap();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // A member-signed floor above our version.
     storage
@@ -2325,10 +2303,9 @@ async fn pull_honors_min_schema_version_from_a_current_owner() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    storage
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     storage
         .set_min_schema_version(SCHEMA_VERSION + 1)

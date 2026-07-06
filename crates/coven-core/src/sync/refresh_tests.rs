@@ -28,7 +28,7 @@ use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, Mem
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    bootstrap_chain, make_entry, open_test_db, pubkey_hex, temp_library_dir, MockSyncStorage,
+    bootstrap_chain, make_linked_entry, open_test_db, pubkey_hex, temp_library_dir, MockSyncStorage,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
@@ -58,7 +58,7 @@ impl KeyPersistence for TestKeyPersistence {
 /// Upload `chain`'s entries to the mock storage exactly as the membership ops do
 /// (one object per entry under `membership/{author}/{seq}`), so the device under
 /// test reloads the same chain a real cloud holds.
-async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain) {
+async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain, signer: &UserKeypair) {
     use std::collections::HashMap;
     let mut next: HashMap<String, u64> = HashMap::new();
     for entry in chain.entries() {
@@ -73,6 +73,23 @@ async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain) {
             .await
             .expect("upload membership entry");
     }
+    crate::sync::membership_ops::publish_membership_head(storage, chain, signer)
+        .await
+        .expect("publish membership head");
+}
+
+fn add_linked_entry(
+    chain: &mut MembershipChain,
+    author: &UserKeypair,
+    action: MembershipAction,
+    subject: &UserKeypair,
+    role: MemberRole,
+    timestamp: &str,
+) {
+    let entry = make_linked_entry(chain, author, action, subject, role, timestamp);
+    chain
+        .add_entry(entry)
+        .expect("valid linked membership entry");
 }
 
 /// Run one real sync cycle for `device_id` over an encrypted home, with the mock
@@ -129,25 +146,23 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // Chain: owner founds, adds B and the victim as members.
     let mut chain = bootstrap_chain(&owner);
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &victim,
-            MemberRole::Member,
-            "0000000003000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &victim,
+        MemberRole::Member,
+        "0000000003000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
 
     // The owner wraps the OLD key for B (what B adopted at join), signed by the
     // owner B pins, so B's refresh can authenticate it.
@@ -267,25 +282,23 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
 
     let storage = MockSyncStorage::new();
     let mut chain = bootstrap_chain(&owner);
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &victim,
-            MemberRole::Member,
-            "0000000003000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &victim,
+        MemberRole::Member,
+        "0000000003000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
 
     let activation = MembershipCoord {
         author_pubkey: owner_pk.clone(),
@@ -349,25 +362,23 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 
     let storage = MockSyncStorage::new();
     let mut chain = bootstrap_chain(&owner);
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &victim,
-            MemberRole::Member,
-            "0000000003000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &victim,
+        MemberRole::Member,
+        "0000000003000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
 
     let b_x = device_b.to_x25519_public_key();
     let wrapped_old =
@@ -452,16 +463,15 @@ async fn same_generation_wrapped_key_is_not_adopted() {
 
     let storage = MockSyncStorage::new();
     let mut chain = bootstrap_chain(&owner);
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
 
     let b_x = device_b.to_x25519_public_key();
     let same_generation_replacement = signed_wrapped_key_for_test(
@@ -517,34 +527,31 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
 
     let storage = MockSyncStorage::new();
     let mut chain = bootstrap_chain(&founder);
-    chain
-        .add_entry(make_entry(
-            &founder,
-            MembershipAction::Add,
-            &second_owner,
-            MemberRole::Owner,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &founder,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000003000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &founder,
-            MembershipAction::Add,
-            &victim,
-            MemberRole::Member,
-            "0000000004000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &founder,
+        MembershipAction::Add,
+        &second_owner,
+        MemberRole::Owner,
+        "0000000002000-0000-A",
+    );
+    add_linked_entry(
+        &mut chain,
+        &founder,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000003000-0000-A",
+    );
+    add_linked_entry(
+        &mut chain,
+        &founder,
+        MembershipAction::Add,
+        &victim,
+        MemberRole::Member,
+        "0000000004000-0000-A",
+    );
+    upload_chain(&storage, &chain, &founder).await;
 
     let db_b = open_test_db();
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
@@ -595,34 +602,31 @@ async fn removed_owner_key_is_not_adopted() {
 
     let storage = MockSyncStorage::new();
     let mut chain = bootstrap_chain(&founder);
-    chain
-        .add_entry(make_entry(
-            &founder,
-            MembershipAction::Add,
-            &second_owner,
-            MemberRole::Owner,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &founder,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000003000-0000-A",
-        ))
-        .unwrap();
-    chain
-        .add_entry(make_entry(
-            &second_owner,
-            MembershipAction::Remove,
-            &founder,
-            MemberRole::Owner,
-            "0000000004000-0000-B",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &founder,
+        MembershipAction::Add,
+        &second_owner,
+        MemberRole::Owner,
+        "0000000002000-0000-A",
+    );
+    add_linked_entry(
+        &mut chain,
+        &founder,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000003000-0000-A",
+    );
+    add_linked_entry(
+        &mut chain,
+        &second_owner,
+        MembershipAction::Remove,
+        &founder,
+        MemberRole::Owner,
+        "0000000004000-0000-B",
+    );
+    upload_chain(&storage, &chain, &second_owner).await;
 
     let b_x = device_b.to_x25519_public_key();
     let removed_owner_wrapped = signed_wrapped_key_for_test(
@@ -687,16 +691,15 @@ async fn refresh_rejects_a_forged_wrapped_key() {
 
     // Chain: owner founds + adds B.
     let mut chain = bootstrap_chain(&owner);
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
 
     // The attacker forges B's wrapped key: a key THEY chose, sealed to B's real
     // public key, signed by the attacker (not the owner), in B's slot.
@@ -764,16 +767,15 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
 
     // A real owner-anchored chain exists, but listing it is made to fail this cycle.
     let mut chain = bootstrap_chain(&owner);
-    chain
-        .add_entry(make_entry(
-            &owner,
-            MembershipAction::Add,
-            &device_b,
-            MemberRole::Member,
-            "0000000002000-0000-A",
-        ))
-        .unwrap();
-    upload_chain(&storage, &chain).await;
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
     storage.fail_membership_listing();
 
     let db_b = open_test_db();

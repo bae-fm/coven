@@ -13,6 +13,7 @@ use super::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
     MembershipEntry, MembershipError,
 };
+use super::membership_ops::publish_membership_head;
 use super::signed_control::WrappedLibraryKey;
 use super::storage::{StorageError, SyncStorage};
 
@@ -43,11 +44,26 @@ pub enum InviteError {
 }
 
 /// Determine the next seq for an author's membership entries from a listed key set.
-fn next_membership_seq(entry_keys: &[(String, u64)], author_pubkey_hex: &str) -> u64 {
-    entry_keys
+fn next_membership_seq(
+    entry_keys: &[(String, u64)],
+    chain: &MembershipChain,
+    author_pubkey_hex: &str,
+) -> u64 {
+    let listed_max = entry_keys
         .iter()
         .filter(|(author, _)| author == author_pubkey_hex)
         .map(|(_, seq)| seq)
+        .max()
+        .copied();
+    let chain_max = chain
+        .entry_coords()
+        .filter_map(|coord| coord.filter(|coord| coord.author_pubkey == author_pubkey_hex))
+        .map(|coord| coord.seq)
+        .max();
+
+    listed_max
+        .into_iter()
+        .chain(chain_max)
         .max()
         .map_or(1, |max| max + 1)
 }
@@ -160,16 +176,13 @@ pub(crate) fn signed_wrapped_keyring_for_test(
 /// Upload a signed membership entry to the storage.
 async fn upload_membership_entry(
     storage: &dyn SyncStorage,
-    entry_keys: &[(String, u64)],
+    coord: &MembershipCoord,
     entry: &MembershipEntry,
-    author_pubkey_hex: &str,
 ) -> Result<(), InviteError> {
-    let next_seq = next_membership_seq(entry_keys, author_pubkey_hex);
-
     let entry_bytes =
         serde_json::to_vec(entry).map_err(|e| InviteError::Crypto(format!("serialize: {e}")))?;
     storage
-        .put_membership_entry(author_pubkey_hex, next_seq, entry_bytes)
+        .put_membership_entry(&coord.author_pubkey, coord.seq, entry_bytes)
         .await?;
 
     Ok(())
@@ -241,10 +254,16 @@ pub async fn create_invitation_with_encryption(
     )?;
 
     // Create and sign a membership entry.
+    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
+    let entry_coord = MembershipCoord {
+        author_pubkey: author_pubkey_hex.clone(),
+        seq: next_membership_seq(&entry_keys, chain, &author_pubkey_hex),
+    };
     let mut entry = MembershipEntry {
         action: MembershipAction::Add,
         user_pubkey: invitee_ed25519_pubkey.to_string(),
         provider_account_email: invitee_email.map(str::to_string),
+        prev_hash: chain.latest_author_hash(&author_pubkey_hex),
         role,
         timestamp: timestamp.to_string(),
         author_pubkey: String::new(),
@@ -254,7 +273,7 @@ pub async fn create_invitation_with_encryption(
 
     // Validate against the local chain before any provider or storage mutation.
     let mut validated_chain = chain.clone();
-    validated_chain.add_entry(entry.clone())?;
+    validated_chain.add_entry_at(entry_coord.clone(), entry.clone())?;
 
     let grant = CloudAccessGrant {
         member_pubkey: invitee_ed25519_pubkey.to_string(),
@@ -281,10 +300,7 @@ pub async fn create_invitation_with_encryption(
         return Err(original.into());
     }
 
-    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
-    if let Err(original) =
-        upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await
-    {
+    if let Err(original) = upload_membership_entry(storage, &entry_coord, &entry).await {
         let mut rollback_errors = Vec::new();
         if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await {
             rollback_errors.push(rollback.to_string());
@@ -301,6 +317,9 @@ pub async fn create_invitation_with_encryption(
         }
         return Err(original);
     }
+    publish_membership_head(storage, &validated_chain, owner_keypair)
+        .await
+        .map_err(|e| InviteError::Crypto(format!("publish membership head: {e}")))?;
 
     *chain = validated_chain;
 
@@ -479,13 +498,14 @@ pub async fn revoke_member(
     let author_pubkey_hex = hex::encode(owner_keypair.public_key());
     let remove_coord = MembershipCoord {
         author_pubkey: author_pubkey_hex.clone(),
-        seq: next_membership_seq(&entry_keys, &author_pubkey_hex),
+        seq: next_membership_seq(&entry_keys, chain, &author_pubkey_hex),
     };
     // Create and sign a Remove entry.
     let mut entry = MembershipEntry {
         action: MembershipAction::Remove,
         user_pubkey: revokee_pubkey.to_string(),
         provider_account_email: None,
+        prev_hash: chain.latest_author_hash(&author_pubkey_hex),
         role: MemberRole::Member, // role field is not meaningful for Remove, but required
         timestamp: timestamp.to_string(),
         author_pubkey: String::new(),
@@ -496,7 +516,7 @@ pub async fn revoke_member(
     // Validate against a clone before any storage writes. The caller's chain
     // advances only after the Remove entry is uploaded as the commit point.
     let mut validated_chain = chain.clone();
-    validated_chain.add_entry(entry.clone())?;
+    validated_chain.add_entry_at(remove_coord.clone(), entry.clone())?;
 
     // Generate a new random encryption key.
     let new_key = encryption::generate_random_key();
@@ -524,7 +544,10 @@ pub async fn revoke_member(
     // Delete the revoked member's wrapped key.
     storage.delete_wrapped_key(revokee_pubkey).await?;
 
-    upload_membership_entry(storage, &entry_keys, &entry, &author_pubkey_hex).await?;
+    upload_membership_entry(storage, &remove_coord, &entry).await?;
+    publish_membership_head(storage, &validated_chain, owner_keypair)
+        .await
+        .map_err(|e| InviteError::Crypto(format!("publish membership head: {e}")))?;
     *chain = validated_chain;
 
     Ok(new_keyring)
@@ -947,7 +970,7 @@ mod tests {
     #[tokio::test]
     async fn second_owner_invite_is_unadoptable_by_the_joiner() {
         use crate::sync::membership::MembershipAction;
-        use crate::sync::test_helpers::make_entry;
+        use crate::sync::test_helpers::make_linked_entry;
 
         let founder = gen_keypair();
         let second_owner = gen_keypair();
@@ -959,13 +982,20 @@ mod tests {
         // Chain: founder, then the founder promotes `second_owner` to Owner.
         let mut chain = bootstrap_chain(&founder);
         chain
-            .add_entry(make_entry(
-                &founder,
-                MembershipAction::Add,
-                &second_owner,
-                MemberRole::Owner,
-                "0000000002000-0000-dev1",
-            ))
+            .add_entry_at(
+                MembershipCoord {
+                    author_pubkey: pubkey_hex(&founder),
+                    seq: 2,
+                },
+                make_linked_entry(
+                    &chain,
+                    &founder,
+                    MembershipAction::Add,
+                    &second_owner,
+                    MemberRole::Owner,
+                    "0000000002000-0000-dev1",
+                ),
+            )
             .unwrap();
 
         // The SECOND owner invites the new member. This succeeds — the chain
@@ -1371,7 +1401,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let activation = MembershipCoord {
             author_pubkey: owner_pk.clone(),
-            seq: 2,
+            seq: 3,
         };
         let keyring = EncryptionService::from_key(old_key)
             .with_appended_generation(2, new_key)

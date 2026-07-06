@@ -649,6 +649,12 @@ impl SyncStorage for HostWriteInjector {
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
         self.inner.list_membership_entries().await
     }
+    async fn put_membership_head(&self, data: Vec<u8>) -> Result<(), StorageError> {
+        self.inner.put_membership_head(data).await
+    }
+    async fn get_membership_head(&self) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_membership_head().await
+    }
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
         self.inner.put_wrapped_key(user_pubkey, data).await
     }
@@ -1218,7 +1224,7 @@ async fn cycle_keeps_a_behind_peers_changeset() {
 /// catalog — yet its rows still reach the cloud through the changeset push.
 #[tokio::test]
 async fn member_device_does_not_create_a_snapshot() {
-    use crate::sync::membership::{MemberRole, MembershipAction};
+    use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let storage = MockSyncStorage::new();
@@ -1233,26 +1239,20 @@ async fn member_device_does_not_create_a_snapshot() {
     let member = UserKeypair::generate();
 
     // The owner founds the chain and adds this device as a write-capable Member.
+    let owner_pk = pubkey_hex(&owner);
+    let mut chain = MembershipChain::new();
     let founder = founder_entry(&owner, "0000000001000-0000-owner");
-    storage
-        .put_membership_entry(
-            &pubkey_hex(&owner),
-            1,
-            serde_json::to_vec(&founder).unwrap(),
-        )
-        .await
-        .unwrap();
-    let add = make_entry(
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add = make_linked_entry(
+        &chain,
         &owner,
         MembershipAction::Add,
         &member,
         MemberRole::Member,
         "0000000002000-0000-owner",
     );
-    storage
-        .put_membership_entry(&pubkey_hex(&owner), 2, serde_json::to_vec(&add).unwrap())
-        .await
-        .unwrap();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // This device pins the owner (set on join in production) — an opaque library.
     db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
@@ -1293,6 +1293,7 @@ async fn member_device_does_not_create_a_snapshot() {
 /// library bootstraps from is preserved by the gate's owner branch.
 #[tokio::test]
 async fn owner_device_creates_a_snapshot() {
+    use crate::sync::membership::MembershipChain;
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let storage = MockSyncStorage::new();
@@ -1304,15 +1305,11 @@ async fn owner_device_creates_a_snapshot() {
     let hlc = Hlc::new("M".to_string());
 
     let owner = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let mut chain = MembershipChain::new();
     let founder = founder_entry(&owner, "0000000001000-0000-owner");
-    storage
-        .put_membership_entry(
-            &pubkey_hex(&owner),
-            1,
-            serde_json::to_vec(&founder).unwrap(),
-        )
-        .await
-        .unwrap();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
     db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
         .expect("pin owner");

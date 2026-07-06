@@ -25,7 +25,9 @@ use crate::sync::hlc::Hlc;
 use crate::sync::invite::{create_invitation, unwrap_library_key};
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
-use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
+use crate::sync::test_helpers::{
+    bootstrap_chain, pubkey_hex, publish_membership_chain_head, MockSyncStorage,
+};
 use rusqlite::OptionalExtension;
 
 /// Run the real [`drain_uploads`] with a throwaway HLC, the register coven stamps a
@@ -662,6 +664,13 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     // a `MockSyncStorage` for it and an `InMemoryCloudHome` for content.)
     let cloud = InMemoryCloudHome::new();
     let membership = MockSyncStorage::new();
+    let owner_pk = pubkey_hex(&owner);
+    let founder = chain.entries()[0].clone();
+    membership
+        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
+        .await
+        .unwrap();
+    publish_membership_chain_head(&membership, &chain, &owner).await;
 
     // Device A invites device B: seals the master key to B's pubkey, signs the
     // binding, and records a signed membership entry.
