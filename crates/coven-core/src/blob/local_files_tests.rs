@@ -84,9 +84,15 @@ async fn local_store_blob_survives_an_evict_to_budget_sweep() {
         provenance: Provenance::UserProvided,
         fill: CacheFill::CacheLazy,
     };
-    write_blob(&db, &ld, &cache_blob, &vec![1u8; 4000])
-        .await
-        .expect("write a cache file");
+    write_blob(
+        &db,
+        &ld,
+        &cache_blob.namespace,
+        &cache_blob.id,
+        &vec![1u8; 4000],
+    )
+    .await
+    .expect("write a cache file");
     db.set_cache_budget("audio", 10)
         .await
         .expect("set a tiny budget");

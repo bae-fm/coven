@@ -238,17 +238,18 @@ impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
 pub(crate) async fn write_blob(
     db: &Database,
     library_dir: &LibraryDir,
-    blob: &BlobRef,
+    namespace: &str,
+    id: &str,
     bytes: &[u8],
 ) -> Result<(), BlobCacheError> {
-    let dest = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+    let dest = library_dir.cache_blob_path(namespace, id)?;
     crate::local_blob::write_atomic(&dest, bytes)
         .await
         .map_err(BlobCacheError::Io)?;
     // The write into `cache/<namespace>/` may have pushed that namespace over its
     // budget; evict its oldest files back under it, never the file just written
     // (passed as `protect`). A no-op when the namespace has no budget set.
-    evict_to_budget(db, library_dir, &blob.namespace, Some(&dest)).await?;
+    evict_to_budget(db, library_dir, namespace, Some(&dest)).await?;
     Ok(())
 }
 

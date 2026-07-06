@@ -45,6 +45,20 @@ pub struct SyncResult {
     pub updated_cursors: HashMap<String, u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeferredLocalBlobDisposition {
+    Drop,
+    Cache,
+    Pin,
+}
+
+#[derive(Clone)]
+pub struct DeferredLocalBlobDrop {
+    pub namespace: String,
+    pub id: String,
+    pub disposition: DeferredLocalBlobDisposition,
+}
+
 pub async fn complete_host_provided_make_remotes(
     db: &Database,
     tables: &[SyncedTable],
@@ -57,16 +71,10 @@ pub async fn complete_host_provided_make_remotes(
     for root in roots {
         let mut uploaded = Vec::new();
         for blob in &root.host_blobs {
-            uploaded.push(
-                upload_host_provided_blob(
-                    db,
-                    storage,
-                    library_dir,
-                    blob,
-                    root.intent.retain_pinned,
-                )
-                .await?,
-            );
+            uploaded.push((
+                upload_host_provided_blob(db, storage, library_dir, blob).await?,
+                local_blob_disposition(blob, root.intent.retain_pinned),
+            ));
         }
 
         finish_host_provided_make_remote(db, root.clone(), timestamp.to_string()).await?;
@@ -77,8 +85,10 @@ pub async fn complete_host_provided_make_remotes(
         // Remote/CacheLazy — but it NEVER deletes the user's original on disk.
         // Only host-provided local-store copies, whose bytes coven owns, are
         // dropped below.
-        for uploaded in uploaded {
-            uploaded.drop_local_store(library_dir).await?;
+        for (uploaded, disposition) in uploaded {
+            uploaded
+                .apply_local_store_disposition(db, library_dir, disposition)
+                .await?;
         }
         completed = true;
     }
@@ -92,8 +102,10 @@ pub(super) async fn upload_snapshot_host_blobs(
     blobs: &[BlobRef],
 ) -> Result<(), SyncCycleError> {
     for blob in blobs {
-        let uploaded = upload_host_provided_blob(db, storage, library_dir, blob, false).await?;
-        uploaded.drop_local_store(library_dir).await?;
+        let uploaded = upload_host_provided_blob(db, storage, library_dir, blob).await?;
+        uploaded
+            .apply_local_store_disposition(db, library_dir, local_blob_disposition(blob, false))
+            .await?;
     }
     Ok(())
 }
@@ -159,8 +171,9 @@ pub async fn sync(
     // blob absent from both means its row is not ready to publish — a missing
     // blob would make pullers 404 on it permanently (the seq advances; the row is
     // never a fresh INSERT again) — so the cycle aborts rather than skipping the
-    // upload. After a successful upload the blob is Remote, so its local-store
-    // copy moves into the cache (a cache copy is evictable + re-fetchable).
+    // upload. After a successful upload the outgoing changeset carries the
+    // local-store cleanup that runs only after the changeset is published.
+    let mut deferred_local_blob_drops = Vec::new();
     if let Some(ref cs) = outgoing_cs {
         let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
         let blob_decls = db.blob_decls();
@@ -171,8 +184,7 @@ pub async fn sync(
         for blob in host_blobs {
             let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
             let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
-            let uploaded =
-                upload_host_provided_blob(db, storage, library_dir, &blob, retain_pinned).await?;
+            let uploaded = upload_host_provided_blob(db, storage, library_dir, &blob).await?;
             if let Some(intent) = intent {
                 consumed_intents.insert((intent.root_table.clone(), intent.root_id.clone()));
             }
@@ -186,7 +198,11 @@ pub async fn sync(
             // fetches them. Reached only on a successful upload, so the bytes are
             // durably in the cloud before we touch the local copy. A copy already
             // in the cache (crash-recovery fallback) needs neither.
-            uploaded.drop_local_store(library_dir).await?;
+            if let Some(deferred) =
+                uploaded.deferred_local_blob_drop(local_blob_disposition(&blob, retain_pinned))
+            {
+                deferred_local_blob_drops.push(deferred);
+            }
         }
         if !consumed_intents.is_empty() {
             delete_make_remote_intents(db, consumed_intents).await?;
@@ -221,6 +237,7 @@ pub async fn sync(
         OutgoingChangeset {
             packed,
             seq: next_seq,
+            deferred_local_blob_drops,
         }
     });
 
@@ -288,20 +305,39 @@ struct ReadyHostProvidedMakeRemote {
 
 struct UploadedHostBlob {
     blob: BlobRef,
-    was_in_local_store: bool,
+    cleanup_local_store_after_publish: bool,
 }
 
 impl UploadedHostBlob {
-    async fn drop_local_store(self, library_dir: &LibraryDir) -> Result<(), SyncCycleError> {
-        if self.was_in_local_store {
-            crate::blob::local_files::drop_blob(library_dir, &self.blob.namespace, &self.blob.id)
-                .await
-                .map_err(|e| {
-                    SyncCycleError::AssetUpload(format!(
-                        "make_remote completed but dropping local-store blob {}/{} failed: {e}",
-                        self.blob.namespace, self.blob.id
-                    ))
-                })?;
+    fn deferred_local_blob_drop(
+        self,
+        disposition: DeferredLocalBlobDisposition,
+    ) -> Option<DeferredLocalBlobDrop> {
+        self.cleanup_local_store_after_publish
+            .then_some(DeferredLocalBlobDrop {
+                namespace: self.blob.namespace,
+                id: self.blob.id,
+                disposition,
+            })
+    }
+
+    async fn apply_local_store_disposition(
+        self,
+        db: &Database,
+        library_dir: &LibraryDir,
+        disposition: DeferredLocalBlobDisposition,
+    ) -> Result<(), SyncCycleError> {
+        if self.cleanup_local_store_after_publish {
+            apply_deferred_local_blob_drop(
+                db,
+                library_dir,
+                &DeferredLocalBlobDrop {
+                    namespace: self.blob.namespace,
+                    id: self.blob.id,
+                    disposition,
+                },
+            )
+            .await?;
         }
         Ok(())
     }
@@ -312,8 +348,21 @@ async fn upload_host_provided_blob(
     storage: &dyn SyncStorage,
     library_dir: &LibraryDir,
     blob: &BlobRef,
-    retain_pinned: bool,
 ) -> Result<UploadedHostBlob, SyncCycleError> {
+    let exists = storage
+        .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
+        .await
+        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+    if exists {
+        let local = crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id)
+            .await
+            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        return Ok(UploadedHostBlob {
+            blob: blob.clone(),
+            cleanup_local_store_after_publish: local.is_some(),
+        });
+    }
+
     let local = match crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id).await {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -365,28 +414,62 @@ async fn upload_host_provided_blob(
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
 
-    if retain_pinned {
-        // The host-provided inline push already holds the plaintext in memory
-        // (read from the local store / cache above), so pin it by writing those
-        // bytes into the protected cache folder. The streaming outbox drain pins
-        // from the source path instead (see `cache::populate_pinned`), never
-        // holding the whole blob.
-        let pinned = library_dir
-            .pinned_blob_path(&blob.namespace, &blob.id)
-            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-        crate::local_blob::write_atomic(&pinned, &bytes)
-            .await
-            .map_err(SyncCycleError::AssetUpload)?;
-    } else if was_in_local_store && blob.fill == CacheFill::CacheEager {
-        crate::blob::cache::write_blob(db, library_dir, blob, &bytes)
-            .await
-            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-    }
-
     Ok(UploadedHostBlob {
         blob: blob.clone(),
-        was_in_local_store,
+        cleanup_local_store_after_publish: was_in_local_store,
     })
+}
+
+pub async fn apply_deferred_local_blob_drop(
+    db: &Database,
+    library_dir: &LibraryDir,
+    deferred: &DeferredLocalBlobDrop,
+) -> Result<(), SyncCycleError> {
+    let local = crate::blob::local_files::read(library_dir, &deferred.namespace, &deferred.id)
+        .await
+        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+    match (deferred.disposition, local) {
+        (DeferredLocalBlobDisposition::Pin, Some(bytes)) => {
+            let pinned = library_dir
+                .pinned_blob_path(&deferred.namespace, &deferred.id)
+                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+            crate::local_blob::write_atomic(&pinned, &bytes)
+                .await
+                .map_err(SyncCycleError::AssetUpload)?;
+        }
+        (DeferredLocalBlobDisposition::Cache, Some(bytes)) => {
+            crate::blob::cache::write_blob(
+                db,
+                library_dir,
+                &deferred.namespace,
+                &deferred.id,
+                &bytes,
+            )
+            .await
+            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        }
+        (DeferredLocalBlobDisposition::Drop, _) => {}
+        (DeferredLocalBlobDisposition::Pin | DeferredLocalBlobDisposition::Cache, None) => {
+            return Err(SyncCycleError::AssetUpload(format!(
+                "published blob {}/{} is missing from local store before {:?} cleanup",
+                deferred.namespace, deferred.id, deferred.disposition
+            )));
+        }
+    }
+    crate::blob::local_files::drop_blob(library_dir, &deferred.namespace, &deferred.id)
+        .await
+        .map(|_| ())
+        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))
+}
+
+fn local_blob_disposition(blob: &BlobRef, retain_pinned: bool) -> DeferredLocalBlobDisposition {
+    if retain_pinned {
+        DeferredLocalBlobDisposition::Pin
+    } else if blob.fill == CacheFill::CacheEager {
+        DeferredLocalBlobDisposition::Cache
+    } else {
+        DeferredLocalBlobDisposition::Drop
+    }
 }
 
 async fn ready_host_provided_make_remotes(

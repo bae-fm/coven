@@ -1408,24 +1408,27 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
     local_files::store(&ld1, "covers", "clazy001", b"LAZY-BYTES")
         .await
         .expect("store lazy blob in local store");
-    let outgoing = db1.take_changeset().await.expect("capture outgoing");
-
     let keypair = UserKeypair::generate();
-    service::sync(
-        "dev1",
-        &db1,
-        &test_synced_tables_with_user_and_host_blobs(eager_decl(), lazy_decl()),
-        outgoing,
-        0,
-        &HashMap::new(),
+    let hlc = crate::sync::hlc::Hlc::new("dev1".to_string());
+    let cipher = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [31u8; 32],
+    )));
+    cycle::run_single_sync_cycle(
         &storage,
-        "2026-01-01T00:00:00Z",
-        "",
+        "test-lib",
+        "dev1",
+        &hlc,
+        &crate::clock::SystemClock,
+        &db1,
+        &cipher,
         &keypair,
+        None,
         &ld1,
+        None,
+        None,
     )
     .await
-    .expect("sync");
+    .expect("cycle");
 
     // Both blobs reached the cloud — the inline push uploads regardless of fill.
     assert!(

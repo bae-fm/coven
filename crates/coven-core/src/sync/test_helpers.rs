@@ -470,6 +470,8 @@ pub struct MockSyncStorage {
     /// is built for.
     hidden_from_listing: Mutex<std::collections::HashSet<(String, u64)>>,
     fail_blob_puts: std::sync::atomic::AtomicUsize,
+    blob_put_count: std::sync::atomic::AtomicUsize,
+    fail_blob_put_on: std::sync::atomic::AtomicUsize,
     fail_changeset_puts: std::sync::atomic::AtomicUsize,
     wrapped_key_put_count: std::sync::atomic::AtomicUsize,
     fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize,
@@ -496,6 +498,8 @@ impl MockSyncStorage {
             membership_get_count: std::sync::atomic::AtomicUsize::new(0),
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
             fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
+            blob_put_count: std::sync::atomic::AtomicUsize::new(0),
+            fail_blob_put_on: std::sync::atomic::AtomicUsize::new(0),
             fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
             wrapped_key_put_count: std::sync::atomic::AtomicUsize::new(0),
             fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize::new(0),
@@ -536,6 +540,14 @@ impl MockSyncStorage {
     pub fn fail_next_blob_puts(&self, count: usize) {
         self.fail_blob_puts
             .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn fail_blob_put_on_call(&self, call_number: usize) {
+        assert!(call_number > 0, "blob put call numbers are 1-based");
+        self.blob_put_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.fail_blob_put_on
+            .store(call_number, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn fail_next_changeset_puts(&self, count: usize) {
@@ -755,6 +767,19 @@ impl SyncStorage for MockSyncStorage {
         cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
+        let call_number = self
+            .blob_put_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self
+            .fail_blob_put_on
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == call_number
+        {
+            return Err(StorageError::Storage(format!(
+                "forced blob upload failure for {namespace}/{id}"
+            )));
+        }
         if self
             .fail_blob_puts
             .fetch_update(

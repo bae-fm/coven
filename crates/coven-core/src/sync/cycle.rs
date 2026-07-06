@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 use crate::config::Config;
-use crate::database::Database;
+use crate::database::{Database, DbError};
 use crate::keys::{KeyPersistence, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
@@ -24,6 +24,7 @@ use crate::storage::cloud::CloudHome;
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
 use super::publish_blobs::{ensure_publishable_changeset_blobs, PublishBlobError};
+use super::service::DeferredLocalBlobDisposition;
 use super::storage::SyncStorage;
 
 /// Result of a single sync cycle.
@@ -190,7 +191,164 @@ async fn commit_push_success(
         .await
         .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
     clear_staged_changeset(library_dir).await;
+    drain_published_blob_drop_intents(db, library_dir, seq).await?;
     Ok(())
+}
+
+async fn persist_staged_push_state(
+    db: &Database,
+    seq: u64,
+    deferred_local_blob_drops: &[super::service::DeferredLocalBlobDrop],
+) -> Result<(), String> {
+    let drops = deferred_local_blob_drops.to_vec();
+    db.call(move |conn| {
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        tx.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('staged_seq', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [seq.to_string()],
+        )
+        .map_err(DbError::from)?;
+        for drop in drops {
+            tx.execute(
+                "INSERT INTO published_blob_drop_intents \
+                 (seq, namespace, blob_id, disposition) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(seq, namespace, blob_id) DO UPDATE SET \
+                 disposition = excluded.disposition",
+                rusqlite::params![
+                    seq as i64,
+                    drop.namespace,
+                    drop.id,
+                    disposition_to_db(drop.disposition),
+                ],
+            )
+            .map_err(DbError::from)?;
+        }
+        tx.commit().map_err(DbError::from)
+    })
+    .await
+    .map_err(|e| format!("Failed to persist staged push state: {e}"))
+}
+
+#[derive(Clone)]
+struct PublishedBlobDropIntent {
+    seq: u64,
+    drop: super::service::DeferredLocalBlobDrop,
+}
+
+async fn drain_published_blob_drop_intents(
+    db: &Database,
+    library_dir: &LibraryDir,
+    max_seq: u64,
+) -> Result<(), String> {
+    let intents = load_published_blob_drop_intents(db, max_seq).await?;
+    for intent in intents {
+        match apply_published_blob_drop_intent(db, library_dir, &intent).await {
+            Ok(()) => clear_published_blob_drop_intent(db, &intent).await?,
+            Err(error) => warn!(
+                seq = intent.seq,
+                namespace = %intent.drop.namespace,
+                blob_id = %intent.drop.id,
+                error = %error,
+                "published blob local-store cleanup remains pending"
+            ),
+        }
+    }
+    Ok(())
+}
+
+async fn load_published_blob_drop_intents(
+    db: &Database,
+    max_seq: u64,
+) -> Result<Vec<PublishedBlobDropIntent>, String> {
+    db.call(move |conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, namespace, blob_id, disposition \
+                 FROM published_blob_drop_intents \
+                 WHERE seq <= ?1 \
+                 ORDER BY seq, namespace, blob_id",
+            )
+            .map_err(DbError::from)?;
+        let intents = stmt
+            .query_map([max_seq as i64], |row| {
+                let disposition_raw: String = row.get(3)?;
+                let disposition = disposition_from_db(&disposition_raw).map_err(|message| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            message,
+                        )),
+                    )
+                })?;
+                Ok(PublishedBlobDropIntent {
+                    seq: row.get::<_, i64>(0)? as u64,
+                    drop: super::service::DeferredLocalBlobDrop {
+                        namespace: row.get(1)?,
+                        id: row.get(2)?,
+                        disposition,
+                    },
+                })
+            })
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        Ok(intents)
+    })
+    .await
+    .map_err(|e| format!("Failed to load published blob drop intents: {e}"))
+}
+
+async fn apply_published_blob_drop_intent(
+    db: &Database,
+    library_dir: &LibraryDir,
+    intent: &PublishedBlobDropIntent,
+) -> Result<(), String> {
+    super::service::apply_deferred_local_blob_drop(db, library_dir, &intent.drop)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn clear_published_blob_drop_intent(
+    db: &Database,
+    intent: &PublishedBlobDropIntent,
+) -> Result<(), String> {
+    let seq = intent.seq;
+    let namespace = intent.drop.namespace.clone();
+    let id = intent.drop.id.clone();
+    db.call(move |conn| {
+        conn.execute(
+            "DELETE FROM published_blob_drop_intents \
+             WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3",
+            rusqlite::params![seq as i64, namespace, id],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .map_err(|e| format!("Failed to clear published blob drop intent: {e}"))
+}
+
+fn disposition_to_db(disposition: DeferredLocalBlobDisposition) -> &'static str {
+    match disposition {
+        DeferredLocalBlobDisposition::Drop => "drop",
+        DeferredLocalBlobDisposition::Cache => "cache",
+        DeferredLocalBlobDisposition::Pin => "pin",
+    }
+}
+
+fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String> {
+    match raw {
+        "drop" => Ok(DeferredLocalBlobDisposition::Drop),
+        "cache" => Ok(DeferredLocalBlobDisposition::Cache),
+        "pin" => Ok(DeferredLocalBlobDisposition::Pin),
+        other => Err(format!(
+            "unknown disposition in published blob drop intent: {other}"
+        )),
+    }
 }
 
 /// Run a single sync cycle: capture + gate + push, pull, bookkeeping, snapshot.
@@ -254,6 +412,7 @@ pub async fn run_single_sync_cycle(
         .filter(|value| !value.is_empty())
         .map(|value| parse_sync_state("staged_seq", &value))
         .transpose()?;
+    drain_published_blob_drop_intents(db, library_dir, local_seq).await?;
 
     // A snapshot bootstrap that could not land every blob it references records a
     // pending flag (an empty/absent value means caught up). While it is set, the
@@ -414,9 +573,7 @@ pub async fn run_single_sync_cycle(
         crate::local_blob::write_atomic(&staging_path(library_dir), &outgoing.packed)
             .await
             .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
-        db.set_sync_state("staged_seq", &seq.to_string())
-            .await
-            .map_err(|e| format!("Failed to persist staged_seq before push: {e}"))?;
+        persist_staged_push_state(db, seq, &outgoing.deferred_local_blob_drops).await?;
         clear_staged_captured_changeset(library_dir)
             .await
             .map_err(|e| format!("Failed to clear staged captured changeset: {e}"))?;

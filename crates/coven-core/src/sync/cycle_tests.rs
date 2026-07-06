@@ -826,6 +826,10 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         [8u8; 32],
     )));
     let storage = MockSyncStorage::new();
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -894,6 +898,202 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     assert!(
         storage.exists("photos/hponly").await.expect("exists check"),
         "the retried captured changeset uploads the host-provided blob"
+    );
+}
+
+#[tokio::test]
+async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_failed() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [18u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheLazy,
+    ));
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('firstblob', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01'); \
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('secondblob', 'n1', 'cover', '0000000001001-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "firstblob", b"first")
+        .await
+        .expect("store first host-provided blob");
+    crate::blob::local_files::store(&ld, "photos", "secondblob", b"second")
+        .await
+        .expect("store second host-provided blob");
+
+    storage.fail_blob_put_on_call(2);
+    let failed = match run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(_) => panic!("second blob upload should fail before publish"),
+        Err(error) => error,
+    };
+    assert!(
+        failed.contains("forced blob upload failure for photos/secondblob"),
+        "cycle surfaces the second blob upload failure: {failed}"
+    );
+    assert!(
+        storage
+            .exists("photos/firstblob")
+            .await
+            .expect("exists check"),
+        "the first blob reached cloud before the second upload failed"
+    );
+    assert!(
+        crate::blob::local_files::read(&ld, "photos", "firstblob")
+            .await
+            .expect("read first local")
+            .is_some(),
+        "the first local copy remains because the changeset was not published"
+    );
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        storage.get_changeset("M", 1).await.is_ok(),
+        "the retry publishes instead of wedging on the first blob's missing local copy"
+    );
+}
+
+#[tokio::test]
+async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [19u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheLazy,
+    ));
+    storage
+        .put_blob(
+            "photos",
+            "remoteonly",
+            crate::blob::ResolvedScope::Master,
+            None,
+            b"already durable".to_vec(),
+        )
+        .await
+        .expect("plant remote blob");
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('remoteonly', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+
+    storage.fail_next_blob_puts(1);
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        storage.get_changeset("M", 1).await.is_ok(),
+        "an already-durable cloud blob publishes without reading a local copy"
+    );
+}
+
+#[tokio::test]
+async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [20u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheLazy,
+    ));
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('lazyblob', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "lazyblob", b"lazy")
+        .await
+        .expect("store cache-lazy host-provided blob");
+
+    storage.fail_next_changeset_puts(1);
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        storage.get_changeset("M", 1).await.is_err(),
+        "the first push attempt did not publish the changeset"
+    );
+    assert!(
+        crate::blob::local_files::read(&ld, "photos", "lazyblob")
+            .await
+            .expect("read lazy local")
+            .is_some(),
+        "the local copy remains until the changeset is published"
+    );
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        storage.get_changeset("M", 1).await.is_ok(),
+        "the staged retry publishes the changeset"
+    );
+    assert!(
+        crate::blob::local_files::read(&ld, "photos", "lazyblob")
+            .await
+            .expect("read lazy local after publish")
+            .is_none(),
+        "the local copy drops after the staged retry commits"
     );
 }
 

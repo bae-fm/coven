@@ -406,7 +406,7 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     let bytes = b"CACHED-BYTES".to_vec();
 
     // Write the bytes into the cache.
-    write_blob(&db, &ld, &blob, &bytes)
+    write_blob(&db, &ld, &blob.namespace, &blob.id, &bytes)
         .await
         .expect("write_blob writes into the cache");
     assert!(
@@ -873,7 +873,7 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
     plant_blob_row(&db, &blob.id, false).await;
 
     // Decoys at the other on-device stores — both must be ignored.
-    write_blob(&db, &ld, &blob, b"OWNED-CACHE-BYTES")
+    write_blob(&db, &ld, &blob.namespace, &blob.id, b"OWNED-CACHE-BYTES")
         .await
         .expect("write a same-id cache decoy");
     crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, b"STALE-LOCAL-STORE")
@@ -929,7 +929,7 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
 
     // Decoys at every other store — all must be ignored.
     put_cloud_blob(&storage, &blob.id, &blob.namespace, b"FROM-CLOUD").await;
-    write_blob(&db, &ld, &blob, b"FROM-CACHE")
+    write_blob(&db, &ld, &blob.namespace, &blob.id, b"FROM-CACHE")
         .await
         .expect("write a same-id cache decoy");
     let ext_bytes = b"FROM-EXTERNAL".to_vec();
@@ -1377,7 +1377,7 @@ async fn stage_with_mtime(
     mtime_secs: u64,
 ) {
     let blob = blob_ref(id, namespace, CacheFill::CacheLazy);
-    write_blob(db, ld, &blob, bytes)
+    write_blob(db, ld, &blob.namespace, &blob.id, bytes)
         .await
         .expect("stage blob into cache");
     set_cache_mtime(ld, namespace, id, mtime_secs);
@@ -1591,7 +1591,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
 
     // Also user-pin a CacheLazy blob (a different namespace) into pinned/.
     let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
-    write_blob(&db2, &ld, &lazy, &[7u8; 500])
+    write_blob(&db2, &ld, &lazy.namespace, &lazy.id, &[7u8; 500])
         .await
         .expect("write the lazy blob into the cache");
     pin(&db2, &ld, Some(&storage), std::slice::from_ref(&lazy))

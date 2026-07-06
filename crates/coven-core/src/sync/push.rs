@@ -15,4 +15,7 @@ pub struct OutgoingChangeset {
     pub packed: Vec<u8>,
     /// The sequence number for this changeset.
     pub seq: u64,
+    /// Local-store blob cleanup that must wait until this changeset is durably
+    /// published.
+    pub deferred_local_blob_drops: Vec<super::service::DeferredLocalBlobDrop>,
 }
