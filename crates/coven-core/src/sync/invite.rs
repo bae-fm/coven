@@ -76,7 +76,8 @@ fn ed25519_hex_to_x25519(
         .map_err(|e| InviteError::Crypto(format!("invalid pubkey hex: {e}")))?
         .try_into()
         .map_err(|_| InviteError::Crypto("pubkey wrong length".to_string()))?;
-    Ok(keys::ed25519_to_x25519_public_key(&pk_bytes))
+    keys::ed25519_to_x25519_public_key(&pk_bytes)
+        .map_err(|e| InviteError::Crypto(format!("invalid pubkey: {e}")))
 }
 
 /// Seal the library key to one member and wrap it in an owner-signed
@@ -528,8 +529,13 @@ pub async fn revoke_member(
     // Re-wrap the new key to all remaining members, each signed so a joiner that
     // later adopts it can authenticate the signer against the current Owner set.
     let remaining_members = validated_chain.current_members();
-    for (member_pubkey, _) in &remaining_members {
-        let x25519_pk = ed25519_hex_to_x25519(member_pubkey)?;
+    let remaining_member_keys = remaining_members
+        .iter()
+        .map(|(member_pubkey, _)| {
+            ed25519_hex_to_x25519(member_pubkey).map(|x25519_pk| (member_pubkey, x25519_pk))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (member_pubkey, x25519_pk) in remaining_member_keys {
         let wrapped = signed_wrapped_key_with_activation(
             library_id,
             member_pubkey,
@@ -1111,6 +1117,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_invitation_off_curve_pubkey_errors() {
+        let owner = gen_keypair();
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+        let encryption_key: [u8; 32] = [0u8; 32];
+        let off_curve_pubkey = "0200000000000000000000000000000000000000000000000000000000000000";
+
+        let result = create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            off_curve_pubkey,
+            None,
+            MemberRole::Member,
+            &encryption_key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+
+        assert!(matches!(result, Err(InviteError::Crypto(_))));
+    }
+
+    #[tokio::test]
     async fn create_invitation_non_owner_fails() {
         let owner = gen_keypair();
         let member = gen_keypair();
@@ -1498,6 +1530,93 @@ mod tests {
         assert!(
             storage.get_wrapped_key(&pubkey_hex(&revokee)).await.is_ok(),
             "the revokee key is deleted only after remaining members are re-wrapped",
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_member_validates_remaining_pubkeys_before_rewrap() {
+        let owner = gen_keypair();
+        let revokee = gen_keypair();
+        let remaining = gen_keypair();
+        let old_key: [u8; 32] = [16u8; 32];
+        let off_curve_pubkey = "0200000000000000000000000000000000000000000000000000000000000000";
+
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &revokee,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &remaining,
+            &old_key,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+        let remaining_key_before = storage
+            .get_wrapped_key(&pubkey_hex(&remaining))
+            .await
+            .unwrap();
+
+        let owner_pk = pubkey_hex(&owner);
+        let coord = MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: next_membership_seq(
+                &storage.list_membership_entries().await.unwrap(),
+                &chain,
+                &owner_pk,
+            ),
+        };
+        let mut invalid_entry = MembershipEntry {
+            action: MembershipAction::Add,
+            user_pubkey: off_curve_pubkey.to_string(),
+            provider_account_email: None,
+            prev_hash: chain.latest_author_hash(&owner_pk),
+            role: MemberRole::Member,
+            timestamp: "0000000004000-0000-dev1".to_string(),
+            author_pubkey: String::new(),
+            signature: String::new(),
+        };
+        sign_membership_entry(&mut invalid_entry, &owner);
+        chain.add_entry_at(coord, invalid_entry).unwrap();
+
+        let result = revoke_member(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&revokee),
+            LIB_ID,
+            "0000000005000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await;
+
+        assert!(matches!(result, Err(InviteError::Crypto(_))));
+        assert_eq!(
+            storage
+                .get_wrapped_key(&pubkey_hex(&remaining))
+                .await
+                .unwrap(),
+            remaining_key_before,
+            "valid remaining member key is not overwritten before corrupt member key fails"
+        );
+        assert!(
+            chain
+                .current_members()
+                .iter()
+                .any(|(pk, _)| pk == &pubkey_hex(&revokee)),
+            "the caller's chain must not advance before all remaining pubkeys validate",
         );
     }
 

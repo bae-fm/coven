@@ -165,10 +165,10 @@ pub fn seal_box_decrypt(
 /// handle the local case; this handles the remote case.
 pub fn ed25519_to_x25519_public_key(
     ed25519_pk: &[u8; SIGN_PUBLICKEYBYTES],
-) -> [u8; CURVE25519_PUBLICKEYBYTES] {
+) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
     let vk = ed25519_dalek::VerifyingKey::from_bytes(ed25519_pk)
-        .expect("valid Ed25519 public key bytes");
-    vk.to_montgomery().to_bytes()
+        .map_err(|_| KeyError::Crypto("invalid Ed25519 public key point".to_string()))?;
+    Ok(vk.to_montgomery().to_bytes())
 }
 
 pub trait KeyPersistence {
@@ -262,12 +262,27 @@ mod tests {
         let kp = UserKeypair::generate();
         let x_sk = kp.to_x25519_secret_key();
         let x_pk = kp.to_x25519_public_key();
+        let converted = ed25519_to_x25519_public_key(&kp.public_key()).unwrap();
 
         // Should produce non-zero 32-byte keys
         assert_eq!(x_sk.len(), 32);
         assert_eq!(x_pk.len(), 32);
         assert!(x_sk.iter().any(|&b| b != 0));
         assert!(x_pk.iter().any(|&b| b != 0));
+        assert_eq!(converted, x_pk);
+    }
+
+    #[test]
+    fn ed25519_to_x25519_rejects_off_curve_bytes() {
+        let mut bytes = [0u8; SIGN_PUBLICKEYBYTES];
+        bytes[0] = 2;
+
+        let error = ed25519_to_x25519_public_key(&bytes).expect_err("invalid point fails");
+
+        assert!(matches!(error, KeyError::Crypto(_)));
+        assert!(error
+            .to_string()
+            .contains("invalid Ed25519 public key point"));
     }
 
     #[test]
