@@ -371,6 +371,33 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     );
 }
 
+#[tokio::test]
+async fn pin_downloads_remote_blob_straight_to_pinned_file() {
+    let db = read_test_db("audio");
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("pin0aaaa", "audio", CacheFill::CacheLazy);
+    let bytes: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+    plant_blob_row(&db, &blob.id, true, bytes.len() as u64).await;
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &bytes).await;
+
+    pin(&db, &ld, Some(&storage), std::slice::from_ref(&blob))
+        .await
+        .expect("pin downloads remote blob");
+
+    assert_eq!(
+        storage.blob_read_to_file_count(),
+        1,
+        "pin writes a cache miss through the file download path",
+    );
+    assert_eq!(
+        std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+        bytes,
+        "pin writes the remote bytes into the pinned file",
+    );
+}
+
 /// A CacheLazy blob is NOT downloaded on pull (no file in either folder afterward),
 /// and a later read fetches it into the cache on first access.
 #[tokio::test]

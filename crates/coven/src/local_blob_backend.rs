@@ -129,6 +129,71 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         Ok(())
     }
 
+    async fn write_stream_atomic(
+        &self,
+        path: &Path,
+        source: &mut dyn PlatformPlaintextReader,
+    ) -> Result<u64, String> {
+        use tokio::io::AsyncWriteExt;
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
+        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+
+        let write_tmp = async {
+            let mut file = tokio::fs::File::create(&tmp)
+                .await
+                .map_err(|e| format!("create temp blob {}: {e}", tmp.display()))?;
+            let mut written = 0u64;
+            loop {
+                let chunk = source.next_chunk(1 << 20).await?;
+                if chunk.is_empty() {
+                    break;
+                }
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|e| format!("write temp blob {}: {e}", tmp.display()))?;
+                written += chunk.len() as u64;
+            }
+            file.sync_all()
+                .await
+                .map_err(|e| format!("fsync temp blob {}: {e}", tmp.display()))?;
+            Ok::<u64, String>(written)
+        }
+        .await;
+        let written = match write_tmp {
+            Ok(written) => written,
+            Err(e) => {
+                if let Err(rm) = tokio::fs::remove_file(&tmp).await {
+                    tracing::warn!(
+                        "could not remove temp blob {} after a failed streamed write: {rm}",
+                        tmp.display()
+                    );
+                }
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = tokio::fs::rename(&tmp, path).await {
+            if let Err(rm) = tokio::fs::remove_file(&tmp).await {
+                tracing::warn!(
+                    "could not remove temp blob {} after a failed streamed rename: {rm}",
+                    tmp.display()
+                );
+            }
+            return Err(format!(
+                "rename temp blob {} -> {}: {e}",
+                tmp.display(),
+                path.display()
+            ));
+        }
+        Ok(written)
+    }
+
     async fn read(&self, path: &Path) -> Result<Vec<u8>, String> {
         tokio::fs::read(path)
             .await

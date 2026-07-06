@@ -360,10 +360,14 @@ async fn upload_host_provided_blob(
         .await
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     if exists {
-        let local =
-            crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id, expected_size)
-                .await
-                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        let local = crate::blob::local_files::path_if_present(
+            library_dir,
+            &blob.namespace,
+            &blob.id,
+            expected_size,
+        )
+        .await
+        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
         return Ok(UploadedHostBlob {
             blob: blob.clone(),
             expected_size,
@@ -371,22 +375,26 @@ async fn upload_host_provided_blob(
         });
     }
 
-    let local =
-        match crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id, expected_size)
-            .await
-        {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return Err(SyncCycleError::AssetUpload(format!(
-                    "reading local-store blob for {}: {e}",
-                    blob.id
-                )));
-            }
-        };
+    let local = match crate::blob::local_files::path_if_present(
+        library_dir,
+        &blob.namespace,
+        &blob.id,
+        expected_size,
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(e) => {
+            return Err(SyncCycleError::AssetUpload(format!(
+                "reading local-store blob for {}: {e}",
+                blob.id
+            )));
+        }
+    };
     let was_in_local_store = local.is_some();
-    let bytes = match local {
-        Some(bytes) => bytes,
-        None => match crate::blob::cache::read_staged(
+    let source_path = match local {
+        Some(path) => path,
+        None => match crate::blob::cache::staged_path(
             library_dir,
             &blob.namespace,
             &blob.id,
@@ -394,7 +402,7 @@ async fn upload_host_provided_blob(
         )
         .await
         {
-            Ok(Some(bytes)) => bytes,
+            Ok(Some(path)) => path,
             Ok(None) => {
                 error!(
                     id = %blob.id,
@@ -420,12 +428,12 @@ async fn upload_host_provided_blob(
         .await
         .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
     storage
-        .put_blob(
+        .put_blob_from_file(
             &blob.namespace,
             &blob.id,
             resolved,
             blob.cloud_path.as_deref(),
-            bytes.clone(),
+            &source_path,
         )
         .await
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
@@ -462,7 +470,7 @@ pub async fn apply_deferred_local_blob_drop(
     library_dir: &LibraryDir,
     deferred: &DeferredLocalBlobDrop,
 ) -> Result<(), SyncCycleError> {
-    let local = crate::blob::local_files::read(
+    let local = crate::blob::local_files::path_if_present(
         library_dir,
         &deferred.namespace,
         &deferred.id,
@@ -471,21 +479,21 @@ pub async fn apply_deferred_local_blob_drop(
     .await
     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     match (deferred.disposition, local) {
-        (DeferredLocalBlobDisposition::Pin, Some(bytes)) => {
+        (DeferredLocalBlobDisposition::Pin, Some(source)) => {
             let pinned = library_dir
                 .pinned_blob_path(&deferred.namespace, &deferred.id)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-            crate::local_blob::write_atomic(&pinned, &bytes)
+            crate::local_blob::copy_atomic(&source, &pinned)
                 .await
                 .map_err(SyncCycleError::AssetUpload)?;
         }
-        (DeferredLocalBlobDisposition::Cache, Some(bytes)) => {
-            crate::blob::cache::write_blob(
+        (DeferredLocalBlobDisposition::Cache, Some(source)) => {
+            crate::blob::cache::write_blob_from_file(
                 db,
                 library_dir,
                 &deferred.namespace,
                 &deferred.id,
-                &bytes,
+                &source,
             )
             .await
             .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;

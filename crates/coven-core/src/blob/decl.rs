@@ -40,8 +40,12 @@ pub enum BlobDeclError {
     MissingColumn { table: String, column: String },
     /// A schema read (`PRAGMA table_info`) failed.
     Sqlite(rusqlite::Error),
+    /// A row's declared size column is not an integer.
+    InvalidSizeValue { table: String, value: String },
     /// A row's declared size column is negative.
     InvalidSize { table: String, value: i64 },
+    /// New and old changeset walks produced different row counts.
+    ChangesetWalkMismatch { old_count: usize, new_count: usize },
     /// Walking the gate's FK graph for [`BlobDecls::refs_for_root`] failed.
     Gate(String),
 }
@@ -56,9 +60,22 @@ impl std::fmt::Display for BlobDeclError {
                 )
             }
             BlobDeclError::Sqlite(e) => write!(f, "blob declaration schema read failed: {e}"),
+            BlobDeclError::InvalidSizeValue { table, value } => {
+                write!(
+                    f,
+                    "blob declaration found non-integer size in {table}: {value:?}"
+                )
+            }
             BlobDeclError::InvalidSize { table, value } => {
                 write!(f, "blob declaration found invalid size in {table}: {value}")
             }
+            BlobDeclError::ChangesetWalkMismatch {
+                old_count,
+                new_count,
+            } => write!(
+                f,
+                "blob declaration changeset walk mismatch: old={old_count}, new={new_count}"
+            ),
             BlobDeclError::Gate(e) => write!(f, "blob declaration FK walk failed: {e}"),
         }
     }
@@ -80,6 +97,8 @@ struct TableBlob {
     fill: CacheFill,
     /// Index of the blob-id column.
     id_col: usize,
+    /// Index of the plaintext-size column.
+    size_col: usize,
     /// Name of the blob-id column. The index reads a row top-to-bottom; the name
     /// keys a lookup the other way ([`BlobDecls::row_for_blob_in_namespace`]: which row
     /// carries a given blob id), so both directions resolve off the same declaration.
@@ -117,6 +136,49 @@ impl TableBlob {
             provenance: self.provenance,
             fill: self.fill,
         }
+    }
+
+    fn ref_from_change(&self, change: &RowChange) -> Result<Option<BlobRef>, BlobDeclError> {
+        let Some(id) = change.col(self.id_col).map(str::to_string) else {
+            return Ok(None);
+        };
+        let cloud_path = self
+            .cloud_path_col
+            .and_then(|i| change.col(i))
+            .map(str::to_string);
+        let scope = match &self.scope {
+            ResolvedScopeSpec::Master => BlobScope::Master,
+            ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
+            ResolvedScopeSpec::ItemColumn(i) => {
+                let Some(item) = change.col(*i) else {
+                    return Ok(None);
+                };
+                BlobScope::Item(item.to_string())
+            }
+        };
+        Ok(Some(self.blob_ref(id, scope, cloud_path)))
+    }
+
+    fn size_from_change(
+        &self,
+        table: &str,
+        change: &RowChange,
+    ) -> Result<Option<u64>, BlobDeclError> {
+        let Some(raw) = change.col(self.size_col) else {
+            return Ok(None);
+        };
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| BlobDeclError::InvalidSizeValue {
+                table: table.to_string(),
+                value: raw.to_string(),
+            })?;
+        Ok(Some(u64::try_from(value).map_err(|_| {
+            BlobDeclError::InvalidSize {
+                table: table.to_string(),
+                value,
+            }
+        })?))
     }
 
     /// Build the [`BlobRef`] for a live `SELECT *` row of this table, or `None` when
@@ -191,7 +253,7 @@ impl BlobDecls {
             };
 
             let id_col = index_of(&decl.id_column)?;
-            index_of(&decl.size_column)?;
+            let size_col = index_of(&decl.size_column)?;
             let cloud_path_col = match &decl.cloud_path_column {
                 Some(c) => Some(index_of(c)?),
                 None => None,
@@ -209,6 +271,7 @@ impl BlobDecls {
                     provenance: decl.provenance,
                     fill: decl.fill,
                     id_col,
+                    size_col,
                     id_col_name: decl.id_column.clone(),
                     size_col_name: decl.size_column.clone(),
                     cloud_path_col,
@@ -228,24 +291,26 @@ impl BlobDecls {
         let Some(tb) = self.tables.get(&change.table) else {
             return Ok(None);
         };
-        let Some(id) = change.col(tb.id_col).map(str::to_string) else {
+        tb.ref_from_change(change)
+    }
+
+    /// The blob a changeset row references plus the row's declared plaintext size
+    /// when that size is present in the changeset row.
+    /// Used by eager pull before the row is applied, so the downloader can stream
+    /// the cloud object into the cache and verify the exact length without querying
+    /// DB state that does not exist locally yet.
+    pub fn ref_and_size_from_change(
+        &self,
+        change: &RowChange,
+    ) -> Result<Option<(BlobRef, Option<u64>)>, BlobDeclError> {
+        let Some(tb) = self.tables.get(&change.table) else {
             return Ok(None);
         };
-        let cloud_path = tb
-            .cloud_path_col
-            .and_then(|i| change.col(i))
-            .map(str::to_string);
-        let scope = match &tb.scope {
-            ResolvedScopeSpec::Master => BlobScope::Master,
-            ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
-            ResolvedScopeSpec::ItemColumn(i) => {
-                let Some(item) = change.col(*i) else {
-                    return Ok(None);
-                };
-                BlobScope::Item(item.to_string())
-            }
+        let Some(blob) = tb.ref_from_change(change)? else {
+            return Ok(None);
         };
-        Ok(Some(tb.blob_ref(id, scope, cloud_path)))
+        let size = tb.size_from_change(&change.table, change)?;
+        Ok(Some((blob, size)))
     }
 
     /// Every blob the rows currently in `conn` reference — the snapshot-bootstrap

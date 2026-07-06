@@ -236,6 +236,7 @@ impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
 /// passed as `protect`, so it is excluded from eviction — this write can never drop
 /// the very bytes it produced. An eviction failure is returned to the caller instead
 /// of reporting a budgeted write as complete while the cache could not be trimmed.
+#[cfg(test)]
 pub(crate) async fn write_blob(
     db: &Database,
     library_dir: &LibraryDir,
@@ -250,6 +251,24 @@ pub(crate) async fn write_blob(
     // The write into `cache/<namespace>/` may have pushed that namespace over its
     // budget; evict its oldest files back under it, never the file just written
     // (passed as `protect`). A no-op when the namespace has no budget set.
+    evict_to_budget(db, library_dir, namespace, Some(&dest)).await?;
+    Ok(())
+}
+
+/// Copy a Remote blob's plaintext source file into the evictable cache without
+/// holding the whole blob in memory. Uses the same cache placement and eviction
+/// contract as the byte-slice cache writer used by tests.
+pub(crate) async fn write_blob_from_file(
+    db: &Database,
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+    src_path: &std::path::Path,
+) -> Result<(), BlobCacheError> {
+    let dest = library_dir.cache_blob_path(namespace, id)?;
+    crate::local_blob::copy_atomic(src_path, &dest)
+        .await
+        .map_err(BlobCacheError::Io)?;
     evict_to_budget(db, library_dir, namespace, Some(&dest)).await?;
     Ok(())
 }
@@ -301,6 +320,21 @@ pub async fn read_staged(
     expected_size: u64,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
     read_cached_blob(library_dir, namespace, id, expected_size).await
+}
+
+/// Return the cached plaintext file path for a Remote blob when either cache
+/// folder has a copy with exactly `expected_size` bytes.
+pub(crate) async fn staged_path(
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+    expected_size: u64,
+) -> Result<Option<std::path::PathBuf>, BlobCacheError> {
+    Ok(
+        cached_blob_path_with_size(library_dir, namespace, id, expected_size)
+            .await?
+            .map(CachedBlobPath::into_path),
+    )
 }
 
 /// Drop a Remote blob's cache copy from BOTH folders (`pinned/<id>` and
@@ -628,6 +662,59 @@ async fn read_remote_range(
     fetch_range_from_cloud(db, storage, blob, source_size, offset, len).await
 }
 
+/// Materialize a Remote blob's whole plaintext into `dest` without holding the
+/// blob in memory. Uses an existing local plaintext file when present
+/// (`pinned/`, `cache/`, or host-provided upload staging), otherwise streams the
+/// cloud object through [`SyncStorage::read_blob_to_file`]. Returns the verified
+/// plaintext length written.
+pub(crate) async fn materialize_remote_blob_to_file(
+    db: &Database,
+    library_dir: &LibraryDir,
+    storage: Option<&dyn SyncStorage>,
+    blob: &BlobRef,
+    dest: &std::path::Path,
+) -> Result<u64, BlobCacheError> {
+    let expected_size = expected_blob_size(db, blob).await?;
+    if let Some(hit) =
+        cached_blob_path_with_size(library_dir, &blob.namespace, &blob.id, expected_size).await?
+    {
+        crate::local_blob::copy_atomic(hit.path(), dest)
+            .await
+            .map_err(BlobCacheError::Io)?;
+        return Ok(expected_size);
+    }
+
+    if blob.provenance == Provenance::HostProvided {
+        if let Some(path) = crate::blob::local_files::path_if_present(
+            library_dir,
+            &blob.namespace,
+            &blob.id,
+            expected_size,
+        )
+        .await?
+        {
+            crate::local_blob::copy_atomic(&path, dest)
+                .await
+                .map_err(BlobCacheError::Io)?;
+            return Ok(expected_size);
+        }
+    }
+
+    let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
+    let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    storage
+        .read_blob_to_file(
+            &blob.namespace,
+            &blob.id,
+            resolved,
+            blob.cloud_path.as_deref(),
+            expected_size,
+            dest,
+        )
+        .await?;
+    Ok(expected_size)
+}
+
 /// Ensure a blob is local AND protected: present in `storage/pinned/<id>`, exempt
 /// from the evictable cache. A pin POPULATES — if the blob isn't cached it is
 /// fetched first — so it is not a flag flip. Idempotent.
@@ -672,11 +759,7 @@ pub async fn pin(
 
         // In neither folder — fetch from the cloud straight into `pinned/`. A
         // home-less library has no storage to fetch a Remote blob from; surface it.
-        let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
-        let bytes = fetch_from_cloud(db, storage, blob).await?;
-        crate::local_blob::write_atomic(&pinned, &bytes)
-            .await
-            .map_err(BlobCacheError::Io)?;
+        materialize_remote_blob_to_file(db, library_dir, storage, blob, &pinned).await?;
     }
     Ok(())
 }
@@ -947,6 +1030,12 @@ impl CachedBlobPath {
             CachedBlobPath::Pinned(path) | CachedBlobPath::Cache(path) => path,
         }
     }
+
+    fn into_path(self) -> std::path::PathBuf {
+        match self {
+            CachedBlobPath::Pinned(path) | CachedBlobPath::Cache(path) => path,
+        }
+    }
 }
 
 async fn cached_blob_path(
@@ -1128,7 +1217,10 @@ async fn validate_and_resolve_blob_scope(
         .map_err(|e| BlobCacheError::Io(format!("resolve blob scope for {}: {e}", blob.id)))
 }
 
-async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, BlobCacheError> {
+pub(crate) async fn expected_blob_size(
+    db: &Database,
+    blob: &BlobRef,
+) -> Result<u64, BlobCacheError> {
     let decls = db.blob_decls();
     let namespace = blob.namespace.clone();
     let id = blob.id.clone();

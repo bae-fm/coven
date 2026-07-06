@@ -455,15 +455,6 @@ pub async fn run_single_sync_cycle(
             .transpose()?;
     drain_published_blob_drop_intents(db, library_dir, local_seq).await?;
 
-    // A snapshot bootstrap that could not land every blob it references records a
-    // pending flag (an empty/absent value means caught up). While it is set, the
-    // reconciliation below re-runs each cycle until every blob is local; a clear
-    // flag skips the scan entirely, so a caught-up library pays nothing.
-    let snapshot_blob_backfill_pending =
-        read_sync_state::<String>(db, super::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING)
-            .await?
-            .is_some_and(|value| !value.is_empty());
-
     // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
     // the gate column: a root being made Remote stays gated off until its last
     // user-provided blob lands, and coven flips it on inside the drain (the
@@ -786,35 +777,6 @@ pub async fn run_single_sync_cycle(
                 }
                 Err(e) => warn!("Tombstone GC skipped: failed to read pinned owner: {e}"),
             }
-        }
-    }
-
-    // Reconcile the blob files a snapshot bootstrap could not land. Runs only
-    // while the pending flag is set, and after the pull above applied this cycle's
-    // changesets so any blob whose `item_keys` row arrived now resolves its key.
-    // The reconciliation is read-only (it downloads files, writes no rows). On the
-    // first run that lands every referenced blob the flag clears and no later cycle
-    // scans.
-    if snapshot_blob_backfill_pending {
-        match super::snapshot::reconcile_snapshot_blobs(
-            db,
-            &library_dir.db_path(),
-            storage,
-            library_dir,
-            tables,
-        )
-        .await
-        {
-            Ok(true) => {
-                db.set_sync_state(super::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING, "")
-                    .await
-                    .map_err(|e| format!("Failed to clear snapshot blob backfill flag: {e}"))?;
-                info!("Snapshot blob backfill reconciled; flag cleared");
-            }
-            Ok(false) => {
-                info!("Snapshot blob backfill still incomplete; will retry next cycle");
-            }
-            Err(e) => warn!("Snapshot blob reconciliation error: {e}"),
         }
     }
 

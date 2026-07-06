@@ -22,6 +22,11 @@ pub trait PlatformLocalBlobBackend: crate::MaybeThreadSafe {
     async fn open_reader(&self, path: &Path) -> Result<Box<dyn PlatformPlaintextReader>, String>;
     async fn file_len(&self, path: &Path) -> Result<u64, String>;
     async fn copy_atomic(&self, src: &Path, dst: &Path) -> Result<(), String>;
+    async fn write_stream_atomic(
+        &self,
+        path: &Path,
+        source: &mut dyn PlatformPlaintextReader,
+    ) -> Result<u64, String>;
     async fn read(&self, path: &Path) -> Result<Vec<u8>, String>;
     async fn read_range(&self, path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String>;
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
@@ -46,6 +51,13 @@ pub async fn file_len(path: &Path) -> Result<u64, String> {
 
 pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
     backend().copy_atomic(src, dst).await
+}
+
+pub async fn write_stream_atomic(
+    path: &Path,
+    source: &mut dyn PlatformPlaintextReader,
+) -> Result<u64, String> {
+    backend().write_stream_atomic(path, source).await
 }
 
 pub async fn read(path: &Path) -> Result<Vec<u8>, String> {

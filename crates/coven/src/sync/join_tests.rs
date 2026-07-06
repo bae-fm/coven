@@ -11,8 +11,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use rusqlite::OptionalExtension;
-
 use crate::blob::{CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::config::Config;
@@ -29,7 +27,6 @@ use crate::sync::join::{join_from_invite_code, open_db_and_pull, JoinError};
 use crate::sync::session::BlobDecl;
 use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
-    SNAPSHOT_BLOB_BACKFILL_PENDING,
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
@@ -317,8 +314,8 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('photo1', 'n1', 'cover', '0000000001000-0000-A', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
 
@@ -400,32 +397,10 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     );
 }
 
-/// Read the snapshot-blob-backfill pending flag (true while a bootstrap could not
-/// land every referenced blob) from a library's `sync_state`.
-async fn backfill_pending(db: &Database) -> bool {
-    let key = SNAPSHOT_BLOB_BACKFILL_PENDING.to_string();
-    db.call(move |conn| {
-        conn.query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| {
-            r.get::<_, String>(0)
-        })
-        .optional()
-        .map(|value| value.is_some_and(|v| !v.is_empty()))
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("read backfill flag")
-}
-
 /// A blob whose download fails at bootstrap (its object isn't in the cloud yet)
-/// must not be lost: the bootstrap records that the reconciliation is incomplete,
-/// and a later sync cycle re-runs it once the object is available. This is the
-/// retry the bootstrap's swallow-and-continue relies on — before it existed, a
-/// transient failure stranded the file permanently, because the pull only
-/// downloads blobs for changesets past the per-device cursor and bootstrap
-/// advanced that cursor past the INSERT that carried this one.
+/// refuses the bootstrap before the library is saved.
 #[tokio::test]
-async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
-    let enc = CloudCipher::Encrypted(EncryptionService::from_key([11u8; 32]));
+async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
@@ -443,8 +418,8 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('photo1', 'n1', 'cover', '0000000001000-0000-A', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
 
@@ -498,71 +473,11 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         &lib_b,
     )
     .await
-    .expect("B open_db_and_pull");
+    .expect_err("B open_db_and_pull must fail when snapshot eager blob is missing");
 
-    // After bootstrap the file is absent and the pending flag is set: the catalog
-    // landed, the blob did not, and the cycle must reconcile it later.
     assert!(
         !expected_blob.exists(),
-        "the cover blob must be absent after a bootstrap whose download failed",
-    );
-    let (db_b, _stamper) = Database::open(
-        &lib_b.db_path(),
-        tables.clone(),
-        "B".to_string(),
-        &test_migrations(),
-    )
-    .expect("open B db");
-    assert!(
-        backfill_pending(&db_b).await,
-        "bootstrap must record the backfill as pending when a blob did not land",
-    );
-
-    // The object becomes available in the cloud (A's upload landed).
-    storage
-        .put_blob(
-            "photos",
-            "photo1",
-            crate::blob::ResolvedScope::Derived("n1".to_string()),
-            None,
-            b"cover-bytes".to_vec(),
-        )
-        .await
-        .expect("seed cover blob");
-
-    // A normal sync cycle now reconciles the missing blob and clears the flag.
-    let enc_lock = RwLock::new(enc.clone());
-    let keypair = UserKeypair::generate();
-    let b_hlc = Hlc::new("B".to_string());
-    run_single_sync_cycle(
-        &storage,
-        "test-lib",
-        "B",
-        &b_hlc,
-        &SystemClock,
-        &db_b,
-        &enc_lock,
-        &keypair,
-        None,
-        &lib_b,
-        None,
-        None,
-    )
-    .await
-    .expect("B sync cycle");
-
-    assert!(
-        expected_blob.exists(),
-        "a later sync cycle must land the previously-missing blob at {}",
+        "the missing cover blob must not be materialized at {}",
         expected_blob.display(),
-    );
-    assert_eq!(
-        std::fs::read(&expected_blob).expect("read reconciled blob"),
-        b"cover-bytes",
-        "the reconciled file must hold the blob's plaintext bytes",
-    );
-    assert!(
-        !backfill_pending(&db_b).await,
-        "the cycle that lands every blob must clear the pending flag",
     );
 }

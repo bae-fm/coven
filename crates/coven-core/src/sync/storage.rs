@@ -43,6 +43,7 @@
 /// opens it after download; a plaintext home stores and serves objects verbatim.
 /// The trait is async and mockable for testing.
 use async_trait::async_trait;
+use std::path::Path;
 
 /// Per-device head: the latest sequence number for a device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +168,17 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         data: Vec<u8>,
     ) -> Result<(), StorageError>;
 
+    /// Upload a blob from a local plaintext file without reading the whole file
+    /// into memory. Same keying, scope, and at-rest protection as [`Self::put_blob`].
+    async fn put_blob_from_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_path: &Path,
+    ) -> Result<(), StorageError>;
+
     /// Download and open a blob, keyed `{namespace}/{id[0..2]}/{id[2..4]}/{id}`
     /// under the hashed scheme or `{namespace}/{cloud_path}` under the plain one,
     /// using the key the resolved `scope` selects on an encrypted home (verbatim
@@ -215,6 +227,19 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, StorageError>;
+
+    /// Download and open a blob into `dest` without holding the whole plaintext in
+    /// memory. Same keying, scope, and validation as [`Self::read_blob_range`],
+    /// writing exactly `source_size` bytes or failing.
+    async fn read_blob_to_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        dest: &Path,
+    ) -> Result<(), StorageError>;
 
     /// Upload one snapshot generation's DB image under its publishing device.
     /// Writes to `snapshot/{author}/{seq}.db{suffix}`. Written before the

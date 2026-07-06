@@ -16,6 +16,7 @@ use super::signed_control::{HeadJson, MinSchemaVersionJson};
 use super::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
+use crate::local_blob::PlatformPlaintextReader;
 use crate::storage::cloud::{BlobBody, CloudHome};
 
 const GENERATION_TAG_MAGIC: &[u8; 4] = b"CKG1";
@@ -529,6 +530,38 @@ pub struct BlobRangeReader {
     header: OnceCell<RangeHeader>,
 }
 
+struct BlobRangePlaintextReader {
+    reader: BlobRangeReader,
+    offset: u64,
+    remaining: u64,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl PlatformPlaintextReader for BlobRangePlaintextReader {
+    async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+        if self.remaining == 0 || max == 0 {
+            return Ok(Vec::new());
+        }
+        let len = self.remaining.min(max as u64);
+        let chunk = self
+            .reader
+            .read(self.offset, len)
+            .await
+            .map_err(|e| e.to_string())?;
+        if chunk.len() as u64 != len {
+            return Err(format!(
+                "short blob range read at {}: got {} of {len} bytes",
+                self.offset,
+                chunk.len()
+            ));
+        }
+        self.offset += chunk.len() as u64;
+        self.remaining = self.remaining.saturating_sub(chunk.len() as u64);
+        Ok(chunk)
+    }
+}
+
 enum RangeEncryption {
     Untagged {
         encryption: EncryptionService,
@@ -818,6 +851,26 @@ impl SyncStorage for CloudSyncStorage {
         self.write_blob_sealed(&key, scope, data).await
     }
 
+    async fn put_blob_from_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let cipher = self.cipher().clone();
+        let body = cipher
+            .open_body(scope, source_path, &self.aad_context(&key))
+            .await
+            .map_err(StorageError::Storage)?;
+        self.home
+            .write(&key, body, &crate::storage::cloud::no_progress())
+            .await?;
+        Ok(())
+    }
+
     async fn get_blob(
         &self,
         namespace: &str,
@@ -867,6 +920,42 @@ impl SyncStorage for CloudSyncStorage {
             aad_context,
         );
         reader.read(offset, len).await
+    }
+
+    async fn read_blob_to_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        dest: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let cipher = self.cipher().clone();
+        let aad_context = self.aad_context(&key);
+        let reader = BlobRangeReader::new(
+            self.home.clone(),
+            &cipher,
+            scope,
+            key,
+            source_size,
+            aad_context,
+        );
+        let mut source = BlobRangePlaintextReader {
+            reader,
+            offset: 0,
+            remaining: source_size,
+        };
+        let written = crate::local_blob::write_stream_atomic(dest, &mut source)
+            .await
+            .map_err(StorageError::Storage)?;
+        if written != source_size {
+            return Err(StorageError::Storage(format!(
+                "downloaded blob {namespace}/{id} wrote {written} bytes, expected {source_size}"
+            )));
+        }
+        Ok(())
     }
 
     async fn put_snapshot(
@@ -1146,6 +1235,110 @@ mod tests {
     use crate::blob::ResolvedScope;
     use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::storage::cloud::{
+        BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHomeError, CloudHomeJoinInfo,
+        CloudObjectState, CloudObjectVersion, ConditionalDelete,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct RecordingCloudHome {
+        inner: InMemoryCloudHome,
+        full_reads: Arc<AtomicUsize>,
+        range_reads: Arc<AtomicUsize>,
+    }
+
+    impl RecordingCloudHome {
+        fn new(inner: InMemoryCloudHome) -> Self {
+            Self {
+                inner,
+                full_reads: Arc::new(AtomicUsize::new(0)),
+                range_reads: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn full_reads(&self) -> usize {
+            self.full_reads.load(Ordering::SeqCst)
+        }
+
+        fn range_reads(&self) -> usize {
+            self.range_reads.load(Ordering::SeqCst)
+        }
+
+        fn get(&self, key: &str) -> Option<Vec<u8>> {
+            self.inner.get(key)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl CloudHome for RecordingCloudHome {
+        async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+            self.inner.put_object(key, data).await
+        }
+
+        async fn open_multipart<'a>(
+            &'a self,
+            key: &str,
+            total_len: u64,
+        ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+            self.inner.open_multipart(key, total_len).await
+        }
+
+        fn multipart_threshold(&self) -> u64 {
+            self.inner.multipart_threshold()
+        }
+
+        async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            self.full_reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.read(key).await
+        }
+
+        async fn read_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            self.range_reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.read_range(key, start, end).await
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+            self.inner.list(prefix).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+            self.inner.delete(key).await
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+            self.inner.exists(key).await
+        }
+
+        async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
+            self.inner.object_state(key).await
+        }
+
+        async fn delete_if_version(
+            &self,
+            key: &str,
+            version: &CloudObjectVersion,
+        ) -> Result<ConditionalDelete, CloudHomeError> {
+            self.inner.delete_if_version(key, version).await
+        }
+
+        async fn grant_access(
+            &self,
+            grant: CloudAccessGrant,
+        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+            self.inner.grant_access(grant).await
+        }
+
+        async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+            self.inner.revoke_access(revoke).await
+        }
+    }
 
     /// A blob larger than the in-memory backend's multipart threshold, sealed by
     /// the streaming `open_body` path and written through `CloudHome::write`, lands
@@ -1189,6 +1382,93 @@ mod tests {
                 .expect("decrypt streamed blob"),
             plaintext,
             "the multipart-streamed object decrypts to the original plaintext",
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_sync_storage_put_blob_from_file_uploads_the_file_body() {
+        let home = RecordingCloudHome::new(InMemoryCloudHome::new());
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Hashed,
+            "test-lib",
+            UserKeypair::generate(),
+        );
+        let plaintext: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        std::fs::write(&path, &plaintext).unwrap();
+
+        storage
+            .put_blob_from_file("audio", "track1", ResolvedScope::Master, None, &path)
+            .await
+            .expect("upload file body");
+
+        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
+            .expect("blob key");
+        assert_eq!(
+            home.get(&key).expect("stored blob"),
+            plaintext,
+            "the file-backed upload stores the file plaintext on a plaintext home",
+        );
+        assert_eq!(
+            home.full_reads(),
+            0,
+            "uploading a file must not read the cloud object back",
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_sync_storage_read_blob_to_file_uses_ranges() {
+        let home = RecordingCloudHome::new(InMemoryCloudHome::new());
+        let master = EncryptionService::from_key([17u8; 32]);
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(master),
+            BlobPathScheme::Hashed,
+            "test-lib",
+            UserKeypair::generate(),
+        );
+        let plaintext: Vec<u8> = (0..180_000u32).map(|i| (i % 251) as u8).collect();
+        storage
+            .put_blob(
+                "audio",
+                "track1",
+                ResolvedScope::Master,
+                None,
+                plaintext.clone(),
+            )
+            .await
+            .expect("seed encrypted blob");
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("download.bin");
+        storage
+            .read_blob_to_file(
+                "audio",
+                "track1",
+                ResolvedScope::Master,
+                None,
+                plaintext.len() as u64,
+                &dest,
+            )
+            .await
+            .expect("download to file");
+
+        assert_eq!(
+            std::fs::read(&dest).expect("read downloaded file"),
+            plaintext,
+            "the file-backed download writes the plaintext to the destination",
+        );
+        assert_eq!(
+            home.full_reads(),
+            0,
+            "download-to-file must not fetch the whole cloud object",
+        );
+        assert!(
+            home.range_reads() > 1,
+            "download-to-file reads the encrypted object through ranges",
         );
     }
 

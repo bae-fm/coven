@@ -26,6 +26,7 @@
 //! whole storage model.
 
 use crate::library_dir::{LibraryDir, PathTokenError};
+use std::path::PathBuf;
 
 /// Why a local-store operation failed.
 #[derive(Debug)]
@@ -84,14 +85,28 @@ pub async fn read(
     id: &str,
     expected_size: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
+    match path_if_present(library_dir, namespace, id, expected_size).await? {
+        Some(path) => crate::local_blob::read(&path)
+            .await
+            .map(Some)
+            .map_err(LocalBlobError::Io),
+        None => Ok(None),
+    }
+}
+
+/// Return the local-store file path when a host-provided blob is present and has
+/// exactly `expected_size` bytes.
+pub async fn path_if_present(
+    library_dir: &LibraryDir,
+    namespace: &str,
+    id: &str,
+    expected_size: u64,
+) -> Result<Option<PathBuf>, LocalBlobError> {
     let path = library_dir.local_blob_path(namespace, id)?;
     match crate::local_blob::exists(&path).await {
         Ok(true) => {
             ensure_file_len(&path, expected_size).await?;
-            crate::local_blob::read(&path)
-                .await
-                .map(Some)
-                .map_err(LocalBlobError::Io)
+            Ok(Some(path))
         }
         Ok(false) => Ok(None),
         Err(e) => Err(LocalBlobError::Io(e)),
@@ -110,17 +125,12 @@ pub async fn read_range(
     offset: u64,
     len: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    let path = library_dir.local_blob_path(namespace, id)?;
-    match crate::local_blob::exists(&path).await {
-        Ok(true) => {
-            ensure_file_len(&path, expected_size).await?;
-            crate::local_blob::read_range(&path, offset, len)
-                .await
-                .map(Some)
-                .map_err(LocalBlobError::Io)
-        }
-        Ok(false) => Ok(None),
-        Err(e) => Err(LocalBlobError::Io(e)),
+    match path_if_present(library_dir, namespace, id, expected_size).await? {
+        Some(path) => crate::local_blob::read_range(&path, offset, len)
+            .await
+            .map(Some)
+            .map_err(LocalBlobError::Io),
+        None => Ok(None),
     }
 }
 

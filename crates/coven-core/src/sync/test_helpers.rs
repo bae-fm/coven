@@ -489,6 +489,8 @@ pub struct MockSyncStorage {
     hidden_from_listing: Mutex<std::collections::HashSet<(String, u64)>>,
     fail_blob_puts: std::sync::atomic::AtomicUsize,
     blob_put_count: std::sync::atomic::AtomicUsize,
+    blob_put_from_file_count: std::sync::atomic::AtomicUsize,
+    blob_read_to_file_count: std::sync::atomic::AtomicUsize,
     fail_blob_put_on: std::sync::atomic::AtomicUsize,
     fail_changeset_puts: std::sync::atomic::AtomicUsize,
     wrapped_key_put_count: std::sync::atomic::AtomicUsize,
@@ -517,6 +519,8 @@ impl MockSyncStorage {
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
             fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
             blob_put_count: std::sync::atomic::AtomicUsize::new(0),
+            blob_put_from_file_count: std::sync::atomic::AtomicUsize::new(0),
+            blob_read_to_file_count: std::sync::atomic::AtomicUsize::new(0),
             fail_blob_put_on: std::sync::atomic::AtomicUsize::new(0),
             fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
             wrapped_key_put_count: std::sync::atomic::AtomicUsize::new(0),
@@ -566,6 +570,16 @@ impl MockSyncStorage {
             .store(0, std::sync::atomic::Ordering::SeqCst);
         self.fail_blob_put_on
             .store(call_number, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn blob_put_from_file_count(&self) -> usize {
+        self.blob_put_from_file_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn blob_read_to_file_count(&self) -> usize {
+        self.blob_read_to_file_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn fail_next_changeset_puts(&self, count: usize) {
@@ -816,6 +830,22 @@ impl SyncStorage for MockSyncStorage {
         Ok(())
     }
 
+    async fn put_blob_from_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        self.blob_put_from_file_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let data = crate::local_blob::read(source_path)
+            .await
+            .map_err(StorageError::Storage)?;
+        self.put_blob(namespace, id, scope, cloud_path, data).await
+    }
+
     async fn get_blob(
         &self,
         namespace: &str,
@@ -872,6 +902,33 @@ impl SyncStorage for MockSyncStorage {
         let objects = self.objects.lock().unwrap();
         let stored = objects.get(&key).ok_or(StorageError::NotFound(key))?;
         Ok(stored[offset as usize..end as usize].to_vec())
+    }
+
+    async fn read_blob_to_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        dest: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        self.blob_read_to_file_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let bytes = self
+            .read_blob_range(
+                namespace,
+                id,
+                scope,
+                cloud_path,
+                source_size,
+                0,
+                source_size,
+            )
+            .await?;
+        crate::local_blob::write_atomic(dest, &bytes)
+            .await
+            .map_err(StorageError::Storage)
     }
 
     async fn put_snapshot(

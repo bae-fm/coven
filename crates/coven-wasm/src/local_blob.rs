@@ -50,6 +50,14 @@ impl PlatformLocalBlobBackend for OpfsLocalBlobBackend {
         imp::copy_atomic(src, dst).await
     }
 
+    async fn write_stream_atomic(
+        &self,
+        path: &Path,
+        source: &mut dyn PlatformPlaintextReader,
+    ) -> Result<u64, String> {
+        imp::write_stream_atomic(path, source).await
+    }
+
     async fn read(&self, path: &Path) -> Result<Vec<u8>, String> {
         imp::read(path).await
     }
@@ -91,6 +99,7 @@ impl PlatformLocalBlobBackend for OpfsLocalBlobBackend {
 mod imp {
     use std::path::{Component, Path, PathBuf};
 
+    use coven_core::local_blob::PlatformPlaintextReader;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
@@ -312,10 +321,32 @@ mod imp {
     }
 
     pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
-        // OPFS has no cross-file rename, so the pin copy is a whole-file read+write
-        // through the same sync-access-handle path as every OPFS write here.
-        let bytes = read(src).await?;
-        write_atomic(dst, &bytes).await
+        let mut source = open_reader(src).await?;
+        write_stream_atomic(dst, &mut source).await.map(|_| ())
+    }
+
+    pub async fn write_stream_atomic(
+        path: &Path,
+        source: &mut dyn PlatformPlaintextReader,
+    ) -> Result<u64, String> {
+        let fh = file_handle(path, true)
+            .await
+            .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
+        let sah = sync_access(&fh).await?;
+        let result = write_stream(&sah, source, path).await;
+        sah.close();
+        match result {
+            Ok(written) => Ok(written),
+            Err(e) => {
+                if let Err(cleanup) = remove_file(path).await {
+                    tracing::warn!(
+                        "failed to remove partial OPFS blob {} after streamed write failure: {cleanup}",
+                        path.display()
+                    );
+                }
+                Err(e)
+            }
+        }
     }
 
     pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
@@ -427,6 +458,37 @@ mod imp {
             .map_err(|e| format!("OPFS flush {}: {}", path.display(), err_str(&e)))
     }
 
+    async fn write_stream(
+        sah: &FileSystemSyncAccessHandle,
+        source: &mut dyn PlatformPlaintextReader,
+        path: &Path,
+    ) -> Result<u64, String> {
+        sah.truncate_with_f64(0.0)
+            .map_err(|e| format!("OPFS truncate {}: {}", path.display(), err_str(&e)))?;
+        let mut offset = 0u64;
+        loop {
+            let chunk = source.next_chunk(1 << 20).await?;
+            if chunk.is_empty() {
+                break;
+            }
+            let written = sah
+                .write_with_u8_array_and_options(&chunk, &at(offset as f64))
+                .map_err(|e| format!("OPFS write {}: {}", path.display(), err_str(&e)))?
+                as usize;
+            if written != chunk.len() {
+                return Err(format!(
+                    "OPFS short write {}: wrote {written} of {} bytes",
+                    path.display(),
+                    chunk.len()
+                ));
+            }
+            offset += written as u64;
+        }
+        sah.flush()
+            .map_err(|e| format!("OPFS flush {}: {}", path.display(), err_str(&e)))?;
+        Ok(offset)
+    }
+
     pub async fn exists(path: &Path) -> Result<bool, String> {
         match file_handle(path, false).await {
             Ok(_) => Ok(true),
@@ -441,25 +503,13 @@ mod imp {
         write(path, bytes).await
     }
 
-    /// OPFS has no cross-directory rename, so a move is copy-then-delete: read the
-    /// source's whole contents, write them to the destination (creating its parent
-    /// directories), then remove the source. This is NOT atomic — a crash between
-    /// the write and the delete leaves the blob in both places — but every blob the
-    /// cache moves is re-fetchable from the cloud and a read checks both folders,
-    /// so a transient duplicate is benign because either folder serves the same
-    /// bytes.
+    /// OPFS has no cross-directory rename, so a move is copy-then-delete. This is
+    /// NOT atomic — a crash between the write and the delete leaves the blob in
+    /// both places — but every blob the cache moves is re-fetchable from the cloud
+    /// and a read checks both folders, so a transient duplicate is benign because
+    /// either folder serves the same bytes.
     pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
-        let from_fh = file_handle(from, false)
-            .await
-            .map_err(|e| e.into_message(&format!("rename source {}", from.display())))?;
-        let sah = sync_access(&from_fh).await?;
-        let bytes = read_all(&sah, from);
-        sah.close();
-        let bytes = bytes?;
-
-        // `write` creates the destination's parent directories and the file, then
-        // truncate-writes the whole payload through one sync-access handle.
-        write(to, &bytes).await?;
+        copy_atomic(from, to).await?;
 
         // The destination now holds the bytes; drop the original. (`remove_file`
         // reports an already-absent source as `Ok(false)`, which the `?` discards —

@@ -627,9 +627,6 @@ async fn materialize_blobs(
             return Err(MakeLocalError::Cancelled);
         }
 
-        let bytes = cache::read_blob(db, library_dir, Some(storage), blob)
-            .await
-            .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
         let cloud_key = cloud_key_for(scheme, blob)
             .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e))?;
 
@@ -644,18 +641,34 @@ async fn materialize_blobs(
                     .get(&blob.id)
                     .ok_or_else(|| MakeLocalError::MissingDest(blob.id.clone()))?
                     .clone();
-                write_durable(&dest_path, &bytes).await.map_err(|detail| {
-                    MakeLocalError::Write {
+                prepare_parent_dir(&dest_path)
+                    .await
+                    .map_err(|detail| MakeLocalError::Write {
                         blob_id: blob.id.clone(),
                         path: dest_path.display().to_string(),
                         detail,
-                    }
-                })?;
+                    })?;
+                let size = cache::materialize_remote_blob_to_file(
+                    db,
+                    library_dir,
+                    Some(storage),
+                    blob,
+                    &dest_path,
+                )
+                .await
+                .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                verify_durable(&dest_path, size)
+                    .await
+                    .map_err(|detail| MakeLocalError::Write {
+                        blob_id: blob.id.clone(),
+                        path: dest_path.display().to_string(),
+                        detail,
+                    })?;
                 written.push(WrittenFile::UserPath(dest_path.clone()));
                 Materialized {
                     blob: blob.clone(),
                     dest: Some(dest_path),
-                    size: bytes.len() as u64,
+                    size,
                     cloud_key,
                 }
             }
@@ -667,7 +680,16 @@ async fn materialize_blobs(
                         path: format!("local/{}/{}", blob.namespace, blob.id),
                         detail: e.to_string(),
                     })?;
-                write_durable(&store_path, &bytes).await.map_err(|detail| {
+                let size = cache::materialize_remote_blob_to_file(
+                    db,
+                    library_dir,
+                    Some(storage),
+                    blob,
+                    &store_path,
+                )
+                .await
+                .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                verify_durable(&store_path, size).await.map_err(|detail| {
                     MakeLocalError::Write {
                         blob_id: blob.id.clone(),
                         path: store_path.display().to_string(),
@@ -678,7 +700,7 @@ async fn materialize_blobs(
                 Materialized {
                     blob: blob.clone(),
                     dest: None,
-                    size: bytes.len() as u64,
+                    size,
                     cloud_key,
                 }
             }
@@ -697,26 +719,20 @@ async fn materialize_blobs(
     Ok(materialized)
 }
 
-/// Write `bytes` to `dest` durably and atomically, then prove the new file survives
-/// a crash. Composes [`crate::local_blob::write_atomic`] (temp sibling, fsynced,
-/// renamed into place) for the atomic write, then verifies the destination length
-/// and fsyncs the parent directory. Unlike `write_atomic` — which serves the
-/// re-fetchable cache and so skips the directory fsync — a materialized local file is
-/// the ONLY copy once the cloud blob is tombstoned, so a directory-fsync failure is a
-/// hard error here: it aborts the make_local (the cloud copy is still intact) rather
-/// than commit a tombstone over a destination whose entry might not survive a crash.
+/// Prove a materialized local file has the expected length and fsync its parent
+/// directory before make_local can tombstone the cloud copy. The materializer has
+/// already written through a temp file / rename path; this check is the
+/// Local-specific durability gate. A materialized local file is the ONLY copy once
+/// the cloud blob is tombstoned, so a directory-fsync failure is a hard error here:
+/// it aborts the make_local (the cloud copy is still intact) rather than commit a
+/// tombstone over a destination whose entry might not survive a crash.
 #[cfg(not(target_arch = "wasm32"))]
-async fn write_durable(dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    crate::local_blob::write_atomic(dest, bytes).await?;
-
-    // Verify the destination holds exactly the bytes we wrote — defense-in-depth
-    // before the commit tombstones the cloud copy.
+async fn verify_durable(dest: &std::path::Path, expected_size: u64) -> Result<(), String> {
     let len = crate::local_blob::file_len(dest).await?;
-    if len != bytes.len() as u64 {
+    if len != expected_size {
         return Err(format!(
-            "dest {} is {len} bytes after write, expected {}",
-            dest.display(),
-            bytes.len()
+            "dest {} is {len} bytes after materialize, expected {expected_size}",
+            dest.display()
         ));
     }
 
@@ -724,6 +740,14 @@ async fn write_durable(dest: &std::path::Path, bytes: &[u8]) -> Result<(), Strin
     // Hard error (see fn doc): the materialized file is the only copy after the commit.
     crate::local_blob::sync_parent_dir(dest).await?;
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| format!("blob path has no parent dir: {}", dest.display()))?;
+    crate::local_blob::create_dir_all(parent).await
 }
 
 /// Roll back the partial local copies an aborted make_local wrote, then return the

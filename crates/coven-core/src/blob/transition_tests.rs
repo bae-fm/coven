@@ -174,6 +174,7 @@ async fn seed_release_rows(
     photo_id: &str,
     cloud_path: &str,
     shared: u8,
+    size: usize,
 ) {
     exec(
         db,
@@ -186,8 +187,8 @@ async fn seed_release_rows(
     exec(
         db,
         &format!(
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-             VALUES ('{photo_id}', '{note_id}', 'image', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
+            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
+             VALUES ('{photo_id}', '{note_id}', 'image', {size}, '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
         ),
     )
     .await;
@@ -203,7 +204,7 @@ async fn seed_local_release(
     cloud_path: &str,
     bytes: &[u8],
 ) -> PathBuf {
-    seed_release_rows(db, note_id, photo_id, cloud_path, 0).await;
+    seed_release_rows(db, note_id, photo_id, cloud_path, 0, bytes.len()).await;
     std::fs::create_dir_all(user_dir).unwrap();
     let src = user_dir.join(format!("{photo_id}.jpg"));
     std::fs::write(&src, bytes).unwrap();
@@ -250,7 +251,7 @@ async fn seed_remote_release(
     cloud_path: &str,
     bytes: &[u8],
 ) {
-    seed_release_rows(db, note_id, photo_id, cloud_path, 1).await;
+    seed_release_rows(db, note_id, photo_id, cloud_path, 1, bytes.len()).await;
     storage
         .put_blob(
             "photos",
@@ -500,6 +501,11 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     .await
     .expect("make_local");
 
+    assert_eq!(
+        storage.blob_read_to_file_count(),
+        1,
+        "make_local materializes the Remote blob through the file download path",
+    );
     assert_eq!(shared_flag(&db_a, "n1").await, 0, "A's release is Local");
     assert_eq!(
         std::fs::read(&dest_path).unwrap(),
@@ -799,6 +805,11 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     assert!(
         storage.exists("covers/cv/host.jpg").await.unwrap(),
         "inline push uploads the host-provided blob"
+    );
+    assert_eq!(
+        storage.blob_put_from_file_count(),
+        1,
+        "inline push uploads the host-provided blob through the file upload path",
     );
     assert!(
         !has_intent(&db_a, "notes", "n-host").await,

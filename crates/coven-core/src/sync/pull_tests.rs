@@ -593,8 +593,8 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-             VALUES ('p1ab', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+             VALUES ('p1ab', 'n1', 'cover', 10, '0000000001000-0000-dev1', '2026-01-01')",
         ],
     )
     .await;
@@ -704,8 +704,8 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .await;
     exec(
         &db2,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', 8, '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
     )
     .await;
     crate::local_blob::write_atomic(
@@ -1612,10 +1612,10 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'SharedBlob', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, cloud_path, _updated_at, created_at) \
-             VALUES ('photo-a', 'n1', 'cover', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, cloud_path, _updated_at, created_at) \
-             VALUES ('photo-b', 'n1', 'cover', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
+             VALUES ('photo-a', 'n1', 'cover', 12, 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
+             VALUES ('photo-b', 'n1', 'cover', 12, 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
         ],
     )
     .await;
@@ -1653,7 +1653,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     let cs2 = capture_bytes(
         &db1,
         &["UPDATE note_photos \
-             SET cloud_path = 'newblob', _updated_at = '0000000002000-0000-dev1' \
+             SET cloud_path = 'newblob', size = 9, _updated_at = '0000000002000-0000-dev1' \
              WHERE id = 'photo-a'"],
     )
     .await;
@@ -2640,8 +2640,8 @@ mod blob_path_traversal {
             &[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-                "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-                 VALUES ('p1ab', 'n1', 'attach', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+                 VALUES ('p1ab', 'n1', 'attach', 10, '0000000001000-0000-dev1', '2026-01-01')",
             ],
         )
         .await;

@@ -600,7 +600,7 @@ pub async fn pull_changes(
             // can't carry the cursor past the failed seq (its blobs would then
             // never be re-fetched). The next cycle resumes at this seq. CacheLazy
             // blobs are not downloaded here — they are fetched on first read.
-            let cache_eager = match cache_eager_blobs(&blob_decls, &changes) {
+            let cache_eager = match cache_eager_blobs(&blob_decls, &old_changes, &changes) {
                 Ok(blobs) => blobs,
                 Err(e) => {
                     warn!(
@@ -1117,20 +1117,95 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
     Ok(map)
 }
 
+pub(crate) struct BlobDownload {
+    blob: crate::blob::BlobRef,
+    size: BlobDownloadSize,
+}
+
+enum BlobDownloadSize {
+    Declared(u64),
+    ExistingRow(crate::blob::BlobRef),
+    InstalledRow,
+    Missing,
+}
+
+impl BlobDownload {
+    fn from_change(
+        blob: crate::blob::BlobRef,
+        source_size: Option<u64>,
+        size_lookup_blob: Option<crate::blob::BlobRef>,
+    ) -> Self {
+        let size = match (source_size, size_lookup_blob) {
+            (Some(size), _) => BlobDownloadSize::Declared(size),
+            (None, Some(blob)) => BlobDownloadSize::ExistingRow(blob),
+            (None, None) => BlobDownloadSize::Missing,
+        };
+        Self { blob, size }
+    }
+
+    pub(crate) fn from_installed_db(blob: crate::blob::BlobRef) -> Self {
+        Self {
+            blob,
+            size: BlobDownloadSize::InstalledRow,
+        }
+    }
+
+    async fn resolve_source_size(
+        db: &Database,
+        blob: &crate::blob::BlobRef,
+        size: BlobDownloadSize,
+    ) -> Result<u64, String> {
+        match size {
+            BlobDownloadSize::Declared(size) => Ok(size),
+            BlobDownloadSize::ExistingRow(lookup) => {
+                crate::blob::cache::expected_blob_size(db, &lookup)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            BlobDownloadSize::InstalledRow => crate::blob::cache::expected_blob_size(db, blob)
+                .await
+                .map_err(|e| e.to_string()),
+            BlobDownloadSize::Missing => Err(format!(
+                "incoming blob {}/{} has no declared size",
+                blob.namespace, blob.id
+            )),
+        }
+    }
+}
+
 /// The `CacheEager` blobs the `changes` reference, derived per row from the
 /// declarations. The cache fill a pulling device fetches into its cache before
-/// applying the rows — fill-based, regardless of provenance.
+/// applying the rows — fill-based, regardless of provenance. The incoming row's
+/// declared plaintext size rides with each blob because incremental pull downloads
+/// before applying that row to the DB. When an UPDATE changes the blob id but not
+/// its size, SQLite omits the unchanged size column, so the old blob ref is kept
+/// as the pre-apply DB lookup key for that unchanged size.
 pub(crate) fn cache_eager_blobs(
     blob_decls: &BlobDecls,
+    old_changes: &[RowChange],
     changes: &[RowChange],
-) -> Result<Vec<crate::blob::BlobRef>, crate::blob::decl::BlobDeclError> {
-    changes
+) -> Result<Vec<BlobDownload>, crate::blob::decl::BlobDeclError> {
+    if old_changes.len() != changes.len() {
+        return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
+            old_count: old_changes.len(),
+            new_count: changes.len(),
+        });
+    }
+    old_changes
         .iter()
-        .filter_map(|change| match blob_decls.ref_from_change(change) {
-            Ok(Some(blob)) if blob.fill == CacheFill::CacheEager => Some(Ok(blob)),
-            Ok(_) => None,
-            Err(e) => Some(Err(e)),
-        })
+        .zip(changes)
+        .filter_map(
+            |(old, change)| match blob_decls.ref_and_size_from_change(change) {
+                Ok(Some((blob, size))) if blob.fill == CacheFill::CacheEager => {
+                    match blob_decls.ref_from_change(old) {
+                        Ok(old_blob) => Some(Ok(BlobDownload::from_change(blob, size, old_blob))),
+                        Err(e) => Some(Err(e)),
+                    }
+                }
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            },
+        )
         .collect()
 }
 
@@ -1283,13 +1358,14 @@ async fn resolve_pull_scope(
 /// so the download/decrypt/write path lives in one place.
 pub(crate) async fn download_blobs(
     db: &Database,
-    blobs: Vec<crate::blob::BlobRef>,
+    blobs: Vec<BlobDownload>,
     storage: &dyn SyncStorage,
     library_dir: &LibraryDir,
     in_changeset_keys: &HashMap<String, [u8; 32]>,
 ) -> bool {
     let mut all_ok = true;
-    for blob in blobs {
+    for download in blobs {
+        let BlobDownload { blob, size } = download;
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
         // changeset authored by any write-capable member. An id or namespace that is
         // not a single safe path token, or a cloud_path that escapes its prefix,
@@ -1362,25 +1438,27 @@ pub(crate) async fn download_blobs(
                 continue;
             }
         };
+        let source_size = match BlobDownload::resolve_source_size(db, &blob, size).await {
+            Ok(size) => size,
+            Err(e) => {
+                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob size, skipping download");
+                all_ok = false;
+                continue;
+            }
+        };
 
         match storage
-            .get_blob(
+            .read_blob_to_file(
                 &blob.namespace,
                 &blob.id,
                 resolved,
                 blob.cloud_path.as_deref(),
+                source_size,
+                &dest,
             )
             .await
         {
-            Ok(bytes) => {
-                // Whole-blob cache populate. Later reads verify the cache file's
-                // length against the row before trusting it, so a short local file
-                // is not served as complete.
-                if let Err(e) = crate::local_blob::write_atomic(&dest, &bytes).await {
-                    warn!(id = %blob.id, error = %e, "failed to write blob");
-                    all_ok = false;
-                }
-            }
+            Ok(()) => {}
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "failed to download blob");
                 all_ok = false;

@@ -262,8 +262,8 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('blob-1', 'note-1', 'cover', '0000000001000-0000-dev-a', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('blob-1', 'note-1', 'cover', 22, '0000000001000-0000-dev-a', '2026-01-01')",
     )
     .await;
 

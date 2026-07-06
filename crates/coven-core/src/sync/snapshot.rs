@@ -1026,12 +1026,6 @@ pub async fn bootstrap_from_snapshot(
     Ok(BootstrapResult { cursors })
 }
 
-/// `sync_state` key holding `"1"` while the snapshot blob reconciliation has not
-/// yet fully succeeded for this library, absent once it has. A bootstrap sets it;
-/// each sync cycle runs the reconciliation while it is set and clears it on the
-/// first run that lands every referenced blob. See [`reconcile_snapshot_blobs`].
-pub const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_pending";
-
 /// Download the blob files the DB at `db_path` references but whose local file is
 /// absent, returning true once every referenced blob is on local disk.
 ///
@@ -1050,14 +1044,9 @@ pub const SNAPSHOT_BLOB_BACKFILL_PENDING: &str = "snapshot_blob_backfill_pending
 /// declarations in `tables`, then downloads the `CacheEager` ones via the same
 /// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into the
 /// evictable cache `storage/cache/<namespace>/<id>` under `library_dir`, skipping
-/// any already present in either cache folder. A failed download is logged there and reflected
-/// in the returned flag; the bootstrap that calls this records the not-yet-complete
-/// state in
-/// [`SNAPSHOT_BLOB_BACKFILL_PENDING`], and each subsequent sync cycle re-runs this
-/// until it returns true, so a blob whose object was not yet in the cloud (or whose
-/// download hit a transient error) at bootstrap is fetched on a later cycle rather
-/// than lost. A clear flag means no cycle runs this, so a caught-up library pays
-/// nothing.
+/// any already present in either cache folder. A failed download is logged there
+/// and reflected in the returned flag; the bootstrap that calls this refuses to
+/// save the library unless the flag is true.
 ///
 /// `refs_in_db` is a read-only enumeration run against a short-lived connection to
 /// the same on-disk DB the `db` actor owns; `db` is still needed because
@@ -1073,7 +1062,7 @@ pub async fn reconcile_snapshot_blobs(
     library_dir: &crate::library_dir::LibraryDir,
     tables: &[SyncedTable],
 ) -> Result<bool, crate::database::DbError> {
-    let blobs: Vec<crate::blob::BlobRef> = {
+    let blobs: Vec<crate::sync::pull::BlobDownload> = {
         let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
         let decls = crate::blob::decl::BlobDecls::from_tables(&conn, tables)
             .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?;
@@ -1082,6 +1071,7 @@ pub async fn reconcile_snapshot_blobs(
             .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?
             .into_iter()
             .filter(|blob| blob.fill == crate::blob::CacheFill::CacheEager)
+            .map(crate::sync::pull::BlobDownload::from_installed_db)
             .collect()
     };
 
@@ -1107,10 +1097,7 @@ pub async fn reconcile_snapshot_blobs(
     if all_ok {
         info!(total, "snapshot blob reconciliation complete");
     } else {
-        warn!(
-            total,
-            "some snapshot blob files are not yet local; a later sync cycle reconciles them"
-        );
+        warn!(total, "some snapshot blob files are not local");
     }
     Ok(all_ok)
 }

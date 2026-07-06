@@ -482,9 +482,9 @@ pub(crate) async fn open_db_and_pull(
 
     // Download the blob files the snapshot's rows reference: the snapshot carried
     // the catalog rows but no blob files, and the pull starts past its cursors so
-    // it never re-walks the INSERTs that first carried them. A blob not yet
-    // available is recorded pending in `sync_state` and retried each later cycle.
-    let backfill_ok = crate::sync::snapshot::reconcile_snapshot_blobs(
+    // it never re-walks the INSERTs that first carried them. Missing eager blobs
+    // abort the bootstrap before the library is saved.
+    if !crate::sync::snapshot::reconcile_snapshot_blobs(
         &db,
         db_path,
         storage,
@@ -492,17 +492,12 @@ pub(crate) async fn open_db_and_pull(
         db.synced_tables(),
     )
     .await
-    .map_err(|e| JoinError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?;
-    db.set_sync_state(
-        crate::sync::snapshot::SNAPSHOT_BLOB_BACKFILL_PENDING,
-        if backfill_ok { "" } else { "1" },
-    )
-    .await
-    .map_err(|e| {
-        JoinError::Database(format!(
-            "Failed to persist snapshot blob backfill flag: {e}"
-        ))
-    })?;
+    .map_err(|e| JoinError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?
+    {
+        return Err(JoinError::Database(
+            "Snapshot blob reconciliation did not land every required eager blob".to_string(),
+        ));
+    }
 
     // Pull over the set coven owns (the host's tables plus coven's injected
     // `item_keys`), not the raw host list — one source of truth.

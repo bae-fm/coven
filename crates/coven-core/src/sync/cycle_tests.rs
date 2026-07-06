@@ -578,6 +578,18 @@ impl SyncStorage for HostWriteInjector {
             .put_blob(namespace, id, scope, cloud_path, data)
             .await
     }
+    async fn put_blob_from_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .put_blob_from_file(namespace, id, scope, cloud_path, source_path)
+            .await
+    }
     async fn get_blob(
         &self,
         namespace: &str,
@@ -607,6 +619,19 @@ impl SyncStorage for HostWriteInjector {
     ) -> Result<Vec<u8>, StorageError> {
         self.inner
             .read_blob_range(namespace, id, scope, cloud_path, source_size, offset, len)
+            .await
+    }
+    async fn read_blob_to_file(
+        &self,
+        namespace: &str,
+        id: &str,
+        scope: crate::blob::ResolvedScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        dest: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .read_blob_to_file(namespace, id, scope, cloud_path, source_size, dest)
             .await
     }
     async fn put_snapshot(
