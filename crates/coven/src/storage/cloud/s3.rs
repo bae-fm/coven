@@ -627,8 +627,10 @@ impl CloudHome for S3CloudHome {
     }
 
     async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
-        // S3 access is managed externally (IAM/pre-shared credentials).
-        Ok(())
+        Err(CloudHomeError::Storage(
+            "S3 member removal requires rotating the shared bucket credentials; this backend cannot revoke one member from a shared access key"
+                .to_string(),
+        ))
     }
 }
 
@@ -758,6 +760,32 @@ mod tests {
 
         assert_eq!(bytes, range_body);
         let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn s3_revoke_reports_unsupported_not_success() {
+        let home = S3CloudHome::new(
+            "bucket".to_string(),
+            "us-east-1".to_string(),
+            Some("http://127.0.0.1:9".to_string()),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+
+        let result = home
+            .revoke_access(CloudAccessRevoke {
+                member_pubkey: "member-pubkey".to_string(),
+                provider_account_email: None,
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "S3 removal must not report success without rotating bucket credentials",
+        );
     }
 
     async fn loopback_connects(endpoint: &str) -> bool {

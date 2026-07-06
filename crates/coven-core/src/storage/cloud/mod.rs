@@ -457,16 +457,16 @@ pub trait CloudHome: crate::MaybeThreadSafe {
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
 
     /// Grant access to a member and return connection info for the cloud home.
-    /// For S3 this ignores `member_id` and returns bucket/region/endpoint
-    /// (access is managed externally via IAM/pre-shared credentials).
-    /// For consumer clouds this shares the folder with the member's account.
+    /// Consumer-cloud backends share the folder with the member's account. A
+    /// backend with shared credentials may return those credentials only if its
+    /// revocation path can later make the removed member's copy unusable.
     async fn grant_access(
         &self,
         grant: CloudAccessGrant,
     ) -> Result<CloudHomeJoinInfo, CloudHomeError>;
 
-    /// Revoke a previously granted access. No-op for backends where access
-    /// is controlled externally (e.g. S3 with pre-shared credentials).
+    /// Revoke a previously granted access. Backends that cannot make the
+    /// removed member's credential stop working must return an error.
     async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError>;
 }
 
