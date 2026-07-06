@@ -26,6 +26,8 @@ pub mod pull;
 #[cfg(test)]
 mod pull_tests;
 pub mod push;
+#[cfg(test)]
+mod refresh_tests;
 pub mod restore_code;
 pub mod service;
 pub mod session;

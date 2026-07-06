@@ -852,21 +852,25 @@ async fn refresh_authorization_state(
     //    (#99) — so a bucket writer can't substitute it. If it differs from the key
     //    in use, swap the live cipher (and persist to the keyring) via
     //    `apply_key_rotation`, so this same cycle's push/pull/blob ops use it.
-    match super::invite::unwrap_library_key(cloud_home, user_keypair, library_id, &owner).await {
-        Ok(new_key) => {
+    match super::invite::unwrap_library_keyring(cloud_home, user_keypair, library_id, &owner).await
+    {
+        Ok(new_encryption) => {
             let in_use = match &*cipher.read().unwrap() {
-                CloudCipher::Encrypted(enc) => Some(enc.key_bytes()),
+                CloudCipher::Encrypted(enc) => Some(enc.keyring_entries()),
                 // Re-checked under the lock; an opaque library is Encrypted, but if a
                 // race left it Plaintext there is no key to compare against.
                 CloudCipher::Plaintext => None,
             };
-            if in_use != Some(new_key) {
+            if in_use != Some(new_encryption.keyring_entries()) {
                 let key_persistence = key_persistence.ok_or_else(|| {
                     "refresh: rotated library key needs platform key persistence".to_string()
                 })?;
-                let fingerprint =
-                    super::membership_ops::apply_key_rotation(new_key, key_persistence, cipher)
-                        .map_err(|e| format!("refresh: adopt rotated library key: {e}"))?;
+                let fingerprint = super::membership_ops::apply_key_rotation(
+                    new_encryption,
+                    key_persistence,
+                    cipher,
+                )
+                .map_err(|e| format!("refresh: adopt rotated library key: {e}"))?;
                 info!(%fingerprint, "Adopted rotated library key");
             }
         }

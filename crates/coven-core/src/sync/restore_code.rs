@@ -6,7 +6,7 @@
 //! The code contains secrets (encryption key, S3 credentials). OAuth tokens are NOT included
 //! because they expire -- the user re-authenticates on restore.
 //!
-//! The encryption key (`ek`) is present for an opaque home and absent for a
+//! The encryption keyring (`ek`) is present for an opaque home and absent for a
 //! browsable one, so `ek`'s presence *is* the home's storage mode: `ek` present
 //! ⇒ opaque (encrypted, obfuscated blob paths), `ek` absent ⇒ browsable
 //! (plaintext, readable blob paths). The restorer rebuilds both the cipher and
@@ -26,7 +26,7 @@ pub struct RestoreCode {
     pub v: u8,
     /// Library ID (UUID).
     pub lid: String,
-    /// Encryption key (hex-encoded, 64 chars), present only for an opaque home.
+    /// Encryption keyring, present only for an opaque home.
     /// Its presence is the home's storage mode: present ⇒ opaque (the restorer
     /// builds `CloudCipher::Encrypted` + `BlobPathScheme::Hashed`); absent ⇒
     /// browsable (`CloudCipher::Plaintext` + `BlobPathScheme::Plain`).
@@ -131,8 +131,8 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     crate::library_dir::validate_path_token(&code.lid)
         .map_err(RestoreCodeError::InvalidLibraryId)?;
     if let Some(key_hex) = &code.ek {
-        decode_hex_bytes("encryption key", key_hex, 32)
-            .map_err(RestoreCodeError::InvalidEncryptionKey)?;
+        crate::encryption::EncryptionService::new(key_hex)
+            .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
     }
     decode_hex_bytes("signing key", &code.sk, 64).map_err(RestoreCodeError::InvalidSigningKey)?;
     Ok(code)

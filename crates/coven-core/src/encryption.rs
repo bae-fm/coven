@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305};
 use hkdf::Hkdf;
@@ -16,6 +18,7 @@ pub const TAG_SIZE: usize = 16;
 pub const CHUNK_SIZE: usize = 65536;
 /// Each encrypted chunk: plaintext + 16-byte auth tag
 pub const ENCRYPTED_CHUNK_SIZE: usize = CHUNK_SIZE + TAG_SIZE;
+pub const INITIAL_KEY_GENERATION: u64 = 1;
 
 /// Generate a random 32-byte key.
 pub fn generate_random_key() -> [u8; 32] {
@@ -91,6 +94,19 @@ pub enum EncryptionError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredKeyring {
+    current_generation: u64,
+    keys: Vec<StoredKeyringGeneration>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredKeyringGeneration {
+    generation: u64,
+    key_hex: String,
+}
+
 /// Manages encryption keys and provides XChaCha20-Poly1305 encryption/decryption
 ///
 /// This implements the security model described in the README:
@@ -98,43 +114,177 @@ pub enum EncryptionError {
 /// - Chunked format enables random-access decryption for efficient range reads
 #[derive(Clone)]
 pub struct EncryptionService {
-    key: [u8; 32],
+    current_generation: u64,
+    keys: BTreeMap<u64, [u8; 32]>,
 }
 impl std::fmt::Debug for EncryptionService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptionService")
-            .field("key", &"<redacted>")
+            .field("current_generation", &self.current_generation)
+            .field("keys", &"<redacted>")
             .finish()
     }
 }
 impl EncryptionService {
     /// Create a new encryption service from a hex-encoded key string
-    pub fn new(key_hex: &str) -> Result<Self, EncryptionError> {
+    pub fn new(stored_key: &str) -> Result<Self, EncryptionError> {
         info!("Loading master key...");
-        let key: [u8; 32] = hex::decode(key_hex)
-            .map_err(|e| EncryptionError::KeyManagement(format!("Invalid key format: {e}")))?
-            .try_into()
-            .map_err(|_| {
-                EncryptionError::KeyManagement("Invalid key length, expected 32 bytes".to_string())
-            })?;
-        Ok(EncryptionService { key })
+        match decode_legacy_key(stored_key) {
+            Ok(key) => Ok(EncryptionService::from_key(key)),
+            Err(legacy_error) => {
+                EncryptionService::from_keyring_json(stored_key).map_err(|keyring_error| {
+                    EncryptionError::KeyManagement(format!(
+                        "invalid stored encryption key: {legacy_error}; keyring parse failed: {keyring_error}"
+                    ))
+                })
+            }
+        }
     }
 
     /// Create a new encryption service from a raw 32-byte key.
     pub fn from_key(key: [u8; 32]) -> Self {
-        EncryptionService { key }
+        Self::from_key_at_generation(INITIAL_KEY_GENERATION, key)
+    }
+
+    pub fn from_key_at_generation(generation: u64, key: [u8; 32]) -> Self {
+        let mut keys = BTreeMap::new();
+        keys.insert(generation, key);
+        EncryptionService {
+            current_generation: generation,
+            keys,
+        }
+    }
+
+    pub fn from_keyring(
+        current_generation: u64,
+        keys: impl IntoIterator<Item = (u64, [u8; 32])>,
+    ) -> Result<Self, EncryptionError> {
+        let keys: BTreeMap<u64, [u8; 32]> = keys.into_iter().collect();
+        if keys.is_empty() {
+            return Err(EncryptionError::KeyManagement(
+                "keyring has no generations".to_string(),
+            ));
+        }
+        if !keys.contains_key(&current_generation) {
+            return Err(EncryptionError::KeyManagement(format!(
+                "keyring has no key for current generation {current_generation}"
+            )));
+        }
+        Ok(EncryptionService {
+            current_generation,
+            keys,
+        })
+    }
+
+    pub fn current_generation(&self) -> u64 {
+        self.current_generation
+    }
+
+    pub fn keyring_entries(&self) -> Vec<(u64, [u8; 32])> {
+        self.keys
+            .iter()
+            .map(|(generation, key)| (*generation, *key))
+            .collect()
+    }
+
+    pub fn to_keyring_string(&self) -> Result<String, EncryptionError> {
+        let payload = StoredKeyring {
+            current_generation: self.current_generation,
+            keys: self
+                .keyring_entries()
+                .into_iter()
+                .map(|(generation, key)| StoredKeyringGeneration {
+                    generation,
+                    key_hex: hex::encode(key),
+                })
+                .collect(),
+        };
+        serde_json::to_string(&payload)
+            .map_err(|e| EncryptionError::KeyManagement(format!("serialize keyring: {e}")))
+    }
+
+    pub fn to_keyring_payload(&self) -> Result<Vec<u8>, EncryptionError> {
+        self.to_keyring_string().map(String::into_bytes)
+    }
+
+    pub fn from_keyring_payload(plaintext: Vec<u8>) -> Result<Self, EncryptionError> {
+        if plaintext.len() == 32 {
+            let key: [u8; 32] = plaintext.try_into().map_err(|_| {
+                EncryptionError::KeyManagement("unwrapped key is not 32 bytes".to_string())
+            })?;
+            return Ok(EncryptionService::from_key(key));
+        }
+        let keyring = String::from_utf8(plaintext).map_err(|e| {
+            EncryptionError::KeyManagement(format!("keyring payload is not UTF-8: {e}"))
+        })?;
+        EncryptionService::from_keyring_json(&keyring)
+    }
+
+    fn from_keyring_json(keyring: &str) -> Result<Self, EncryptionError> {
+        let payload: StoredKeyring = serde_json::from_str(keyring).map_err(|e| {
+            EncryptionError::KeyManagement(format!("keyring JSON is malformed: {e}"))
+        })?;
+        let mut keys = Vec::with_capacity(payload.keys.len());
+        for entry in payload.keys {
+            let key: [u8; 32] = hex::decode(&entry.key_hex)
+                .map_err(|e| {
+                    EncryptionError::KeyManagement(format!("keyring key is not hex: {e}"))
+                })?
+                .try_into()
+                .map_err(|_| {
+                    EncryptionError::KeyManagement("keyring key is not 32 bytes".to_string())
+                })?;
+            keys.push((entry.generation, key));
+        }
+        EncryptionService::from_keyring(payload.current_generation, keys)
+    }
+
+    pub fn key_for_generation(&self, generation: u64) -> Result<[u8; 32], EncryptionError> {
+        self.keys.get(&generation).copied().ok_or_else(|| {
+            EncryptionError::KeyManagement(format!("no key for generation {generation}"))
+        })
+    }
+
+    pub fn service_for_generation(
+        &self,
+        generation: u64,
+    ) -> Result<EncryptionService, EncryptionError> {
+        Ok(EncryptionService::from_key_at_generation(
+            generation,
+            self.key_for_generation(generation)?,
+        ))
+    }
+
+    pub fn with_appended_generation(
+        &self,
+        generation: u64,
+        key: [u8; 32],
+    ) -> Result<EncryptionService, EncryptionError> {
+        if generation <= self.current_generation {
+            return Err(EncryptionError::KeyManagement(format!(
+                "new generation {generation} must be greater than current generation {}",
+                self.current_generation
+            )));
+        }
+        let mut keys = self.keys.clone();
+        keys.insert(generation, key);
+        Ok(EncryptionService {
+            current_generation: generation,
+            keys,
+        })
     }
 
     /// SHA-256 fingerprint of the key, first 8 bytes hex-encoded (16 hex chars).
     /// Short enough to display in UI, long enough to detect wrong keys.
     pub fn fingerprint(&self) -> String {
-        let hash = Sha256::digest(self.key);
+        let hash = Sha256::digest(self.key_bytes());
         hex::encode(&hash[..8])
     }
 
     /// Return the raw 32-byte key.
     pub fn key_bytes(&self) -> [u8; 32] {
-        self.key
+        self.key_for_generation(self.current_generation)
+            .expect("current generation key exists")
     }
 
     /// Encrypt data using chunked XChaCha20-Poly1305 format.
@@ -162,7 +312,8 @@ impl EncryptionService {
     pub fn decrypt(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, EncryptionError> {
         let base_nonce = read_base_nonce(encrypted_data)?;
         let layout = encrypted_chunk_layout(encrypted_data.len())?;
-        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&self.key));
+        let key = self.key_bytes();
+        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key));
 
         let mut result = Vec::with_capacity(decrypted_len_upper_bound(layout.data_len));
         for chunk_index in 0..layout.total_chunks {
@@ -186,7 +337,7 @@ impl EncryptionService {
     /// A streaming sealer over this service's key, for encrypting a blob
     /// chunk-by-chunk straight into an upload. See [`ChunkSealer`].
     pub fn sealer(&self) -> ChunkSealer {
-        ChunkSealer::new(&self.key)
+        ChunkSealer::new(&self.key_bytes())
     }
 
     /// Decrypt a specific chunk from chunked encrypted data.
@@ -201,7 +352,8 @@ impl EncryptionService {
         let (chunk_start, chunk_end) = layout.chunk_bounds(ciphertext.len(), chunk_index)?;
         let chunk_data = &ciphertext[chunk_start..chunk_end];
 
-        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&self.key));
+        let key = self.key_bytes();
+        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key));
         decrypt_chunk_with_cipher(&cipher, &base_nonce, chunk_index as u64, chunk_data)
             .map_err(|_| EncryptionError::Decryption("Authentication failed".to_string()))
     }
@@ -245,7 +397,8 @@ impl EncryptionService {
             .try_into()
             .map_err(|_| EncryptionError::Decryption("Invalid nonce".to_string()))?;
 
-        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&self.key));
+        let key = self.key_bytes();
+        let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key));
 
         let start_chunk = plaintext_start / CHUNK_SIZE as u64;
         let end_chunk = (plaintext_end.saturating_sub(1)) / CHUNK_SIZE as u64;
@@ -307,7 +460,19 @@ impl EncryptionService {
     /// Deterministic: same master + scope_id always gives the same key.
     pub fn derive_scoped(&self, scope_id: &str) -> EncryptionService {
         let derived = self.derive_key(&format!("coven-scope-v1:{scope_id}"));
-        EncryptionService::from_key(derived)
+        EncryptionService::from_key_at_generation(self.current_generation, derived)
+    }
+
+    pub fn derive_scoped_for_generation(
+        &self,
+        generation: u64,
+        scope_id: &str,
+    ) -> Result<EncryptionService, EncryptionError> {
+        let key = self.key_for_generation(generation)?;
+        let derived = derive_key_from(&key, &format!("coven-scope-v1:{scope_id}"));
+        Ok(EncryptionService::from_key_at_generation(
+            generation, derived,
+        ))
     }
 
     /// Derive a 32-byte key using HKDF-SHA256 with the given info label.
@@ -320,12 +485,23 @@ impl EncryptionService {
     /// - IKM: master key
     /// - Info: caller-provided label
     pub fn derive_key(&self, info: &str) -> [u8; 32] {
-        let hk = Hkdf::<Sha256>::new(Some(b"coven-hkdf-salt-v1"), &self.key);
-        let mut okm = [0u8; 32];
-        hk.expand(info.as_bytes(), &mut okm)
-            .expect("32 bytes is a valid HKDF output length");
-        okm
+        derive_key_from(&self.key_bytes(), info)
     }
+}
+
+fn decode_legacy_key(stored_key: &str) -> Result<[u8; 32], String> {
+    hex::decode(stored_key)
+        .map_err(|e| format!("legacy key is not hex: {e}"))?
+        .try_into()
+        .map_err(|bytes: Vec<u8>| format!("legacy key must be 32 bytes, got {}", bytes.len()))
+}
+
+fn derive_key_from(key: &[u8; 32], info: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(b"coven-hkdf-salt-v1"), key);
+    let mut okm = [0u8; 32];
+    hk.expand(info.as_bytes(), &mut okm)
+        .expect("32 bytes is a valid HKDF output length");
+    okm
 }
 
 #[derive(Clone, Copy)]

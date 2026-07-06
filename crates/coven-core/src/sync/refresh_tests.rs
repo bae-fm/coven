@@ -11,11 +11,11 @@
 //! refresh in place fails when the corresponding refresh step is dropped (the
 //! "mutation" each test documents).
 
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
-use crate::keys::{KeyService, UserKeypair};
+use crate::keys::{KeyError, KeyPersistence, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
@@ -29,6 +29,28 @@ use crate::sync::test_helpers::{
 };
 
 const LIB_ID: &str = "lib-refresh-test";
+
+#[derive(Default)]
+struct TestKeyPersistence {
+    value: Mutex<Option<String>>,
+}
+
+impl TestKeyPersistence {
+    fn set_initial_key(&self, key: [u8; 32]) {
+        self.set_encryption_key(&hex::encode(key)).unwrap();
+    }
+
+    fn stored_key(&self) -> Option<String> {
+        self.value.lock().unwrap().clone()
+    }
+}
+
+impl KeyPersistence for TestKeyPersistence {
+    fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
+        *self.value.lock().unwrap() = Some(value.to_string());
+        Ok(())
+    }
+}
 
 /// Upload `chain`'s entries to the mock storage exactly as the membership ops do
 /// (one object per entry under `membership/{author}/{seq}`), so the device under
@@ -60,6 +82,7 @@ async fn run_cycle(
     keypair: &UserKeypair,
     device_id: &str,
     ld: &LibraryDir,
+    key_persistence: Option<&dyn KeyPersistence>,
 ) -> Result<(), String> {
     let hlc = Hlc::new(device_id.to_string());
     run_single_sync_cycle(
@@ -71,7 +94,7 @@ async fn run_cycle(
         db,
         cipher,
         keypair,
-        None,
+        key_persistence,
         ld,
         Some(storage as &dyn crate::storage::cloud::CloudHome),
         None,
@@ -93,8 +116,6 @@ async fn run_cycle(
 /// keyring both hold the rotated key, which only the adoption can produce.)
 #[tokio::test]
 async fn non_rotating_device_adopts_rotated_key_without_restart() {
-    crate::keys::test_keyring::install();
-
     let owner = UserKeypair::generate(); // device A, the founder/owner
     let device_b = UserKeypair::generate();
     let victim = UserKeypair::generate(); // the member A will remove
@@ -141,16 +162,24 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = KeyService::new(LIB_ID.to_string());
-    ks_b.set_encryption_key(&hex::encode(old_key)).unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let (_tmp_b, ld_b) = temp_library_dir();
 
     // Sanity: before the rotation, B's refresh is a no-op — it already holds the
     // current key, so the cycle leaves the cipher unchanged.
-    run_cycle(&storage, &db_b, &cipher_b, &device_b, "B", &ld_b)
-        .await
-        .expect("pre-rotation cycle");
+    run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await
+    .expect("pre-rotation cycle");
     assert_eq!(
         cipher_key(&cipher_b),
         old_key,
@@ -167,31 +196,44 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         &pubkey_hex(&victim),
         LIB_ID,
         "0000000004000-0000-A",
+        &EncryptionService::from_key(old_key),
     )
     .await
     .expect("revoke rotates the key");
-    assert_ne!(new_key, old_key, "removal rotates to a fresh key");
+    assert_ne!(
+        new_key.key_bytes(),
+        old_key,
+        "removal rotates to a fresh key"
+    );
 
     // A seals a control object under the NEW key (a changeset) so we can prove B
     // can decrypt post-rotation content only if it adopted the new key. We assert
     // adoption directly via B's cipher + keyring below, which is what gates that.
 
     // --- B's NEXT cycle, no restart: it must adopt the rotated key. ---
-    run_cycle(&storage, &db_b, &cipher_b, &device_b, "B", &ld_b)
-        .await
-        .expect("post-rotation cycle");
+    run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await
+    .expect("post-rotation cycle");
 
     // B's live cipher now holds the rotated key (it can decrypt what A seals under
     // it this cycle), and its keyring was updated so a restart reads the new key —
     // the two halves `apply_key_rotation` performs.
     assert_eq!(
         cipher_key(&cipher_b),
-        new_key,
+        new_key.key_bytes(),
         "B adopted the rotated key into its live cipher without a restart (#87)",
     );
     assert_eq!(
-        ks_b.get_encryption_key().unwrap().as_deref(),
-        Some(&*hex::encode(new_key)),
+        ks_b.stored_key().as_deref(),
+        Some(new_key.to_keyring_string().unwrap().as_str()),
         "B persisted the rotated key to its keyring, so its restart reads the current key",
     );
 
@@ -200,7 +242,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let reunwrapped = unwrap_library_key(&storage, &device_b, LIB_ID, &owner_pk)
         .await
         .expect("B can unwrap its re-wrapped key");
-    assert_eq!(reunwrapped, new_key);
+    assert_eq!(reunwrapped, new_key.key_bytes());
 }
 
 /// #87 (authentication invariant, #99): the wrapped-key adoption refuses a forged
@@ -210,8 +252,6 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 /// adopt the attacker's key; the cycle fails closed and B keeps its real key.
 #[tokio::test]
 async fn refresh_rejects_a_forged_wrapped_key() {
-    crate::keys::test_keyring::install();
-
     let owner = UserKeypair::generate();
     let attacker = UserKeypair::generate();
     let device_b = UserKeypair::generate();
@@ -249,15 +289,24 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = KeyService::new(LIB_ID.to_string());
-    ks_b.set_encryption_key(&hex::encode(real_key)).unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(real_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         real_key,
     )));
     let (_tmp_b, ld_b) = temp_library_dir();
 
     // B's cycle aborts (refuses the forged key) rather than adopting it.
-    let result = run_cycle(&storage, &db_b, &cipher_b, &device_b, "B", &ld_b).await;
+    let result = run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await;
     assert!(
         result.is_err(),
         "a forged wrapped key must abort the cycle, not be adopted: {result:?}",
@@ -282,8 +331,6 @@ async fn refresh_rejects_a_forged_wrapped_key() {
 /// rather than letting it push or judge under no authorization.
 #[tokio::test]
 async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
-    crate::keys::test_keyring::install();
-
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
@@ -309,12 +356,21 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = KeyService::new(LIB_ID.to_string());
-    ks_b.set_encryption_key(&hex::encode(key)).unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
     let (_tmp_b, ld_b) = temp_library_dir();
 
-    let result = run_cycle(&storage, &db_b, &cipher_b, &device_b, "B", &ld_b).await;
+    let result = run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await;
     assert!(
         result.is_err(),
         "a membership-list failure under a pinned owner must abort the cycle, not \

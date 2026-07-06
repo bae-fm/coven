@@ -18,6 +18,9 @@ use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionServic
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{BlobBody, CloudHome};
 
+const GENERATION_TAG_MAGIC: &[u8; 4] = b"CKG1";
+const GENERATION_TAG_LEN: usize = GENERATION_TAG_MAGIC.len() + std::mem::size_of::<u64>();
+
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
 /// every object under the library key (the default); a `Plaintext` home stores
 /// objects in the clear so the bucket is browsable, and drops the `.enc` suffix.
@@ -77,8 +80,9 @@ impl CloudCipher {
     }
 
     /// Protect a control object (heads, changesets, snapshot, snapshot_meta,
-    /// min_schema, membership) for storage. Encrypted seals under the library
-    /// key; plaintext returns the bytes unchanged.
+    /// min_schema, membership) for storage. Encrypted seals under the current
+    /// library-key generation and prefixes that generation in cleartext;
+    /// plaintext returns the bytes unchanged.
     pub fn seal(&self, plaintext: Vec<u8>) -> Vec<u8> {
         // A control object is always whole-home scoped; only blobs carry a scope.
         // This is exactly the master-scoped blob path: `encryption_for_scope`
@@ -91,16 +95,16 @@ impl CloudCipher {
         self.open_scoped(crate::blob::ResolvedScope::Master, stored)
     }
 
-    /// Protect a blob under its resolved scope. Encrypted derives the scope's key
-    /// from the master via [`encryption_for_scope`]; plaintext is passthrough,
-    /// ignoring the scope (a plaintext home has no per-scope keys).
+    /// Protect a blob under its resolved scope. Master/derived encrypted blobs
+    /// carry the current library-key generation in cleartext; item-key blobs are
+    /// sealed under their explicit key and do not carry a library generation.
     pub(crate) fn seal_scoped(
         &self,
         scope: crate::blob::ResolvedScope,
         plaintext: Vec<u8>,
     ) -> Vec<u8> {
         match self {
-            CloudCipher::Encrypted(e) => encryption_for_scope(scope, e).encrypt(&plaintext),
+            CloudCipher::Encrypted(e) => seal_scoped_encrypted(scope, e, &plaintext),
             CloudCipher::Plaintext => plaintext,
         }
     }
@@ -112,7 +116,7 @@ impl CloudCipher {
         stored: Vec<u8>,
     ) -> Result<Vec<u8>, EncryptionError> {
         match self {
-            CloudCipher::Encrypted(e) => encryption_for_scope(scope, e).decrypt(&stored),
+            CloudCipher::Encrypted(e) => open_scoped_encrypted(scope, e, &stored),
             CloudCipher::Plaintext => Ok(stored),
         }
     }
@@ -135,9 +139,11 @@ impl CloudCipher {
     /// The final object length for a blob of `plaintext_len` bytes under this
     /// cipher: the chunked-encrypted length for an encrypted home, the plaintext
     /// length verbatim for a browsable one.
-    pub fn body_len(&self, plaintext_len: u64) -> u64 {
+    pub fn body_len(&self, scope: &crate::blob::ResolvedScope, plaintext_len: u64) -> u64 {
         match self {
-            CloudCipher::Encrypted(_) => chunked_encrypted_len(plaintext_len),
+            CloudCipher::Encrypted(_) => {
+                chunked_encrypted_len(plaintext_len) + encrypted_scope_prefix_len(scope)
+            }
             CloudCipher::Plaintext => plaintext_len,
         }
     }
@@ -154,14 +160,18 @@ impl CloudCipher {
     ) -> Result<BlobBody, String> {
         let plaintext_len = crate::local_blob::file_len(file_path).await?;
         let reader = crate::local_blob::open_reader(file_path).await?;
-        let sealer = match self {
-            CloudCipher::Encrypted(e) => Some(encryption_for_scope(scope, e).sealer()),
-            CloudCipher::Plaintext => None,
+        let (sealer, prefix) = match self {
+            CloudCipher::Encrypted(e) => {
+                let (encryption, prefix) = sealing_encryption_for_scope(scope.clone(), e)?;
+                (Some(encryption.sealer()), prefix)
+            }
+            CloudCipher::Plaintext => (None, Vec::new()),
         };
-        Ok(BlobBody::from_file(
-            self.body_len(plaintext_len),
+        Ok(BlobBody::from_file_with_prefix(
+            self.body_len(&scope, plaintext_len),
             reader,
             sealer,
+            prefix,
         ))
     }
 }
@@ -343,6 +353,116 @@ pub(crate) fn encryption_for_scope(
     }
 }
 
+fn encrypted_scope_prefix_len(scope: &crate::blob::ResolvedScope) -> u64 {
+    match scope {
+        crate::blob::ResolvedScope::Key(_) => 0,
+        crate::blob::ResolvedScope::Master | crate::blob::ResolvedScope::Derived(_) => {
+            GENERATION_TAG_LEN as u64
+        }
+    }
+}
+
+fn generation_tag(generation: u64) -> Vec<u8> {
+    let mut tag = Vec::with_capacity(GENERATION_TAG_LEN);
+    tag.extend_from_slice(GENERATION_TAG_MAGIC);
+    tag.extend_from_slice(&generation.to_be_bytes());
+    tag
+}
+
+fn read_generation_tag(stored: &[u8]) -> Result<(u64, &[u8]), EncryptionError> {
+    if stored.len() < GENERATION_TAG_LEN {
+        return Err(EncryptionError::Decryption(
+            "ciphertext too short for generation tag".to_string(),
+        ));
+    }
+    if &stored[..GENERATION_TAG_MAGIC.len()] != GENERATION_TAG_MAGIC {
+        return Err(EncryptionError::Decryption(
+            "ciphertext missing generation tag".to_string(),
+        ));
+    }
+    let mut generation_bytes = [0u8; std::mem::size_of::<u64>()];
+    generation_bytes.copy_from_slice(&stored[GENERATION_TAG_MAGIC.len()..GENERATION_TAG_LEN]);
+    Ok((
+        u64::from_be_bytes(generation_bytes),
+        &stored[GENERATION_TAG_LEN..],
+    ))
+}
+
+fn sealing_encryption_for_scope(
+    scope: crate::blob::ResolvedScope,
+    master: &EncryptionService,
+) -> Result<(EncryptionService, Vec<u8>), String> {
+    match scope {
+        crate::blob::ResolvedScope::Master => Ok((
+            encryption_for_scope(crate::blob::ResolvedScope::Master, master),
+            generation_tag(master.current_generation()),
+        )),
+        crate::blob::ResolvedScope::Derived(scope_id) => Ok((
+            encryption_for_scope(crate::blob::ResolvedScope::Derived(scope_id), master),
+            generation_tag(master.current_generation()),
+        )),
+        crate::blob::ResolvedScope::Key(key) => Ok((EncryptionService::from_key(key), Vec::new())),
+    }
+}
+
+fn opening_encryption_for_scope(
+    scope: crate::blob::ResolvedScope,
+    master: &EncryptionService,
+    generation: u64,
+) -> Result<EncryptionService, EncryptionError> {
+    match scope {
+        crate::blob::ResolvedScope::Master => master.service_for_generation(generation),
+        crate::blob::ResolvedScope::Derived(scope_id) => {
+            master.derive_scoped_for_generation(generation, &scope_id)
+        }
+        crate::blob::ResolvedScope::Key(key) => Ok(EncryptionService::from_key(key)),
+    }
+}
+
+fn seal_scoped_encrypted(
+    scope: crate::blob::ResolvedScope,
+    master: &EncryptionService,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let (encryption, mut prefix) = sealing_encryption_for_scope(scope, master)
+        .expect("current generation is present in the encryption service");
+    prefix.extend(encryption.encrypt(plaintext));
+    prefix
+}
+
+fn open_scoped_encrypted(
+    scope: crate::blob::ResolvedScope,
+    master: &EncryptionService,
+    stored: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+    match scope {
+        crate::blob::ResolvedScope::Key(key) => EncryptionService::from_key(key).decrypt(stored),
+        crate::blob::ResolvedScope::Master | crate::blob::ResolvedScope::Derived(_) => {
+            let (generation, ciphertext) = read_generation_tag(stored)?;
+            opening_encryption_for_scope(scope, master, generation)?.decrypt(ciphertext)
+        }
+    }
+}
+
+fn range_encryption_for_scope(
+    scope: crate::blob::ResolvedScope,
+    master: &EncryptionService,
+) -> RangeEncryption {
+    match scope {
+        crate::blob::ResolvedScope::Master => RangeEncryption::Tagged {
+            master: master.clone(),
+            scope: TaggedRangeScope::Master,
+        },
+        crate::blob::ResolvedScope::Derived(scope_id) => RangeEncryption::Tagged {
+            master: master.clone(),
+            scope: TaggedRangeScope::Derived(scope_id),
+        },
+        crate::blob::ResolvedScope::Key(key) => {
+            RangeEncryption::Untagged(EncryptionService::from_key(key))
+        }
+    }
+}
+
 /// Reads plaintext byte ranges from a single stored blob without fetching the
 /// whole object — the ranged analogue of [`CloudSyncStorage::get_blob`].
 ///
@@ -363,14 +483,33 @@ pub struct BlobRangeReader {
     home: Arc<dyn CloudHome>,
     /// The scope's key for an encrypted home, resolved once at construction;
     /// `None` for a plaintext home (the blob is read verbatim).
-    encryption: Option<EncryptionService>,
+    encryption: Option<RangeEncryption>,
     /// The blob's cloud object key (see [`CloudSyncStorage::blob_key`]).
     key: String,
     /// Plaintext length of the blob. Ranges are validated against it, and the
     /// encrypted chunk range is clamped to the matching blob length.
     source_size: u64,
-    /// The 24-byte base nonce of an encrypted blob, read once on first use.
-    nonce: OnceCell<Vec<u8>>,
+    /// The encrypted blob header, read once on first use.
+    header: OnceCell<RangeHeader>,
+}
+
+enum RangeEncryption {
+    Untagged(EncryptionService),
+    Tagged {
+        master: EncryptionService,
+        scope: TaggedRangeScope,
+    },
+}
+
+enum TaggedRangeScope {
+    Master,
+    Derived(String),
+}
+
+struct RangeHeader {
+    encryption: EncryptionService,
+    nonce: Vec<u8>,
+    chunk_base: u64,
 }
 
 impl BlobRangeReader {
@@ -387,7 +526,7 @@ impl BlobRangeReader {
         source_size: u64,
     ) -> Self {
         let encryption = match cipher {
-            CloudCipher::Encrypted(master) => Some(encryption_for_scope(scope, master)),
+            CloudCipher::Encrypted(master) => Some(range_encryption_for_scope(scope, master)),
             CloudCipher::Plaintext => None,
         };
         BlobRangeReader {
@@ -395,7 +534,7 @@ impl BlobRangeReader {
             encryption,
             key,
             source_size,
-            nonce: OnceCell::new(),
+            header: OnceCell::new(),
         }
     }
 
@@ -430,36 +569,89 @@ impl BlobRangeReader {
 
         use crate::encryption::{chunked_encrypted_len, encrypted_chunk_range, CHUNK_SIZE};
 
-        let nonce = self.nonce().await?;
+        let header = self.header(encryption).await?;
 
         let (chunk_start, mut chunk_end) = encrypted_chunk_range(offset, end);
         chunk_end = chunk_end.min(chunked_encrypted_len(self.source_size));
+        let stored_chunk_start =
+            header.chunk_base + (chunk_start - crate::encryption::NONCE_SIZE as u64);
+        let stored_chunk_end =
+            header.chunk_base + (chunk_end - crate::encryption::NONCE_SIZE as u64);
         let encrypted_chunks = self
             .home
-            .read_range(&self.key, chunk_start, chunk_end)
+            .read_range(&self.key, stored_chunk_start, stored_chunk_end)
             .await
             .map_err(StorageError::from)?;
 
         let first_chunk_index = offset / CHUNK_SIZE as u64;
-        encryption
-            .decrypt_range_with_offset(nonce, &encrypted_chunks, first_chunk_index, offset, end)
+        header
+            .encryption
+            .decrypt_range_with_offset(
+                &header.nonce,
+                &encrypted_chunks,
+                first_chunk_index,
+                offset,
+                end,
+            )
             .map_err(|e| StorageError::Decryption(format!("blob range {offset}..{end}: {e}")))
     }
 
-    /// The cached 24-byte base nonce, read from the encrypted blob's header on
-    /// first use and reused for every later range read.
-    async fn nonce(&self) -> Result<&[u8], StorageError> {
+    /// The cached encrypted blob header, read once and reused for later range reads.
+    async fn header(&self, encryption: &RangeEncryption) -> Result<&RangeHeader, StorageError> {
         use crate::encryption::NONCE_SIZE;
-        let nonce = self
-            .nonce
+        self.header
             .get_or_try_init(|| async {
-                self.home
-                    .read_range(&self.key, 0, NONCE_SIZE as u64)
-                    .await
-                    .map_err(StorageError::from)
+                match encryption {
+                    RangeEncryption::Untagged(encryption) => {
+                        let nonce = self
+                            .home
+                            .read_range(&self.key, 0, NONCE_SIZE as u64)
+                            .await
+                            .map_err(StorageError::from)?;
+                        Ok(RangeHeader {
+                            encryption: encryption.clone(),
+                            nonce,
+                            chunk_base: NONCE_SIZE as u64,
+                        })
+                    }
+                    RangeEncryption::Tagged { master, scope } => {
+                        let header = self
+                            .home
+                            .read_range(&self.key, 0, (GENERATION_TAG_LEN + NONCE_SIZE) as u64)
+                            .await
+                            .map_err(StorageError::from)?;
+                        if header.len() < GENERATION_TAG_LEN + NONCE_SIZE {
+                            return Err(StorageError::Decryption(format!(
+                                "blob header too short: expected {}, got {}",
+                                GENERATION_TAG_LEN + NONCE_SIZE,
+                                header.len()
+                            )));
+                        }
+                        let (generation, nonce_and_chunks) =
+                            read_generation_tag(&header).map_err(|e| {
+                                StorageError::Decryption(format!("blob generation tag: {e}"))
+                            })?;
+                        let scope = match scope {
+                            TaggedRangeScope::Master => crate::blob::ResolvedScope::Master,
+                            TaggedRangeScope::Derived(scope_id) => {
+                                crate::blob::ResolvedScope::Derived(scope_id.clone())
+                            }
+                        };
+                        let encryption = opening_encryption_for_scope(scope, master, generation)
+                            .map_err(|e| {
+                                StorageError::Decryption(format!(
+                                    "blob generation {generation}: {e}"
+                                ))
+                            })?;
+                        Ok(RangeHeader {
+                            encryption,
+                            nonce: nonce_and_chunks[..NONCE_SIZE].to_vec(),
+                            chunk_base: (GENERATION_TAG_LEN + NONCE_SIZE) as u64,
+                        })
+                    }
+                }
             })
-            .await?;
-        Ok(nonce)
+            .await
     }
 }
 
@@ -915,11 +1107,11 @@ mod tests {
             .await
             .expect("streaming write");
 
-        // At rest it is the sealed wire format; the unchanged decrypt recovers the
-        // plaintext.
+        // At rest it is the generation-tagged sealed wire format; the cipher
+        // reads the tag and recovers the plaintext.
         let stored = home.get("blob-key").expect("blob present");
         assert_eq!(
-            master.decrypt(&stored).expect("decrypt streamed blob"),
+            cipher.open(stored).expect("decrypt streamed blob"),
             plaintext,
             "the multipart-streamed object decrypts to the original plaintext",
         );
@@ -950,6 +1142,47 @@ mod tests {
         ));
         // An opaque home with no key (a locked library) has no cipher.
         assert!(CloudCipher::for_storage(HomeStorage::Opaque, None).is_none());
+    }
+
+    #[tokio::test]
+    async fn membership_entry_survives_key_generation_rotation() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32])),
+            BlobPathScheme::Hashed,
+            UserKeypair::generate(),
+        );
+
+        storage
+            .put_membership_entry("owner", 1, b"generation-one-entry".to_vec())
+            .await
+            .expect("write generation one membership");
+
+        let keyring = EncryptionService::from_keyring(2, [(1, [1u8; 32]), (2, [2u8; 32])]).unwrap();
+        *storage.shared_cipher().write().unwrap() = CloudCipher::Encrypted(keyring);
+
+        assert_eq!(
+            storage
+                .get_membership_entry("owner", 1)
+                .await
+                .expect("read generation one membership after rotation"),
+            b"generation-one-entry",
+        );
+
+        storage
+            .put_membership_entry("owner", 2, b"generation-two-entry".to_vec())
+            .await
+            .expect("write generation two membership");
+        let generation_two = home
+            .get("membership/owner/2.enc")
+            .expect("generation two object exists");
+        assert!(
+            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32]))
+                .open(generation_two)
+                .is_err(),
+            "a generation one key must not open a generation two object",
+        );
     }
 
     /// A `ResolvedScope::Key` blob is encrypted under the explicit (item) key, not

@@ -69,7 +69,7 @@ pub async fn invite_member(
     public_key_hex: &str,
     invitee_email: Option<&str>,
     role: MemberRole,
-    encryption_key: &[u8; 32],
+    encryption: &EncryptionService,
     library_id: &str,
     library_name: &str,
 ) -> Result<crate::join_code::InviteCode, String> {
@@ -101,7 +101,7 @@ pub async fn invite_member(
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
-    let join_info = super::invite::create_invitation(
+    let join_info = super::invite::create_invitation_with_encryption(
         storage,
         cloud_home,
         &mut chain,
@@ -110,7 +110,7 @@ pub async fn invite_member(
         public_key_hex,
         invitee_email,
         role,
-        encryption_key,
+        encryption,
         library_id,
         &invite_ts,
     )
@@ -153,7 +153,8 @@ pub async fn remove_member(
     hlc: &Hlc,
     public_key_hex: &str,
     library_id: &str,
-) -> Result<[u8; 32], String> {
+    current_encryption: &EncryptionService,
+) -> Result<EncryptionService, String> {
     // Download existing membership entries and build the chain.
     let entry_keys = storage
         .list_membership_entries()
@@ -177,6 +178,7 @@ pub async fn remove_member(
         public_key_hex,
         library_id,
         &revoke_ts,
+        current_encryption,
     )
     .await
     .map_err(|e| format!("Failed to revoke member: {e}"))?;
@@ -197,7 +199,7 @@ pub async fn remove_member(
 /// A plaintext home has no library key to rotate, so this is an error there:
 /// sharing (and hence member removal) requires an encrypted home.
 pub fn apply_key_rotation(
-    new_key: [u8; 32],
+    new_encryption: EncryptionService,
     key_persistence: &dyn KeyPersistence,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
 ) -> Result<String, String> {
@@ -205,11 +207,13 @@ pub fn apply_key_rotation(
         let mut cipher = cipher_lock.write().unwrap();
         match &mut *cipher {
             CloudCipher::Encrypted(enc) => {
-                let new_key_hex = hex::encode(new_key);
+                let new_key_hex = new_encryption
+                    .to_keyring_string()
+                    .map_err(|e| format!("Failed to serialize encryption keyring: {e}"))?;
                 key_persistence
                     .set_encryption_key(&new_key_hex)
                     .map_err(|e| format!("Failed to persist new encryption key: {e}"))?;
-                *enc = EncryptionService::from_key(new_key);
+                *enc = new_encryption;
                 enc.fingerprint()
             }
             CloudCipher::Plaintext => {
@@ -490,7 +494,7 @@ mod tests {
             &pubkey_hex(&invitee),
             None,
             MemberRole::Member,
-            &[7u8; 32],
+            &EncryptionService::from_key([7u8; 32]),
             "lib-1",
             "Lib One",
         )
@@ -533,7 +537,7 @@ mod tests {
             &invitee_pk,
             None,
             MemberRole::Member,
-            &[7u8; 32],
+            &EncryptionService::from_key([7u8; 32]),
             "lib-1",
             "Lib One",
         )
@@ -542,9 +546,17 @@ mod tests {
 
         assert_eq!(storage.membership_list_count(), 1);
 
-        remove_member(&storage, &storage, &owner, &hlc, &invitee_pk, "lib-1")
-            .await
-            .expect("remove");
+        remove_member(
+            &storage,
+            &storage,
+            &owner,
+            &hlc,
+            &invitee_pk,
+            "lib-1",
+            &EncryptionService::from_key([7u8; 32]),
+        )
+        .await
+        .expect("remove");
 
         assert_eq!(storage.membership_list_count(), 2);
     }

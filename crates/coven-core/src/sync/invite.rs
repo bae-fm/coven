@@ -1,4 +1,4 @@
-use crate::encryption;
+use crate::encryption::{self, EncryptionService};
 use crate::keys::{self, KeyError, UserKeypair};
 /// Invitation and revocation flow for shared library membership.
 ///
@@ -90,14 +90,35 @@ fn signed_wrapped_key(
     library_id: &str,
     recipient_ed25519_pubkey: &str,
     recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
-    encryption_key: &[u8; 32],
+    encryption: &EncryptionService,
     owner_keypair: &UserKeypair,
 ) -> Result<Vec<u8>, InviteError> {
-    let sealed = keys::seal_box_encrypt(encryption_key, recipient_x25519_pk);
+    let payload = encryption
+        .to_keyring_payload()
+        .map_err(|e| InviteError::Crypto(format!("serialize keyring payload: {e}")))?;
+    let sealed = keys::seal_box_encrypt(&payload, recipient_x25519_pk);
     let wrapped =
         WrappedLibraryKey::signed(library_id, recipient_ed25519_pubkey, sealed, owner_keypair);
     serde_json::to_vec(&wrapped)
         .map_err(|e| InviteError::Crypto(format!("serialize wrapped key: {e}")))
+}
+
+#[cfg(test)]
+pub(crate) fn signed_wrapped_key_for_test(
+    library_id: &str,
+    recipient_ed25519_pubkey: &str,
+    recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
+    encryption_key: &[u8; 32],
+    owner_keypair: &UserKeypair,
+) -> Vec<u8> {
+    signed_wrapped_key(
+        library_id,
+        recipient_ed25519_pubkey,
+        recipient_x25519_pk,
+        &EncryptionService::from_key(*encryption_key),
+        owner_keypair,
+    )
+    .expect("signed wrapped key")
 }
 
 /// Upload a signed membership entry to the storage.
@@ -137,6 +158,36 @@ pub async fn create_invitation(
     library_id: &str,
     timestamp: &str,
 ) -> Result<CloudHomeJoinInfo, InviteError> {
+    let encryption = EncryptionService::from_key(*encryption_key);
+    create_invitation_with_encryption(
+        storage,
+        cloud_home,
+        chain,
+        entry_keys,
+        owner_keypair,
+        invitee_ed25519_pubkey,
+        invitee_email,
+        role,
+        &encryption,
+        library_id,
+        timestamp,
+    )
+    .await
+}
+
+pub async fn create_invitation_with_encryption(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    chain: &mut MembershipChain,
+    entry_keys: Vec<(String, u64)>,
+    owner_keypair: &UserKeypair,
+    invitee_ed25519_pubkey: &str,
+    invitee_email: Option<&str>,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    library_id: &str,
+    timestamp: &str,
+) -> Result<CloudHomeJoinInfo, InviteError> {
     // Convert Ed25519 -> X25519 for sealed box encryption.
     let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
 
@@ -149,7 +200,7 @@ pub async fn create_invitation(
         library_id,
         invitee_ed25519_pubkey,
         &invitee_x25519_pk,
-        encryption_key,
+        encryption,
         owner_keypair,
     )?;
 
@@ -241,6 +292,19 @@ pub async fn unwrap_library_key(
     library_id: &str,
     expected_owner: &str,
 ) -> Result<[u8; 32], InviteError> {
+    Ok(
+        unwrap_library_keyring(cloud_home, keypair, library_id, expected_owner)
+            .await?
+            .key_bytes(),
+    )
+}
+
+pub async fn unwrap_library_keyring(
+    cloud_home: &dyn CloudHome,
+    keypair: &UserKeypair,
+    library_id: &str,
+    expected_owner: &str,
+) -> Result<EncryptionService, InviteError> {
     let pubkey_hex = hex::encode(keypair.public_key());
 
     // Download the wrapped key directly off the cloud home (not through
@@ -265,12 +329,8 @@ pub async fn unwrap_library_key(
     // Decrypt with our X25519 secret key.
     let x25519_sk = keypair.to_x25519_secret_key();
     let plaintext = keys::seal_box_decrypt(&sealed, &x25519_sk)?;
-
-    let encryption_key: [u8; 32] = plaintext
-        .try_into()
-        .map_err(|_| InviteError::Crypto("unwrapped key is not 32 bytes".to_string()))?;
-
-    Ok(encryption_key)
+    EncryptionService::from_keyring_payload(plaintext)
+        .map_err(|e| InviteError::Crypto(format!("keyring payload: {e}")))
 }
 
 /// Revoke a member from the library. This:
@@ -291,7 +351,8 @@ pub async fn revoke_member(
     revokee_pubkey: &str,
     library_id: &str,
     timestamp: &str,
-) -> Result<[u8; 32], InviteError> {
+    current_encryption: &EncryptionService,
+) -> Result<EncryptionService, InviteError> {
     let members = chain.current_members();
 
     // Verify the revokee is a current member.
@@ -340,6 +401,10 @@ pub async fn revoke_member(
 
     // Generate a new random encryption key.
     let new_key = encryption::generate_random_key();
+    let new_generation = current_encryption.current_generation() + 1;
+    let new_keyring = current_encryption
+        .with_appended_generation(new_generation, new_key)
+        .map_err(|e| InviteError::Crypto(format!("append key generation: {e}")))?;
 
     // Re-wrap the new key to all remaining members, each signed so a joiner that
     // later adopts it can authenticate it the same way an invite's key is. As at
@@ -354,7 +419,7 @@ pub async fn revoke_member(
             library_id,
             member_pubkey,
             &x25519_pk,
-            &new_key,
+            &new_keyring,
             owner_keypair,
         )?;
         storage.put_wrapped_key(member_pubkey, wrapped).await?;
@@ -363,7 +428,7 @@ pub async fn revoke_member(
     // Delete the revoked member's wrapped key.
     storage.delete_wrapped_key(revokee_pubkey).await?;
 
-    Ok(new_key)
+    Ok(new_keyring)
 }
 
 #[cfg(test)]
@@ -660,7 +725,7 @@ mod tests {
             LIB_ID,
             &pubkey_hex(&joiner),
             &joiner_x25519,
-            &attacker_key,
+            &EncryptionService::from_key(attacker_key),
             &attacker,
         )
         .unwrap();
@@ -700,8 +765,14 @@ mod tests {
         // bytes are written under member B's slot (a relocation a bucket writer
         // can perform).
         let a_x25519 = member_a.to_x25519_public_key();
-        let for_a =
-            signed_wrapped_key(LIB_ID, &pubkey_hex(&member_a), &a_x25519, &key, &owner).unwrap();
+        let for_a = signed_wrapped_key(
+            LIB_ID,
+            &pubkey_hex(&member_a),
+            &a_x25519,
+            &EncryptionService::from_key(key),
+            &owner,
+        )
+        .unwrap();
         storage
             .put_wrapped_key(&pubkey_hex(&member_b), for_a)
             .await
@@ -998,12 +1069,13 @@ mod tests {
             &pubkey_hex(&member),
             LIB_ID,
             "0000000003000-0000-dev1",
+            &EncryptionService::from_key(old_key),
         )
         .await
         .unwrap();
 
         // New key should be different from old key.
-        assert_ne!(new_key, old_key);
+        assert_ne!(new_key.key_bytes(), old_key);
 
         // Member is no longer in the chain.
         let members = chain.current_members();
@@ -1026,7 +1098,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(owner_unwrapped, new_key);
+        assert_eq!(owner_unwrapped, new_key.key_bytes());
 
         // The Remove entry was uploaded to the storage.
         let entries = storage.list_membership_entries().await.unwrap();
@@ -1091,6 +1163,7 @@ mod tests {
             &pubkey_hex(&member1),
             LIB_ID,
             "0000000004000-0000-dev1",
+            &EncryptionService::from_key(old_key),
         )
         .await
         .unwrap();
@@ -1104,7 +1177,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(owner_key, new_key);
+        assert_eq!(owner_key, new_key.key_bytes());
 
         let member2_key = unwrap_library_key(
             &storage as &dyn CloudHome,
@@ -1114,7 +1187,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(member2_key, new_key);
+        assert_eq!(member2_key, new_key.key_bytes());
 
         // member1 cannot get a wrapped key.
         let result = storage.get_wrapped_key(&pubkey_hex(&member1)).await;
@@ -1173,6 +1246,7 @@ mod tests {
             &member_pubkey,
             LIB_ID,
             "0000000004000-0000-dev1",
+            &EncryptionService::from_key(old_key),
         )
         .await
         .unwrap();
@@ -1203,6 +1277,7 @@ mod tests {
             &pubkey_hex(&outsider),
             LIB_ID,
             "0000000002000-0000-dev1",
+            &EncryptionService::from_key([42u8; 32]),
         )
         .await;
 
@@ -1244,6 +1319,7 @@ mod tests {
             &pubkey_hex(&owner),
             LIB_ID,
             "0000000003000-0000-dev1",
+            &EncryptionService::from_key([42u8; 32]),
         )
         .await;
 
@@ -1302,6 +1378,7 @@ mod tests {
             &pubkey_hex(&member2),
             LIB_ID,
             "0000000004000-0000-dev1",
+            &EncryptionService::from_key([42u8; 32]),
         )
         .await;
 

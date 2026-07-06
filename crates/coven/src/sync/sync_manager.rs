@@ -530,16 +530,12 @@ impl SyncManager {
         // home has. Refuse before touching the membership chain.
         require_encrypted_home(sync_loop.cipher())?;
 
-        let encryption_key_hex = self
-            .key_service
-            .get_encryption_key()
-            .map_err(|e| format!("Failed to read encryption key: {e}"))?
-            .ok_or("Encryption key not configured")?;
-
-        let key_bytes: [u8; 32] = hex::decode(&encryption_key_hex)
-            .map_err(|e| format!("Invalid encryption key hex: {e}"))?
-            .try_into()
-            .map_err(|_| "Encryption key wrong length".to_string())?;
+        let encryption = match &*sync_loop.cipher().read().unwrap() {
+            CloudCipher::Encrypted(enc) => enc.clone(),
+            CloudCipher::Plaintext => {
+                return Err("sharing requires an encrypted cloud home".to_string())
+            }
+        };
 
         let (library_id, library_name) = {
             let config = (self.config_provider)();
@@ -557,7 +553,7 @@ impl SyncManager {
             public_key_hex,
             invitee_email,
             role,
-            &key_bytes,
+            &encryption,
             &library_id,
             &library_name,
         )
@@ -583,6 +579,12 @@ impl SyncManager {
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
+        let current_encryption = match &*sync_loop.cipher().read().unwrap() {
+            CloudCipher::Encrypted(enc) => enc.clone(),
+            CloudCipher::Plaintext => {
+                return Err("sharing requires an encrypted cloud home".to_string())
+            }
+        };
 
         let new_key = crate::sync::membership_ops::remove_member(
             storage,
@@ -591,6 +593,7 @@ impl SyncManager {
             sync_loop.hlc(),
             public_key_hex,
             &library_id,
+            &current_encryption,
         )
         .await?;
 

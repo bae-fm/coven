@@ -168,6 +168,8 @@ enum BlobSource {
     /// sealed one 64 KiB chunk at a time into the `[base_nonce][chunk]...` form.
     File {
         reader: PlaintextReader,
+        /// Final bytes emitted before the nonce/plaintext stream.
+        prefix: Bytes,
         /// `Some` seals each chunk under the scope's key; `None` passes the
         /// plaintext through (a browsable home).
         sealer: Option<ChunkSealer>,
@@ -195,11 +197,15 @@ impl BlobSource {
             }
             BlobSource::File {
                 reader,
+                prefix,
                 sealer,
                 nonce_pending,
                 sealed_any,
                 eof,
             } => {
+                if !prefix.is_empty() {
+                    return Ok(Some(std::mem::take(prefix)));
+                }
                 if *nonce_pending {
                     *nonce_pending = false;
                     if let Some(s) = sealer {
@@ -249,20 +255,18 @@ impl BlobBody {
         }
     }
 
-    /// A streaming body over a local plaintext file: `len` is the final object
-    /// length (encrypted or plaintext), `reader` reads the plaintext incrementally,
-    /// and `sealer` (`Some` = encrypted home) seals each chunk. Built by
-    /// `CloudCipher::open_body`.
-    pub(crate) fn from_file(
+    pub(crate) fn from_file_with_prefix(
         len: u64,
         reader: PlaintextReader,
         sealer: Option<ChunkSealer>,
+        prefix: Vec<u8>,
     ) -> Self {
         let nonce_pending = sealer.is_some();
         BlobBody {
             len,
             source: BlobSource::File {
                 reader,
+                prefix: Bytes::from(prefix),
                 sealer,
                 nonce_pending,
                 sealed_any: false,
@@ -488,10 +492,11 @@ mod streaming_tests {
         let path = dir.path().join("blob.bin");
         std::fs::write(&path, plaintext).unwrap();
         let reader = crate::local_blob::open_reader(&path).await.unwrap();
-        let body = BlobBody::from_file(
+        let body = BlobBody::from_file_with_prefix(
             crate::encryption::chunked_encrypted_len(plaintext.len() as u64),
             reader,
             Some(service.sealer()),
+            Vec::new(),
         );
         (dir, body)
     }
@@ -574,17 +579,18 @@ mod streaming_tests {
 
         let reader = crate::local_blob::open_reader(&path).await.unwrap();
         let streamed = drain(
-            BlobBody::from_file(plaintext.len() as u64, reader, None),
+            BlobBody::from_file_with_prefix(plaintext.len() as u64, reader, None, Vec::new()),
             4096,
         )
         .await;
         assert_eq!(streamed, plaintext);
 
         let reader = crate::local_blob::open_reader(&path).await.unwrap();
-        let collected = BlobBody::from_file(plaintext.len() as u64, reader, None)
-            .collect()
-            .await
-            .unwrap();
+        let collected =
+            BlobBody::from_file_with_prefix(plaintext.len() as u64, reader, None, Vec::new())
+                .collect()
+                .await
+                .unwrap();
         assert_eq!(collected, plaintext);
         assert_eq!(collected, streamed);
     }

@@ -10,14 +10,14 @@ use tracing::info;
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
-use crate::encryption::{EncryptionError, EncryptionService};
+use crate::encryption::EncryptionError;
 use crate::join_code::InviteCode;
 use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
 use crate::library_dir::LibraryDir;
 use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::invite::{unwrap_library_key, InviteError};
+use crate::sync::invite::{unwrap_library_keyring, InviteError};
 use crate::sync::pull::{pull_changes, PullError};
 use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
@@ -287,20 +287,19 @@ pub async fn join_library(
     // needed. The key is authenticated against the owner the invite pins (the
     // chain founder) before adoption, so a bucket writer can't substitute it.
     on_status("Accepting invitation...");
-    let encryption_key = unwrap_library_key(
+    let encryption = unwrap_library_keyring(
         cloud_home.as_ref(),
         &user_keypair,
         &code.library_id,
         &code.owner_pubkey,
     )
     .await?;
-    let encryption_key_hex = hex::encode(encryption_key);
+    let encryption_keyring = encryption.to_keyring_string()?;
 
     // Create the sync storage with the real encryption key. Joining a shared
     // library only makes sense over an opaque home — the invite wraps the library
     // key — so the home is always opaque here: the cipher is `Encrypted` and the
     // blob-path scheme is `Hashed`, matching what the owner writes.
-    let encryption = EncryptionService::new(&encryption_key_hex)?;
     let cipher = CloudCipher::Encrypted(encryption);
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
     // The device's signing identity signs the head/min_schema control objects it
@@ -324,7 +323,7 @@ pub async fn join_library(
     let result = bootstrap_and_save_library(
         &storage,
         &cipher,
-        Some(&encryption_key_hex),
+        Some(&encryption_keyring),
         &library_dir,
         &library_id,
         &device_id,
