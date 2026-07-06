@@ -704,8 +704,7 @@ mod tests {
     #[test]
     fn count_other_pending_uploads_excludes_current_row_and_counts_matching_blob_ids() {
         let conn = Connection::open_in_memory().expect("open sqlite");
-        conn.execute_batch(crate::db::MIGRATION_SQL)
-            .expect("create bookkeeping schema");
+        crate::db::apply_coven_schema(&conn).expect("create bookkeeping schema");
         for (id, operation, file_id, cloud_key) in [
             (1, "upload", "blob-a", "key-a-current"),
             (2, "upload", "blob-a", "key-a-other"),

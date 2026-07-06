@@ -1654,7 +1654,7 @@ mod tests {
         let db_a = synced_conn();
         // Add coven's bookkeeping tables (the snapshot source normally has them;
         // the synthetic test schema doesn't) and populate every one.
-        exec(&db_a, crate::db::MIGRATION_SQL);
+        crate::db::apply_coven_schema(&db_a).expect("create bookkeeping schema");
         exec(
             &db_a,
             "INSERT INTO sync_state (key, value) VALUES \

@@ -5,7 +5,7 @@
 //! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
 //! `local_cleanup_intents`, `published_blob_drop_intents`,
 //! `pending_changesets` — plus the library-global synced table `item_keys`, all
-//! created by `MIGRATION_SQL`, which coven runs against the connection it owns
+//! created by [`apply_coven_schema`], which coven runs against the connection it owns
 //! during open. The host does not implement any of this; native app SQL goes through
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 //!
@@ -20,22 +20,27 @@
 /// like any synced table — but is owned by coven, not the host. The `_updated_at`
 /// HLC stamp satisfies the synced-table contract; rows are immutable
 /// (idempotent INSERT) so LWW never has to pick a winner.
-pub(crate) const ITEM_KEYS_TABLE: &str = "item_keys";
+pub(crate) const ITEM_KEYS_TABLE: &str = stringify!(item_keys);
 
-/// SQL that creates coven's bookkeeping tables and the `item_keys` synced table,
-/// run before the host's own migration. Idempotent (`IF NOT EXISTS`).
-pub(crate) const MIGRATION_SQL: &str = "\
-CREATE TABLE IF NOT EXISTS sync_cursors (
+macro_rules! coven_tables {
+    ($visit:ident) => {
+        $visit!(
+            sync_cursors,
+            "
     device_id TEXT PRIMARY KEY,
     last_seq INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sync_state (
+"
+        );
+        $visit!(
+            sync_state,
+            "
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS cloud_outbox (
+"
+        );
+        $visit!(
+            cloud_outbox,
+            "
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete', 'cancel')),
     -- The blob's file id, which an upload reports progress under. NULL for a
@@ -59,63 +64,96 @@ CREATE TABLE IF NOT EXISTS cloud_outbox (
     last_error TEXT,
     last_attempt_at TEXT,
     UNIQUE(operation, cloud_key)
-);
-
--- Device-local map from a blob id to an external user-owned file coven reads
--- but does not own (a user-provided Local blob plays the user's own file). A weaker
--- storage class than the cache: validate-on-read by presence + size, never
--- self-heal. Device-local like the bookkeeping tables — no `_updated_at`, never
--- in the synced-table set, never snapshotted — so external refs stay on the one
--- device that registered them and never cross to a peer.
-CREATE TABLE IF NOT EXISTS local_blob_refs (
+"
+        );
+        $visit!(
+            local_blob_refs,
+            "
     blob_id   TEXT PRIMARY KEY,
     namespace TEXT NOT NULL,
     path      TEXT NOT NULL,   -- absolute external path coven reads but does NOT own
     size      INTEGER NOT NULL -- plaintext length; validate-on-read
-);
-
--- Device-local marker for an in-flight make_remote (Local → Remote): coven owns
--- the transition, so this row makes it durable. It is set in the same transaction
--- that enqueues the root's user-provided blob uploads, and removed in the same
--- transaction that flips the gate true once the last upload lands (the single commit
--- point) or once inline host-provided uploads consume it. Its existence tells the upload drain's
--- completion check that an uploaded blob's root is a make_remote to finish (vs. an
--- orphan from a cancelled make_remote to tombstone), and `retain_pinned` carries the
--- root pin choice for host-provided blobs that do not have upload rows. Device-local like the other bookkeeping tables —
--- no `_updated_at`, never synced or snapshotted.
-CREATE TABLE IF NOT EXISTS blob_make_remote_intents (
+"
+        );
+        $visit!(
+            blob_make_remote_intents,
+            "
     root_table TEXT NOT NULL,
     root_id    TEXT NOT NULL,
     retain_pinned INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (root_table, root_id)
-);
-
-CREATE TABLE IF NOT EXISTS local_cleanup_intents (
+"
+        );
+        $visit!(
+            local_cleanup_intents,
+            "
     namespace TEXT NOT NULL,
     blob_id   TEXT NOT NULL,
     PRIMARY KEY (namespace, blob_id)
-);
-
-CREATE TABLE IF NOT EXISTS published_blob_drop_intents (
+"
+        );
+        $visit!(
+            published_blob_drop_intents,
+            "
     seq INTEGER NOT NULL,
     namespace TEXT NOT NULL,
     blob_id TEXT NOT NULL,
     size INTEGER NOT NULL,
     disposition TEXT NOT NULL CHECK (disposition IN ('drop', 'cache', 'pin')),
     PRIMARY KEY (seq, namespace, blob_id)
-);
-
-CREATE TABLE IF NOT EXISTS pending_changesets (
+"
+        );
+        $visit!(
+            pending_changesets,
+            "
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     changeset BLOB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS item_keys (
+"
+        );
+        $visit!(
+            item_keys,
+            "
     item_id TEXT PRIMARY KEY,
     key BLOB NOT NULL,
     _updated_at TEXT NOT NULL
-);
-";
+"
+        );
+    };
+}
+
+/// Creates coven's bookkeeping tables and the `item_keys` synced table before
+/// the host's own migrations. Idempotent (`IF NOT EXISTS`).
+pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    macro_rules! apply_table {
+        ($name:ident, $columns:literal) => {
+            conn.execute_batch(concat!(
+                "CREATE TABLE IF NOT EXISTS ",
+                stringify!($name),
+                " (",
+                $columns,
+                ");"
+            ))?;
+        };
+    }
+
+    coven_tables!(apply_table);
+    Ok(())
+}
+
+/// Whether `name` is a table coven owns for sync bookkeeping or library-global
+/// key material. Hosts may not declare these as synced tables.
+pub(crate) fn is_reserved_table_name(name: &str) -> bool {
+    macro_rules! matches_table {
+        ($table:ident, $columns:literal) => {
+            if name == stringify!($table) {
+                return true;
+            }
+        };
+    }
+
+    coven_tables!(matches_table);
+    false
+}
 
 /// An external user-owned file a blob id resolves to, read back from a
 /// `local_blob_refs` row. The blob's plaintext lives at `path` (an absolute file

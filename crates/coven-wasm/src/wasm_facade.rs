@@ -451,9 +451,6 @@ fn parse_synced_tables(value: JsValue) -> Result<Vec<SyncedTable>, String> {
         serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())?;
     defs.into_iter()
         .map(|t| {
-            if t.name.is_empty() {
-                return Err("synced table has empty name".to_string());
-            }
             if t.gated_by.is_some() && t.gated_by_descendants {
                 return Err(format!(
                     "synced table {} cannot be both gated_by and gated_by_descendants",

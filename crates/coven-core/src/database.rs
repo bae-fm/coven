@@ -17,7 +17,9 @@ use rusqlite::{Connection, OptionalExtension};
 use tracing::{debug, error};
 
 use crate::blob::decl::BlobDecls;
-use crate::db::{ExternalBlob, OutboxEntry, OutboxOperation, MIGRATION_SQL};
+use crate::db::{
+    apply_coven_schema, is_reserved_table_name, ExternalBlob, OutboxEntry, OutboxOperation,
+};
 use crate::migration::{run_migrations, Migration};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
@@ -83,6 +85,8 @@ impl DatabaseCore {
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState, UpdatedAtStamper), DbError> {
+        validate_host_synced_tables(&synced_tables)?;
+
         let conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
@@ -93,7 +97,7 @@ impl DatabaseCore {
         // sync-visibility: coven's bookkeeping rows are stripped on snapshot, so a
         // versioned ledger can't track them; the host's synced ladder version rides
         // inside the snapshot's DB header.
-        conn.execute_batch(MIGRATION_SQL).map_err(DbError::from)?;
+        apply_coven_schema(&conn).map_err(DbError::from)?;
         migrate_bookkeeping_schema(&conn)?;
         let schema_version = run_migrations(&conn, migrations)?;
 
@@ -253,6 +257,21 @@ fn attach_erased_session(
     synced_tables: &[SyncedTable],
 ) -> Result<rusqlite::session::Session<'static>, DbError> {
     Ok(erase_session_lifetime(attach_session(conn, synced_tables)?))
+}
+
+fn validate_host_synced_tables(synced_tables: &[SyncedTable]) -> Result<(), DbError> {
+    for table in synced_tables {
+        let name = table.name();
+        if name.is_empty() {
+            return Err(DbError("synced table name must not be empty".to_string()));
+        }
+        if is_reserved_table_name(name) {
+            return Err(DbError(format!(
+                "synced table {name:?} is reserved by coven"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Database {
@@ -1392,6 +1411,18 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
 mod tests {
     use super::*;
 
+    fn notes_migration() -> Migration {
+        Migration::sql(
+            1,
+            "notes",
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                body TEXT NOT NULL,
+                _updated_at TEXT NOT NULL
+            );",
+        )
+    }
+
     #[tokio::test]
     async fn database_open_rejects_empty_device_id() {
         let result = Database::open(Path::new(":memory:"), Vec::new(), String::new(), &[]);
@@ -1404,6 +1435,57 @@ mod tests {
             error.contains("device_id") && error.contains("empty"),
             "error names the empty device id: {error}",
         );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_host_declared_reserved_tables() {
+        for table_name in [crate::db::ITEM_KEYS_TABLE, "sync_state"] {
+            let result = Database::open(
+                Path::new(":memory:"),
+                vec![SyncedTable::new(table_name)],
+                format!("reserved-{table_name}"),
+                &[notes_migration()],
+            );
+            let error = match result {
+                Ok(_) => panic!("reserved table {table_name} must be rejected"),
+                Err(error) => error.to_string(),
+            };
+
+            assert!(
+                error.contains(table_name),
+                "error names reserved table {table_name}: {error}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_empty_synced_table_name() {
+        let result = Database::open(
+            Path::new(":memory:"),
+            vec![SyncedTable::new("")],
+            "empty-synced-table".to_string(),
+            &[notes_migration()],
+        );
+        let error = match result {
+            Ok(_) => panic!("empty synced table name must be rejected"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(
+            error.contains("empty"),
+            "error names empty synced table: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_accepts_normal_host_synced_table() {
+        Database::open(
+            Path::new(":memory:"),
+            vec![SyncedTable::new("notes")],
+            "normal-synced-table".to_string(),
+            &[notes_migration()],
+        )
+        .expect("normal host table opens");
     }
 
     #[tokio::test]
