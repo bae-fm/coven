@@ -20,5 +20,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check (wasm32-unknown-unknown)
         run: scripts/check-wasm.sh
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.14.0
       - name: Build package
         run: scripts/build-wasm-pkg.sh --check
