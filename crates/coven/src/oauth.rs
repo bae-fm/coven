@@ -239,29 +239,39 @@ pub fn code_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash)
 }
 
-/// An authorization request the host drives itself: the URL to open and the
-/// PKCE verifier to feed back to [`exchange_code`]. For hosts that capture the
-/// redirect outside coven's localhost callback server — e.g. a mobile OS auth
-/// session (ASWebAuthenticationSession / Custom Tabs) redirecting to a custom
-/// URI scheme, where binding a localhost port and `open::that` don't apply.
+/// An authorization request the host drives itself: the URL to open plus the
+/// PKCE verifier and state value coven checks during exchange. For hosts that
+/// capture the redirect outside coven's localhost callback server — e.g. a
+/// mobile OS auth session (ASWebAuthenticationSession / Custom Tabs)
+/// redirecting to a custom URI scheme, where binding a localhost port and
+/// `open::that` don't apply.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 #[derive(Clone, Debug)]
 pub struct AuthorizeRequest {
     pub auth_url: String,
-    pub verifier: String,
+    verifier: String,
+    state: String,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+impl AuthorizeRequest {
+    pub fn verify_callback_state(&self, callback_state: Option<&str>) -> Result<(), OAuthError> {
+        verify_callback_state(callback_state, &self.state).map_err(OAuthError::Denied)
+    }
 }
 
 /// Build the authorization URL + PKCE verifier for `config`, redirecting to
-/// `redirect_uri`. The caller opens the URL, captures the `code` from the
-/// redirect itself, then calls [`exchange_code`] with the same `redirect_uri`
-/// and the returned verifier. [`authorize`] is this plus coven's localhost
-/// callback server for desktop.
+/// `redirect_uri`. The caller opens the URL, captures the `code` and `state`
+/// from the redirect itself, then calls [`exchange_authorize_request`] with the
+/// same `redirect_uri` and returned request. [`authorize`] is this plus coven's
+/// localhost callback server for desktop.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub fn build_authorize_url(
     config: &OAuthConfig,
     redirect_uri: &str,
 ) -> Result<AuthorizeRequest, OAuthError> {
     let verifier = generate_code_verifier();
+    let state = generate_code_verifier();
     let challenge = code_challenge(&verifier);
 
     let mut auth_params = vec![
@@ -270,6 +280,7 @@ pub fn build_authorize_url(
         ("redirect_uri", redirect_uri.to_string()),
         ("code_challenge", challenge),
         ("code_challenge_method", "S256".to_string()),
+        ("state", state.clone()),
     ];
 
     for (k, v) in &config.extra_auth_params {
@@ -287,7 +298,38 @@ pub fn build_authorize_url(
             .map_err(|e| OAuthError::Server(format!("failed to encode params: {e}")))?
     );
 
-    Ok(AuthorizeRequest { auth_url, verifier })
+    Ok(AuthorizeRequest {
+        auth_url,
+        verifier,
+        state,
+    })
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+fn callback_code(params: &std::collections::HashMap<String, String>) -> Result<String, String> {
+    if let Some(error) = params.get("error") {
+        let desc = match params.get("error_description") {
+            Some(desc) => desc.clone(),
+            None => {
+                warn!("OAuth callback error omitted error_description: {error}");
+                error.clone()
+            }
+        };
+        Err(desc)
+    } else if let Some(code) = params.get("code") {
+        Ok(code.clone())
+    } else {
+        Err("no code in callback".to_string())
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+fn verify_callback_state(callback_state: Option<&str>, expected_state: &str) -> Result<(), String> {
+    match callback_state {
+        Some(state) if state == expected_state => Ok(()),
+        Some(_) => Err("state mismatch in callback".to_string()),
+        None => Err("missing state in callback".to_string()),
+    }
 }
 
 /// Open the user's browser, wait for the OAuth callback, and exchange the
@@ -303,7 +345,7 @@ pub fn build_authorize_url(
 /// Native-only: binds a localhost TCP port (`tokio::net`), serves the callback
 /// with axum, and opens the system browser (`open`) — none of which exist on
 /// wasm. The browser captures the redirect itself via the pure
-/// [`build_authorize_url`] + [`exchange_code`] pair. Also gated on
+/// [`build_authorize_url`] + [`exchange_authorize_request`] pair. Also gated on
 /// `oauth-providers` (it pulls in `open`).
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn authorize(
@@ -312,13 +354,18 @@ pub async fn authorize(
     clock: &dyn crate::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
     let redirect_uri = format!("http://localhost:{}/callback", config.redirect_port);
-    let AuthorizeRequest { auth_url, verifier } = build_authorize_url(config, &redirect_uri)?;
+    let AuthorizeRequest {
+        auth_url,
+        verifier,
+        state,
+    } = build_authorize_url(config, &redirect_uri)?;
 
     // Channel to receive the authorization code from the callback handler
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
     let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
     let tx_for_handler = tx.clone();
+    let expected_state = state.clone();
     let app = axum::Router::new().route(
         "/callback",
         axum::routing::get(
@@ -326,20 +373,16 @@ pub async fn authorize(
                 std::collections::HashMap<String, String>,
             >| {
                 let tx = tx_for_handler.clone();
+                let expected_state = expected_state.clone();
                 async move {
                     let mut guard = tx.lock().await;
-                    let is_error = params.contains_key("error") || !params.contains_key("code");
+                    let callback =
+                        verify_callback_state(params.get("state").map(String::as_str), &expected_state)
+                            .and_then(|()| callback_code(&params));
+                    let is_error = callback.is_err();
                     if let Some(sender) = guard.take() {
-                        if let Some(error) = params.get("error") {
-                            let desc = params
-                                .get("error_description")
-                                .cloned()
-                                .unwrap_or_else(|| error.clone());
-                            let _ = sender.send(Err(desc));
-                        } else if let Some(code) = params.get("code") {
-                            let _ = sender.send(Ok(code.clone()));
-                        } else {
-                            let _ = sender.send(Err("no code in callback".to_string()));
+                        if sender.send(callback).is_err() {
+                            warn!("OAuth callback receiver dropped before result delivery");
                         }
                     }
                     let html = if is_error {
@@ -434,9 +477,8 @@ pub async fn authorize(
     exchange_code(config, &code, &verifier, &redirect_uri, clock).await
 }
 
-/// Exchange an authorization code for tokens.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-pub async fn exchange_code(
+async fn exchange_code(
     config: &OAuthConfig,
     code: &str,
     verifier: &str,
@@ -455,6 +497,21 @@ pub async fn exchange_code(
     }
 
     post_token_request(config, params, clock).await
+}
+
+/// Verify the callback state from an [`AuthorizeRequest`] and exchange its code
+/// for tokens.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+pub async fn exchange_authorize_request(
+    config: &OAuthConfig,
+    code: &str,
+    callback_state: Option<&str>,
+    request: &AuthorizeRequest,
+    redirect_uri: &str,
+    clock: &dyn crate::clock::Clock,
+) -> Result<OAuthTokens, OAuthError> {
+    request.verify_callback_state(callback_state)?;
+    exchange_code(config, code, &request.verifier, redirect_uri, clock).await
 }
 
 /// Refresh an expired access token using a refresh token.
@@ -523,8 +580,8 @@ pub async fn authorize_provider(
 
 /// Build an OAuth authorization request for `provider` redirecting to
 /// `redirect_uri`, for hosts that capture the redirect themselves (a mobile OS
-/// auth session). Pair the returned verifier and the same `redirect_uri` with
-/// [`exchange_code_for_provider`].
+/// auth session). Pair the returned request, callback `code`, callback `state`,
+/// and same `redirect_uri` with [`exchange_code_for_provider`].
 ///
 /// Native-only: depends on [`oauth_config_for_provider`], whose per-provider
 /// config lives on the native-only cloud-backend types; also gated on
@@ -538,24 +595,25 @@ pub fn build_authorize_request_for_provider(
 }
 
 /// Exchange an authorization `code` captured by the host for `provider`'s
-/// tokens. `redirect_uri` and `verifier` must match the originating
-/// [`build_authorize_request_for_provider`] call.
+/// tokens. `redirect_uri`, `request`, and `callback_state` must match the
+/// originating [`build_authorize_request_for_provider`] call.
 ///
 /// Native-only for the same reason as [`build_authorize_request_for_provider`];
-/// also gated on `oauth-providers`. The pure [`exchange_code`] it delegates to is
-/// available on wasm directly.
+/// also gated on `oauth-providers`.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn exchange_code_for_provider(
     provider: crate::config::CloudProvider,
     code: &str,
-    verifier: &str,
+    callback_state: Option<&str>,
+    request: &AuthorizeRequest,
     redirect_uri: &str,
     clock: &dyn crate::clock::Clock,
 ) -> Result<OAuthTokens, OAuthError> {
-    exchange_code(
+    exchange_authorize_request(
         &oauth_config_for_provider(provider)?,
         code,
-        verifier,
+        callback_state,
+        request,
         redirect_uri,
         clock,
     )
@@ -686,6 +744,12 @@ mod tests {
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    fn authorize_url_params(auth_url: &str) -> HashMap<String, String> {
+        let (_, query) = auth_url.split_once('?').expect("authorize URL has query");
+        serde_urlencoded::from_str(query).expect("parse authorize query")
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
     #[test]
     fn oauth_callback_html_renders_result_text() {
         let html = oauth_callback_html("Authorization denied", "Denied message");
@@ -694,6 +758,94 @@ mod tests {
         assert!(html.contains("<p>Denied message</p>"));
         assert!(!html.contains("{{title}}"));
         assert!(!html.contains("{{message}}"));
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[test]
+    fn build_authorize_url_includes_matching_random_state() {
+        let config = oauth_config("http://token.example/token".to_string());
+
+        let first = build_authorize_url(&config, "http://localhost/callback")
+            .expect("build first authorize URL");
+        let second = build_authorize_url(&config, "http://localhost/callback")
+            .expect("build second authorize URL");
+
+        let first_params = authorize_url_params(&first.auth_url);
+        let first_state = first_params
+            .get("state")
+            .expect("authorize URL includes state");
+        assert!(
+            first
+                .verify_callback_state(Some(first_state.as_str()))
+                .is_ok(),
+            "AuthorizeRequest verifies the state it put in the URL",
+        );
+        assert!(
+            !first_state.is_empty(),
+            "state must be present for callback validation",
+        );
+        let second_params = authorize_url_params(&second.auth_url);
+        let second_state = second_params
+            .get("state")
+            .expect("second authorize URL includes state");
+        assert_ne!(
+            first_state, second_state,
+            "separate OAuth flows must carry separate state values",
+        );
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[test]
+    fn callback_rejects_missing_or_wrong_state() {
+        let expected_state = "expected-state";
+        let valid = HashMap::from([
+            ("code".to_string(), "auth-code".to_string()),
+            ("state".to_string(), expected_state.to_string()),
+        ]);
+        let wrong = HashMap::from([
+            ("code".to_string(), "auth-code".to_string()),
+            ("state".to_string(), "wrong-state".to_string()),
+        ]);
+        let missing = HashMap::from([("code".to_string(), "auth-code".to_string())]);
+
+        assert_eq!(
+            verify_callback_state(valid.get("state").map(String::as_str), expected_state)
+                .and_then(|()| callback_code(&valid))
+                .as_deref(),
+            Ok("auth-code"),
+        );
+        assert!(
+            verify_callback_state(wrong.get("state").map(String::as_str), expected_state).is_err(),
+            "wrong state must reject the callback",
+        );
+        assert!(
+            verify_callback_state(missing.get("state").map(String::as_str), expected_state)
+                .is_err(),
+            "missing state must reject the callback",
+        );
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[tokio::test]
+    async fn exchange_authorize_request_rejects_wrong_state_before_token_request() {
+        let config = oauth_config("http://127.0.0.1:9/token".to_string());
+        let request = build_authorize_url(&config, "http://localhost/callback")
+            .expect("build authorize request");
+
+        let result = exchange_authorize_request(
+            &config,
+            "auth-code",
+            Some("wrong-state"),
+            &request,
+            "http://localhost/callback",
+            &crate::clock::SystemClock,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(OAuthError::Denied(ref msg)) if msg.contains("state mismatch")),
+            "expected state rejection before token request, got {result:?}",
+        );
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
