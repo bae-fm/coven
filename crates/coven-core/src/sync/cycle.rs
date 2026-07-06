@@ -31,19 +31,20 @@ use super::storage::SyncStorage;
 pub struct SyncCycleResult {
     /// Number of remote changesets that were applied.
     pub changesets_applied: u64,
-    /// Changesets from a newer schema version that we couldn't apply. The
-    /// cursor advanced past them, so the count is per-cycle (transient) — it
-    /// surfaces once and clears once the user updates the client.
+    /// Changesets from a newer schema version that we couldn't apply. The cursor
+    /// is held at the first such seq for each device until the app updates.
     pub skipped_schema: u64,
     /// Changesets skipped because their author is not a write-capable member,
     /// judged against the exact membership entry they are signed under (forged or
     /// revoked, not a propagation lag). The cursor advanced past them so the
     /// device isn't stuck; the count is per-cycle and surfaces as a warning.
     pub rejected_unauthorized: u64,
-    /// Changesets skipped because their signature did not verify (forged or
-    /// corrupt). The cursor advanced past each so the device isn't stuck; the count
-    /// is per-cycle and surfaces as a warning.
+    /// Changesets whose signature did not verify (forged or corrupt). The cursor
+    /// is held at the bad seq for that device, and the count surfaces as a warning.
     pub invalid_signatures: u64,
+    /// Changesets whose present cloud object failed validation or apply. The
+    /// cursor is held at the bad seq for that device.
+    pub held_changesets: u64,
     /// Changeset rows omitted because SQLite reported a non-retryable constraint
     /// conflict. The cursor advanced past the changeset; the count is per-cycle
     /// and surfaces as a warning.
@@ -931,6 +932,7 @@ pub async fn run_single_sync_cycle(
         skipped_schema: sync_result.pull.skipped_schema,
         rejected_unauthorized: sync_result.pull.rejected_unauthorized.len() as u64,
         invalid_signatures: sync_result.pull.invalid_signatures.len() as u64,
+        held_changesets: sync_result.pull.held_changesets.len() as u64,
         constraint_conflicts: sync_result.pull.constraint_conflicts.len() as u64,
         other_device_count,
         sync_time: now,

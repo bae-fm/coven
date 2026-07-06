@@ -17,7 +17,7 @@ use crate::sync::cycle;
 use crate::sync::envelope;
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
-use crate::sync::pull::PullError;
+use crate::sync::pull::{HeldChangesetReason, PullError};
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
@@ -452,8 +452,8 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
 /// of the fields the signature covers, so a signed changeset whose bytes were
 /// altered after signing surfaces here (and at the signature check); an unsigned
 /// one is caught by this gate alone. Either way the bytes failed their own
-/// integrity check and the row must never land. The cursor is held back so a
-/// transient on-download corruption re-fetches next cycle.
+/// integrity check and the row must never land. The cursor is held back so the
+/// next cycle re-examines the same object instead of suppressing the seq.
 #[tokio::test]
 async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     let storage = MockSyncStorage::new();
@@ -499,18 +499,86 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "a size-mismatched changeset must not be applied",
     );
-    // The cursor ADVANCES past the bad seq. A size mismatch that survives the
-    // signature check is a permanent buggy/inconsistent encoder, not a transient
-    // download glitch (truncation in transit fails the signature), so holding would
-    // re-fetch the same bad object every cycle and stall this device's pull forever
-    // — a single bad changeset would halt the whole fleet's sync. Skipping it
-    // (logged at error) keeps the fleet syncing; the row's data, if real, recovers
-    // via a later snapshot from a device that produced consistent bytes.
     assert_eq!(
         updated.get("dev1"),
-        Some(&1),
-        "cursor advances past a permanently-bad size-mismatched changeset",
+        None,
+        "cursor holds at the size-mismatched changeset",
     );
+    assert_eq!(result.held_changesets.len(), 1);
+    assert_eq!(result.held_changesets[0].device_id, "dev1");
+    assert_eq!(result.held_changesets[0].seq, 1);
+    assert_eq!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::SizeMismatch {
+            expected: cs.len() - 1,
+            actual: cs.len(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn apply_failure_isolates_to_one_device() {
+    let storage = MockSyncStorage::new();
+
+    let good_source = open_test_db();
+    let good_cs = capture_bytes(
+        &good_source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n-good', 'Good', NULL, '0000000001000-0000-devA', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("devA", 1, &good_cs, SCHEMA_VERSION);
+
+    let bad_source = open_test_db();
+    exec(
+        &bad_source,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n-bad', 'Base', NULL, '0000000001000-0000-devB', '2026-01-01')",
+    )
+    .await;
+    let _ = bad_source
+        .take_changeset()
+        .await
+        .expect("clear bad source seed");
+    let bad_cs = capture_bytes(
+        &bad_source,
+        &[
+            "UPDATE notes SET title = 'Bad', _updated_at = '0000000002000-0000-devB' \
+             WHERE id = 'n-bad'",
+        ],
+    )
+    .await;
+    storage.store_changeset("devB", 1, &bad_cs, SCHEMA_VERSION);
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n-bad', 'Local', NULL, 'not-a-stamp', '2026-01-01')",
+    )
+    .await;
+    let (_tmp, ld) = temp_library_dir();
+    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &HashMap::new(), &ld)
+        .await
+        .expect("pull isolates apply failure");
+
+    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n-good'").await);
+    assert_eq!(updated.get("devA"), Some(&1));
+    assert_eq!(
+        updated.get("devB"),
+        None,
+        "the failed device cursor is held",
+    );
+    assert_eq!(result.held_changesets.len(), 1);
+    assert_eq!(result.held_changesets[0].device_id, "devB");
+    assert_eq!(result.held_changesets[0].seq, 1);
+    assert!(matches!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::ApplyFailed { .. }
+    ));
+    assert_eq!(result.changesets_applied, 1);
 }
 
 #[tokio::test]
@@ -2006,13 +2074,12 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
 }
 
 /// Issue #86 — a changeset whose signature does not verify (forged or corrupt in
-/// transit) is SKIPPED, logged at error, and surfaced as `invalid_signatures` so
-/// the host can warn; the cursor advances past it (a bad signature never becomes
-/// valid, so holding would stall the device). The signature check runs before the
+/// transit) is rejected, logged at error, and surfaced as `invalid_signatures` so
+/// the host can warn; the cursor holds at it. The signature check runs before the
 /// authorization judgment, so a corrupt signature is reported as an invalid
 /// signature, not as unauthorized.
 #[tokio::test]
-async fn pull_skips_and_surfaces_a_changeset_with_an_invalid_signature() {
+async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
@@ -2070,14 +2137,14 @@ async fn pull_skips_and_surfaces_a_changeset_with_an_invalid_signature() {
     .await;
 
     // Nothing applied; surfaced as an invalid signature (NOT unauthorized) and the
-    // cursor advances past it so the device doesn't stall on the bad object.
+    // cursor holds at the bad object.
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert!(result.rejected_unauthorized.is_empty());
     assert_eq!(result.invalid_signatures.len(), 1);
     assert_eq!(result.invalid_signatures[0].device_id, "dev1");
     assert_eq!(result.invalid_signatures[0].seq, 1);
-    assert_eq!(updated.get("dev1"), Some(&1));
+    assert_eq!(updated.get("dev1"), None);
 }
 
 /// Issue #84 — a removed member's changeset is skipped, not applied. The owner

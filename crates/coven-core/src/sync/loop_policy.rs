@@ -30,6 +30,7 @@ pub struct SyncLoopAlerts {
     pub skipped_schema: u64,
     pub rejected_unauthorized: u64,
     pub invalid_signatures: u64,
+    pub held_changesets: u64,
     pub constraint_conflicts: u64,
     pub asset_downloads_failed: bool,
 }
@@ -48,8 +49,13 @@ impl SyncLoopAlerts {
             ))
         } else if self.invalid_signatures > 0 {
             Some(format!(
-                "{} changes with an invalid signature were skipped.",
+                "{} changes with an invalid signature are stalled.",
                 self.invalid_signatures,
+            ))
+        } else if self.held_changesets > 0 {
+            Some(format!(
+                "{} invalid changes are stalled.",
+                self.held_changesets,
             ))
         } else if self.constraint_conflicts > 0 {
             let noun = if self.constraint_conflicts == 1 {
@@ -115,6 +121,7 @@ pub fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
                 skipped_schema: result.skipped_schema,
                 rejected_unauthorized: result.rejected_unauthorized,
                 invalid_signatures: result.invalid_signatures,
+                held_changesets: result.held_changesets,
                 constraint_conflicts: result.constraint_conflicts,
                 asset_downloads_failed: result.asset_downloads_failed,
             },
@@ -148,6 +155,7 @@ mod tests {
             skipped_schema: 0,
             rejected_unauthorized: 0,
             invalid_signatures: 0,
+            held_changesets: 0,
             constraint_conflicts: 0,
             other_device_count: 2,
             sync_time: "2026-07-03T00:00:00Z".to_string(),
@@ -201,7 +209,8 @@ mod tests {
             skipped_schema: 1,
             rejected_unauthorized: 2,
             invalid_signatures: 3,
-            constraint_conflicts: 4,
+            held_changesets: 4,
+            constraint_conflicts: 5,
             asset_downloads_failed: true,
         };
 
@@ -217,6 +226,7 @@ mod tests {
             skipped_schema: 0,
             rejected_unauthorized: 0,
             invalid_signatures: 0,
+            held_changesets: 0,
             constraint_conflicts: 1,
             asset_downloads_failed: false,
         };

@@ -82,14 +82,29 @@ pub struct RejectedUnauthorized {
     pub author: Option<String>,
 }
 
-/// A changeset skipped because its signature did not verify — forged or corrupt,
-/// not a propagation lag. The author claim is unverifiable (the signature is
-/// invalid), so only the object's location identifies it. Surfaced so the host can
-/// warn the user, the way `RejectedUnauthorized` does.
+/// A changeset rejected because its signature did not verify — forged or corrupt,
+/// not a propagation lag. The cursor is held at this seq so the bad object stalls
+/// only its device stream instead of suppressing data permanently. The author
+/// claim is unverifiable (the signature is invalid), so only the object's
+/// location identifies it. Surfaced so the host can warn the user, the way
+/// `RejectedUnauthorized` does.
 #[derive(Debug, Clone)]
 pub struct InvalidSignature {
     pub device_id: String,
     pub seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldChangesetReason {
+    SizeMismatch { expected: usize, actual: usize },
+    ApplyFailed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldChangeset {
+    pub device_id: String,
+    pub seq: u64,
+    pub reason: HeldChangesetReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,11 +130,14 @@ pub struct PullResult {
     /// (forged or revoked). The cursor advanced past each so the client is not
     /// stuck; surfaced so the host can warn. Per-cycle, like `skipped_schema`.
     pub rejected_unauthorized: Vec<RejectedUnauthorized>,
-    /// Changesets skipped because their signature did not verify (forged or
-    /// corrupt). The cursor advanced past each — a bad signature never becomes
-    /// valid, so holding would re-fetch the bad object and stall the device —
-    /// surfaced so the host can warn. Per-cycle, like `skipped_schema`.
+    /// Changesets whose signature did not verify (forged or corrupt). The cursor
+    /// is held and this device stream stops at the bad seq; surfaced so the host
+    /// can warn. Per-cycle, like `skipped_schema`.
     pub invalid_signatures: Vec<InvalidSignature>,
+    /// Changesets whose envelope or apply step failed after the object was present
+    /// and readable. The cursor is held and this device stream stops at the bad
+    /// seq; other device streams continue.
+    pub held_changesets: Vec<HeldChangeset>,
     /// Changesets that hit a non-retryable SQLite constraint conflict while
     /// applying. The conflicting row is omitted and the cursor advances; surfaced
     /// so the host can warn about the unresolved uniqueness/constraint clash.
@@ -336,6 +354,7 @@ pub async fn pull_changes(
         skipped_schema: 0,
         rejected_unauthorized: Vec::new(),
         invalid_signatures: Vec::new(),
+        held_changesets: Vec::new(),
         constraint_conflicts: Vec::new(),
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
@@ -403,43 +422,43 @@ pub async fn pull_changes(
             }
 
             // Signature check: reject changesets with invalid signatures. A bad
-            // signature is forged or corrupt and never becomes valid, so advance the
-            // cursor (holding would re-fetch the bad object and stall the device) and
-            // surface it — logged at error and reported to the host so it can warn.
+            // signature is forged or corrupt; hold the cursor and stop this device
+            // stream at the bad seq so it surfaces as a bounded stall instead of
+            // silently suppressing the seq's data.
             if !verify_changeset_signature(&env, &changeset_bytes) {
                 error!(
                     device_id = %head.device_id,
                     seq,
-                    "changeset has invalid signature, skipping"
+                    "changeset has invalid signature; holding cursor for this device"
                 );
                 result.invalid_signatures.push(InvalidSignature {
                     device_id: head.device_id.clone(),
                     seq,
                 });
-                updated_cursors.insert(head.device_id.clone(), seq);
-                continue;
+                break;
             }
 
             // The envelope's declared changeset_size must match the trailing bytes.
-            // For a signed changeset, in-transit truncation or tampering already
-            // failed the signature check above; a mismatch that survives to here is a
-            // buggy or inconsistent encoder (or corrupt bytes of an unsigned
-            // changeset) — permanent bad data, not a transient download glitch. Skip
-            // it and ADVANCE the cursor rather than hold: holding would re-fetch the
-            // same bad object every cycle and stall this device's pull on the seq
-            // forever (a single bad changeset would halt the whole fleet's sync).
-            // Real data behind the seq still reaches this device via a later snapshot
-            // from a device that produced consistent bytes.
+            // A mismatch is present-but-invalid cloud data. Hold this device's
+            // cursor and surface it; do not advance past bytes whose integrity check
+            // failed.
             if env.changeset_size != changeset_bytes.len() {
                 error!(
                     device_id = %head.device_id,
                     seq,
                     expected = env.changeset_size,
                     actual = changeset_bytes.len(),
-                    "changeset_size mismatch in envelope; skipping (corrupt encoder)"
+                    "changeset_size mismatch in envelope; holding cursor for this device"
                 );
-                updated_cursors.insert(head.device_id.clone(), seq);
-                continue;
+                result.held_changesets.push(HeldChangeset {
+                    device_id: head.device_id.clone(),
+                    seq,
+                    reason: HeldChangesetReason::SizeMismatch {
+                        expected: env.changeset_size,
+                        actual: changeset_bytes.len(),
+                    },
+                });
+                break;
             }
 
             // Membership validation: in a chain-enabled library every changeset
@@ -602,14 +621,30 @@ pub async fn pull_changes(
             // Through `apply_changeset` so capture is disabled around just this
             // apply (the applied rows must not echo as this device's own writes),
             // while host writes outside it stay captured.
-            let apply_result = {
+            let apply_attempt = {
                 let schema = schema.clone();
                 let bytes = changeset_bytes.clone();
                 db.apply_changeset(move |conn| {
                     apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await
-                .map_err(|e| PullError::Apply(e.0))?
+            };
+            let apply_result = match apply_attempt {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(
+                        device_id = %head.device_id,
+                        seq,
+                        error = %e.0,
+                        "changeset apply failed; holding cursor for this device"
+                    );
+                    result.held_changesets.push(HeldChangeset {
+                        device_id: head.device_id.clone(),
+                        seq,
+                        reason: HeldChangesetReason::ApplyFailed { error: e.0 },
+                    });
+                    break;
+                }
             };
 
             if apply_result.had_fk_violations {
@@ -661,14 +696,30 @@ pub async fn pull_changes(
         );
 
         for d in &deferred {
-            let retry_result = {
+            let retry_attempt = {
                 let schema = schema.clone();
                 let bytes = d.changeset.clone();
                 db.apply_changeset(move |conn| {
                     apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await
-                .map_err(|e| PullError::Apply(e.0))?
+            };
+            let retry_result = match retry_attempt {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(
+                        device_id = %d.device_id,
+                        seq = d.seq,
+                        error = %e.0,
+                        "deferred changeset apply failed; holding cursor for this device"
+                    );
+                    result.held_changesets.push(HeldChangeset {
+                        device_id: d.device_id.clone(),
+                        seq: d.seq,
+                        reason: HeldChangesetReason::ApplyFailed { error: e.0 },
+                    });
+                    continue;
+                }
             };
 
             if retry_result.had_fk_violations {
