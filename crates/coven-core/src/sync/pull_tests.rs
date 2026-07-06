@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use crate::blob::{local_files, CacheFill, Provenance};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
+use crate::migration::Migration;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -22,7 +23,7 @@ use crate::sync::pull::PullError;
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
 use crate::sync::service::{self, SyncCycleError};
-use crate::sync::session::{BlobDecl, BlobScopeSpec};
+use crate::sync::session::{BlobDecl, BlobScopeSpec, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
@@ -36,6 +37,24 @@ fn photo_decl() -> BlobDecl {
 fn photo_decl_with_blob_id_column() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
         .with_id_column("cloud_path")
+}
+
+fn unique_note_db() -> crate::database::Database {
+    open_test_db_schema(
+        vec![SyncedTable::new("unique_notes")],
+        vec![Migration::run(1, "unique-note-schema", |conn| {
+            conn.execute_batch(
+                "CREATE TABLE unique_notes (
+                    id TEXT PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    _updated_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );",
+            )
+            .map_err(crate::database::DbError::from)
+        })],
+    )
 }
 
 /// Store `bytes` into `ld`'s local store under blob id `id`, the way a host stores a
@@ -77,6 +96,90 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
         .row_changes
         .iter()
         .any(|c| c.table == "notes" && c.pk() == Some("n1")));
+}
+
+#[tokio::test]
+async fn uniqueness_conflict_is_surfaced_not_retried() {
+    let storage = MockSyncStorage::new();
+
+    let db1 = unique_note_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
+             VALUES ('remote', 'same-slug', 'Remote', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+    let db2 = unique_note_db();
+    exec(
+        &db2,
+        "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
+         VALUES ('local', 'same-slug', 'Local', '0000000002000-0000-dev2', '2026-01-01')",
+    )
+    .await;
+    let (_tmp, ld) = temp_library_dir();
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+
+    assert_eq!(result.constraint_conflicts.len(), 1);
+    assert_eq!(result.constraint_conflicts[0].device_id, "dev1");
+    assert_eq!(result.constraint_conflicts[0].seq, 1);
+    assert_eq!(result.constraint_conflicts[0].table, "unique_notes");
+    assert_eq!(updated.get("dev1"), Some(&1));
+    assert!(row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'local'").await);
+    assert!(!row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'remote'").await);
+}
+
+#[tokio::test]
+async fn fk_violation_still_retries_and_resolves() {
+    let storage = MockSyncStorage::new();
+
+    let child_source = open_test_db();
+    exec(
+        &child_source,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'Parent', NULL, '0000000001000-0000-parent', '2026-01-01')",
+    )
+    .await;
+    let _ = child_source
+        .take_changeset()
+        .await
+        .expect("clear parent seed");
+    let child_cs = capture_bytes(
+        &child_source,
+        &[
+            "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+             VALUES ('t1', 'n1', 'green', '0000000001001-0000-child', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev-child", 1, &child_cs, SCHEMA_VERSION);
+
+    let parent_source = open_test_db();
+    let parent_cs = capture_bytes(
+        &parent_source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'Parent', NULL, '0000000001000-0000-parent', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev-parent", 1, &parent_cs, SCHEMA_VERSION);
+
+    let target = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let (updated, result) = pull_into(&target, &storage, "dev-target", &HashMap::new(), &ld).await;
+
+    assert_eq!(updated.get("dev-child"), Some(&1));
+    assert_eq!(updated.get("dev-parent"), Some(&1));
+    assert_eq!(result.changesets_applied, 2);
+    assert!(result.constraint_conflicts.is_empty());
+    assert_eq!(
+        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        "green"
+    );
 }
 
 #[tokio::test]

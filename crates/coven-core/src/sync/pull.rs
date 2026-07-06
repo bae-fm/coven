@@ -7,10 +7,10 @@
 /// 4. Unpack envelope, check schema_version, apply with LWW.
 /// 5. Update sync_cursors for that device.
 ///
-/// After all changesets are applied, any that had FK constraint violations
-/// are retried once -- the parent rows should now exist from other devices'
+/// After all changesets are applied, any that had FK violations are retried once
+/// -- the parent rows should now exist from other devices'
 /// changesets applied in the same batch.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
@@ -92,6 +92,13 @@ pub struct InvalidSignature {
     pub seq: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintConflict {
+    pub device_id: String,
+    pub seq: u64,
+    pub table: String,
+}
+
 /// Summary of a pull operation.
 #[derive(Debug)]
 pub struct PullResult {
@@ -113,6 +120,10 @@ pub struct PullResult {
     /// valid, so holding would re-fetch the bad object and stall the device —
     /// surfaced so the host can warn. Per-cycle, like `skipped_schema`.
     pub invalid_signatures: Vec<InvalidSignature>,
+    /// Changesets that hit a non-retryable SQLite constraint conflict while
+    /// applying. The conflicting row is omitted and the cursor advances; surfaced
+    /// so the host can warn about the unresolved uniqueness/constraint clash.
+    pub constraint_conflicts: Vec<ConstraintConflict>,
     /// All device heads fetched during this pull (including our own).
     /// Used by the sync status UI to show other devices' activity.
     pub remote_heads: Vec<DeviceHead>,
@@ -131,6 +142,15 @@ struct DeferredChangeset {
     device_id: String,
     seq: u64,
     changeset: Vec<u8>,
+    old_changes: Vec<RowChange>,
+    changes: Vec<RowChange>,
+}
+
+struct CompletedChangeset<'a> {
+    device_id: &'a str,
+    seq: u64,
+    old_changes: &'a [RowChange],
+    changes: &'a [RowChange],
 }
 
 /// Pull and apply all new changesets from the sync storage.
@@ -316,11 +336,13 @@ pub async fn pull_changes(
         skipped_schema: 0,
         rejected_unauthorized: Vec::new(),
         invalid_signatures: Vec::new(),
+        constraint_conflicts: Vec::new(),
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
         max_applied_updated_at: None,
     };
     let mut deferred: Vec<DeferredChangeset> = Vec::new();
+    let mut applied_devices: HashSet<String> = HashSet::new();
 
     for head in &heads {
         // Skip our own device.
@@ -339,8 +361,6 @@ pub async fn pull_changes(
             remote_seq = head.seq,
             "pulling changesets"
         );
-
-        let mut pulled_any = false;
 
         for seq in (local_seq + 1)..=head.seq {
             // The storage client returns already-decrypted bytes per its trait
@@ -597,48 +617,42 @@ pub async fn pull_changes(
                     device_id: head.device_id.clone(),
                     seq,
                     changeset: changeset_bytes.clone(),
+                    old_changes,
+                    changes,
                 });
-            }
-
-            // A changeset that DELETEs a blob-bearing row (a gate retract or a
-            // genuine delete) leaves this peer holding the blob's local copy. Drop
-            // it wherever it is — the cache (both folders; the `pinned/` copy is
-            // budget-exempt) and the local store — or it would leak forever once the
-            // row is gone. A peer NEVER writes a cloud tombstone here; that belongs
-            // to the deleting / make-Local owner.
-            if let Err(e) =
-                drop_deleted_blob_local(&old_changes, &changes, &blob_decls, library_dir).await
-            {
-                warn!(
-                    "Dropping local copies for deleted blob rows failed for {}/{}: {e}; \
-                     cursor not advanced, will retry next cycle",
-                    head.device_id, seq
-                );
-                result.asset_downloads_failed = true;
                 break;
             }
-
-            advance_max_updated_at(
-                &mut result.max_applied_updated_at,
-                &changes,
-                &schema,
-                receiver_wall_ms,
+            record_constraint_conflicts(
+                &mut result,
+                &head.device_id,
+                seq,
+                apply_result.constraint_conflict_tables,
             );
 
-            result.changesets_applied += 1;
-            result.row_changes.extend(changes);
-
-            pulled_any = true;
-            updated_cursors.insert(head.device_id.clone(), seq);
-        }
-
-        if pulled_any {
-            result.devices_pulled += 1;
+            if !finish_applied_changeset(
+                &mut result,
+                &mut updated_cursors,
+                &mut applied_devices,
+                CompletedChangeset {
+                    device_id: &head.device_id,
+                    seq,
+                    old_changes: &old_changes,
+                    changes: &changes,
+                },
+                &blob_decls,
+                library_dir,
+                &schema,
+                receiver_wall_ms,
+            )
+            .await
+            {
+                break;
+            }
         }
     }
 
-    // Retry changesets that had FK constraint violations. After applying all
-    // changesets from all devices, the parent rows should now exist.
+    // Retry changesets that had FK violations. After applying all changesets
+    // from all devices, the parent rows should now exist.
     if !deferred.is_empty() {
         info!(
             count = deferred.len(),
@@ -660,13 +674,106 @@ pub async fn pull_changes(
                 warn!(
                     device_id = %d.device_id,
                     seq = d.seq,
-                    "changeset still has FK violations after retry, skipping"
+                    "changeset still has FK violations after retry; cursor not advanced"
                 );
+                continue;
+            }
+            record_constraint_conflicts(
+                &mut result,
+                &d.device_id,
+                d.seq,
+                retry_result.constraint_conflict_tables,
+            );
+            if !finish_applied_changeset(
+                &mut result,
+                &mut updated_cursors,
+                &mut applied_devices,
+                CompletedChangeset {
+                    device_id: &d.device_id,
+                    seq: d.seq,
+                    old_changes: &d.old_changes,
+                    changes: &d.changes,
+                },
+                &blob_decls,
+                library_dir,
+                &schema,
+                receiver_wall_ms,
+            )
+            .await
+            {
+                continue;
             }
         }
     }
 
+    result.devices_pulled = applied_devices.len() as u64;
+
     Ok((updated_cursors, result))
+}
+
+async fn finish_applied_changeset(
+    result: &mut PullResult,
+    updated_cursors: &mut HashMap<String, u64>,
+    applied_devices: &mut HashSet<String>,
+    applied: CompletedChangeset<'_>,
+    blob_decls: &BlobDecls,
+    library_dir: &LibraryDir,
+    schema: &TableSchema,
+    receiver_wall_ms: u64,
+) -> bool {
+    // A changeset that DELETEs a blob-bearing row (a gate retract or a genuine
+    // delete) leaves this peer holding the blob's local copy. Drop it wherever it
+    // is: cache, pinned cache, and local store. A peer never writes a cloud
+    // tombstone here; that belongs to the deleting / make-Local owner.
+    if let Err(e) = drop_deleted_blob_local(
+        applied.old_changes,
+        applied.changes,
+        blob_decls,
+        library_dir,
+    )
+    .await
+    {
+        warn!(
+            "Dropping local copies for deleted blob rows failed for {}/{}: {e}; \
+             cursor not advanced, will retry next cycle",
+            applied.device_id, applied.seq
+        );
+        result.asset_downloads_failed = true;
+        return false;
+    }
+
+    advance_max_updated_at(
+        &mut result.max_applied_updated_at,
+        applied.changes,
+        schema,
+        receiver_wall_ms,
+    );
+    result.changesets_applied += 1;
+    result.row_changes.extend(applied.changes.to_vec());
+    applied_devices.insert(applied.device_id.to_string());
+    updated_cursors.insert(applied.device_id.to_string(), applied.seq);
+    true
+}
+
+fn record_constraint_conflicts(
+    result: &mut PullResult,
+    device_id: &str,
+    seq: u64,
+    tables: Vec<String>,
+) {
+    for table in tables {
+        error!(
+            device_id = %device_id,
+            seq,
+            table = %table,
+            "changeset hit a non-retryable SQLite constraint conflict; row omitted"
+        );
+        result.constraint_conflicts.push(ConstraintConflict {
+            device_id: device_id.to_string(),
+            seq,
+            table,
+        });
+    }
 }
 
 /// Outcome of deciding whether a changeset's author may write, when the

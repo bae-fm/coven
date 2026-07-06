@@ -6,12 +6,13 @@
 //! always in earlier changesets than children).
 //!
 //! If a FK violation remains after applying a changeset, the conflict handler
-//! reports it via `FOREIGN_KEY`/`CONSTRAINT` and the returned flag notes it for
-//! the caller, which retries the changeset once its parents have landed.
+//! reports it via `FOREIGN_KEY` and the returned flag notes it for the caller,
+//! which retries the changeset once its parents have landed. Non-FK constraint
+//! conflicts are surfaced separately because retrying cannot make them valid.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use fallible_streaming_iterator::FallibleStreamingIterator;
 use rusqlite::hooks::Action;
@@ -30,10 +31,13 @@ use crate::database::DbError;
 
 /// Result of applying a changeset.
 pub struct ApplyResult {
-    /// True if any FK/uniqueness constraint violations were reported. The caller
-    /// may retry this changeset after applying other changesets that contain the
-    /// missing parent rows.
+    /// True if any FK violations were reported. The caller may retry this
+    /// changeset after applying other changesets that contain the missing parent
+    /// rows.
     pub had_fk_violations: bool,
+    /// Tables that hit non-retryable SQLite constraint conflicts. The conflicting
+    /// rows were omitted.
+    pub constraint_conflict_tables: Vec<String>,
 }
 
 /// Apply `bytes` to `conn` using LWW conflict resolution, building the
@@ -63,7 +67,8 @@ pub fn apply_changeset_lww(
 /// across every changeset in a pull, rather than re-querying `PRAGMA table_info`
 /// per changeset. The conflict closure resolves each conflicting row's table from
 /// its operation and decides REPLACE/OMIT by comparing `_updated_at`;
-/// FK/constraint violations flip a shared flag for the caller to retry.
+/// FK violations flip a shared flag for the caller to retry; non-FK constraint
+/// conflicts are collected so the caller can surface the dropped rows.
 ///
 /// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
@@ -76,10 +81,12 @@ pub fn apply_changeset_lww_with_schema(
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
     let fk_flag = Arc::new(AtomicBool::new(false));
+    let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     let premerged_updates = premerge_losing_update_columns(&tx, bytes, &schema, receiver_wall_ms)?;
 
     let closure_flag = fk_flag.clone();
+    let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
     tx.apply_strm(
         &mut &bytes[..],
         // Apply to every table in the changeset (it only ever carries synced
@@ -102,6 +109,20 @@ pub fn apply_changeset_lww_with_schema(
                     return ConflictAction::SQLITE_CHANGESET_ABORT;
                 }
             };
+            if conflict_type == ConflictType::SQLITE_CHANGESET_CONSTRAINT {
+                warn!(
+                    table = %table,
+                    "changeset hit a non-retryable SQLite constraint conflict; omitting row"
+                );
+                match closure_constraint_conflict_tables.lock() {
+                    Ok(mut tables) => tables.push(table),
+                    Err(error) => {
+                        warn!(error = %error, "failed to record changeset constraint conflict; aborting apply");
+                        return ConflictAction::SQLITE_CHANGESET_ABORT;
+                    }
+                }
+                return ConflictAction::SQLITE_CHANGESET_OMIT;
+            }
             if conflict_type == ConflictType::SQLITE_CHANGESET_DATA
                 && op_code == Action::SQLITE_UPDATE
             {
@@ -114,14 +135,7 @@ pub fn apply_changeset_lww_with_schema(
                     }
                 }
             }
-            lww_conflict_handler(
-                conflict_type,
-                item,
-                &table,
-                &schema,
-                receiver_wall_ms,
-                &closure_flag,
-            )
+            lww_conflict_handler(conflict_type, item, &table, &schema, receiver_wall_ms)
         },
     )
     .map_err(DbError::from)?;
@@ -132,7 +146,19 @@ pub fn apply_changeset_lww_with_schema(
         tx.commit().map_err(DbError::from)?;
     }
 
-    Ok(ApplyResult { had_fk_violations })
+    let constraint_conflict_tables = constraint_conflict_tables
+        .lock()
+        .map_err(|error| {
+            DbError(format!(
+                "constraint conflict table collection poisoned: {error}"
+            ))
+        })?
+        .clone();
+
+    Ok(ApplyResult {
+        had_fk_violations,
+        constraint_conflict_tables,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

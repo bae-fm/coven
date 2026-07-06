@@ -43,6 +43,10 @@ pub struct SyncCycleResult {
     /// corrupt). The cursor advanced past each so the device isn't stuck; the count
     /// is per-cycle and surfaces as a warning.
     pub invalid_signatures: u64,
+    /// Changeset rows omitted because SQLite reported a non-retryable constraint
+    /// conflict. The cursor advanced past the changeset; the count is per-cycle
+    /// and surfaces as a warning.
+    pub constraint_conflicts: u64,
     /// Number of other devices seen in the sync storage.
     pub other_device_count: usize,
     /// RFC 3339 timestamp of when this cycle completed.
@@ -761,6 +765,7 @@ pub async fn run_single_sync_cycle(
         skipped_schema: sync_result.pull.skipped_schema,
         rejected_unauthorized: sync_result.pull.rejected_unauthorized.len() as u64,
         invalid_signatures: sync_result.pull.invalid_signatures.len() as u64,
+        constraint_conflicts: sync_result.pull.constraint_conflicts.len() as u64,
         other_device_count,
         sync_time: now,
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,

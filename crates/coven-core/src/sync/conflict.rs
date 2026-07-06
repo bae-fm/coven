@@ -19,12 +19,9 @@
 //! The logic runs inside the `apply_strm` conflict closure in [`super::apply`],
 //! which is `Fn(ConflictType, ChangesetItem) -> ConflictAction + Send + 'static`.
 //! This module provides the per-table column map (moved owned into the closure)
-//! and the pure per-row decision; FK-violation tracking is an `Arc<AtomicBool>`
-//! the closure owns, since `Fn` forbids `&mut` state.
+//! and the pure per-row decision.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use rusqlite::hooks::Action;
 use rusqlite::session::{ChangesetItem, ConflictAction, ConflictType};
@@ -117,10 +114,11 @@ pub fn compare_lww_stamps(
 ///   otherwise compare `_updated_at`. Newer wins.
 /// - **NOTFOUND** (row deleted locally, incoming UPDATE): OMIT (delete wins).
 /// - **CONFLICT** (row exists, incoming INSERT): compare `_updated_at`. Newer wins.
-/// - **CONSTRAINT** (uniqueness/other constraint): OMIT and flag for retry.
 ///
 /// FOREIGN_KEY conflicts never reach here — [`super::apply`] resolves them before
 /// calling this, because that conflict type's iterator does not expose the row.
+/// CONSTRAINT conflicts are also handled in [`super::apply`] so the caller can
+/// surface the table that hit a non-retryable uniqueness/constraint clash.
 ///
 /// For DATA/CONFLICT, the incoming `_updated_at` is read from the side the op
 /// records — `item.new_value(uat)` for an INSERT/UPDATE, `item.old_value(uat)` for
@@ -131,16 +129,13 @@ pub fn compare_lww_stamps(
 /// from a later partial UPDATE. Non-delete conflicts parse both stamps as HLC
 /// [`Timestamp`]s; an unparseable value keeps local. A grossly-future incoming
 /// stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`] — is
-/// refused (kept local) so a broken clock can't win every conflict. `fk_flag` is
-/// set on a CONSTRAINT so the caller can retry the changeset once its missing
-/// parents have landed.
+/// refused (kept local) so a broken clock can't win every conflict.
 pub fn lww_conflict_handler(
     conflict_type: ConflictType,
     item: ChangesetItem,
     table: &str,
     schema: &TableSchema,
     receiver_wall_ms: u64,
-    fk_flag: &Arc<AtomicBool>,
 ) -> ConflictAction {
     match conflict_type {
         ConflictType::SQLITE_CHANGESET_DATA | ConflictType::SQLITE_CHANGESET_CONFLICT => {
@@ -216,14 +211,10 @@ pub fn lww_conflict_handler(
         // Row was deleted locally, incoming changeset has an UPDATE. Delete wins.
         ConflictType::SQLITE_CHANGESET_NOTFOUND => ConflictAction::SQLITE_CHANGESET_OMIT,
 
-        ConflictType::SQLITE_CHANGESET_CONSTRAINT => {
-            fk_flag.store(true, Ordering::Relaxed);
-            ConflictAction::SQLITE_CHANGESET_OMIT
-        }
-
-        // FOREIGN_KEY is filtered out in `apply`; `ConflictType` is also
-        // `#[non_exhaustive]` (an `UNKNOWN` sentinel for codes outside the five
-        // SQLite documents). None reach a well-formed apply here, so keep local.
+        // FOREIGN_KEY and CONSTRAINT are filtered out in `apply`; `ConflictType`
+        // is also `#[non_exhaustive]` (an `UNKNOWN` sentinel for codes outside
+        // the five SQLite documents). None reach a well-formed apply here, so
+        // keep local.
         _ => {
             warn!(table, "unexpected changeset conflict type, keeping local");
             ConflictAction::SQLITE_CHANGESET_OMIT

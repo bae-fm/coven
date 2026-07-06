@@ -627,6 +627,7 @@ impl SyncStorage for MockSyncStorage {
                 author_pubkey: head.author_pubkey,
             });
         }
+        out.sort_by(|a, b| a.device_id.cmp(&b.device_id));
         Ok(out)
     }
 

@@ -30,6 +30,7 @@ pub struct SyncLoopAlerts {
     pub skipped_schema: u64,
     pub rejected_unauthorized: u64,
     pub invalid_signatures: u64,
+    pub constraint_conflicts: u64,
     pub asset_downloads_failed: bool,
 }
 
@@ -49,6 +50,16 @@ impl SyncLoopAlerts {
             Some(format!(
                 "{} changes with an invalid signature were skipped.",
                 self.invalid_signatures,
+            ))
+        } else if self.constraint_conflicts > 0 {
+            let noun = if self.constraint_conflicts == 1 {
+                "change"
+            } else {
+                "changes"
+            };
+            Some(format!(
+                "{} {} hit a local uniqueness or constraint conflict.",
+                self.constraint_conflicts, noun,
             ))
         } else if self.asset_downloads_failed {
             Some("Some files failed to download, will retry".to_string())
@@ -104,6 +115,7 @@ pub fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
                 skipped_schema: result.skipped_schema,
                 rejected_unauthorized: result.rejected_unauthorized,
                 invalid_signatures: result.invalid_signatures,
+                constraint_conflicts: result.constraint_conflicts,
                 asset_downloads_failed: result.asset_downloads_failed,
             },
         }),
@@ -136,6 +148,7 @@ mod tests {
             skipped_schema: 0,
             rejected_unauthorized: 0,
             invalid_signatures: 0,
+            constraint_conflicts: 0,
             other_device_count: 2,
             sync_time: "2026-07-03T00:00:00Z".to_string(),
             asset_downloads_failed: false,
@@ -188,12 +201,29 @@ mod tests {
             skipped_schema: 1,
             rejected_unauthorized: 2,
             invalid_signatures: 3,
+            constraint_conflicts: 4,
             asset_downloads_failed: true,
         };
 
         assert_eq!(
             alerts.primary_message().as_deref(),
             Some("1 changes from a newer app version were skipped. Update the app to apply them."),
+        );
+    }
+
+    #[test]
+    fn constraint_conflict_alert_is_reported() {
+        let alerts = SyncLoopAlerts {
+            skipped_schema: 0,
+            rejected_unauthorized: 0,
+            invalid_signatures: 0,
+            constraint_conflicts: 1,
+            asset_downloads_failed: false,
+        };
+
+        assert_eq!(
+            alerts.primary_message().as_deref(),
+            Some("1 change hit a local uniqueness or constraint conflict."),
         );
     }
 }
