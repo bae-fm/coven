@@ -1,11 +1,11 @@
 //! coven's bookkeeping schema, the `item_keys` synced table, and the
 //! cloud-outbox row types.
 //!
-//! coven owns five device-local bookkeeping tables — `sync_cursors`,
-//! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents` — plus
-//! the library-global synced table `item_keys`, all created by `MIGRATION_SQL`,
-//! which coven runs against the connection it owns during open. The host does
-//! not implement any of this; native app SQL goes through
+//! coven owns six device-local bookkeeping tables — `sync_cursors`,
+//! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
+//! `local_cleanup_intents` — plus the library-global synced table `item_keys`,
+//! all created by `MIGRATION_SQL`, which coven runs against the connection it
+//! owns during open. The host does not implement any of this; native app SQL goes through
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 //!
 //! Unlike the bookkeeping tables, `item_keys` is content every member needs, so
@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS blob_make_remote_intents (
     root_id    TEXT NOT NULL,
     retain_pinned INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (root_table, root_id)
+);
+
+CREATE TABLE IF NOT EXISTS local_cleanup_intents (
+    namespace TEXT NOT NULL,
+    blob_id   TEXT NOT NULL,
+    PRIMARY KEY (namespace, blob_id)
 );
 
 CREATE TABLE IF NOT EXISTS item_keys (
