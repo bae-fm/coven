@@ -1,7 +1,7 @@
 //! CloudKit-backed `CloudHome` implementation.
 //!
 //! CloudKit's CKAsset has a 50MB limit, so large files are split into 10MB
-//! chunks stored as separate records: `key.part0`, `key.part1`, etc.
+//! chunks stored as tokened part records plus a manifest record.
 //!
 //! The `CloudKitOps` trait defines synchronous record operations that are
 //! implemented in Swift via a UniFFI callback interface. `CloudKitCloudHome`
@@ -10,6 +10,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
+use crate::id_provider::{IdRef, UuidProvider};
 
 use super::{CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 
@@ -59,6 +61,7 @@ pub struct CloudKitShare {
 /// CloudKit-backed cloud home with automatic chunking for large files.
 pub struct CloudKitCloudHome {
     ops: Arc<dyn CloudKitOps>,
+    ids: IdRef,
     scope: CloudKitScope,
 }
 
@@ -68,15 +71,30 @@ impl CloudKitCloudHome {
     }
 
     pub fn new_private(ops: Arc<dyn CloudKitOps>) -> Self {
+        Self::new_private_with_ids(ops, Arc::new(UuidProvider))
+    }
+
+    pub fn new_private_with_ids(ops: Arc<dyn CloudKitOps>, ids: IdRef) -> Self {
         Self {
             ops,
+            ids,
             scope: CloudKitScope::Private,
         }
     }
 
     pub fn new_shared(ops: Arc<dyn CloudKitOps>, owner_name: String, zone_name: String) -> Self {
+        Self::new_shared_with_ids(ops, Arc::new(UuidProvider), owner_name, zone_name)
+    }
+
+    pub fn new_shared_with_ids(
+        ops: Arc<dyn CloudKitOps>,
+        ids: IdRef,
+        owner_name: String,
+        zone_name: String,
+    ) -> Self {
         Self {
             ops,
+            ids,
             scope: CloudKitScope::Shared {
                 owner_name,
                 zone_name,
@@ -114,24 +132,31 @@ fn strip_part_suffix(key: &str) -> &str {
     }
     if let Some(idx) = key.rfind(".part") {
         let after = &key[idx + 5..];
-        if !after.is_empty() && after.chars().all(|c| c.is_ascii_digit()) {
+        let digits = after
+            .as_bytes()
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digits > 0 && (digits == after.len() || after.as_bytes()[digits] == b'.') {
             return &key[..idx];
         }
     }
     key
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ChunkManifest {
     part_count: usize,
     total_len: usize,
+    upload_id: String,
 }
 
 impl ChunkManifest {
-    fn for_total_len(total_len: usize) -> Self {
+    fn new(total_len: usize, upload_id: String) -> Self {
         Self {
             part_count: total_len.div_ceil(CHUNK_SIZE),
             total_len,
+            upload_id,
         }
     }
 }
@@ -142,11 +167,17 @@ fn encode_chunk_manifest(manifest: ChunkManifest) -> Vec<u8> {
     encoded.push(b'\n');
     encoded.extend_from_slice(manifest.total_len.to_string().as_bytes());
     encoded.push(b'\n');
+    encoded.extend_from_slice(manifest.upload_id.as_bytes());
+    encoded.push(b'\n');
     encoded
 }
 
 fn chunk_manifest_key(key: &str) -> String {
     format!("{key}{CHUNK_MANIFEST_SUFFIX}")
+}
+
+fn chunk_part_key(key: &str, upload_id: &str, index: usize) -> String {
+    format!("{key}.part{index}.{upload_id}")
 }
 
 fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
@@ -179,6 +210,12 @@ fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
                 "CloudKit chunk manifest total length is invalid: {e}"
             ))
         })?;
+    let upload_id = lines
+        .next()
+        .ok_or_else(|| {
+            CloudHomeError::Storage("CloudKit chunk manifest missing upload id".to_string())
+        })?
+        .to_string();
     if lines.next().is_some() {
         return Err(CloudHomeError::Storage(
             "CloudKit chunk manifest has extra fields".to_string(),
@@ -189,7 +226,17 @@ fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
             "CloudKit chunk manifest must describe a non-empty object".to_string(),
         ));
     }
-    if ChunkManifest::for_total_len(total_len).part_count != part_count {
+    if upload_id.is_empty()
+        || !upload_id
+            .as_bytes()
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+    {
+        return Err(CloudHomeError::Storage(
+            "CloudKit chunk manifest upload id is invalid".to_string(),
+        ));
+    }
+    if ChunkManifest::new(total_len, upload_id.clone()).part_count != part_count {
         return Err(CloudHomeError::Storage(format!(
             "CloudKit chunk manifest part count {part_count} does not match total length {total_len}"
         )));
@@ -197,36 +244,47 @@ fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
     Ok(ChunkManifest {
         part_count,
         total_len,
+        upload_id,
     })
 }
 
-fn parse_chunk_key(key: &str) -> Result<usize, CloudHomeError> {
-    key.rsplit_once(".part")
+fn parse_chunk_key(key: &str, upload_id: &str) -> Result<Option<usize>, CloudHomeError> {
+    let Some((part_key, token)) = key.rsplit_once('.') else {
+        return Ok(None);
+    };
+    if token != upload_id {
+        return Ok(None);
+    }
+    let index = part_key
+        .rsplit_once(".part")
         .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
-        .ok_or_else(|| CloudHomeError::Storage(format!("chunk key {key:?} missing .part suffix")))
+        .ok_or_else(|| {
+            CloudHomeError::Storage(format!("chunk key {key:?} missing .part suffix"))
+        })?;
+    Ok(Some(index))
 }
 
 fn list_numbered_chunks(
     ops: &dyn CloudKitOps,
     scope: &CloudKitScope,
     key: &str,
+    manifest: &ChunkManifest,
 ) -> Result<Vec<(usize, String)>, CloudHomeError> {
     let chunk_prefix = format!("{key}.part");
-    let mut numbered: Vec<(usize, String)> = ops
-        .list_records(scope, &chunk_prefix)?
-        .into_iter()
-        .map(|chunk_key| {
-            let index = parse_chunk_key(&chunk_key)?;
-            Ok::<_, CloudHomeError>((index, chunk_key))
-        })
-        .collect::<Result<_, _>>()?;
+    let mut numbered = Vec::new();
+    for chunk_key in ops.list_records(scope, &chunk_prefix)? {
+        let Some(index) = parse_chunk_key(&chunk_key, &manifest.upload_id)? else {
+            continue;
+        };
+        numbered.push((index, chunk_key));
+    }
     numbered.sort_by_key(|(index, _)| *index);
     Ok(numbered)
 }
 
 fn verify_chunk_manifest(
     key: &str,
-    manifest: ChunkManifest,
+    manifest: &ChunkManifest,
     chunks: &[(usize, String)],
 ) -> Result<(), CloudHomeError> {
     if chunks.len() != manifest.part_count {
@@ -246,7 +304,7 @@ fn verify_chunk_manifest(
     Ok(())
 }
 
-fn chunk_manifest_has_all_parts(manifest: ChunkManifest, chunks: &[(usize, String)]) -> bool {
+fn chunk_manifest_has_all_parts(manifest: &ChunkManifest, chunks: &[(usize, String)]) -> bool {
     chunks.len() == manifest.part_count
         && chunks
             .iter()
@@ -258,7 +316,7 @@ fn read_chunk(
     ops: &dyn CloudKitOps,
     scope: &CloudKitScope,
     key: &str,
-    manifest: ChunkManifest,
+    manifest: &ChunkManifest,
     index: usize,
     chunk_key: &str,
 ) -> Result<Vec<u8>, CloudHomeError> {
@@ -283,12 +341,12 @@ fn read_chunked_object(
     key: &str,
     manifest: ChunkManifest,
 ) -> Result<Vec<u8>, CloudHomeError> {
-    let chunks = list_numbered_chunks(ops, scope, key)?;
-    verify_chunk_manifest(key, manifest, &chunks)?;
+    let chunks = list_numbered_chunks(ops, scope, key, &manifest)?;
+    verify_chunk_manifest(key, &manifest, &chunks)?;
 
     let mut result = Vec::with_capacity(manifest.total_len);
     for (index, chunk_key) in &chunks {
-        let chunk = read_chunk(ops, scope, key, manifest, *index, chunk_key)?;
+        let chunk = read_chunk(ops, scope, key, &manifest, *index, chunk_key)?;
         result.extend_from_slice(&chunk);
     }
     if result.len() != manifest.total_len {
@@ -301,25 +359,16 @@ fn read_chunked_object(
     Ok(result)
 }
 
-/// Delete old single record and chunk records for a key (best-effort).
-fn delete_all_variants(
+fn delete_chunk_layout(
     ops: &dyn CloudKitOps,
     scope: &CloudKitScope,
     key: &str,
 ) -> Result<(), CloudHomeError> {
-    // Delete single record (ignore not-found)
-    match ops.delete_record(scope, key) {
-        Ok(()) | Err(CloudHomeError::NotFound(_)) => {}
-        Err(e) => return Err(e),
-    }
-
-    // Delete chunk manifest (ignore not-found)
     match ops.delete_record(scope, &chunk_manifest_key(key)) {
         Ok(()) | Err(CloudHomeError::NotFound(_)) => {}
         Err(e) => return Err(e),
     }
 
-    // Delete all chunk records
     let chunk_prefix = format!("{key}.part");
     let chunks = ops.list_records(scope, &chunk_prefix)?;
     for chunk_key in chunks {
@@ -332,14 +381,56 @@ fn delete_all_variants(
     Ok(())
 }
 
+fn delete_stale_chunk_records(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    key: &str,
+    upload_id: &str,
+) -> Result<(), CloudHomeError> {
+    let chunk_prefix = format!("{key}.part");
+    let chunks = ops.list_records(scope, &chunk_prefix)?;
+    for chunk_key in chunks {
+        if parse_chunk_key(&chunk_key, upload_id)?.is_some() {
+            continue;
+        }
+        match ops.delete_record(scope, &chunk_key) {
+            Ok(()) | Err(CloudHomeError::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn delete_single_record(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    key: &str,
+) -> Result<(), CloudHomeError> {
+    match ops.delete_record(scope, key) {
+        Ok(()) | Err(CloudHomeError::NotFound(_)) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Delete old single record and chunk records for a key.
+fn delete_all_variants(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    key: &str,
+) -> Result<(), CloudHomeError> {
+    delete_single_record(ops, scope, key)?;
+    delete_chunk_layout(ops, scope, key)
+}
+
 /// A [`PartSink`] over CloudKit's chunked record layout: each `send_part` writes
-/// one `{key}.part{i}` record (CKAsset caps at 50 MB, so a large blob is split),
+/// one tokened part record (CKAsset caps at 50 MB, so a large blob is split),
 /// `finish` writes the `{key}.manifest` record that makes the object readable.
-/// The existing records were cleared by `open_multipart` before the first part.
+/// Existing records stay readable until the manifest points at the new token.
 struct CloudKitPartSink {
     ops: Arc<dyn CloudKitOps>,
     scope: CloudKitScope,
     key: String,
+    upload_id: String,
     index: usize,
     total_len: usize,
     written_len: usize,
@@ -362,13 +453,13 @@ impl super::PartSink for CloudKitPartSink {
         self.written_len += part.len();
         let ops = self.ops.clone();
         let scope = self.scope.clone();
-        let chunk_key = format!("{}.part{i}", self.key);
+        let chunk_key = chunk_part_key(&self.key, &self.upload_id, i);
         let data = part.to_vec();
         blocking(move || ops.write_record(&scope, &chunk_key, data)).await
     }
 
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
-        let manifest = ChunkManifest::for_total_len(self.total_len);
+        let manifest = ChunkManifest::new(self.total_len, self.upload_id.clone());
         if self.index != manifest.part_count || self.written_len != manifest.total_len {
             return Err(CloudHomeError::Storage(format!(
                 "CloudKit multipart {} wrote {} parts/{} bytes, expected {} parts/{} bytes",
@@ -379,24 +470,33 @@ impl super::PartSink for CloudKitPartSink {
         let scope = self.scope.clone();
         let key = chunk_manifest_key(&self.key);
         let data = encode_chunk_manifest(manifest);
-        blocking(move || ops.write_record(&scope, &key, data)).await
+        blocking(move || ops.write_record(&scope, &key, data)).await?;
+
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = self.key.clone();
+        blocking(move || delete_single_record(&*ops, &scope, &key)).await?;
+
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = self.key.clone();
+        let upload_id = self.upload_id.clone();
+        blocking(move || delete_stale_chunk_records(&*ops, &scope, &key, &upload_id)).await
     }
 }
 
 #[async_trait]
 impl CloudHome for CloudKitCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        // Clean up any existing single or chunked records first (an overwrite may
-        // transition between single and chunked layouts).
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let k = key.to_string();
-        blocking(move || delete_all_variants(&*ops, &scope, &k)).await?;
+        blocking(move || ops.write_record(&scope, &k, data)).await?;
 
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let k = key.to_string();
-        blocking(move || ops.write_record(&scope, &k, data)).await
+        blocking(move || delete_chunk_layout(&*ops, &scope, &k)).await
     }
 
     async fn open_multipart<'a>(
@@ -404,11 +504,6 @@ impl CloudHome for CloudKitCloudHome {
         key: &str,
         total_len: u64,
     ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
-        // Clear any existing records before the first part lands.
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let k = key.to_string();
-        blocking(move || delete_all_variants(&*ops, &scope, &k)).await?;
         let total_len = usize::try_from(total_len).map_err(|_| {
             CloudHomeError::Storage(format!(
                 "CloudKit object {key} is too large for this platform"
@@ -418,6 +513,7 @@ impl CloudHome for CloudKitCloudHome {
             ops: self.ops.clone(),
             scope: self.scope.clone(),
             key: key.to_string(),
+            upload_id: self.ids.new_id(),
             index: 0,
             total_len,
             written_len: 0,
@@ -448,7 +544,7 @@ impl CloudHome for CloudKitCloudHome {
                 Err(e) => return Err(e),
             }
 
-            let chunks = list_numbered_chunks(&*ops, &scope, &key)?;
+            let chunks = ops.list_records(&scope, &format!("{key}.part"))?;
             if chunks.is_empty() {
                 return Err(CloudHomeError::NotFound(key));
             }
@@ -488,8 +584,8 @@ impl CloudHome for CloudKitCloudHome {
             match ops.read_record(&scope, &chunk_manifest_key(&key)) {
                 Ok(data) => {
                     let manifest = decode_chunk_manifest(&data)?;
-                    let chunks = list_numbered_chunks(&*ops, &scope, &key)?;
-                    verify_chunk_manifest(&key, manifest, &chunks)?;
+                    let chunks = list_numbered_chunks(&*ops, &scope, &key, &manifest)?;
+                    verify_chunk_manifest(&key, &manifest, &chunks)?;
                     if end > manifest.total_len {
                         return Err(CloudHomeError::Storage(format!(
                             "range {start}..{end} exceeds file size {}",
@@ -504,7 +600,7 @@ impl CloudHome for CloudKitCloudHome {
                         .iter()
                         .filter(|(i, _)| (first_chunk..=last_chunk).contains(i))
                     {
-                        let chunk = read_chunk(&*ops, &scope, &key, manifest, *i, chunk_key)?;
+                        let chunk = read_chunk(&*ops, &scope, &key, &manifest, *i, chunk_key)?;
                         let chunk_start = i * CHUNK_SIZE;
                         let slice_start = if *i == first_chunk {
                             start - chunk_start
@@ -524,7 +620,7 @@ impl CloudHome for CloudKitCloudHome {
                 Err(e) => return Err(e),
             }
 
-            let chunks = list_numbered_chunks(&*ops, &scope, &key)?;
+            let chunks = ops.list_records(&scope, &format!("{key}.part"))?;
             if chunks.is_empty() {
                 return Err(CloudHomeError::NotFound(key));
             }
@@ -574,8 +670,8 @@ impl CloudHome for CloudKitCloudHome {
                 Err(CloudHomeError::NotFound(_)) => return Ok(false),
                 Err(e) => return Err(e),
             };
-            let chunks = list_numbered_chunks(&*ops, &scope, &key)?;
-            Ok(chunk_manifest_has_all_parts(manifest, &chunks))
+            let chunks = list_numbered_chunks(&*ops, &scope, &key, &manifest)?;
+            Ok(chunk_manifest_has_all_parts(&manifest, &chunks))
         })
         .await
     }
@@ -606,14 +702,25 @@ impl CloudHome for CloudKitCloudHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::id_provider::SequentialIdProvider;
     use crate::storage::cloud::{no_progress, BlobBody};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum MockCall {
+        Write(String),
+        Read(String),
+        List(String),
+        Delete(String),
+        Exists(String),
+    }
+
     struct MockCloudKitOps {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
-        calls: Mutex<Vec<(CloudKitScope, String)>>,
+        calls: Mutex<Vec<MockCall>>,
+        fail_deletes: Mutex<HashSet<String>>,
         record_exists_calls: AtomicUsize,
     }
 
@@ -622,8 +729,21 @@ mod tests {
             Self {
                 store: Mutex::new(HashMap::new()),
                 calls: Mutex::new(Vec::new()),
+                fail_deletes: Mutex::new(HashSet::new()),
                 record_exists_calls: AtomicUsize::new(0),
             }
+        }
+
+        fn calls(&self) -> Vec<MockCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn clear_calls(&self) {
+            self.calls.lock().unwrap().clear();
+        }
+
+        fn fail_delete(&self, key: &str) {
+            self.fail_deletes.lock().unwrap().insert(key.to_string());
         }
     }
 
@@ -637,7 +757,7 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push((scope.clone(), key.to_string()));
+                .push(MockCall::Write(key.to_string()));
             self.store
                 .lock()
                 .unwrap()
@@ -649,7 +769,7 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push((scope.clone(), key.to_string()));
+                .push(MockCall::Read(key.to_string()));
             self.store
                 .lock()
                 .unwrap()
@@ -666,7 +786,7 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push((scope.clone(), prefix.to_string()));
+                .push(MockCall::List(prefix.to_string()));
             let store = self.store.lock().unwrap();
             let mut keys: Vec<String> = store
                 .keys()
@@ -681,7 +801,10 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push((scope.clone(), key.to_string()));
+                .push(MockCall::Delete(key.to_string()));
+            if self.fail_deletes.lock().unwrap().contains(key) {
+                return Err(CloudHomeError::Storage(format!("delete {key} failed")));
+            }
             self.store
                 .lock()
                 .unwrap()
@@ -694,7 +817,7 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push((scope.clone(), key.to_string()));
+                .push(MockCall::Exists(key.to_string()));
             Ok(self
                 .store
                 .lock()
@@ -724,19 +847,51 @@ mod tests {
     }
 
     fn make_cloud_home() -> CloudKitCloudHome {
-        CloudKitCloudHome::new(Arc::new(MockCloudKitOps::new()))
+        CloudKitCloudHome::new_private_with_ids(
+            Arc::new(MockCloudKitOps::new()),
+            Arc::new(SequentialIdProvider::new("cloudkit-upload")),
+        )
     }
 
     fn make_cloud_home_with_ops() -> (CloudKitCloudHome, Arc<MockCloudKitOps>) {
         let ops = Arc::new(MockCloudKitOps::new());
-        (CloudKitCloudHome::new(ops.clone()), ops)
+        (
+            CloudKitCloudHome::new_private_with_ids(
+                ops.clone(),
+                Arc::new(SequentialIdProvider::new("cloudkit-upload")),
+            ),
+            ops,
+        )
     }
 
     fn write_chunk_manifest(ops: &MockCloudKitOps, key: &str, total_len: usize) {
+        write_chunk_manifest_with_upload_id(
+            ops,
+            key,
+            total_len,
+            "0123456789abcdef0123456789abcdef",
+        );
+    }
+
+    fn write_chunk_manifest_with_upload_id(
+        ops: &MockCloudKitOps,
+        key: &str,
+        total_len: usize,
+        upload_id: &str,
+    ) {
         ops.write_record(
             &CloudKitScope::Private,
             &chunk_manifest_key(key),
-            encode_chunk_manifest(ChunkManifest::for_total_len(total_len)),
+            encode_chunk_manifest(ChunkManifest::new(total_len, upload_id.to_string())),
+        )
+        .unwrap();
+    }
+
+    fn write_chunk_part(ops: &MockCloudKitOps, key: &str, index: usize, data: Vec<u8>) {
+        ops.write_record(
+            &CloudKitScope::Private,
+            &chunk_part_key(key, "0123456789abcdef0123456789abcdef", index),
+            data,
         )
         .unwrap();
     }
@@ -850,10 +1005,8 @@ mod tests {
         let (ch, ops) = make_cloud_home_with_ops();
         let first = vec![1u8; CHUNK_SIZE];
         let second = b"tail".to_vec();
-        ops.write_record(&CloudKitScope::Private, "chunked.bin.part0", first.clone())
-            .unwrap();
-        ops.write_record(&CloudKitScope::Private, "chunked.bin.part1", second.clone())
-            .unwrap();
+        write_chunk_part(&ops, "chunked.bin", 0, first.clone());
+        write_chunk_part(&ops, "chunked.bin", 1, second.clone());
 
         let err = ch
             .read("chunked.bin")
@@ -875,10 +1028,8 @@ mod tests {
         let second = vec![2u8; CHUNK_SIZE];
         let total_len = (CHUNK_SIZE * 2) + 4;
         write_chunk_manifest(&ops, "chunked.bin", total_len);
-        ops.write_record(&CloudKitScope::Private, "chunked.bin.part0", first)
-            .unwrap();
-        ops.write_record(&CloudKitScope::Private, "chunked.bin.part1", second)
-            .unwrap();
+        write_chunk_part(&ops, "chunked.bin", 0, first);
+        write_chunk_part(&ops, "chunked.bin", 1, second);
 
         let err = ch
             .read("chunked.bin")
@@ -919,18 +1070,8 @@ mod tests {
         let (ch, ops) = make_cloud_home_with_ops();
         let total_len = CHUNK_SIZE + 8;
         write_chunk_manifest(&ops, "short-tail.bin", total_len);
-        ops.write_record(
-            &CloudKitScope::Private,
-            "short-tail.bin.part0",
-            vec![1u8; CHUNK_SIZE],
-        )
-        .unwrap();
-        ops.write_record(
-            &CloudKitScope::Private,
-            "short-tail.bin.part1",
-            vec![2u8; 4],
-        )
-        .unwrap();
+        write_chunk_part(&ops, "short-tail.bin", 0, vec![1u8; CHUNK_SIZE]);
+        write_chunk_part(&ops, "short-tail.bin", 1, vec![2u8; 4]);
 
         let err = ch
             .read_range("short-tail.bin", CHUNK_SIZE as u64, (CHUNK_SIZE + 8) as u64)
@@ -1047,8 +1188,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_object_over_single_writes_without_deleting_base_first() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        ch.write(
+            "file.bin",
+            BlobBody::from_bytes(b"old".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+        ops.clear_calls();
+
+        ch.write(
+            "file.bin",
+            BlobBody::from_bytes(b"new".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        let calls = ops.calls();
+        assert_eq!(
+            calls.first(),
+            Some(&MockCall::Write("file.bin".to_string()))
+        );
+        assert!(
+            !calls.contains(&MockCall::Delete("file.bin".to_string())),
+            "single-record overwrite must not delete the base record: {calls:?}"
+        );
+        assert_eq!(ch.read("file.bin").await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn put_object_over_chunked_publishes_single_before_cleanup() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        let large_data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
+        ch.write("file.bin", BlobBody::from_bytes(large_data), &no_progress())
+            .await
+            .unwrap();
+        ops.clear_calls();
+
+        ch.write(
+            "file.bin",
+            BlobBody::from_bytes(b"new".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        let calls = ops.calls();
+        assert_eq!(
+            calls.first(),
+            Some(&MockCall::Write("file.bin".to_string()))
+        );
+        assert_eq!(ch.read("file.bin").await.unwrap(), b"new");
+        assert!(ch
+            .ops
+            .list_records(&CloudKitScope::Private, "file.bin.part")
+            .unwrap()
+            .is_empty());
+        assert!(!ch
+            .ops
+            .record_exists(&CloudKitScope::Private, &chunk_manifest_key("file.bin"))
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn put_object_cleanup_failure_leaves_new_single_readable() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        let large_data: Vec<u8> = vec![0u8; 15 * 1024 * 1024];
+        ch.write("file.bin", BlobBody::from_bytes(large_data), &no_progress())
+            .await
+            .unwrap();
+        let stale_chunk = ch
+            .ops
+            .list_records(&CloudKitScope::Private, "file.bin.part")
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("chunked setup writes a chunk");
+        ops.fail_delete(&stale_chunk);
+
+        let err = ch
+            .write(
+                "file.bin",
+                BlobBody::from_bytes(b"new".to_vec()),
+                &no_progress(),
+            )
+            .await
+            .expect_err("stale chunk cleanup failure must fail loud");
+        let msg = err.to_string();
+
+        assert!(msg.contains("delete"), "unexpected error: {msg}");
+        assert_eq!(ch.read("file.bin").await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
     async fn test_overwrite_single_with_chunked() {
-        let ch = make_cloud_home();
+        let (ch, ops) = make_cloud_home_with_ops();
         // Write small file
         ch.write(
             "file.bin",
@@ -1057,6 +1294,7 @@ mod tests {
         )
         .await
         .unwrap();
+        ops.clear_calls();
 
         // Overwrite with large file (chunked)
         let large_data: Vec<u8> = vec![1u8; 25 * 1024 * 1024];
@@ -1071,6 +1309,20 @@ mod tests {
         let read = ch.read("file.bin").await.unwrap();
         assert_eq!(read, large_data);
 
+        let calls = ops.calls();
+        let manifest_write = calls
+            .iter()
+            .position(|call| *call == MockCall::Write(chunk_manifest_key("file.bin")))
+            .expect("chunked write publishes manifest");
+        let base_delete = calls
+            .iter()
+            .position(|call| *call == MockCall::Delete("file.bin".to_string()))
+            .expect("chunked write removes stale single base");
+        assert!(
+            manifest_write < base_delete,
+            "chunk manifest must publish before stale base cleanup: {calls:?}"
+        );
+
         // The single-record base is replaced by the chunk layout.
         assert!(!ch
             .ops
@@ -1080,6 +1332,41 @@ mod tests {
             .ops
             .record_exists(&CloudKitScope::Private, &chunk_manifest_key("file.bin"))
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn chunked_over_longer_chunked_uses_new_token_before_stale_cleanup() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        let old_data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
+        ch.write("file.bin", BlobBody::from_bytes(old_data), &no_progress())
+            .await
+            .unwrap();
+        let old_chunks = ops
+            .list_records(&CloudKitScope::Private, "file.bin.part")
+            .unwrap();
+        ops.clear_calls();
+
+        let new_data: Vec<u8> = vec![1u8; 15 * 1024 * 1024];
+        ch.write(
+            "file.bin",
+            BlobBody::from_bytes(new_data.clone()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ch.read("file.bin").await.unwrap(), new_data);
+        let remaining_chunks = ch
+            .ops
+            .list_records(&CloudKitScope::Private, "file.bin.part")
+            .unwrap();
+        assert_eq!(remaining_chunks.len(), 2);
+        assert!(
+            old_chunks
+                .iter()
+                .all(|old| !remaining_chunks.iter().any(|new| new == old)),
+            "old token chunks must be cleaned after new manifest publishes"
+        );
     }
 
     #[tokio::test]
@@ -1155,6 +1442,11 @@ mod tests {
     fn test_strip_part_suffix() {
         assert_eq!(strip_part_suffix("file.bin.part0"), "file.bin");
         assert_eq!(strip_part_suffix("file.bin.part123"), "file.bin");
+        assert_eq!(
+            strip_part_suffix("file.bin.part123.0123456789abcdef0123456789abcdef"),
+            "file.bin"
+        );
+        assert_eq!(strip_part_suffix("file.bin.manifest"), "file.bin");
         assert_eq!(strip_part_suffix("file.bin"), "file.bin");
         assert_eq!(strip_part_suffix("file.partition"), "file.partition");
         assert_eq!(strip_part_suffix("file.part"), "file.part"); // no digits after .part
