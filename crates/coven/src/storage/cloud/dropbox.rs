@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::StatusCode;
+use std::fmt::Write as _;
 
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::oauth_rest::{
@@ -21,6 +22,7 @@ use super::{
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
 use crate::oauth::{OAuthConfig, OAuthTokens};
+use tracing::warn;
 
 const API_BASE: &str = "https://api.dropboxapi.com/2";
 const CONTENT_BASE: &str = "https://content.dropboxapi.com/2";
@@ -161,6 +163,30 @@ impl DropboxCloudHome {
     }
 }
 
+fn dropbox_api_arg(value: &serde_json::Value) -> String {
+    let json = value.to_string();
+    let mut arg = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            arg.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                write!(&mut arg, "\\u{unit:04x}").expect("writing to a String cannot fail");
+            }
+        }
+    }
+    arg
+}
+
+fn strip_dropbox_folder_prefix<'a>(path_display: &'a str, folder_path: &str) -> Option<&'a str> {
+    let folder_prefix = path_display.get(..folder_path.len())?;
+    if !folder_prefix.eq_ignore_ascii_case(folder_path) {
+        return None;
+    }
+    path_display.get(folder_path.len()..)?.strip_prefix('/')
+}
+
 /// A [`PartSink`](super::PartSink) over a Dropbox upload session: `append_v2` adds
 /// each non-final part at its byte offset; the final part is committed to the
 /// destination path via `upload_session/finish` (overwrite mode). The session was
@@ -186,7 +212,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
         let resp = if is_last {
             // The final part commits the file at the destination path.
             let path = self.home.full_path(&self.key);
-            let arg = serde_json::json!({
+            let arg = dropbox_api_arg(&serde_json::json!({
                 "cursor": { "session_id": self.session_id, "offset": offset },
                 "commit": {
                     "path": path,
@@ -194,8 +220,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
                     "autorename": false,
                     "mute": true,
                 },
-            })
-            .to_string();
+            }));
             self.home
                 .session
                 .api_call(|token| {
@@ -209,11 +234,10 @@ impl super::PartSink for DropboxSessionSink<'_> {
                 })
                 .await?
         } else {
-            let arg = serde_json::json!({
+            let arg = dropbox_api_arg(&serde_json::json!({
                 "cursor": { "session_id": self.session_id, "offset": offset },
                 "close": false,
-            })
-            .to_string();
+            }));
             self.home
                 .session
                 .api_call(|token| {
@@ -288,7 +312,7 @@ impl OAuthRestHome for DropboxCloudHome {
         key: &str,
         range: Option<(u64, u64)>,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        let arg = serde_json::json!({ "path": self.full_path(key) }).to_string();
+        let arg = dropbox_api_arg(&serde_json::json!({ "path": self.full_path(key) }));
         let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
             .api_call(|token| {
@@ -357,25 +381,26 @@ impl OAuthRestHome for DropboxCloudHome {
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
             .map_err(|e| CloudHomeError::Storage(format!("parse list: {e}")))?;
-        let folder_lower = self.folder_path.to_lowercase();
-        let lower_prefix = format!("{folder_lower}/");
         let mut keys = Vec::new();
         if let Some(entries) = json["entries"].as_array() {
             for entry in entries {
                 if entry[".tag"].as_str() != Some("file") {
                     continue;
                 }
-                // path_lower for reliable prefix stripping (path_display has
-                // inconsistent casing); path_display for the actual key value.
-                if let (Some(path_lower), Some(path_display)) =
-                    (entry["path_lower"].as_str(), entry["path_display"].as_str())
-                {
-                    if path_lower.starts_with(&lower_prefix) {
-                        let key = &path_display[lower_prefix.len()..];
-                        if key.starts_with(prefix) {
-                            keys.push(key.to_string());
-                        }
-                    }
+                let Some(path_display) = entry["path_display"].as_str() else {
+                    warn!("skipping Dropbox file entry without path_display: {entry}");
+                    continue;
+                };
+                let Some(key) = strip_dropbox_folder_prefix(path_display, &self.folder_path) else {
+                    warn!(
+                        folder_path = %self.folder_path,
+                        path_display,
+                        "skipping Dropbox file entry outside the configured folder"
+                    );
+                    continue;
+                };
+                if key.starts_with(prefix) {
+                    keys.push(key.to_string());
                 }
             }
         }
@@ -401,13 +426,12 @@ impl OAuthRestHome for DropboxCloudHome {
 impl CloudHome for DropboxCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let body = Bytes::from(data);
-        let api_arg = serde_json::json!({
+        let api_arg = dropbox_api_arg(&serde_json::json!({
             "path": self.full_path(key),
             "mode": { ".tag": "overwrite" },
             "autorename": false,
             "mute": true,
-        })
-        .to_string();
+        }));
         let resp = self
             .session
             .api_call(|token| {
@@ -566,8 +590,12 @@ mod tests {
     use std::sync::Arc;
 
     fn home() -> DropboxCloudHome {
+        home_with_folder("/Apps/your-app/my-library")
+    }
+
+    fn home_with_folder(folder_path: &str) -> DropboxCloudHome {
         DropboxCloudHome::new(
-            "/Apps/your-app/my-library".to_string(),
+            folder_path.to_string(),
             OAuthTokens {
                 access_token: String::new(),
                 refresh_token: None,
@@ -584,6 +612,23 @@ mod tests {
             home().full_path("changes/dev1/42.enc"),
             "/Apps/your-app/my-library/changes/dev1/42.enc"
         );
+    }
+
+    #[test]
+    fn dropbox_api_arg_escapes_non_ascii_for_headers() {
+        let path = "/Apps/your-app/Folderé/Object🧪.enc";
+        let arg = dropbox_api_arg(&serde_json::json!({ "path": path }));
+
+        assert!(arg.is_ascii(), "Dropbox-API-Arg must be ASCII: {arg}");
+        assert!(arg.contains(r"\u00e9"), "missing BMP escape: {arg}");
+        assert!(
+            arg.contains(r"\ud83e\uddea"),
+            "missing surrogate-pair escape: {arg}",
+        );
+        assert!(reqwest::header::HeaderValue::from_str(&arg).is_ok());
+
+        let parsed: serde_json::Value = serde_json::from_str(&arg).expect("parse escaped JSON");
+        assert_eq!(parsed["path"].as_str(), Some(path));
     }
 
     #[test]
@@ -631,5 +676,45 @@ mod tests {
             Ok(_) => panic!("has_more without cursor must fail"),
             Err(err) => assert!(err.to_string().contains("cursor"), "{err}"),
         }
+    }
+
+    #[test]
+    fn parse_list_page_strips_non_ascii_folder_prefix() {
+        assert_list_page_strips_folder_prefix(
+            "/Apps/your-app/Folderé",
+            "/apps/your-app/folderé/changes/dev1/1.enc",
+            "/Apps/your-app/Folderé/changes/dev1/1.enc",
+        );
+    }
+
+    #[test]
+    fn parse_list_page_strips_prefix_without_lowercase_length_drift() {
+        assert_list_page_strips_folder_prefix(
+            "/Apps/your-app/İlib",
+            "/apps/your-app/i̇lib/changes/dev1/1.enc",
+            "/Apps/your-app/İlib/changes/dev1/1.enc",
+        );
+    }
+
+    fn assert_list_page_strips_folder_prefix(
+        folder_path: &str,
+        path_lower: &str,
+        path_display: &str,
+    ) {
+        let home = home_with_folder(folder_path);
+        let body = serde_json::json!({
+            "entries": [{
+                ".tag": "file",
+                "path_lower": path_lower,
+                "path_display": path_display,
+            }],
+            "has_more": false,
+        })
+        .to_string();
+        let page = home
+            .parse_list_page(&body, "changes/")
+            .expect("parse list page");
+
+        assert_eq!(page.keys, vec!["changes/dev1/1.enc"]);
     }
 }
