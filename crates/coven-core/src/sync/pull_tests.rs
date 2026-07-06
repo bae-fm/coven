@@ -1165,6 +1165,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key([5u8; 32])),
         BlobPathScheme::Plain,
+        "test-lib",
         UserKeypair::generate(),
     );
 
@@ -1270,6 +1271,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
+        "test-lib",
         UserKeypair::generate(),
     );
 

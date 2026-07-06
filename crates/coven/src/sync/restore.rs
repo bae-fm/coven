@@ -239,6 +239,7 @@ pub async fn restore_from_cloud(
         std::sync::Arc::from(cloud_home),
         cipher.clone(),
         blob_paths,
+        library_id.to_string(),
         keypair.clone(),
     );
 

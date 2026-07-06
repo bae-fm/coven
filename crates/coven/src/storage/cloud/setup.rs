@@ -443,6 +443,7 @@ pub fn create_sync_storage_with_home(
         home,
         cipher,
         BlobPathScheme::for_storage(config.cloud_home.storage),
+        config.library_id.clone(),
         keypair,
     ))
 }

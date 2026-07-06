@@ -60,6 +60,7 @@ fn storage_over(home: InMemoryCloudHome) -> CloudSyncStorage {
         std::sync::Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::from_key(MASTER_KEY)),
         BlobPathScheme::Hashed,
+        "test-lib",
         UserKeypair::generate(),
     )
 }
@@ -244,6 +245,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key(MASTER_KEY)),
         BlobPathScheme::Hashed,
+        "test-lib",
         UserKeypair::generate(),
     );
 
@@ -352,7 +354,6 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
 async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     let home = InMemoryCloudHome::new();
     let storage = storage_over(home);
-    let snapshot_enc = CloudCipher::Encrypted(EncryptionService::from_key(MASTER_KEY));
 
     // --- Device A: mint + upload an Item-scoped blob, then snapshot its live DB. ---
     let db_a = open_db("dev-a");
@@ -373,11 +374,9 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     let temp = tempfile::tempdir().unwrap();
     let snap_dir = temp.path().to_path_buf();
     let tables = db_a.synced_tables().to_vec();
-    let enc = snapshot_enc.clone();
     let encrypted = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables, &enc)
-                .map_err(|e| DbError(format!("snapshot: {e}")))
+            create_snapshot(conn, &snap_dir, &tables).map_err(|e| DbError(format!("snapshot: {e}")))
         })
         .await
         .expect("create snapshot on A");
@@ -405,7 +404,7 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     // so the snapshot is authorized on its signature alone — the open-library path.
     // The bootstrapping binary supports the same schema version A wrote (1).
     let target = temp.path().join("device_b.db");
-    bootstrap_from_snapshot(&storage, "test-lib", &snapshot_enc, None, 1, &target)
+    bootstrap_from_snapshot(&storage, "test-lib", None, 1, &target)
         .await
         .expect("device B bootstraps from snapshot");
 

@@ -139,6 +139,9 @@ const KEY_ENC_FILE: &str = "key.enc";
 
 /// The authorized-blobs manifest.
 const MANIFEST_FILE: &str = "manifest.json";
+const SHARE_WRAP_AAD: &[u8] = b"coven-share-wrap-v1";
+#[cfg(test)]
+const SHARE_BLOB_TEST_AAD: &[u8] = b"coven-share-blob-test-v1";
 
 /// Cloud object key for one of a share's objects, e.g.
 /// `shares/{share_id}/key.enc`. The single home for the share layout, so
@@ -205,9 +208,9 @@ impl<'a> ShareProxy<'a> {
 
         // Wrap the item key under the per-share secret with the symmetric AEAD.
         // This is the share wire format:
-        // `key.enc = from_key(secret).encrypt(item_key)`, the exact bytes
+        // `key.enc = from_key(secret).encrypt(item_key, SHARE_WRAP_AAD)`, the exact bytes
         // `open_share` reverses.
-        let key_enc = EncryptionService::from_key(secret).encrypt(&item_key);
+        let key_enc = EncryptionService::from_key(secret).encrypt(&item_key, SHARE_WRAP_AAD);
 
         let manifest = ShareManifest { blobs };
         let manifest_json = serde_json::to_vec(&manifest)?;
@@ -251,8 +254,8 @@ impl<'a> ShareProxy<'a> {
 /// matching this format with its own XChaCha20-Poly1305 primitive:
 ///
 /// ```text
-/// key.enc = EncryptionService::from_key(secret).encrypt(item_key)
-/// item_key = EncryptionService::from_key(secret).decrypt(key.enc)
+/// key.enc = EncryptionService::from_key(secret).encrypt(item_key, b"coven-share-wrap-v1")
+/// item_key = EncryptionService::from_key(secret).decrypt(key.enc, b"coven-share-wrap-v1")
 /// ```
 ///
 /// `secret` is the URL-fragment bearer secret; `key_enc` is the bytes of
@@ -260,7 +263,7 @@ impl<'a> ShareProxy<'a> {
 /// recipient decrypts the authorized blobs.
 pub fn open_share(secret: &[u8; 32], key_enc: &[u8]) -> Result<[u8; 32], ShareError> {
     let item_key = EncryptionService::from_key(*secret)
-        .decrypt(key_enc)
+        .decrypt(key_enc, SHARE_WRAP_AAD)
         .map_err(|e| ShareError::Open(e.to_string()))?;
     item_key.try_into().map_err(|v: Vec<u8>| {
         ShareError::Open(format!("unwrapped key is {} bytes, not 32", v.len()))
@@ -292,7 +295,8 @@ mod tests {
 
         let item_key = db.mint_item_key("item-1").await.expect("mint item key");
         let plaintext = b"the shared item's content".to_vec();
-        let ciphertext = EncryptionService::from_key(item_key).encrypt(&plaintext);
+        let ciphertext =
+            EncryptionService::from_key(item_key).encrypt(&plaintext, SHARE_BLOB_TEST_AAD);
 
         let token = ShareProxy::new(&db, &home)
             .create(
@@ -310,7 +314,7 @@ mod tests {
 
         assert_eq!(recovered, item_key, "open_share recovers the item key");
         let decrypted = EncryptionService::from_key(recovered)
-            .decrypt(&ciphertext)
+            .decrypt(&ciphertext, SHARE_BLOB_TEST_AAD)
             .expect("decrypt with the recovered item key");
         assert_eq!(decrypted, plaintext, "the recovered key decrypts the blob");
     }
@@ -474,7 +478,8 @@ mod tests {
 
         // A blob encrypted under item-2's key.
         let item_2_plaintext = b"item-2 secret audio".to_vec();
-        let item_2_ciphertext = EncryptionService::from_key(key_2).encrypt(&item_2_plaintext);
+        let item_2_ciphertext =
+            EncryptionService::from_key(key_2).encrypt(&item_2_plaintext, SHARE_BLOB_TEST_AAD);
 
         // Share item-1 — even with item-2's blob forced into the manifest.
         let token = ShareProxy::new(&db, &home)
@@ -494,7 +499,7 @@ mod tests {
 
         assert!(
             EncryptionService::from_key(recovered)
-                .decrypt(&item_2_ciphertext)
+                .decrypt(&item_2_ciphertext, SHARE_BLOB_TEST_AAD)
                 .is_err(),
             "item-1's key cannot decrypt item-2's blob — a foreign ref in the \
              manifest leaks only undecryptable ciphertext"

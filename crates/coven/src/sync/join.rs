@@ -308,6 +308,7 @@ pub async fn join_library(
         std::sync::Arc::from(cloud_home),
         cipher.clone(),
         blob_paths,
+        code.library_id.clone(),
         user_keypair.clone(),
     );
 
@@ -385,7 +386,6 @@ pub(crate) async fn bootstrap_and_save_library(
     let bootstrap_result = bootstrap_from_snapshot(
         bucket_dyn,
         library_id,
-        cipher,
         owner_pubkey,
         binary_schema_version,
         &db_path,

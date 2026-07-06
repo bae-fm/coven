@@ -283,6 +283,7 @@ impl SyncManager {
             home.clone(),
             cipher.clone(),
             BlobPathScheme::for_storage(config.cloud_home.storage),
+            config.library_id.clone(),
             keypair.clone(),
         );
 

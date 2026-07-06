@@ -326,6 +326,7 @@ impl CovenLibrary {
             std::sync::Arc::from(home),
             cipher,
             blob_paths,
+            library_id,
             user_keypair.clone(),
         );
         // The cycle and the storage must seal/open under the *same* cipher lock so a

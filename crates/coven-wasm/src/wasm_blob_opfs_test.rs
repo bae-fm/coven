@@ -196,6 +196,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        "wasm-blob-opfs-test",
         UserKeypair::generate(),
     );
     run_cycle(&storage_a, &db_a, "device-a", &lib_a).await;
@@ -216,6 +217,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        "wasm-blob-opfs-test",
         UserKeypair::generate(),
     );
     run_cycle(&storage_b, &db_b, "device-b", &lib_b).await;

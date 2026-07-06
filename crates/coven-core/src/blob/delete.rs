@@ -268,7 +268,8 @@ pub async fn drain_tombstones(
                 // object, so an encrypted home holds no plaintext tombstone at
                 // rest. The suffix the key carries matches the seal (plaintext
                 // home: passthrough + empty suffix).
-                let sealed = cipher.read().unwrap().seal(bytes);
+                let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, &key);
+                let sealed = cipher.read().unwrap().seal(bytes, &aad_context);
                 if let Err(e) = cloud_home
                     .write(
                         &key,
@@ -399,7 +400,8 @@ pub async fn gc_tombstones(
                 continue;
             }
         };
-        let decoded = match cipher.read().unwrap().open(stored) {
+        let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, &key);
+        let decoded = match cipher.read().unwrap().open(stored, &aad_context) {
             Ok(d) => d,
             Err(e) => {
                 // A tombstone we can't decrypt is a foreign library's object in a

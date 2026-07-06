@@ -41,7 +41,17 @@ async fn run_drain(
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, String> {
     let hlc = Hlc::new("test-device".to_string());
-    drain_uploads(db, cloud, cipher, library_dir, clock, &hlc, observer).await
+    drain_uploads(
+        db,
+        cloud,
+        cipher,
+        "test-lib",
+        library_dir,
+        clock,
+        &hlc,
+        observer,
+    )
+    .await
 }
 
 // --- Database under test ----------------------------------------------------
@@ -718,16 +728,17 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     // At rest the blob is per-release ciphertext: not plaintext, and NOT
     // decryptable with the master key every member holds.
     let at_rest = cloud.get(cloud_key).expect("blob present in cloud");
+    let aad_context = crate::sync::cloud_storage::cloud_aad_context("test-lib", cloud_key);
     assert_ne!(at_rest, plaintext, "content is encrypted at rest");
     assert!(
         EncryptionService::from_key(master_key)
-            .decrypt(&at_rest)
+            .decrypt(&at_rest, &aad_context)
             .is_err(),
         "the master key must NOT decrypt per-release content"
     );
     assert_eq!(
         EncryptionService::from_key(k_release)
-            .decrypt(&at_rest)
+            .decrypt(&at_rest, &aad_context)
             .unwrap(),
         plaintext,
         "the per-release key decrypts the content"
@@ -754,12 +765,12 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     let fetched = cloud.get(cloud_key).expect("device B fetches the blob");
     assert!(
         EncryptionService::from_key(joined_master)
-            .decrypt(&fetched)
+            .decrypt(&fetched, &aad_context)
             .is_err(),
         "membership alone does not unlock a release's content"
     );
     let recovered = EncryptionService::from_key(k_release)
-        .decrypt(&fetched)
+        .decrypt(&fetched, &aad_context)
         .expect("device B decrypts the content with the per-release key");
     assert_eq!(recovered, plaintext, "device B recovers the original audio");
 }

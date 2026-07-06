@@ -495,7 +495,7 @@ mod streaming_tests {
         let body = BlobBody::from_file_with_prefix(
             crate::encryption::chunked_encrypted_len(plaintext.len() as u64),
             reader,
-            Some(service.sealer()),
+            Some(service.sealer(plaintext.len() as u64, b"storage-cloud-test")),
             Vec::new(),
         );
         (dir, body)
@@ -535,7 +535,7 @@ mod streaming_tests {
                     "streamed length wrong for len={len} min={min}"
                 );
                 assert_eq!(
-                    service.decrypt(&sealed).unwrap(),
+                    service.decrypt(&sealed, b"storage-cloud-test").unwrap(),
                     plaintext,
                     "sealed stream failed to round-trip for len={len} min={min}"
                 );

@@ -273,8 +273,17 @@ pub async fn run_single_sync_cycle(
     // whether it broke to publish, which drives the loop's cadence below.
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
-        match crate::blob::upload::drain_uploads(db, ch, cipher, library_dir, clock, hlc, observer)
-            .await
+        match crate::blob::upload::drain_uploads(
+            db,
+            ch,
+            cipher,
+            library_id,
+            library_dir,
+            clock,
+            hlc,
+            observer,
+        )
+        .await
         {
             Ok(outcome) => {
                 resume_drain_promptly = outcome.yielded_for_publish;
@@ -665,10 +674,9 @@ pub async fn run_single_sync_cycle(
         // on one `/tmp/snapshot.db`. A library's own cycles run serially.
         let temp_dir = library_dir.as_ref().to_path_buf();
         let snapshot_result = {
-            let cipher = cipher.read().unwrap().clone();
             let tables = tables.to_vec();
             db.call(move |conn| {
-                super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables, &cipher)
+                super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
                     .map_err(|e| crate::database::DbError(e.to_string()))
             })
             .await
@@ -688,7 +696,7 @@ pub async fn run_single_sync_cycle(
                 match super::snapshot::push_snapshot(
                     storage,
                     library_id,
-                    snapshot.encrypted,
+                    snapshot.db_image,
                     device_id,
                     sync_result.updated_cursors.clone(),
                     local_seq,

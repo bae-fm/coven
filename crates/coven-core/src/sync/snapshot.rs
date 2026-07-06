@@ -1,8 +1,8 @@
 /// Snapshots and garbage collection for the sync system.
 ///
 /// Periodically, a device creates a full snapshot of the database via
-/// `VACUUM INTO`, seals it through the home's [`CloudCipher`], and publishes it as
-/// a generation under its own `{author}` (its hex public key): the DB image
+/// `VACUUM INTO`, and publishes it as a generation under its own `{author}` (its
+/// hex public key): the DB image
 /// (`snapshot/{author}/{seq}.db{suffix}`) and then the signed metadata
 /// (`snapshot/{author}/{seq}_meta.json{suffix}`) are written first, then a single
 /// signed pointer (`snapshot/current.json{suffix}`) carrying that generation's
@@ -32,7 +32,6 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
-use super::cloud_storage::CloudCipher;
 use super::membership::MembershipChain;
 use super::membership_ops::{
     authorize_loaded_membership_author, authorize_membership_author, load_membership_chain,
@@ -53,7 +52,7 @@ const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
 const SNAPSHOT_HOURS_THRESHOLD: u64 = 24;
 
 pub(crate) struct CreatedSnapshot {
-    pub encrypted: Vec<u8>,
+    pub db_image: Vec<u8>,
     pub host_blobs: Vec<BlobRef>,
     pub publish_blobs: Vec<BlobRef>,
 }
@@ -164,12 +163,12 @@ fn write_snapshot_db(target_path: &Path, plaintext: &[u8]) -> Result<(), Snapsho
     Ok(())
 }
 
-/// SHA-256 of a snapshot's stored (sealed) bytes, hex-encoded. The hash the
-/// signed [`SnapshotMetaJson`] and [`SnapshotPointerJson`] both commit to, so the
-/// same bytes that round-trip through a generation's db object are what the
-/// signatures bind.
-fn snapshot_db_hash(sealed: &[u8]) -> String {
-    hex::encode(Sha256::digest(sealed))
+/// SHA-256 of a snapshot DB image, hex-encoded. The hash the signed
+/// [`SnapshotMetaJson`] and [`SnapshotPointerJson`] both commit to, so the same
+/// bytes that round-trip through a generation's db object are what the signatures
+/// bind.
+fn snapshot_db_hash(db_image: &[u8]) -> String {
+    hex::encode(Sha256::digest(db_image))
 }
 
 /// Result of bootstrapping from a snapshot.
@@ -180,12 +179,13 @@ pub struct BootstrapResult {
     pub cursors: HashMap<String, u64>,
 }
 
-/// Create a snapshot of the database as bytes sealed for storage.
+/// Create a snapshot of the database as bytes ready for storage.
 ///
 /// Uses `VACUUM INTO` to create a clean copy of the database at a temp path,
 /// then clears every non-synced table's data from that copy, reads the bytes,
-/// seals them through the home's [`CloudCipher`] (encrypting for an encrypted
-/// home, verbatim for a plaintext one), and returns the sealed blob.
+/// returns the DB image. The storage layer seals it at
+/// `snapshot/{author}/{seq}.db{suffix}`, where the cloud key is known and can be
+/// authenticated as AEAD associated data.
 ///
 /// A snapshot is restored byte-for-byte as the joining device's `library.db`
 /// (no migration rebuild), so it must carry only data that is eligible to
@@ -198,17 +198,14 @@ pub fn create_snapshot(
     conn: &Connection,
     temp_dir: &Path,
     tables: &[SyncedTable],
-    cipher: &CloudCipher,
 ) -> Result<Vec<u8>, SnapshotError> {
-    create_snapshot_with_host_blobs(conn, temp_dir, tables, cipher)
-        .map(|snapshot| snapshot.encrypted)
+    create_snapshot_with_host_blobs(conn, temp_dir, tables).map(|snapshot| snapshot.db_image)
 }
 
 pub(crate) fn create_snapshot_with_host_blobs(
     conn: &Connection,
     temp_dir: &Path,
     tables: &[SyncedTable],
-    cipher: &CloudCipher,
 ) -> Result<CreatedSnapshot, SnapshotError> {
     // A snapshot with no synced set would either leak every local-only table or
     // clear the whole DB — both wrong. Refuse before doing any work.
@@ -248,20 +245,15 @@ pub(crate) fn create_snapshot_with_host_blobs(
         .cloned()
         .collect();
 
-    // Read the cleared snapshot file and seal it for storage.
+    // Read the cleared snapshot file. The storage implementation seals it at the
+    // final cloud key so the AEAD context can bind that key.
     let plaintext = read_and_remove_snapshot(&snapshot_path)?;
     let plaintext_size = plaintext.len();
 
-    let sealed = cipher.seal(plaintext);
-
-    info!(
-        plaintext_size,
-        sealed_size = sealed.len(),
-        "created snapshot"
-    );
+    info!(plaintext_size, "created snapshot");
 
     Ok(CreatedSnapshot {
-        encrypted: sealed,
+        db_image: plaintext,
         host_blobs,
         publish_blobs,
     })
@@ -398,7 +390,7 @@ fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
 pub async fn push_snapshot(
     storage: &dyn SyncStorage,
     library_id: &str,
-    sealed_snapshot: Vec<u8>,
+    snapshot_db_image: Vec<u8>,
     device_id: &str,
     applied_cursors: HashMap<String, u64>,
     current_seq: u64,
@@ -407,18 +399,18 @@ pub async fn push_snapshot(
     clock: &dyn crate::clock::Clock,
     blob_preflight: SnapshotBlobPreflight<'_>,
 ) -> Result<(), SnapshotError> {
-    let size = sealed_snapshot.len();
+    let size = snapshot_db_image.len();
 
     // This generation lives under this device's own keyspace, keyed by its public
     // key. The same value is what the signed meta/pointer carry as `author_pubkey`,
     // so the pointer's `{author, seq}` resolves straight to these objects.
     let own_author = hex::encode(keypair.public_key());
 
-    // Hash the exact bytes we store, before they move into `put_snapshot`. Both
+    // Hash the exact DB image, before it moves into `put_snapshot`. Both
     // the signed meta and the signed pointer commit to this hash, so a reader that
     // downloads the generation re-hashes those same bytes and detects a
     // substituted image.
-    let db_hash = snapshot_db_hash(&sealed_snapshot);
+    let db_hash = snapshot_db_hash(&snapshot_db_image);
 
     if !blob_preflight.blobs.is_empty() {
         ensure_publishable_blobs(blob_preflight.db, storage, blob_preflight.blobs)
@@ -434,7 +426,7 @@ pub async fn push_snapshot(
     // readers and to the sweep; a later publish reusing this seq overwrites it,
     // otherwise it lingers (the sweep lists generations by meta, which this db lacks).
     storage
-        .put_snapshot(&own_author, current_seq, sealed_snapshot)
+        .put_snapshot(&own_author, current_seq, snapshot_db_image)
         .await?;
 
     // The snapshot DB is a VACUUM of this device's live database, so its
@@ -500,7 +492,7 @@ pub async fn push_snapshot(
 async fn push_snapshot_without_blob_refs(
     storage: &dyn SyncStorage,
     library_id: &str,
-    sealed_snapshot: Vec<u8>,
+    snapshot_db_image: Vec<u8>,
     device_id: &str,
     applied_cursors: HashMap<String, u64>,
     current_seq: u64,
@@ -512,7 +504,7 @@ async fn push_snapshot_without_blob_refs(
     push_snapshot(
         storage,
         library_id,
-        sealed_snapshot,
+        snapshot_db_image,
         device_id,
         applied_cursors,
         current_seq,
@@ -949,11 +941,11 @@ pub struct GcResult {
 /// Bootstrap a new device from a snapshot.
 ///
 /// Follows the snapshot pointer to the live generation, authenticates the whole
-/// generation before touching disk, opens its DB through the home's
-/// [`CloudCipher`] (decrypting for an encrypted home, verbatim for a plaintext
-/// one), and writes the plaintext database to `target_path`. The caller should
-/// then open this as their local database and pull any changesets newer than the
-/// per-device cursors in the result.
+/// generation before touching disk, reads its DB image through the storage layer
+/// (opened for an encrypted home, verbatim for a plaintext one), and writes the
+/// database to `target_path`. The caller should then open this as their local
+/// database and pull any changesets newer than the per-device cursors in the
+/// result.
 ///
 /// The bucket is untrusted, so a snapshot is held to the same authorship bar as a
 /// changeset before it is adopted:
@@ -986,7 +978,6 @@ pub struct GcResult {
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
     library_id: &str,
-    cipher: &CloudCipher,
     owner_pubkey: Option<&str>,
     binary_schema_version: u32,
     target_path: &Path,
@@ -1017,14 +1008,10 @@ pub async fn bootstrap_from_snapshot(
     // Download the named generation's DB image from its publisher's keyspace and
     // confirm it is the exact image the (now authenticated) meta and pointer commit
     // to, before opening or writing it.
-    let sealed = storage.get_snapshot(&author_pubkey, seq).await?;
-    if snapshot_db_hash(&sealed) != meta.db_hash {
+    let plaintext = storage.get_snapshot(&author_pubkey, seq).await?;
+    if snapshot_db_hash(&plaintext) != meta.db_hash {
         return Err(SnapshotError::DbHashMismatch);
     }
-
-    let plaintext = cipher
-        .open(sealed)
-        .map_err(|e| SnapshotError::Decryption(e.to_string()))?;
 
     write_snapshot_db(target_path, &plaintext)?;
 
@@ -1172,7 +1159,6 @@ mod tests {
     use super::*;
     use crate::blob::{local_files, CacheFill, ResolvedScope};
     use crate::database::DbError;
-    use crate::encryption::EncryptionService;
     use crate::sync::apply::apply_changeset_lww;
     use crate::sync::session::BlobDecl;
     use crate::sync::test_helpers::{
@@ -1276,13 +1262,6 @@ mod tests {
         buf
     }
 
-    /// An encrypted-home cipher over a fixed key, the default the snapshot tests
-    /// run against. Plaintext-home snapshot round-tripping is covered end-to-end
-    /// through the real cycle in `delete_propagation_tests`.
-    fn test_encryption() -> CloudCipher {
-        CloudCipher::Encrypted(EncryptionService::from_key([0x42u8; 32]))
-    }
-
     /// The keypair the snapshot tests push and sign with, when they don't care
     /// who the author is (round-trip, cursor-honesty, GC). It is not registered in
     /// any chain, so these tests bootstrap with `owner = None` and an empty
@@ -1335,7 +1314,7 @@ mod tests {
     // ---- create_snapshot tests ----
 
     #[test]
-    fn create_snapshot_produces_encrypted_db() {
+    fn create_snapshot_produces_db_image() {
         let c = synced_conn();
         exec(
             &c,
@@ -1344,12 +1323,10 @@ mod tests {
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted =
-            create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("create_snapshot");
+        let db_image = create_snapshot(&c, temp.path(), &synced_tables()).expect("create_snapshot");
 
-        assert!(!encrypted.is_empty());
-        let plaintext = enc.open(encrypted).expect("open should succeed");
+        assert!(!db_image.is_empty());
+        let plaintext = db_image;
         assert!(!plaintext.is_empty());
         assert!(
             plaintext.starts_with(b"SQLite format 3\0"),
@@ -1370,9 +1347,8 @@ mod tests {
             .prefix("snapshot-'")
             .tempdir()
             .unwrap();
-        let enc = test_encryption();
-        let encrypted = create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("snapshot");
-        let plaintext = enc.open(encrypted).expect("open");
+        let encrypted = create_snapshot(&c, temp.path(), &synced_tables()).expect("snapshot");
+        let plaintext = encrypted;
 
         let db_path = temp.path().join("verify.db");
         std::fs::write(&db_path, &plaintext).unwrap();
@@ -1399,9 +1375,8 @@ mod tests {
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted = create_snapshot(&c, temp.path(), &synced_tables(), &enc).expect("snapshot");
-        let plaintext = enc.open(encrypted).expect("open");
+        let encrypted = create_snapshot(&c, temp.path(), &synced_tables()).expect("snapshot");
+        let plaintext = encrypted;
 
         let db_path = temp.path().join("verify.db");
         std::fs::write(&db_path, &plaintext).unwrap();
@@ -1443,9 +1418,7 @@ mod tests {
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted =
-            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let encrypted = create_snapshot(&db_a, temp.path(), &synced_tables()).expect("snapshot");
 
         let storage = MockSyncStorage::new();
         push_snapshot_without_blob_refs(
@@ -1463,7 +1436,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1507,9 +1480,7 @@ mod tests {
              VALUES ('n1', 'Note One', 1, '0000000001000-0000-devA', '2026-01-01')",
         );
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted =
-            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let encrypted = create_snapshot(&db_a, temp.path(), &synced_tables()).expect("snapshot");
 
         // Publish the generation stamped at synced-schema version 2.
         let storage = MockSyncStorage::new();
@@ -1530,7 +1501,7 @@ mod tests {
         // A binary topping out at version 1 cannot apply a version-2 image: refused
         // before download, with the SchemaTooNew shape, writing nothing.
         let too_old = temp.path().join("too_old.db");
-        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 1, &too_old)
+        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 1, &too_old)
             .await
             .expect_err("a too-old binary must refuse a newer snapshot");
         assert!(matches!(
@@ -1547,14 +1518,14 @@ mod tests {
 
         // A binary at the writer's version adopts it.
         let same = temp.path().join("same.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 2, &same)
+        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 2, &same)
             .await
             .expect("a binary at the snapshot's version bootstraps");
         assert!(same.exists());
 
         // A newer binary (version 3) adopts it too.
         let newer = temp.path().join("newer.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 3, &newer)
+        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 3, &newer)
             .await
             .expect("a newer binary bootstraps an older snapshot");
         assert!(newer.exists());
@@ -1595,9 +1566,7 @@ mod tests {
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted =
-            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let encrypted = create_snapshot(&db_a, temp.path(), &synced_tables()).expect("snapshot");
 
         let storage = MockSyncStorage::new();
         push_snapshot_without_blob_refs(
@@ -1615,7 +1584,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1653,10 +1622,9 @@ mod tests {
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
         let encrypted =
-            create_snapshot(&db_a, temp.path(), &remote_root_tables(), &enc).expect("snapshot");
-        let plaintext = enc.open(encrypted).expect("open");
+            create_snapshot(&db_a, temp.path(), &remote_root_tables()).expect("snapshot");
+        let plaintext = encrypted;
         let db_path = temp.path().join("remote_root_snapshot.db");
         std::fs::write(&db_path, &plaintext).unwrap();
         let db_b = open_db_at(&db_path);
@@ -1717,9 +1685,7 @@ mod tests {
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted =
-            create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let encrypted = create_snapshot(&db_a, temp.path(), &synced_tables()).expect("snapshot");
 
         let storage = MockSyncStorage::new();
         push_snapshot_without_blob_refs(
@@ -1737,7 +1703,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1824,17 +1790,12 @@ mod tests {
         BlobDecl::new("covers", Provenance::HostProvided, CacheFill::CacheEager)
     }
 
-    async fn snapshot_from_blob_db(
-        db: &Database,
-        temp_dir: &Path,
-        enc: &CloudCipher,
-    ) -> CreatedSnapshot {
+    async fn snapshot_from_blob_db(db: &Database, temp_dir: &Path) -> CreatedSnapshot {
         let tables =
             test_synced_tables_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
         let temp_dir = temp_dir.to_path_buf();
-        let enc = enc.clone();
         db.call(move |conn| {
-            create_snapshot_with_host_blobs(conn, &temp_dir, &tables, &enc)
+            create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
                 .map_err(|e| DbError(e.to_string()))
         })
         .await
@@ -1870,15 +1831,13 @@ mod tests {
             .await
             .expect("register external ref");
         insert_snapshot_blob_rows(&db, false).await;
-
-        let enc = test_encryption();
-        let snapshot = snapshot_from_blob_db(&db, tmp.path(), &enc).await;
+        let snapshot = snapshot_from_blob_db(&db, tmp.path()).await;
         let storage = MockSyncStorage::new();
 
         let err = push_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            snapshot.encrypted,
+            snapshot.db_image,
             "dev-1",
             HashMap::new(),
             7,
@@ -1906,15 +1865,13 @@ mod tests {
         let db = open_test_db_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
         let (tmp, _ld) = temp_library_dir();
         insert_snapshot_blob_rows(&db, false).await;
-
-        let enc = test_encryption();
-        let snapshot = snapshot_from_blob_db(&db, tmp.path(), &enc).await;
+        let snapshot = snapshot_from_blob_db(&db, tmp.path()).await;
         let storage = MockSyncStorage::new();
 
         let err = push_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            snapshot.encrypted,
+            snapshot.db_image,
             "dev-1",
             HashMap::new(),
             7,
@@ -1945,9 +1902,7 @@ mod tests {
         local_files::store(&ld, "covers", "cover1", b"COVER")
             .await
             .expect("store host-provided cover");
-
-        let enc = test_encryption();
-        let snapshot = snapshot_from_blob_db(&db, tmp.path(), &enc).await;
+        let snapshot = snapshot_from_blob_db(&db, tmp.path()).await;
         let storage = MockSyncStorage::new();
         storage
             .put_blob(
@@ -1973,7 +1928,7 @@ mod tests {
         push_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            snapshot.encrypted.clone(),
+            snapshot.db_image.clone(),
             "dev-1",
             HashMap::new(),
             7,
@@ -1988,10 +1943,7 @@ mod tests {
         .await
         .expect("snapshot is publishable once user and host blobs are remote");
 
-        assert_eq!(
-            storage.current_snapshot_db().await,
-            Some(snapshot.encrypted)
-        );
+        assert_eq!(storage.current_snapshot_db().await, Some(snapshot.db_image));
         assert_eq!(storage.list_heads().await.expect("list heads")[0].seq, 7);
     }
 
@@ -2007,9 +1959,7 @@ mod tests {
              VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
         );
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted =
-            create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let encrypted = create_snapshot(&db, temp.path(), &synced_tables()).expect("snapshot");
 
         let storage = MockSyncStorage::new();
         publish_signed_generation(
@@ -2022,7 +1972,7 @@ mod tests {
         .await;
 
         let target = temp.path().join("bootstrapped.db");
-        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap");
 
@@ -2041,12 +1991,10 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_fails_when_no_snapshot_exists() {
         let storage = MockSyncStorage::new();
-        let enc = test_encryption();
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("nope.db");
 
-        let result =
-            bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target).await;
+        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target).await;
 
         assert!(result.is_err());
         assert!(!target.exists());
@@ -2069,11 +2017,9 @@ mod tests {
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
         let storage = MockSyncStorage::new();
 
-        let encrypted =
-            create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let encrypted = create_snapshot(&db, temp.path(), &synced_tables()).expect("snapshot");
         push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
@@ -2089,7 +2035,7 @@ mod tests {
         .expect("push");
 
         let target = temp.path().join("device2.db");
-        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap");
         assert_eq!(result.cursors.get("dev-1"), Some(&5));
@@ -2109,7 +2055,6 @@ mod tests {
     /// as applying all changesets from scratch.
     #[tokio::test]
     async fn snapshot_plus_changesets_equals_full_replay() {
-        let enc = test_encryption();
         let temp = tempfile::tempdir().unwrap();
 
         // --- Phase 1: create data, snapshot, then more data ---
@@ -2136,7 +2081,7 @@ mod tests {
 
         // Snapshot after cs1.
         let snapshot_encrypted =
-            create_snapshot(&db_source, temp.path(), &synced_tables(), &enc).expect("snapshot");
+            create_snapshot(&db_source, temp.path(), &synced_tables()).expect("snapshot");
 
         // More data after snapshot, captured as cs2.
         let mut session2 = RqSession::new(&db_source).expect("session2");
@@ -2157,7 +2102,7 @@ mod tests {
         drop(session2);
 
         // --- Path A: bootstrap from snapshot + apply cs2 ---
-        let snapshot_plain = enc.open(snapshot_encrypted).unwrap();
+        let snapshot_plain = snapshot_encrypted;
         let path_a = temp.path().join("path_a.db");
         std::fs::write(&path_a, &snapshot_plain).unwrap();
         let db_a = open_db_at(&path_a);
@@ -2205,9 +2150,7 @@ mod tests {
              VALUES ('a1', 'Artist One', 1, '0000000001000-0000-dev1', '2026-01-01')",
         );
         let temp = tempfile::tempdir().unwrap();
-        let enc = test_encryption();
-        let encrypted =
-            create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let encrypted = create_snapshot(&db, temp.path(), &synced_tables()).expect("snapshot");
 
         // Write a generation's db image under some device's keyspace but never
         // publish a pointer naming it (the crash-mid-publish state).
@@ -2222,7 +2165,7 @@ mod tests {
             .unwrap();
 
         let target = temp.path().join("torn.db");
-        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect_err("bootstrap must refuse a generation with no pointer");
         assert!(
@@ -2247,7 +2190,6 @@ mod tests {
     /// orphan db. It adopts the old generation's contents and cursors, untorn.
     #[tokio::test]
     async fn bootstrap_resolves_a_consistent_generation_despite_an_orphan_db() {
-        let enc = test_encryption();
         let temp = tempfile::tempdir().unwrap();
         let storage = MockSyncStorage::new();
 
@@ -2258,7 +2200,7 @@ mod tests {
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES ('n1', 'old', 1, '0000000001000-0000-self', '2026-01-01')",
         );
-        let snap_a = create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snap A");
+        let snap_a = create_snapshot(&db_a, temp.path(), &synced_tables()).expect("snap A");
         push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
@@ -2282,13 +2224,13 @@ mod tests {
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES ('n2', 'new', 1, '0000000002000-0000-self', '2026-01-01')",
         );
-        let snap_b = create_snapshot(&db_b, temp.path(), &synced_tables(), &enc).expect("snap B");
+        let snap_b = create_snapshot(&db_b, temp.path(), &synced_tables()).expect("snap B");
         storage.put_snapshot("selfpubkey", 9, snap_b).await.unwrap();
 
         // Bootstrap resolves the pointer (still naming A) and adopts A's consistent
         // generation — the 'old' row, cursor {self: 5} — never B's orphan db.
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap resolves the consistent generation A");
         assert_eq!(
@@ -2553,7 +2495,6 @@ mod tests {
     /// collision across devices no longer aliases one object.
     #[tokio::test]
     async fn two_devices_same_seq_keep_both_generations() {
-        let enc = test_encryption();
         let temp = tempfile::tempdir().unwrap();
         let storage = MockSyncStorage::new();
         let kp_a = test_keypair();
@@ -2569,7 +2510,7 @@ mod tests {
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES ('a-row', 'A', 1, '0000000001000-0000-A', '2026-01-01')",
         );
-        let snap_a = create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snap A");
+        let snap_a = create_snapshot(&db_a, temp.path(), &synced_tables()).expect("snap A");
         publish_signed_generation(
             &storage,
             7,
@@ -2589,7 +2530,7 @@ mod tests {
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES ('b-row', 'B', 1, '0000000002000-0000-B', '2026-01-01')",
         );
-        let snap_b = create_snapshot(&db_b, temp.path(), &synced_tables(), &enc).expect("snap B");
+        let snap_b = create_snapshot(&db_b, temp.path(), &synced_tables()).expect("snap B");
         let db_hash_b = snapshot_db_hash(&snap_b);
         let meta_b = SnapshotMetaJson::signed(
             TEST_LIBRARY_ID,
@@ -2625,7 +2566,7 @@ mod tests {
         // The pointer names A's generation, so a joiner resolves and adopts A's
         // catalog — A's db image was never aliased by B's same-seq publish.
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap resolves A's live generation");
         assert_eq!(boot.cursors.get("A"), Some(&7));
@@ -2660,7 +2601,6 @@ mod tests {
     /// bootstraps at the snapshot's seq and replays the post-snapshot edit forward.
     #[tokio::test]
     async fn snapshot_meta_reflects_applied_not_published() {
-        let enc = test_encryption();
         let temp = tempfile::tempdir().unwrap();
         let storage = MockSyncStorage::new();
 
@@ -2694,8 +2634,7 @@ mod tests {
         // Device B is behind: it has applied M only up to K. B snapshots its state.
         let db_b = synced_conn();
         apply(&db_b, &cs_insert);
-        let snapshot =
-            create_snapshot(&db_b, temp.path(), &synced_tables(), &enc).expect("snapshot");
+        let snapshot = create_snapshot(&db_b, temp.path(), &synced_tables()).expect("snapshot");
 
         let kp = test_keypair();
         let applied = HashMap::from([("M".to_string(), k)]);
@@ -2729,7 +2668,7 @@ mod tests {
             .expect("K+1 is above the snapshot cursor and must be preserved");
 
         let target = temp.path().join("device_c.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap");
         let c_cursor = *boot.cursors.get("M").unwrap_or(&0);
@@ -2755,7 +2694,6 @@ mod tests {
     /// also has the update. All through the real snapshot/GC/bootstrap funcs.
     #[tokio::test]
     async fn multi_device_managed_edit_reaches_restore() {
-        let enc = test_encryption();
         let temp = tempfile::tempdir().unwrap();
         let storage = MockSyncStorage::new();
 
@@ -2771,7 +2709,7 @@ mod tests {
 
         let db_owner = synced_conn();
         apply(&db_owner, &cs1);
-        let snap1 = create_snapshot(&db_owner, temp.path(), &synced_tables(), &enc).expect("snap1");
+        let snap1 = create_snapshot(&db_owner, temp.path(), &synced_tables()).expect("snap1");
         push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
@@ -2788,7 +2726,7 @@ mod tests {
 
         // Device B bootstraps and has the note.
         let b_path = temp.path().join("b.db");
-        let b_boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &b_path)
+        let b_boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &b_path)
             .await
             .expect("b bootstrap");
         let db_b = open_db_at(&b_path);
@@ -2830,7 +2768,7 @@ mod tests {
         );
 
         // B snapshots its now-current state with honest cursors {owner: 2}.
-        let snap2 = create_snapshot(&db_b, temp.path(), &synced_tables(), &enc).expect("snap2");
+        let snap2 = create_snapshot(&db_b, temp.path(), &synced_tables()).expect("snap2");
         push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
@@ -2847,7 +2785,7 @@ mod tests {
 
         // Device C bootstraps + pulls and must also have the update.
         let c_path = temp.path().join("c.db");
-        let c_boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &c_path)
+        let c_boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &c_path)
             .await
             .expect("c bootstrap");
         let db_c = open_db_at(&c_path);
@@ -2906,7 +2844,6 @@ mod tests {
     /// from.
     #[tokio::test]
     async fn bootstrap_cursors_match_snapshot_contents() {
-        let enc = test_encryption();
         let temp = tempfile::tempdir().unwrap();
         let storage = MockSyncStorage::new();
 
@@ -2917,7 +2854,7 @@ mod tests {
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
              VALUES ('n1', 'A', 1, '0000000001000-0000-M', '2026-01-01')",
         );
-        let snap = create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snap");
+        let snap = create_snapshot(&db, temp.path(), &synced_tables()).expect("snap");
 
         let applied = HashMap::from([("M".to_string(), 7)]);
         push_snapshot_without_blob_refs(
@@ -2935,7 +2872,7 @@ mod tests {
         .expect("push");
 
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &enc, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("bootstrap");
         assert_eq!(boot.cursors.get("M"), Some(&7));
@@ -2985,23 +2922,17 @@ mod tests {
 #[cfg(test)]
 mod authorization_tests {
     use super::*;
-    use crate::encryption::EncryptionService;
     use crate::keys::UserKeypair;
     use crate::sync::membership::{founder_entry, MemberRole, MembershipAction};
     use crate::sync::test_helpers::{make_entry, pubkey_hex, MockSyncStorage};
 
-    /// The encrypted-home cipher these tests seal snapshots under.
-    fn cipher() -> CloudCipher {
-        CloudCipher::Encrypted(EncryptionService::from_key([0x42u8; 32]))
-    }
-
-    /// A minimal sealed snapshot blob. The authorization checks operate on the
+    /// A minimal snapshot DB image. The authorization checks operate on the
     /// metadata signature, the DB-hash binding, and the chain — none of which need
     /// a real SQLite image — so a fixed byte string stands in for the catalog.
     /// (The full create→push→bootstrap DB round-trip is covered in the sibling
     /// `tests` module; here the blob is just the thing the signature commits to.)
     fn fake_snapshot() -> Vec<u8> {
-        cipher().seal(b"catalog-image-bytes".to_vec())
+        b"catalog-image-bytes".to_vec()
     }
 
     /// Seed a one-owner founder chain into the mock and return the owner keypair.
@@ -3041,7 +2972,6 @@ mod authorization_tests {
         let boot = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3094,16 +3024,10 @@ mod authorization_tests {
         let library_y = "library-y";
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("boot.db");
-        let err = bootstrap_from_snapshot(
-            &storage,
-            library_y,
-            &cipher(),
-            Some(&pubkey_hex(&owner)),
-            0,
-            &target,
-        )
-        .await
-        .expect_err("a snapshot bound to a different library must be refused");
+        let err =
+            bootstrap_from_snapshot(&storage, library_y, Some(&pubkey_hex(&owner)), 0, &target)
+                .await
+                .expect_err("a snapshot bound to a different library must be refused");
         assert!(
             matches!(err, SnapshotError::PointerSignatureInvalid),
             "expected PointerSignatureInvalid (the cross-library binding fails), got {err:?}",
@@ -3147,7 +3071,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3212,7 +3135,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3270,7 +3192,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3329,7 +3250,6 @@ mod authorization_tests {
         bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &owner_target,
@@ -3359,7 +3279,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &member_target,
@@ -3404,7 +3323,7 @@ mod authorization_tests {
             .put_snapshot(
                 &pubkey_hex(&owner),
                 1,
-                cipher().seal(b"a-different-forged-catalog".to_vec()),
+                b"a-different-forged-catalog".to_vec(),
             )
             .await
             .unwrap();
@@ -3414,7 +3333,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3461,7 +3379,7 @@ mod authorization_tests {
         // re-sign over a DIFFERENT db image's hash, naming the same `{owner, seq 1}`.
         // The bucket now holds a pointer and a meta naming generation 1 but committing
         // to different hashes — a spliced generation a reader must refuse.
-        let other_hash = snapshot_db_hash(&cipher().seal(b"a-different-devices-catalog".to_vec()));
+        let other_hash = snapshot_db_hash(b"a-different-devices-catalog");
         let spliced_pointer = SnapshotPointerJson::signed(TEST_LIBRARY_ID, 1, other_hash, &owner);
         storage
             .put_snapshot_pointer(serde_json::to_vec(&spliced_pointer).unwrap())
@@ -3473,7 +3391,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3532,7 +3449,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3574,7 +3490,7 @@ mod authorization_tests {
 
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("restore.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &cipher(), None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
             .await
             .expect("restore adopts a member-signed snapshot anchored to the chain founder");
         assert!(target.exists());
@@ -3596,7 +3512,7 @@ mod authorization_tests {
         .expect("outsider overwrites the snapshot objects");
 
         let target2 = temp.path().join("restore2.db");
-        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, &cipher(), None, 0, &target2)
+        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target2)
             .await
             .expect_err("restore must refuse a non-member-signed snapshot");
         assert!(
@@ -3672,7 +3588,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3725,7 +3640,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&pinned_owner)),
             0,
             &target,
@@ -3780,7 +3694,6 @@ mod authorization_tests {
         let err = bootstrap_from_snapshot(
             &storage,
             TEST_LIBRARY_ID,
-            &cipher(),
             Some(&pubkey_hex(&owner)),
             0,
             &target,

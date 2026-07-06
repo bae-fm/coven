@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use chacha20poly1305::aead::generic_array::GenericArray;
-use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305};
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,7 @@ pub const CHUNK_SIZE: usize = 65536;
 /// Each encrypted chunk: plaintext + 16-byte auth tag
 pub const ENCRYPTED_CHUNK_SIZE: usize = CHUNK_SIZE + TAG_SIZE;
 pub const INITIAL_KEY_GENERATION: u64 = 1;
+const AEAD_V2_LABEL: &[u8] = b"coven-aead-v2";
 
 /// Generate a random 32-byte key.
 pub fn generate_random_key() -> [u8; 32] {
@@ -33,8 +35,9 @@ pub fn generate_random_key() -> [u8; 32] {
 /// (tag-only) chunk. Lets a streaming upload know the final object size up
 /// front, before a byte is sealed.
 pub fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
-    let chunks = plaintext_len.div_ceil(CHUNK_SIZE as u64).max(1);
-    NONCE_SIZE as u64 + plaintext_len + chunks * TAG_SIZE as u64
+    NONCE_SIZE as u64
+        + plaintext_len
+        + chunk_count_for_plaintext_len(plaintext_len) * TAG_SIZE as u64
 }
 
 /// Incremental encryptor that emits the same `[base_nonce][chunk_0][chunk_1]...`
@@ -45,17 +48,21 @@ pub fn chunked_encrypted_len(plaintext_len: u64) -> u64 {
 pub struct ChunkSealer {
     cipher: XChaCha20Poly1305,
     base_nonce: [u8; NONCE_SIZE],
+    aad_context: Vec<u8>,
+    total_chunks: u64,
     next_index: u64,
 }
 
 impl ChunkSealer {
     /// Start a sealer with a fresh random base nonce.
-    fn new(key: &[u8; 32]) -> Self {
+    fn new(key: &[u8; 32], plaintext_len: u64, aad_context: &[u8]) -> Self {
         let mut base_nonce = [0u8; NONCE_SIZE];
         rand::rng().fill_bytes(&mut base_nonce);
         Self {
             cipher: XChaCha20Poly1305::new(GenericArray::from_slice(key)),
             base_nonce,
+            aad_context: aad_context.to_vec(),
+            total_chunks: chunk_count_for_plaintext_len(plaintext_len),
             next_index: 0,
         }
     }
@@ -76,9 +83,16 @@ impl ChunkSealer {
             "a sealed chunk must be at most CHUNK_SIZE bytes"
         );
         let nonce = chunk_nonce(&self.base_nonce, self.next_index);
+        let aad = chunk_aad(&self.aad_context, self.next_index, self.total_chunks);
         self.next_index += 1;
         self.cipher
-            .encrypt(GenericArray::from_slice(&nonce), plaintext)
+            .encrypt(
+                GenericArray::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
             .expect("encryption should not fail")
     }
 }
@@ -291,8 +305,8 @@ impl EncryptionService {
     /// Returns: [base_nonce: 24 bytes][ciphertext with auth tags]
     /// For small data (single chunk), this is equivalent to standard AEAD.
     /// For large data, each chunk is independently encrypted for random-access.
-    pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        let mut sealer = self.sealer();
+    pub fn encrypt(&self, plaintext: &[u8], aad_context: &[u8]) -> Vec<u8> {
+        let mut sealer = self.sealer(plaintext.len() as u64, aad_context);
         let mut output = sealer.base_nonce().to_vec();
 
         // Empty plaintext still produces one chunk holding just the auth tag.
@@ -309,7 +323,11 @@ impl EncryptionService {
     }
 
     /// Decrypt data in chunked format: [nonce (24 bytes)][ciphertext chunks...]
-    pub fn decrypt(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+    pub fn decrypt(
+        &self,
+        encrypted_data: &[u8],
+        aad_context: &[u8],
+    ) -> Result<Vec<u8>, EncryptionError> {
         let base_nonce = read_base_nonce(encrypted_data)?;
         let layout = encrypted_chunk_layout(encrypted_data.len())?;
         let key = self.key_bytes();
@@ -320,14 +338,20 @@ impl EncryptionService {
             let (chunk_start, chunk_end) =
                 layout.chunk_bounds(encrypted_data.len(), chunk_index)?;
             let chunk_data = &encrypted_data[chunk_start..chunk_end];
-            let decrypted =
-                decrypt_chunk_with_cipher(&cipher, &base_nonce, chunk_index as u64, chunk_data)
-                    .map_err(|_| {
-                        EncryptionError::Decryption(format!(
-                            "Authentication failed for chunk {}",
-                            chunk_index
-                        ))
-                    })?;
+            let decrypted = decrypt_chunk_with_cipher(
+                &cipher,
+                &base_nonce,
+                aad_context,
+                chunk_index as u64,
+                layout.total_chunks as u64,
+                chunk_data,
+            )
+            .map_err(|_| {
+                EncryptionError::Decryption(format!(
+                    "Authentication failed for chunk {}",
+                    chunk_index
+                ))
+            })?;
             result.extend(decrypted);
         }
 
@@ -336,8 +360,8 @@ impl EncryptionService {
 
     /// A streaming sealer over this service's key, for encrypting a blob
     /// chunk-by-chunk straight into an upload. See [`ChunkSealer`].
-    pub fn sealer(&self) -> ChunkSealer {
-        ChunkSealer::new(&self.key_bytes())
+    pub fn sealer(&self, plaintext_len: u64, aad_context: &[u8]) -> ChunkSealer {
+        ChunkSealer::new(&self.key_bytes(), plaintext_len, aad_context)
     }
 
     /// Decrypt a specific chunk from chunked encrypted data.
@@ -346,6 +370,7 @@ impl EncryptionService {
         &self,
         ciphertext: &[u8],
         chunk_index: usize,
+        aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
         let base_nonce = read_base_nonce(ciphertext)?;
         let layout = encrypted_chunk_layout(ciphertext.len())?;
@@ -354,8 +379,15 @@ impl EncryptionService {
 
         let key = self.key_bytes();
         let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key));
-        decrypt_chunk_with_cipher(&cipher, &base_nonce, chunk_index as u64, chunk_data)
-            .map_err(|_| EncryptionError::Decryption("Authentication failed".to_string()))
+        decrypt_chunk_with_cipher(
+            &cipher,
+            &base_nonce,
+            aad_context,
+            chunk_index as u64,
+            layout.total_chunks as u64,
+            chunk_data,
+        )
+        .map_err(|_| EncryptionError::Decryption("Authentication failed".to_string()))
     }
 
     /// Decrypt a plaintext byte range using nonce from DB and partial chunk data.
@@ -369,7 +401,7 @@ impl EncryptionService {
     /// Example: To read plaintext bytes 500,000-600,000:
     /// 1. Calculate needed chunks: `encrypted_chunk_range(500000, 600000)` -> chunks 7-9
     /// 2. Fetch encrypted bytes from cloud at those positions
-    /// 3. Call `decrypt_range_with_offset(nonce, chunks, 7, 500000, 600000)`
+    /// 3. Call `decrypt_range_with_offset(nonce, chunks, 7, 500000, 600000, source_size, aad_context)`
     pub fn decrypt_range_with_offset(
         &self,
         nonce: &[u8],
@@ -377,6 +409,8 @@ impl EncryptionService {
         first_chunk_index: u64,
         plaintext_start: u64,
         plaintext_end: u64,
+        source_size: u64,
+        aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
         if nonce.len() != NONCE_SIZE {
             return Err(EncryptionError::Decryption(format!(
@@ -392,6 +426,11 @@ impl EncryptionService {
                 plaintext_start, plaintext_end
             )));
         }
+        if plaintext_end > source_size {
+            return Err(EncryptionError::Decryption(format!(
+                "Invalid range: end ({plaintext_end}) > source size ({source_size})"
+            )));
+        }
 
         let base_nonce: [u8; NONCE_SIZE] = nonce
             .try_into()
@@ -402,6 +441,7 @@ impl EncryptionService {
 
         let start_chunk = plaintext_start / CHUNK_SIZE as u64;
         let end_chunk = (plaintext_end.saturating_sub(1)) / CHUNK_SIZE as u64;
+        let total_chunks = chunk_count_for_plaintext_len(source_size);
 
         let mut plaintext = Vec::new();
 
@@ -425,10 +465,15 @@ impl EncryptionService {
             }
 
             let chunk_data = &encrypted_chunks[chunk_start..chunk_end];
-            let nonce = chunk_nonce(&base_nonce, absolute_chunk_idx);
-            let nonce_arr = GenericArray::from_slice(&nonce);
-
-            let decrypted = cipher.decrypt(nonce_arr, chunk_data).map_err(|_| {
+            let decrypted = decrypt_chunk_with_cipher(
+                &cipher,
+                &base_nonce,
+                aad_context,
+                absolute_chunk_idx,
+                total_chunks,
+                chunk_data,
+            )
+            .map_err(|_| {
                 EncryptionError::Decryption(format!(
                     "Authentication failed for chunk {}",
                     absolute_chunk_idx
@@ -569,15 +614,40 @@ fn decrypted_len_upper_bound(encrypted_data_len: usize) -> usize {
     encrypted_data_len.saturating_sub(chunk_count * TAG_SIZE)
 }
 
+fn chunk_count_for_plaintext_len(plaintext_len: u64) -> u64 {
+    plaintext_len.div_ceil(CHUNK_SIZE as u64).max(1)
+}
+
+fn chunk_aad(aad_context: &[u8], chunk_index: u64, total_chunks: u64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(AEAD_V2_LABEL.len() + 8 + aad_context.len() + 16);
+    aad.extend_from_slice(AEAD_V2_LABEL);
+    aad.extend_from_slice(&(aad_context.len() as u64).to_le_bytes());
+    aad.extend_from_slice(aad_context);
+    aad.extend_from_slice(&chunk_index.to_le_bytes());
+    aad.extend_from_slice(&total_chunks.to_le_bytes());
+    aad
+}
+
 fn decrypt_chunk_with_cipher(
     cipher: &XChaCha20Poly1305,
     base_nonce: &[u8; NONCE_SIZE],
+    aad_context: &[u8],
     chunk_index: u64,
+    total_chunks: u64,
     chunk_data: &[u8],
 ) -> Result<Vec<u8>, ()> {
     let nonce = chunk_nonce(base_nonce, chunk_index);
     let nonce_arr = GenericArray::from_slice(&nonce);
-    cipher.decrypt(nonce_arr, chunk_data).map_err(|_| ())
+    let aad = chunk_aad(aad_context, chunk_index, total_chunks);
+    cipher
+        .decrypt(
+            nonce_arr,
+            Payload {
+                msg: chunk_data,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| ())
 }
 
 /// Derive nonce for chunk i: base_nonce XOR i (little-endian)
@@ -611,6 +681,8 @@ pub fn encrypted_chunk_range(plaintext_start: u64, plaintext_end: u64) -> (u64, 
 mod tests {
     use super::*;
 
+    const TEST_AAD: &[u8] = b"encryption-test-context";
+
     fn test_key() -> [u8; 32] {
         // Fixed test key for reproducibility
         [
@@ -627,6 +699,7 @@ mod tests {
     fn decrypt_plaintext_range(
         service: &EncryptionService,
         full_ciphertext: &[u8],
+        source_size: u64,
         plaintext_start: u64,
         plaintext_end: u64,
     ) -> Vec<u8> {
@@ -641,6 +714,8 @@ mod tests {
                 first_chunk_index,
                 plaintext_start,
                 plaintext_end,
+                source_size,
+                TEST_AAD,
             )
             .unwrap()
     }
@@ -650,8 +725,8 @@ mod tests {
         let service = create_test_service();
         let plaintext = b"Hello, world!";
 
-        let ciphertext = service.encrypt(plaintext);
-        let decrypted = service.decrypt(&ciphertext).unwrap();
+        let ciphertext = service.encrypt(plaintext, TEST_AAD);
+        let decrypted = service.decrypt(&ciphertext, TEST_AAD).unwrap();
 
         assert_eq!(decrypted, plaintext);
     }
@@ -675,7 +750,7 @@ mod tests {
             let plaintext: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
 
             // Seal incrementally, exactly as a streaming upload would.
-            let mut sealer = service.sealer();
+            let mut sealer = service.sealer(plaintext.len() as u64, TEST_AAD);
             let mut streamed = sealer.base_nonce().to_vec();
             if plaintext.is_empty() {
                 streamed.extend(sealer.seal_chunk(&[]));
@@ -691,7 +766,7 @@ mod tests {
                 "predicted length wrong for len={len}"
             );
             assert_eq!(
-                service.decrypt(&streamed).unwrap(),
+                service.decrypt(&streamed, TEST_AAD).unwrap(),
                 plaintext,
                 "streamed ciphertext failed to round-trip for len={len}"
             );
@@ -712,7 +787,7 @@ mod tests {
             CHUNK_SIZE + 1,
             200_000,
         ] {
-            let produced = service.encrypt(&vec![0u8; n]).len() as u64;
+            let produced = service.encrypt(&vec![0u8; n], TEST_AAD).len() as u64;
             assert_eq!(
                 chunked_encrypted_len(n as u64),
                 produced,
@@ -726,8 +801,8 @@ mod tests {
         let service = create_test_service();
         let plaintext = vec![0x42u8; CHUNK_SIZE];
 
-        let ciphertext = service.encrypt(&plaintext);
-        let decrypted = service.decrypt(&ciphertext).unwrap();
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
+        let decrypted = service.decrypt(&ciphertext, TEST_AAD).unwrap();
 
         assert_eq!(decrypted, plaintext);
     }
@@ -740,8 +815,8 @@ mod tests {
             .map(|i| (i % 256) as u8)
             .collect();
 
-        let ciphertext = service.encrypt(&plaintext);
-        let decrypted = service.decrypt(&ciphertext).unwrap();
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
+        let decrypted = service.decrypt(&ciphertext, TEST_AAD).unwrap();
 
         assert_eq!(decrypted, plaintext);
     }
@@ -754,18 +829,18 @@ mod tests {
         plaintext.extend(vec![0x11u8; CHUNK_SIZE]);
         plaintext.extend(vec![0x22u8; CHUNK_SIZE]);
 
-        let ciphertext = service.encrypt(&plaintext);
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
         // Decrypt only chunk 1 (middle chunk)
-        let chunk1 = service.decrypt_chunk(&ciphertext, 1).unwrap();
+        let chunk1 = service.decrypt_chunk(&ciphertext, 1, TEST_AAD).unwrap();
         assert_eq!(chunk1, vec![0x11u8; CHUNK_SIZE]);
 
         // Decrypt chunk 0
-        let chunk0 = service.decrypt_chunk(&ciphertext, 0).unwrap();
+        let chunk0 = service.decrypt_chunk(&ciphertext, 0, TEST_AAD).unwrap();
         assert_eq!(chunk0, vec![0x00u8; CHUNK_SIZE]);
 
         // Decrypt chunk 2
-        let chunk2 = service.decrypt_chunk(&ciphertext, 2).unwrap();
+        let chunk2 = service.decrypt_chunk(&ciphertext, 2, TEST_AAD).unwrap();
         assert_eq!(chunk2, vec![0x22u8; CHUNK_SIZE]);
     }
 
@@ -776,12 +851,12 @@ mod tests {
         let mut plaintext = vec![0xAAu8; CHUNK_SIZE];
         plaintext.extend(vec![0xBBu8; 100]);
 
-        let ciphertext = service.encrypt(&plaintext);
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
-        let chunk0 = service.decrypt_chunk(&ciphertext, 0).unwrap();
+        let chunk0 = service.decrypt_chunk(&ciphertext, 0, TEST_AAD).unwrap();
         assert_eq!(chunk0, vec![0xAAu8; CHUNK_SIZE]);
 
-        let chunk1 = service.decrypt_chunk(&ciphertext, 1).unwrap();
+        let chunk1 = service.decrypt_chunk(&ciphertext, 1, TEST_AAD).unwrap();
         assert_eq!(chunk1, vec![0xBBu8; 100]);
     }
 
@@ -790,14 +865,27 @@ mod tests {
         let service = create_test_service();
         let plaintext = b"Secret data";
 
-        let mut ciphertext = service.encrypt(plaintext);
+        let mut ciphertext = service.encrypt(plaintext, TEST_AAD);
 
         // Tamper with the ciphertext (after nonce)
         let tamper_pos = NONCE_SIZE + 5;
         ciphertext[tamper_pos] ^= 0xFF;
 
-        let result = service.decrypt(&ciphertext);
+        let result = service.decrypt(&ciphertext, TEST_AAD);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn truncating_trailing_chunks_fails_to_decrypt() {
+        let service = create_test_service();
+        let plaintext: Vec<u8> = (0..CHUNK_SIZE * 3).map(|i| (i % 251) as u8).collect();
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
+        let truncated = &ciphertext[..ciphertext.len() - ENCRYPTED_CHUNK_SIZE];
+
+        assert!(
+            service.decrypt(truncated, TEST_AAD).is_err(),
+            "a truncated multi-chunk object must fail, not return a short plaintext",
+        );
     }
 
     #[test]
@@ -805,12 +893,12 @@ mod tests {
         let service = create_test_service();
         let plaintext = b"";
 
-        let ciphertext = service.encrypt(plaintext);
+        let ciphertext = service.encrypt(plaintext, TEST_AAD);
 
         // Should just be nonce + auth tag
         assert_eq!(ciphertext.len(), NONCE_SIZE + TAG_SIZE);
 
-        let decrypted = service.decrypt(&ciphertext).unwrap();
+        let decrypted = service.decrypt(&ciphertext, TEST_AAD).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
@@ -819,8 +907,8 @@ mod tests {
         let service = create_test_service();
         let plaintext = b"x";
 
-        let ciphertext = service.encrypt(plaintext);
-        let decrypted = service.decrypt(&ciphertext).unwrap();
+        let ciphertext = service.encrypt(plaintext, TEST_AAD);
+        let decrypted = service.decrypt(&ciphertext, TEST_AAD).unwrap();
 
         assert_eq!(decrypted, plaintext);
     }
@@ -858,15 +946,15 @@ mod tests {
         let service = create_test_service();
         let plaintext = b"Same message";
 
-        let ciphertext1 = service.encrypt(plaintext);
-        let ciphertext2 = service.encrypt(plaintext);
+        let ciphertext1 = service.encrypt(plaintext, TEST_AAD);
+        let ciphertext2 = service.encrypt(plaintext, TEST_AAD);
 
         // Different nonces = different ciphertext
         assert_ne!(ciphertext1, ciphertext2);
 
         // Both decrypt to same plaintext
-        assert_eq!(service.decrypt(&ciphertext1).unwrap(), plaintext);
-        assert_eq!(service.decrypt(&ciphertext2).unwrap(), plaintext);
+        assert_eq!(service.decrypt(&ciphertext1, TEST_AAD).unwrap(), plaintext);
+        assert_eq!(service.decrypt(&ciphertext2, TEST_AAD).unwrap(), plaintext);
     }
 
     #[test]
@@ -874,13 +962,13 @@ mod tests {
         let service = create_test_service();
         let plaintext = vec![0u8; CHUNK_SIZE]; // Exactly 1 chunk
 
-        let ciphertext = service.encrypt(&plaintext);
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
         // Chunk 0 should work
-        assert!(service.decrypt_chunk(&ciphertext, 0).is_ok());
+        assert!(service.decrypt_chunk(&ciphertext, 0, TEST_AAD).is_ok());
 
         // Chunk 1 should fail
-        assert!(service.decrypt_chunk(&ciphertext, 1).is_err());
+        assert!(service.decrypt_chunk(&ciphertext, 1, TEST_AAD).is_err());
     }
 
     #[test]
@@ -889,9 +977,10 @@ mod tests {
         // Create plaintext with recognizable pattern
         let plaintext: Vec<u8> = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect();
 
-        let ciphertext = service.encrypt(&plaintext);
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
-        let decrypted = decrypt_plaintext_range(&service, &ciphertext, 100, 200);
+        let decrypted =
+            decrypt_plaintext_range(&service, &ciphertext, plaintext.len() as u64, 100, 200);
 
         assert_eq!(decrypted.len(), 100);
         assert_eq!(decrypted, plaintext[100..200]);
@@ -903,12 +992,13 @@ mod tests {
         // 3 chunks of data
         let plaintext: Vec<u8> = (0..CHUNK_SIZE * 3).map(|i| (i % 256) as u8).collect();
 
-        let ciphertext = service.encrypt(&plaintext);
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
         // Range spanning from end of chunk 0 into chunk 1
         let start = CHUNK_SIZE as u64 - 100;
         let end = CHUNK_SIZE as u64 + 100;
-        let decrypted = decrypt_plaintext_range(&service, &ciphertext, start, end);
+        let decrypted =
+            decrypt_plaintext_range(&service, &ciphertext, plaintext.len() as u64, start, end);
 
         assert_eq!(decrypted.len(), 200);
         assert_eq!(decrypted, &plaintext[start as usize..end as usize]);
@@ -922,12 +1012,13 @@ mod tests {
         plaintext.extend(vec![0xBBu8; CHUNK_SIZE]);
         plaintext.extend(vec![0xCCu8; CHUNK_SIZE]);
 
-        let ciphertext = service.encrypt(&plaintext);
+        let ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
         // Decrypt just the middle chunk
         let start = CHUNK_SIZE as u64;
         let end = (CHUNK_SIZE * 2) as u64;
-        let decrypted = decrypt_plaintext_range(&service, &ciphertext, start, end);
+        let decrypted =
+            decrypt_plaintext_range(&service, &ciphertext, plaintext.len() as u64, start, end);
 
         assert_eq!(decrypted, vec![0xBBu8; CHUNK_SIZE]);
     }
@@ -937,7 +1028,7 @@ mod tests {
         let service = create_test_service();
         // Create 3-chunk plaintext
         let plaintext: Vec<u8> = (0..CHUNK_SIZE * 3).map(|i| (i % 256) as u8).collect();
-        let full_ciphertext = service.encrypt(&plaintext);
+        let full_ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
         // Calculate encrypted range for plaintext bytes in chunk 1
         let plaintext_start = CHUNK_SIZE as u64 + 100;
@@ -953,6 +1044,8 @@ mod tests {
                 first_chunk_index,
                 plaintext_start,
                 plaintext_end,
+                plaintext.len() as u64,
+                TEST_AAD,
             )
             .unwrap();
 
@@ -1005,7 +1098,7 @@ mod tests {
 
         // Create 10-chunk plaintext with recognizable pattern
         let plaintext: Vec<u8> = (0..CHUNK_SIZE * 10).map(|i| (i % 256) as u8).collect();
-        let full_ciphertext = service.encrypt(&plaintext);
+        let full_ciphertext = service.encrypt(&plaintext, TEST_AAD);
 
         // Extract nonce (this would come from DB in production)
         let nonce = &full_ciphertext[..NONCE_SIZE];
@@ -1031,6 +1124,8 @@ mod tests {
                 first_chunk_index,
                 plaintext_start,
                 plaintext_end,
+                plaintext.len() as u64,
+                TEST_AAD,
             )
             .unwrap();
 
@@ -1047,7 +1142,7 @@ mod tests {
         let service = create_test_service();
 
         let plaintext: Vec<u8> = (0..CHUNK_SIZE * 10).map(|i| (i % 256) as u8).collect();
-        let full_ciphertext = service.encrypt(&plaintext);
+        let full_ciphertext = service.encrypt(&plaintext, TEST_AAD);
         let nonce = &full_ciphertext[..NONCE_SIZE];
 
         // Range spanning chunks 3, 4, 5
@@ -1065,6 +1160,8 @@ mod tests {
                 first_chunk_index,
                 plaintext_start,
                 plaintext_end,
+                plaintext.len() as u64,
+                TEST_AAD,
             )
             .unwrap();
 
@@ -1120,15 +1217,15 @@ mod tests {
         let release_enc = master.derive_scoped("rel-456");
         let plaintext = b"test audio data for this release";
 
-        let encrypted = release_enc.encrypt(plaintext);
-        let decrypted = release_enc.decrypt(&encrypted).unwrap();
+        let encrypted = release_enc.encrypt(plaintext, TEST_AAD);
+        let decrypted = release_enc.decrypt(&encrypted, TEST_AAD).unwrap();
         assert_eq!(decrypted, plaintext);
 
         // Cannot decrypt with master key
-        assert!(master.decrypt(&encrypted).is_err());
+        assert!(master.decrypt(&encrypted, TEST_AAD).is_err());
 
         // Cannot decrypt with wrong release key
         let wrong_enc = master.derive_scoped("rel-999");
-        assert!(wrong_enc.decrypt(&encrypted).is_err());
+        assert!(wrong_enc.decrypt(&encrypted, TEST_AAD).is_err());
     }
 }

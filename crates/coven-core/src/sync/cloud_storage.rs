@@ -83,16 +83,16 @@ impl CloudCipher {
     /// min_schema, membership) for storage. Encrypted seals under the current
     /// library-key generation and prefixes that generation in cleartext;
     /// plaintext returns the bytes unchanged.
-    pub fn seal(&self, plaintext: Vec<u8>) -> Vec<u8> {
+    pub fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
         // A control object is always whole-home scoped; only blobs carry a scope.
         // This is exactly the master-scoped blob path: `encryption_for_scope`
         // maps `Master` to the library key itself.
-        self.seal_scoped(crate::blob::ResolvedScope::Master, plaintext)
+        self.seal_scoped(crate::blob::ResolvedScope::Master, plaintext, aad_context)
     }
 
     /// Recover a control object read from storage. Inverse of [`Self::seal`].
-    pub fn open(&self, stored: Vec<u8>) -> Result<Vec<u8>, EncryptionError> {
-        self.open_scoped(crate::blob::ResolvedScope::Master, stored)
+    pub fn open(&self, stored: Vec<u8>, aad_context: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        self.open_scoped(crate::blob::ResolvedScope::Master, stored, aad_context)
     }
 
     /// Protect a blob under its resolved scope. Master/derived encrypted blobs
@@ -102,9 +102,10 @@ impl CloudCipher {
         &self,
         scope: crate::blob::ResolvedScope,
         plaintext: Vec<u8>,
+        aad_context: &[u8],
     ) -> Vec<u8> {
         match self {
-            CloudCipher::Encrypted(e) => seal_scoped_encrypted(scope, e, &plaintext),
+            CloudCipher::Encrypted(e) => seal_scoped_encrypted(scope, e, &plaintext, aad_context),
             CloudCipher::Plaintext => plaintext,
         }
     }
@@ -114,9 +115,10 @@ impl CloudCipher {
         &self,
         scope: crate::blob::ResolvedScope,
         stored: Vec<u8>,
+        aad_context: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
         match self {
-            CloudCipher::Encrypted(e) => open_scoped_encrypted(scope, e, &stored),
+            CloudCipher::Encrypted(e) => open_scoped_encrypted(scope, e, &stored, aad_context),
             CloudCipher::Plaintext => Ok(stored),
         }
     }
@@ -157,13 +159,14 @@ impl CloudCipher {
         &self,
         scope: crate::blob::ResolvedScope,
         file_path: &std::path::Path,
+        aad_context: &[u8],
     ) -> Result<BlobBody, String> {
         let plaintext_len = crate::local_blob::file_len(file_path).await?;
         let reader = crate::local_blob::open_reader(file_path).await?;
         let (sealer, prefix) = match self {
             CloudCipher::Encrypted(e) => {
                 let (encryption, prefix) = sealing_encryption_for_scope(scope.clone(), e)?;
-                (Some(encryption.sealer()), prefix)
+                (Some(encryption.sealer(plaintext_len, aad_context)), prefix)
             }
             CloudCipher::Plaintext => (None, Vec::new()),
         };
@@ -188,6 +191,7 @@ pub struct CloudSyncStorage {
     /// How blob objects are keyed. Unlike the cipher, the scheme does not rotate
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
+    library_id: String,
     /// The device's signing identity. The control objects this storage writes
     /// (its head, the min_schema floor) are signed with it so a reader can
     /// attribute and verify them; the at-rest cipher proves confidentiality, not
@@ -200,12 +204,14 @@ impl CloudSyncStorage {
         home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
         blob_paths: BlobPathScheme,
+        library_id: impl Into<String>,
         keypair: UserKeypair,
     ) -> Self {
         CloudSyncStorage {
             home,
             cipher: Arc::new(RwLock::new(cipher)),
             blob_paths,
+            library_id: library_id.into(),
             keypair,
         }
     }
@@ -233,7 +239,7 @@ impl CloudSyncStorage {
     }
 
     async fn write_sealed(&self, key: &str, plaintext: Vec<u8>) -> Result<(), StorageError> {
-        let stored = self.cipher().seal(plaintext);
+        let stored = self.cipher().seal(plaintext, &self.aad_context(key));
         self.home
             .write(
                 key,
@@ -246,13 +252,22 @@ impl CloudSyncStorage {
 
     async fn read_sealed(&self, key: &str, label: &str) -> Result<Vec<u8>, StorageError> {
         let stored = self.home.read(key).await?;
-        self.open_stored(stored, label)
+        self.open_stored(key, stored, label)
     }
 
-    fn open_stored(&self, stored: Vec<u8>, label: &str) -> Result<Vec<u8>, StorageError> {
+    fn open_stored(
+        &self,
+        key: &str,
+        stored: Vec<u8>,
+        label: &str,
+    ) -> Result<Vec<u8>, StorageError> {
         self.cipher()
-            .open(stored)
+            .open(stored, &self.aad_context(key))
             .map_err(|e| StorageError::Decryption(format!("{label}: {e}")))
+    }
+
+    fn aad_context(&self, key: &str) -> Vec<u8> {
+        cloud_aad_context(&self.library_id, key)
     }
 
     async fn write_blob_sealed(
@@ -261,7 +276,9 @@ impl CloudSyncStorage {
         scope: crate::blob::ResolvedScope,
         plaintext: Vec<u8>,
     ) -> Result<(), StorageError> {
-        let stored = self.cipher().seal_scoped(scope, plaintext);
+        let stored = self
+            .cipher()
+            .seal_scoped(scope, plaintext, &self.aad_context(key));
         self.home
             .write(
                 key,
@@ -280,7 +297,7 @@ impl CloudSyncStorage {
     ) -> Result<Vec<u8>, StorageError> {
         let stored = self.home.read(key).await?;
         self.cipher()
-            .open_scoped(scope, stored)
+            .open_scoped(scope, stored, &self.aad_context(key))
             .map_err(|e| StorageError::Decryption(format!("{label}: {e}")))
     }
 
@@ -362,6 +379,16 @@ fn encrypted_scope_prefix_len(scope: &crate::blob::ResolvedScope) -> u64 {
     }
 }
 
+pub(crate) fn cloud_aad_context(library_id: &str, cloud_key: &str) -> Vec<u8> {
+    let mut context =
+        Vec::with_capacity(std::mem::size_of::<u64>() * 2 + library_id.len() + cloud_key.len());
+    context.extend_from_slice(&(library_id.len() as u64).to_le_bytes());
+    context.extend_from_slice(library_id.as_bytes());
+    context.extend_from_slice(&(cloud_key.len() as u64).to_le_bytes());
+    context.extend_from_slice(cloud_key.as_bytes());
+    context
+}
+
 fn generation_tag(generation: u64) -> Vec<u8> {
     let mut tag = Vec::with_capacity(GENERATION_TAG_LEN);
     tag.extend_from_slice(GENERATION_TAG_MAGIC);
@@ -423,10 +450,11 @@ fn seal_scoped_encrypted(
     scope: crate::blob::ResolvedScope,
     master: &EncryptionService,
     plaintext: &[u8],
+    aad_context: &[u8],
 ) -> Vec<u8> {
     let (encryption, mut prefix) = sealing_encryption_for_scope(scope, master)
         .expect("current generation is present in the encryption service");
-    prefix.extend(encryption.encrypt(plaintext));
+    prefix.extend(encryption.encrypt(plaintext, aad_context));
     prefix
 }
 
@@ -434,12 +462,16 @@ fn open_scoped_encrypted(
     scope: crate::blob::ResolvedScope,
     master: &EncryptionService,
     stored: &[u8],
+    aad_context: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
     match scope {
-        crate::blob::ResolvedScope::Key(key) => EncryptionService::from_key(key).decrypt(stored),
+        crate::blob::ResolvedScope::Key(key) => {
+            EncryptionService::from_key(key).decrypt(stored, aad_context)
+        }
         crate::blob::ResolvedScope::Master | crate::blob::ResolvedScope::Derived(_) => {
             let (generation, ciphertext) = read_generation_tag(stored)?;
-            opening_encryption_for_scope(scope, master, generation)?.decrypt(ciphertext)
+            opening_encryption_for_scope(scope, master, generation)?
+                .decrypt(ciphertext, aad_context)
         }
     }
 }
@@ -447,19 +479,23 @@ fn open_scoped_encrypted(
 fn range_encryption_for_scope(
     scope: crate::blob::ResolvedScope,
     master: &EncryptionService,
+    aad_context: Vec<u8>,
 ) -> RangeEncryption {
     match scope {
         crate::blob::ResolvedScope::Master => RangeEncryption::Tagged {
             master: master.clone(),
             scope: TaggedRangeScope::Master,
+            aad_context,
         },
         crate::blob::ResolvedScope::Derived(scope_id) => RangeEncryption::Tagged {
             master: master.clone(),
             scope: TaggedRangeScope::Derived(scope_id),
+            aad_context,
         },
-        crate::blob::ResolvedScope::Key(key) => {
-            RangeEncryption::Untagged(EncryptionService::from_key(key))
-        }
+        crate::blob::ResolvedScope::Key(key) => RangeEncryption::Untagged {
+            encryption: EncryptionService::from_key(key),
+            aad_context,
+        },
     }
 }
 
@@ -494,11 +530,24 @@ pub struct BlobRangeReader {
 }
 
 enum RangeEncryption {
-    Untagged(EncryptionService),
+    Untagged {
+        encryption: EncryptionService,
+        aad_context: Vec<u8>,
+    },
     Tagged {
         master: EncryptionService,
         scope: TaggedRangeScope,
+        aad_context: Vec<u8>,
     },
+}
+
+impl RangeEncryption {
+    fn aad_context(&self) -> &[u8] {
+        match self {
+            RangeEncryption::Untagged { aad_context, .. }
+            | RangeEncryption::Tagged { aad_context, .. } => aad_context,
+        }
+    }
 }
 
 enum TaggedRangeScope {
@@ -524,9 +573,12 @@ impl BlobRangeReader {
         scope: crate::blob::ResolvedScope,
         key: String,
         source_size: u64,
+        aad_context: Vec<u8>,
     ) -> Self {
         let encryption = match cipher {
-            CloudCipher::Encrypted(master) => Some(range_encryption_for_scope(scope, master)),
+            CloudCipher::Encrypted(master) => {
+                Some(range_encryption_for_scope(scope, master, aad_context))
+            }
             CloudCipher::Plaintext => None,
         };
         BlobRangeReader {
@@ -592,6 +644,8 @@ impl BlobRangeReader {
                 first_chunk_index,
                 offset,
                 end,
+                self.source_size,
+                encryption.aad_context(),
             )
             .map_err(|e| StorageError::Decryption(format!("blob range {offset}..{end}: {e}")))
     }
@@ -602,7 +656,7 @@ impl BlobRangeReader {
         self.header
             .get_or_try_init(|| async {
                 match encryption {
-                    RangeEncryption::Untagged(encryption) => {
+                    RangeEncryption::Untagged { encryption, .. } => {
                         let nonce = self
                             .home
                             .read_range(&self.key, 0, NONCE_SIZE as u64)
@@ -614,7 +668,7 @@ impl BlobRangeReader {
                             chunk_base: NONCE_SIZE as u64,
                         })
                     }
-                    RangeEncryption::Tagged { master, scope } => {
+                    RangeEncryption::Tagged { master, scope, .. } => {
                         let header = self
                             .home
                             .read_range(&self.key, 0, (GENERATION_TAG_LEN + NONCE_SIZE) as u64)
@@ -680,7 +734,7 @@ impl SyncStorage for CloudSyncStorage {
             // above still propagates (it retries next cycle); a parse failure of
             // a head we *can* open is our own corrupt data and still surfaces. In
             // a plaintext home `open` never fails, so this branch never trips.
-            let decoded = match self.open_stored(stored, &format!("head {device_id}")) {
+            let decoded = match self.open_stored(key, stored, &format!("head {device_id}")) {
                 Ok(d) => d,
                 Err(e) => {
                     warn!("skipping head {device_id} this library cannot decrypt: {e}");
@@ -800,7 +854,15 @@ impl SyncStorage for CloudSyncStorage {
         // of the lock so the reader doesn't hold the guard across its awaits.
         let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
         let cipher = self.cipher().clone();
-        let reader = BlobRangeReader::new(self.home.clone(), &cipher, scope, key, source_size);
+        let aad_context = self.aad_context(&key);
+        let reader = BlobRangeReader::new(
+            self.home.clone(),
+            &cipher,
+            scope,
+            key,
+            source_size,
+            aad_context,
+        );
         reader.read(offset, len).await
     }
 
@@ -812,20 +874,14 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<(), StorageError> {
         crate::library_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(data),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
+        self.write_sealed(&key, data).await
     }
 
     async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
         crate::library_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
-        self.home.read(&key).await.map_err(StorageError::from)
+        self.read_sealed(&key, &format!("snapshot {author}/{seq}"))
+            .await
     }
 
     async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
@@ -875,7 +931,7 @@ impl SyncStorage for CloudSyncStorage {
             Err(e) => return Err(StorageError::from(e)),
         };
 
-        let decoded = self.open_stored(stored, "min_schema_version")?;
+        let decoded = self.open_stored(&key, stored, "min_schema_version")?;
 
         let parsed: MinSchemaVersionJson = serde_json::from_slice(&decoded)
             .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
@@ -1096,7 +1152,11 @@ mod tests {
         std::fs::write(&path, &plaintext).unwrap();
 
         let body = cipher
-            .open_body(ResolvedScope::Master, &path)
+            .open_body(
+                ResolvedScope::Master,
+                &path,
+                &cloud_aad_context("test-lib", "blob-key"),
+            )
             .await
             .expect("open streaming body");
         assert!(
@@ -1111,7 +1171,9 @@ mod tests {
         // reads the tag and recovers the plaintext.
         let stored = home.get("blob-key").expect("blob present");
         assert_eq!(
-            cipher.open(stored).expect("decrypt streamed blob"),
+            cipher
+                .open(stored, &cloud_aad_context("test-lib", "blob-key"))
+                .expect("decrypt streamed blob"),
             plaintext,
             "the multipart-streamed object decrypts to the original plaintext",
         );
@@ -1151,6 +1213,7 @@ mod tests {
             Arc::new(home.clone()),
             CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32])),
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
 
@@ -1179,7 +1242,10 @@ mod tests {
             .expect("generation two object exists");
         assert!(
             CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32]))
-                .open(generation_two)
+                .open(
+                    generation_two,
+                    &cloud_aad_context("test-lib", "membership/owner/2.enc"),
+                )
                 .is_err(),
             "a generation one key must not open a generation two object",
         );
@@ -1197,6 +1263,7 @@ mod tests {
             Arc::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(master),
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
 
@@ -1238,6 +1305,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn blob_moved_to_a_different_cloud_key_fails_to_open() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            BlobPathScheme::Hashed,
+            "test-lib",
+            UserKeypair::generate(),
+        );
+
+        storage
+            .put_blob(
+                "images",
+                "blob-a",
+                ResolvedScope::Master,
+                None,
+                b"secret-a".to_vec(),
+            )
+            .await
+            .expect("put blob a");
+        storage
+            .put_blob(
+                "images",
+                "blob-b",
+                ResolvedScope::Master,
+                None,
+                b"secret-b".to_vec(),
+            )
+            .await
+            .expect("put blob b");
+
+        let key_a = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "blob-a", None)
+            .expect("blob a key");
+        let key_b = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "blob-b", None)
+            .expect("blob b key");
+        let a_bytes = home.get(&key_a).expect("blob a at rest");
+        home.write(
+            &key_b,
+            BlobBody::from_bytes(a_bytes),
+            &crate::storage::cloud::no_progress(),
+        )
+        .await
+        .expect("overwrite blob b");
+
+        assert!(
+            storage
+                .get_blob("images", "blob-b", ResolvedScope::Master, None)
+                .await
+                .is_err(),
+            "a blob substituted at another key must fail authentication",
+        );
+    }
+
     /// A head this library cannot decrypt — e.g. one a *different* library wrote
     /// when it reused the same bucket (its own encryption key) — must be skipped,
     /// not abort `list_heads`. The sync cycle's pull calls `list_heads`, so an
@@ -1249,6 +1370,7 @@ mod tests {
             Arc::new(InMemoryCloudHome::new()),
             CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32])),
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
         storage
@@ -1294,6 +1416,7 @@ mod tests {
             Arc::new(InMemoryCloudHome::new()),
             cipher.clone(),
             BlobPathScheme::Hashed,
+            "test-lib",
             keypair.clone(),
         );
 
@@ -1314,7 +1437,10 @@ mod tests {
             author_pubkey: hex::encode(UserKeypair::generate().public_key()),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
         };
-        let sealed = cipher.seal(serde_json::to_vec(&forged).expect("serialize forged head"));
+        let sealed = cipher.seal(
+            serde_json::to_vec(&forged).expect("serialize forged head"),
+            &cloud_aad_context("test-lib", "heads/forged-device.json.enc"),
+        );
         storage
             .cloud_home()
             .write(
@@ -1348,6 +1474,7 @@ mod tests {
             Arc::new(InMemoryCloudHome::new()),
             cipher.clone(),
             BlobPathScheme::Hashed,
+            "test-lib",
             keypair.clone(),
         );
 
@@ -1365,7 +1492,10 @@ mod tests {
             author_pubkey: hex::encode(UserKeypair::generate().public_key()),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
         };
-        let sealed = cipher.seal(serde_json::to_vec(&forged).expect("serialize forged floor"));
+        let sealed = cipher.seal(
+            serde_json::to_vec(&forged).expect("serialize forged floor"),
+            &cloud_aad_context("test-lib", "min_schema_version.json.enc"),
+        );
         storage
             .cloud_home()
             .write(
@@ -1397,6 +1527,7 @@ mod tests {
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
 
@@ -1561,6 +1692,7 @@ mod tests {
             Arc::new(home.clone()),
             CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
             BlobPathScheme::Plain,
+            "test-lib",
             UserKeypair::generate(),
         );
 
@@ -1618,6 +1750,7 @@ mod tests {
             Arc::new(InMemoryCloudHome::new()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
+            "test-lib",
             UserKeypair::generate(),
         );
         assert!(
@@ -1640,6 +1773,7 @@ mod tests {
             Arc::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
 
@@ -1662,8 +1796,9 @@ mod tests {
             Arc::new(home.clone()) as Arc<dyn CloudHome>,
             &CloudCipher::Encrypted(master),
             ResolvedScope::Master,
-            key,
+            key.clone(),
             plaintext.len() as u64,
+            cloud_aad_context("test-lib", &key),
         );
 
         // A window straddling the 65_536-byte chunk boundary.
@@ -1689,6 +1824,7 @@ mod tests {
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
         let plaintext: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
@@ -1709,8 +1845,9 @@ mod tests {
             Arc::new(home.clone()) as Arc<dyn CloudHome>,
             &CloudCipher::Plaintext,
             ResolvedScope::Master,
-            key,
+            key.clone(),
             plaintext.len() as u64,
+            cloud_aad_context("test-lib", &key),
         );
         let got = reader.read(40_000, 10_000).await.expect("ranged read");
         assert_eq!(got, &plaintext[40_000..50_000]);
@@ -1728,6 +1865,7 @@ mod tests {
             Arc::new(home.clone()),
             cipher.clone(),
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
 
@@ -1754,6 +1892,7 @@ mod tests {
             ResolvedScope::Derived(scope_id),
             key.clone(),
             plaintext.len() as u64,
+            cloud_aad_context("test-lib", &key),
         );
         assert_eq!(
             derived.read(10_000, 20_000).await.expect("derived read"),
@@ -1765,8 +1904,9 @@ mod tests {
             home_arc,
             &cipher,
             ResolvedScope::Master,
-            key,
+            key.clone(),
             plaintext.len() as u64,
+            cloud_aad_context("test-lib", &key),
         );
         assert!(
             wrong.read(10_000, 20_000).await.is_err(),
@@ -1784,6 +1924,7 @@ mod tests {
             Arc::new(home.clone()),
             CloudCipher::Encrypted(master.clone()),
             BlobPathScheme::Hashed,
+            "test-lib",
             UserKeypair::generate(),
         );
         let plaintext = b"a short blob".to_vec();
@@ -1803,8 +1944,9 @@ mod tests {
             Arc::new(home) as Arc<dyn CloudHome>,
             &CloudCipher::Encrypted(master),
             ResolvedScope::Master,
-            key,
+            key.clone(),
             plaintext.len() as u64,
+            cloud_aad_context("test-lib", &key),
         );
         assert!(
             reader.read(8, 100).await.is_err(),

@@ -182,10 +182,10 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let db_a = open_test_db();
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let (tables_c, enc_c) = (tables.clone(), enc.clone());
+    let tables_c = tables.clone();
     let empty_snap = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c, &enc_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
         })
         .await
         .expect("owner empty snapshot");
@@ -227,7 +227,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     // Device B joins through the real path: bootstrap from the snapshot, then
     // pull the changesets published after it.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, 1, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -300,7 +300,6 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 /// album renders a placeholder cover. Asserts the file lands.
 #[tokio::test]
 async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
-    let enc = CloudCipher::Encrypted(EncryptionService::from_key([9u8; 32]));
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
@@ -325,10 +324,10 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
 
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let (tables_c, enc_c) = (tables.clone(), enc.clone());
+    let tables_c = tables.clone();
     let snapshot = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c, &enc_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -373,7 +372,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, 1, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(
@@ -451,10 +450,10 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
 
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let (tables_c, enc_c) = (tables.clone(), enc.clone());
+    let tables_c = tables.clone();
     let snapshot = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c, &enc_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -485,7 +484,7 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &enc, None, 1, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(

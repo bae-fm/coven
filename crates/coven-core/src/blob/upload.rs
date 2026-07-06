@@ -163,6 +163,8 @@ async fn resolve_and_open(
     db: &Database,
     cipher: &std::sync::RwLock<CloudCipher>,
     file_path: &Path,
+    library_id: &str,
+    cloud_key: &str,
     scope: BlobScope,
 ) -> Result<BlobBody, String> {
     let resolved = db
@@ -172,7 +174,8 @@ async fn resolve_and_open(
     // Snapshot the cipher out of the lock so the (streaming, await-holding) body
     // doesn't keep the guard across the upload.
     let cipher = cipher.read().unwrap().clone();
-    cipher.open_body(resolved, file_path).await
+    let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, cloud_key);
+    cipher.open_body(resolved, file_path, &aad_context).await
 }
 
 /// The result of one upload-queue drain pass.
@@ -214,6 +217,7 @@ pub async fn drain_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
+    library_id: &str,
     library_dir: &LibraryDir,
     clock: &dyn crate::clock::Clock,
     hlc: &Hlc,
@@ -319,7 +323,16 @@ pub async fn drain_uploads(
         // body seals each chunk as it uploads, never holding the whole blob. A
         // missing key is a host bug; record it as a failure rather than silently
         // sealing under the master key (which no share recipient could read).
-        let body = match resolve_and_open(db, cipher, &file_path, scope.clone()).await {
+        let body = match resolve_and_open(
+            db,
+            cipher,
+            &file_path,
+            library_id,
+            &entry.cloud_key,
+            scope.clone(),
+        )
+        .await
+        {
             Ok(body) => body,
             Err(msg) => {
                 warn!("Upload failed for {}: {msg}", entry.cloud_key);

@@ -978,9 +978,18 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
 
     // Drain with photobbb's source removed: photoaaa uploads (not the last, no flip), photobbb fails.
     std::fs::remove_file(&src2).unwrap();
-    drain_uploads(&db, &storage, &enc, &lib, &SystemClock, &hlc, None)
-        .await
-        .expect("partial drain");
+    drain_uploads(
+        &db,
+        &storage,
+        &enc,
+        "test-lib",
+        &lib,
+        &SystemClock,
+        &hlc,
+        None,
+    )
+    .await
+    .expect("partial drain");
     assert_eq!(
         shared_flag(&db, "n1").await,
         0,
@@ -1050,9 +1059,18 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     .await
     .unwrap();
 
-    drain_uploads(&db, &storage, &enc, &lib, &SystemClock, &hlc, None)
-        .await
-        .expect("drain");
+    drain_uploads(
+        &db,
+        &storage,
+        &enc,
+        "test-lib",
+        &lib,
+        &SystemClock,
+        &hlc,
+        None,
+    )
+    .await
+    .expect("drain");
 
     assert_eq!(shared_flag(&db, "n1").await, 0, "no intent ⇒ no flip");
     assert_eq!(
@@ -1259,9 +1277,18 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // "Crash" after photoaaa uploads but before completion: remove photobbb's source so the
     // first drain uploads only photoaaa, leaving the make_remote in flight.
     std::fs::remove_file(&src2).unwrap();
-    drain_uploads(&db, &storage, &enc, &lib, &SystemClock, &hlc, None)
-        .await
-        .expect("partial drain");
+    drain_uploads(
+        &db,
+        &storage,
+        &enc,
+        "test-lib",
+        &lib,
+        &SystemClock,
+        &hlc,
+        None,
+    )
+    .await
+    .expect("partial drain");
     assert_eq!(shared_flag(&db, "n1").await, 0, "still Local-uploading");
     assert!(
         has_intent(&db, "notes", "n1").await,
@@ -1278,9 +1305,18 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // the drain then completes and flips.
     std::fs::write(&src2, b"second").unwrap();
     db.reset_cloud_outbox_backoff().await.unwrap();
-    drain_uploads(&db, &storage, &enc, &lib, &SystemClock, &hlc, None)
-        .await
-        .expect("resume drain");
+    drain_uploads(
+        &db,
+        &storage,
+        &enc,
+        "test-lib",
+        &lib,
+        &SystemClock,
+        &hlc,
+        None,
+    )
+    .await
+    .expect("resume drain");
     assert_eq!(shared_flag(&db, "n1").await, 1, "converged to Remote");
     assert!(
         !has_intent(&db, "notes", "n1").await,

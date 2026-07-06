@@ -62,6 +62,7 @@ fn runtime_for_device(device_id: &str, db: Database, cloud: &InMemoryCloudHome) 
         Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        "wasm-runtime-test",
         keypair.clone(),
     );
     // The runtime shares the storage's cipher lock (the same instance the storage

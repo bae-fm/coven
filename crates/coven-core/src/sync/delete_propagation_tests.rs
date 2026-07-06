@@ -95,7 +95,7 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
 
     // Device B joins: bootstrap from A's snapshot, then pull A/1.
     let (_tmp_b, lib_b) = temp_library_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", &cipher, None, 1, &lib_b.db_path())
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
     open_db_and_pull(

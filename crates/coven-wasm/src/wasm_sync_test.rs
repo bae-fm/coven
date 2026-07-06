@@ -57,6 +57,7 @@ fn storage_for(cloud: &InMemoryCloudHome) -> CloudSyncStorage {
         std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Hashed,
+        "wasm-sync-test",
         UserKeypair::generate(),
     )
 }
