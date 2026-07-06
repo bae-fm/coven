@@ -9,16 +9,23 @@
 //! reports it via `FOREIGN_KEY`/`CONSTRAINT` and the returned flag notes it for
 //! the caller, which retries the changeset once its parents have landed.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rusqlite::session::{ConflictAction, ConflictType};
-use rusqlite::Connection;
+use fallible_streaming_iterator::FallibleStreamingIterator;
+use rusqlite::hooks::Action;
+use rusqlite::session::{ChangesetItem, ChangesetIter, ConflictAction, ConflictType};
+use rusqlite::types::{Value, ValueRef};
+use rusqlite::{params_from_iter, Connection, OptionalExtension, ToSql};
 use tracing::warn;
 
-use super::conflict::{lww_conflict_handler, TableSchema};
+use super::conflict::{compare_lww_stamps, lww_conflict_handler, LwwComparison, TableSchema};
+use super::hlc::Timestamp;
+use super::session::quote_ident;
 #[cfg(any(test, feature = "test-utils"))]
 use super::session::SyncedTable;
+use crate::changeset::{value_ref_to_string, UpdateValue};
 use crate::database::DbError;
 
 /// Result of applying a changeset.
@@ -69,9 +76,11 @@ pub fn apply_changeset_lww_with_schema(
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
     let fk_flag = Arc::new(AtomicBool::new(false));
+    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    let premerged_updates = premerge_losing_update_columns(&tx, bytes, &schema, receiver_wall_ms)?;
 
     let closure_flag = fk_flag.clone();
-    conn.apply_strm(
+    tx.apply_strm(
         &mut &bytes[..],
         // Apply to every table in the changeset (it only ever carries synced
         // tables; the gate already excluded local-only rows on the wire).
@@ -86,13 +95,25 @@ pub fn apply_changeset_lww_with_schema(
             }
             // Every other conflict type exposes the operation, so the table name
             // (needed to find the `_updated_at` column) is readable.
-            let table = match item.op() {
-                Ok(op) => op.table_name().to_string(),
+            let (table, op_code) = match item.op() {
+                Ok(op) => (op.table_name().to_string(), op.code()),
                 Err(error) => {
                     warn!(error = %error, "failed to read changeset conflict operation; aborting apply");
                     return ConflictAction::SQLITE_CHANGESET_ABORT;
                 }
             };
+            if conflict_type == ConflictType::SQLITE_CHANGESET_DATA
+                && op_code == Action::SQLITE_UPDATE
+            {
+                match is_premerged_update(&item, &table, &premerged_updates) {
+                    Ok(true) => return ConflictAction::SQLITE_CHANGESET_OMIT,
+                    Ok(false) => {}
+                    Err(error) => {
+                        warn!(table, error = %error, "failed to read premerged UPDATE primary key; aborting apply");
+                        return ConflictAction::SQLITE_CHANGESET_ABORT;
+                    }
+                }
+            }
             lww_conflict_handler(
                 conflict_type,
                 item,
@@ -104,8 +125,306 @@ pub fn apply_changeset_lww_with_schema(
         },
     )
     .map_err(DbError::from)?;
+    let had_fk_violations = fk_flag.load(Ordering::Relaxed);
+    if had_fk_violations {
+        tx.rollback().map_err(DbError::from)?;
+    } else {
+        tx.commit().map_err(DbError::from)?;
+    }
 
-    Ok(ApplyResult {
-        had_fk_violations: fk_flag.load(Ordering::Relaxed),
-    })
+    Ok(ApplyResult { had_fk_violations })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct RowKey {
+    table: String,
+    pk: String,
+}
+
+struct ChangedColumn {
+    index: usize,
+    base: Value,
+    incoming: Value,
+}
+
+struct IncomingUpdate {
+    table: String,
+    pk: String,
+    changed_columns: Vec<ChangedColumn>,
+    incoming_updated_at: Timestamp,
+}
+
+fn premerge_losing_update_columns(
+    conn: &Connection,
+    bytes: &[u8],
+    schema: &TableSchema,
+    receiver_wall_ms: u64,
+) -> Result<HashSet<RowKey>, DbError> {
+    if bytes.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let input: &mut dyn std::io::Read = &mut &bytes[..];
+    let mut iter = ChangesetIter::start_strm(&input).map_err(DbError::from)?;
+    let mut handled = HashSet::new();
+
+    while let Some(item) = iter.next().map_err(DbError::from)? {
+        let Some(update) = incoming_update(item, schema)? else {
+            continue;
+        };
+        if merge_losing_update(conn, schema, &update, receiver_wall_ms)? {
+            handled.insert(RowKey {
+                table: update.table,
+                pk: update.pk,
+            });
+        }
+    }
+
+    Ok(handled)
+}
+
+fn incoming_update(
+    item: &ChangesetItem,
+    schema: &TableSchema,
+) -> Result<Option<IncomingUpdate>, DbError> {
+    let op = item.op().map_err(DbError::from)?;
+    if op.code() != Action::SQLITE_UPDATE {
+        return Ok(None);
+    }
+
+    let table = op.table_name();
+    let Some(updated_at) = schema.updated_at(table) else {
+        warn!(
+            table,
+            "UPDATE changeset table is not in the local synced schema"
+        );
+        return Ok(None);
+    };
+
+    let Some(incoming_updated_at_value) = changeset_value(item, updated_at, UpdateValue::New)?
+    else {
+        warn!(table, "UPDATE changeset has no incoming _updated_at value");
+        return Ok(None);
+    };
+    let Some(incoming_updated_at) = timestamp_from_value(&incoming_updated_at_value) else {
+        warn!(
+            table,
+            "UPDATE changeset has an incoming _updated_at value that does not parse"
+        );
+        return Ok(None);
+    };
+
+    let pk = update_pk_value(item, table)?;
+
+    let mut changed_columns = Vec::new();
+    for index in 0..op.number_of_columns() as usize {
+        if index == 0 || index == updated_at {
+            continue;
+        }
+        let base = changeset_value(item, index, UpdateValue::Old)?;
+        let incoming = changeset_value(item, index, UpdateValue::New)?;
+        match (base, incoming) {
+            (Some(base), Some(incoming)) => changed_columns.push(ChangedColumn {
+                index,
+                base,
+                incoming,
+            }),
+            (None, None) => {}
+            _ => {
+                return Err(DbError(format!(
+                    "UPDATE changeset for {table} has only one side for column {index}"
+                )));
+            }
+        }
+    }
+
+    Ok(Some(IncomingUpdate {
+        table: table.to_string(),
+        pk,
+        changed_columns,
+        incoming_updated_at,
+    }))
+}
+
+fn merge_losing_update(
+    conn: &Connection,
+    schema: &TableSchema,
+    update: &IncomingUpdate,
+    receiver_wall_ms: u64,
+) -> Result<bool, DbError> {
+    let columns = schema
+        .columns(&update.table)
+        .ok_or_else(|| DbError(format!("synced table {} has no column map", update.table)))?;
+    let updated_at_index = schema.updated_at(&update.table).ok_or_else(|| {
+        DbError(format!(
+            "synced table {} has no _updated_at column index",
+            update.table
+        ))
+    })?;
+    if update
+        .changed_columns
+        .iter()
+        .any(|c| c.index >= columns.len())
+        || updated_at_index >= columns.len()
+    {
+        return Err(DbError(format!(
+            "UPDATE changeset for {} names a column outside the local schema",
+            update.table
+        )));
+    }
+
+    let mut selected_indices = update
+        .changed_columns
+        .iter()
+        .map(|column| column.index)
+        .collect::<Vec<_>>();
+    selected_indices.push(updated_at_index);
+    let select_columns = selected_indices
+        .iter()
+        .map(|index| quote_ident(&columns[*index]))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {select_columns} FROM {} WHERE {} = ?1",
+        quote_ident(&update.table),
+        quote_ident(&columns[0])
+    );
+    let local_values = conn
+        .query_row(&sql, rusqlite::params![&update.pk], |row| {
+            (0..selected_indices.len())
+                .map(|index| row.get::<_, Value>(index))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .optional()
+        .map_err(DbError::from)?;
+    let Some(local_values) = local_values else {
+        return Ok(false);
+    };
+
+    let local_updated_at = local_values
+        .last()
+        .and_then(timestamp_from_value)
+        .ok_or_else(|| {
+            DbError(format!(
+                "local row in {} has no parseable _updated_at",
+                update.table
+            ))
+        })?;
+    match compare_lww_stamps(
+        &update.table,
+        update.incoming_updated_at.clone(),
+        local_updated_at,
+        receiver_wall_ms,
+    ) {
+        LwwComparison::IncomingWins | LwwComparison::IncomingGrossFuture => return Ok(false),
+        LwwComparison::LocalWins => {}
+    }
+
+    let mut applied = Vec::new();
+    for (column, local_value) in update.changed_columns.iter().zip(local_values.iter()) {
+        if *local_value == column.base {
+            applied.push(column);
+        }
+    }
+    if !applied.is_empty() {
+        apply_columns(conn, columns, update, &applied)?;
+    }
+
+    Ok(true)
+}
+
+fn apply_columns(
+    conn: &Connection,
+    columns: &[String],
+    update: &IncomingUpdate,
+    applied: &[&ChangedColumn],
+) -> Result<(), DbError> {
+    let assignments = applied
+        .iter()
+        .enumerate()
+        .map(|(offset, column)| {
+            format!("{} = ?{}", quote_ident(&columns[column.index]), offset + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE {} SET {assignments} WHERE {} = ?{}",
+        quote_ident(&update.table),
+        quote_ident(&columns[0]),
+        applied.len() + 1
+    );
+
+    let mut params: Vec<&dyn ToSql> = applied
+        .iter()
+        .map(|column| &column.incoming as &dyn ToSql)
+        .collect();
+    params.push(&update.pk);
+    conn.execute(&sql, params_from_iter(params))
+        .map(|_| ())
+        .map_err(DbError::from)
+}
+
+fn changeset_value(
+    item: &ChangesetItem,
+    column: usize,
+    side: UpdateValue,
+) -> Result<Option<Value>, DbError> {
+    let value = match side {
+        UpdateValue::Old => item.old_value(column),
+        UpdateValue::New => item.new_value(column),
+    };
+    match value {
+        Ok(value) => Value::try_from(value).map(Some).map_err(|error| {
+            DbError(format!(
+                "changeset {side:?} value conversion failed for column {column}: {error}"
+            ))
+        }),
+        Err(rusqlite::Error::InvalidColumnIndex(_)) => Ok(None),
+        Err(error) => Err(DbError(format!(
+            "changeset {side:?} value read failed for column {column}: {error}"
+        ))),
+    }
+}
+
+fn update_pk_value(item: &ChangesetItem, table: &str) -> Result<String, DbError> {
+    update_pk_key(item, table).map_err(DbError)
+}
+
+fn is_premerged_update(
+    item: &ChangesetItem,
+    table: &str,
+    premerged: &HashSet<RowKey>,
+) -> Result<bool, String> {
+    let pk = update_pk_key(item, table)?;
+    Ok(premerged.contains(&RowKey {
+        table: table.to_string(),
+        pk,
+    }))
+}
+
+fn update_pk_key(item: &ChangesetItem, table: &str) -> Result<String, String> {
+    match item.old_value(0) {
+        Ok(value) => text_id_from_value_ref(table, value),
+        Err(rusqlite::Error::InvalidColumnIndex(_)) => Err(format!(
+            "UPDATE changeset for {table} has no old-side primary key"
+        )),
+        Err(error) => Err(format!(
+            "UPDATE changeset for {table} primary key read failed: {error}"
+        )),
+    }
+}
+
+fn text_id_from_value_ref(table: &str, value: ValueRef<'_>) -> Result<String, String> {
+    let ValueRef::Text(bytes) = value else {
+        return Err(format!(
+            "UPDATE changeset for {table} primary key is not TEXT"
+        ));
+    };
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|error| format!("UPDATE changeset for {table} primary key is not UTF-8: {error}"))
+}
+
+fn timestamp_from_value(value: &Value) -> Option<Timestamp> {
+    value_ref_to_string(ValueRef::from(value)).and_then(|s| Timestamp::parse(&s))
 }

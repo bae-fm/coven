@@ -32,6 +32,7 @@ use rusqlite::Connection;
 use tracing::warn;
 
 use super::hlc::Timestamp;
+use super::session::table_columns;
 use crate::changeset::value_ref_to_string;
 use crate::database::DbError;
 
@@ -40,6 +41,14 @@ use crate::database::DbError;
 /// be `'static`.
 pub struct TableSchema {
     updated_at_by_table: HashMap<String, usize>,
+    columns_by_table: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LwwComparison {
+    IncomingWins,
+    LocalWins,
+    IncomingGrossFuture,
 }
 
 impl TableSchema {
@@ -48,36 +57,21 @@ impl TableSchema {
     /// error and surfaces as `Err`.
     pub fn from_db(conn: &Connection, synced_tables: &[&str]) -> Result<Self, DbError> {
         let mut updated_at_by_table = HashMap::new();
+        let mut columns_by_table = HashMap::new();
 
         for &table in synced_tables {
-            let mut stmt = conn
-                .prepare(&format!(
-                    "PRAGMA table_info({})",
-                    super::session::quote_ident(table)
-                ))
-                .map_err(DbError::from)?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((r.get::<_, i64>(0)? as usize, r.get::<_, String>(1)?))
-                })
-                .map_err(DbError::from)?;
-
-            let mut updated_at = None;
-            for row in rows {
-                let (col_index, name) = row.map_err(DbError::from)?;
-                if name == "_updated_at" {
-                    updated_at = Some(col_index);
-                }
-            }
-
+            let columns = table_columns(conn, table).map_err(DbError::from)?;
+            let updated_at = columns.iter().position(|name| name == "_updated_at");
             let updated_at = updated_at.ok_or_else(|| {
                 DbError(format!("synced table {table} has no _updated_at column"))
             })?;
             updated_at_by_table.insert(table.to_string(), updated_at);
+            columns_by_table.insert(table.to_string(), columns);
         }
 
         Ok(TableSchema {
             updated_at_by_table,
+            columns_by_table,
         })
     }
 
@@ -87,6 +81,32 @@ impl TableSchema {
     /// apply, the caller treats an unresolved table as a row to omit.
     pub fn updated_at(&self, table: &str) -> Option<usize> {
         self.updated_at_by_table.get(table).copied()
+    }
+
+    pub fn columns(&self, table: &str) -> Option<&[String]> {
+        self.columns_by_table.get(table).map(Vec::as_slice)
+    }
+}
+
+pub fn compare_lww_stamps(
+    table: &str,
+    incoming: Timestamp,
+    local: Timestamp,
+    receiver_wall_ms: u64,
+) -> LwwComparison {
+    if !incoming.is_within_future_bound(receiver_wall_ms) {
+        warn!(
+            table,
+            incoming = %incoming,
+            receiver_wall_ms,
+            "incoming _updated_at is grossly beyond the offline-skew allowance, \
+             refusing to let it win; keeping local"
+        );
+        LwwComparison::IncomingGrossFuture
+    } else if incoming > local {
+        LwwComparison::IncomingWins
+    } else {
+        LwwComparison::LocalWins
     }
 }
 
@@ -165,22 +185,11 @@ pub fn lww_conflict_handler(
 
             match (incoming, local) {
                 (Some(inc), Some(loc)) => {
-                    if !inc.is_within_future_bound(receiver_wall_ms) {
-                        // A grossly-future stamp (broken clock / buggy client) would
-                        // beat every honest stamp and win this conflict forever.
-                        // Refuse it: keep local.
-                        warn!(
-                            table,
-                            incoming = %inc,
-                            receiver_wall_ms,
-                            "incoming _updated_at is grossly beyond the offline-skew \
-                             allowance, refusing to let it win; keeping local"
-                        );
-                        ConflictAction::SQLITE_CHANGESET_OMIT
-                    } else if inc > loc {
-                        ConflictAction::SQLITE_CHANGESET_REPLACE
-                    } else {
-                        ConflictAction::SQLITE_CHANGESET_OMIT
+                    match compare_lww_stamps(table, inc, loc, receiver_wall_ms) {
+                        LwwComparison::IncomingWins => ConflictAction::SQLITE_CHANGESET_REPLACE,
+                        LwwComparison::LocalWins | LwwComparison::IncomingGrossFuture => {
+                            ConflictAction::SQLITE_CHANGESET_OMIT
+                        }
                     }
                 }
                 _ => {

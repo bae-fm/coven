@@ -29,7 +29,9 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::changeset::RowChange;
 use crate::sync::gate::Gates;
-use crate::sync::session::{quote_ident, BlobScopeSpec, SyncedTable};
+use crate::sync::session::{
+    quote_ident, table_columns as session_table_columns, BlobScopeSpec, SyncedTable,
+};
 
 /// Why building the blob-declaration model failed.
 #[derive(Debug)]
@@ -324,10 +326,5 @@ fn pk_carrying_blob(
 /// the safe-rusqlite sibling of the gate's FFI `column_names`. The index of a name
 /// here is the index a changeset reports for that column.
 pub(crate) fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, BlobDeclError> {
-    let sql = format!("PRAGMA table_info({})", quote_ident(table));
-    let mut stmt = conn.prepare(&sql)?;
-    let names = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(names)
+    session_table_columns(conn, table).map_err(BlobDeclError::from)
 }

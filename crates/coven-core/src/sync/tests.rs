@@ -104,6 +104,88 @@ async fn lww_earlier_update_loses() {
 }
 
 #[tokio::test]
+async fn independent_column_edits_converge() {
+    let src = open_test_db();
+    exec(
+        &src,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01')",
+    )
+    .await;
+    let _ = capture_bytes(&src, &[]).await;
+    let cs = capture_bytes(
+        &src,
+        &["UPDATE notes \
+             SET title = 'titleA', _updated_at = '0000000003000-0000-s' \
+             WHERE id = 'n1'"],
+    )
+    .await;
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01');
+         UPDATE notes \
+         SET body = 'bodyB', _updated_at = '0000000005000-0000-t' \
+         WHERE id = 'n1';",
+    )
+    .await;
+
+    apply_to_db(&target, &cs, &test_synced_tables()).await;
+
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "titleA"
+    );
+    assert_eq!(
+        query_text(&target, "SELECT body FROM notes WHERE id = 'n1'").await,
+        "bodyB"
+    );
+}
+
+#[tokio::test]
+async fn same_column_contention_keeps_newer() {
+    let src = open_test_db();
+    exec(
+        &src,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01')",
+    )
+    .await;
+    let _ = capture_bytes(&src, &[]).await;
+    let cs = capture_bytes(
+        &src,
+        &["UPDATE notes \
+             SET title = 'titleA', _updated_at = '0000000003000-0000-s' \
+             WHERE id = 'n1'"],
+    )
+    .await;
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'title0', 'body0', '0000000001000-0000-s', '2026-01-01');
+         UPDATE notes \
+         SET title = 'titleB', _updated_at = '0000000005000-0000-t' \
+         WHERE id = 'n1';",
+    )
+    .await;
+
+    apply_to_db(&target, &cs, &test_synced_tables()).await;
+
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "titleB"
+    );
+    assert_eq!(
+        query_text(&target, "SELECT body FROM notes WHERE id = 'n1'").await,
+        "body0"
+    );
+}
+
+#[tokio::test]
 async fn fk_violation_is_reported_then_resolved_on_retry() {
     // Capture a child insert (note_tags -> notes) on a source that has the parent.
     let src = open_test_db();

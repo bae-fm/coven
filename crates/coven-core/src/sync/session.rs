@@ -5,6 +5,8 @@
 //! [`crate::CovenBuilder::synced_tables`], and coven owns it for the lifetime of
 //! the connection and hands it to the capture session, the gate, and apply.
 
+use rusqlite::Connection;
+
 /// A table that participates in changeset sync, declared at startup by the host
 /// and passed to [`crate::CovenBuilder::synced_tables`].
 ///
@@ -251,6 +253,18 @@ impl BlobDecl {
         self.scope = scope;
         self
     }
+}
+
+/// Column names of `table`, in declared order, via `PRAGMA table_info`. The
+/// index of a name here is the index SQLite session changesets report for that
+/// column.
+pub(crate) fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    let sql = format!("PRAGMA table_info({})", quote_ident(table));
+    let mut stmt = conn.prepare(&sql)?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns)
 }
 
 /// Quote an SQL identifier (table/column name), doubling any embedded quote, so
