@@ -270,12 +270,8 @@ impl Database {
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), DbError> {
-        Self::open_with_hlc(
-            path,
-            synced_tables,
-            Arc::new(Hlc::new(device_id)),
-            migrations,
-        )
+        let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
+        Self::open_with_hlc(path, synced_tables, Arc::new(hlc), migrations)
     }
 
     /// Open with a caller-supplied register clock instead of a fresh
@@ -1395,6 +1391,20 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn database_open_rejects_empty_device_id() {
+        let result = Database::open(Path::new(":memory:"), Vec::new(), String::new(), &[]);
+        let error = match result {
+            Ok(_) => panic!("empty device_id must be rejected"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(
+            error.contains("device_id") && error.contains("empty"),
+            "error names the empty device id: {error}",
+        );
+    }
 
     #[tokio::test]
     async fn fresh_open_creates_canonical_make_remote_intent_retain_pinned_column() {

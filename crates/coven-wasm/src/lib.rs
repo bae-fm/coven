@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{hash_map::Entry, HashMap},
+    sync::Arc,
+};
 
 #[cfg(target_arch = "wasm32")]
 pub mod local_blob;
@@ -99,22 +103,26 @@ thread_local! {
 /// open library use [`CovenLibrary::stamp`].
 #[wasm_bindgen]
 pub fn stamp(device_id: String) -> Result<String, JsValue> {
-    if device_id.is_empty() {
-        return Err(JsValue::from_str(
-            "invalid browser config: device_id must not be empty",
-        ));
-    }
     install_platform();
-    let stamper = UpdatedAtStamper::new(standalone_hlc_for_device(device_id));
+    let stamper = UpdatedAtStamper::new(
+        standalone_hlc_for_device(device_id)
+            .map_err(|e| JsValue::from_str(&format!("invalid browser config: device_id {e}")))?,
+    );
     Ok(stamper.stamp())
 }
 
-fn standalone_hlc_for_device(device_id: String) -> Arc<Hlc> {
+fn standalone_hlc_for_device(
+    device_id: String,
+) -> Result<Arc<Hlc>, crate::library_dir::PathTokenError> {
     STANDALONE_HLCS.with(|hlcs| {
-        hlcs.borrow_mut()
-            .entry(device_id.clone())
-            .or_insert_with(|| Arc::new(Hlc::new(device_id)))
-            .clone()
+        let mut hlcs = hlcs.borrow_mut();
+        match hlcs.entry(device_id.clone()) {
+            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                let hlc = Arc::new(Hlc::try_new(device_id)?);
+                Ok(entry.insert(hlc).clone())
+            }
+        }
     })
 }
 
@@ -182,9 +190,11 @@ mod tests {
 
     #[test]
     fn standalone_hlc_is_shared_per_device() {
-        let first = standalone_hlc_for_device("shared-hlc-device".to_string());
-        let second = standalone_hlc_for_device("shared-hlc-device".to_string());
-        let other = standalone_hlc_for_device("other-shared-hlc-device".to_string());
+        let first = standalone_hlc_for_device("shared-hlc-device".to_string()).expect("first HLC");
+        let second =
+            standalone_hlc_for_device("shared-hlc-device".to_string()).expect("second HLC");
+        let other =
+            standalone_hlc_for_device("other-shared-hlc-device".to_string()).expect("other HLC");
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &other));

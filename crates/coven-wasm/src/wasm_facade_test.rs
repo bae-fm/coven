@@ -20,6 +20,7 @@
 //! [`S3WasmCloudHome`]: crate::storage::cloud::s3_wasm::S3WasmCloudHome
 
 use gloo_timers::future::TimeoutFuture;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 use crate::migration::Migration;
@@ -95,20 +96,92 @@ async fn assemble_library(
 }
 
 fn demo_migrations() -> Vec<Migration> {
-    vec![Migration::sql(
-        1,
-        "demo-schema",
-        "CREATE TABLE IF NOT EXISTS notes (
-            id TEXT PRIMARY KEY,
-            body TEXT NOT NULL,
-            _updated_at TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );",
-    )]
+    vec![Migration::sql(1, DEMO_MIGRATION_NAME, DEMO_NOTES_SQL)]
 }
 
 fn demo_synced_tables() -> Vec<SyncedTable> {
-    vec![SyncedTable::new("notes")]
+    vec![SyncedTable::new(DEMO_TABLE_NAME)]
+}
+
+const DEMO_MIGRATION_NAME: &str = "demo-schema";
+const DEMO_TABLE_NAME: &str = "notes";
+const DEMO_NOTES_SQL: &str = "CREATE TABLE IF NOT EXISTS notes (
+    id TEXT PRIMARY KEY,
+    body TEXT NOT NULL,
+    _updated_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);";
+
+fn to_js_value(value: serde_json::Value) -> JsValue {
+    serde::Serialize::serialize(&value, &serde_wasm_bindgen::Serializer::json_compatible())
+        .expect("serialize JS value")
+}
+
+fn public_open_config(library_id: &str, device_id: &str) -> JsValue {
+    to_js_value(serde_json::json!({
+        "bucket": "test-bucket",
+        "region": "us-east-1",
+        "access_key": "test-access-key",
+        "secret_key": "test-secret-key",
+        "library_id": library_id,
+        "storage": "browsable",
+        "device_id": device_id,
+    }))
+}
+
+fn public_open_migrations() -> JsValue {
+    to_js_value(serde_json::json!([
+        {
+            "version": 1,
+            "name": DEMO_MIGRATION_NAME,
+            "sql": DEMO_NOTES_SQL,
+        }
+    ]))
+}
+
+fn public_open_synced_tables() -> JsValue {
+    to_js_value(serde_json::json!([
+        { "name": DEMO_TABLE_NAME }
+    ]))
+}
+
+async fn public_open(library_id: &str, device_id: &str) -> Result<CovenLibrary, JsValue> {
+    CovenLibrary::open(
+        public_open_config(library_id, device_id),
+        public_open_migrations(),
+        public_open_synced_tables(),
+    )
+    .await
+}
+
+fn js_error_string(value: &JsValue) -> String {
+    value
+        .as_string()
+        .expect("CovenLibrary::open errors are strings")
+}
+
+async fn assert_public_open_rejects(
+    library_id: &str,
+    device_id: &str,
+    expected: &[&str],
+    label: &str,
+) {
+    let result = public_open(library_id, device_id).await;
+    match result {
+        Ok(lib) => {
+            drop(lib);
+            panic!("{label} must be rejected");
+        }
+        Err(error) => {
+            let error = js_error_string(&error);
+            for expected in expected {
+                assert!(
+                    error.contains(expected),
+                    "error {error:?} contains {expected:?}",
+                );
+            }
+        }
+    }
 }
 
 /// Whether `lib`'s `notes` table holds a row with `id`, read through the facade's
@@ -224,6 +297,47 @@ async fn second_open_of_one_library_id_is_refused_until_the_first_handle_drops()
     assemble_library(&library_id, "device-c", &cloud)
         .await
         .expect("open succeeds after the first handle drops");
+}
+
+#[wasm_bindgen_test]
+async fn open_rejects_empty_library_id() {
+    console_error_panic_hook::set_once();
+
+    assert_public_open_rejects("", "device-a", &["library_id", "empty"], "empty library_id").await;
+}
+
+#[wasm_bindgen_test]
+async fn open_rejects_empty_device_id() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    assert_public_open_rejects(
+        &format!("empty-device-{run}"),
+        "",
+        &["device_id", "empty"],
+        "empty device_id",
+    )
+    .await;
+}
+
+#[wasm_bindgen_test]
+async fn from_home_rejects_empty_library_id() {
+    console_error_panic_hook::set_once();
+
+    let cloud = InMemoryCloudHome::new();
+    let result = assemble_library("", "device-a", &cloud).await;
+    match result {
+        Ok(lib) => {
+            drop(lib);
+            panic!("empty library_id must be rejected");
+        }
+        Err(error) => {
+            assert!(
+                error.contains("library_id") && error.contains("empty"),
+                "error names the empty library id: {error}",
+            );
+        }
+    }
 }
 
 #[wasm_bindgen_test]

@@ -128,15 +128,31 @@ pub struct Hlc {
 }
 
 impl Hlc {
+    pub fn try_new(device_id: String) -> Result<Self, crate::library_dir::PathTokenError> {
+        Self::try_new_with_wall_clock(device_id, wall_clock_ms)
+    }
+
     /// Create a new HLC with the given device ID.
     pub fn new(device_id: String) -> Self {
+        Self::try_new(device_id).expect("device_id must be a safe path token")
+    }
+
+    fn try_new_with_wall_clock(
+        device_id: String,
+        clock: impl Fn() -> u64 + Send + Sync + 'static,
+    ) -> Result<Self, crate::library_dir::PathTokenError> {
+        crate::library_dir::validate_path_token(&device_id)?;
+        Ok(Self::new_validated(device_id, Box::new(clock)))
+    }
+
+    fn new_validated(device_id: String, wall_clock: Box<dyn Fn() -> u64 + Send + Sync>) -> Self {
         Self {
             device_id,
             state: Mutex::new(HlcState {
                 millis: 0,
                 counter: 0,
             }),
-            wall_clock: Box::new(wall_clock_ms),
+            wall_clock,
         }
     }
 
@@ -223,14 +239,8 @@ impl Hlc {
         device_id: String,
         clock: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
-        Self {
-            device_id,
-            state: Mutex::new(HlcState {
-                millis: 0,
-                counter: 0,
-            }),
-            wall_clock: Box::new(clock),
-        }
+        Self::try_new_with_wall_clock(device_id, clock)
+            .expect("device_id must be a safe path token")
     }
 }
 
@@ -342,6 +352,14 @@ mod tests {
 
         assert!(t2 > t1, "t2={t2} should be > t1={t1}");
         assert!(t3 > t2, "t3={t3} should be > t2={t2}");
+    }
+
+    #[test]
+    fn new_rejects_empty_device_id() {
+        assert!(matches!(
+            Hlc::try_new(String::new()),
+            Err(crate::library_dir::PathTokenError::Empty),
+        ));
     }
 
     #[test]

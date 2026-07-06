@@ -160,6 +160,8 @@ impl CovenLibrary {
 
         let config: OpenConfig = serde_wasm_bindgen::from_value(config)
             .map_err(|e| JsValue::from_str(&format!("invalid open config: {e}")))?;
+        validate_library_id(&config.library_id)
+            .map_err(|e| JsValue::from_str(&format!("invalid browser config: {e}")))?;
         let migrations = parse_migrations(migrations)
             .map_err(|e| JsValue::from_str(&format!("invalid migrations: {e}")))?;
         let synced_tables = parse_synced_tables(synced_tables)
@@ -309,6 +311,7 @@ impl CovenLibrary {
         user_keypair: UserKeypair,
         schedule: WasmSyncSchedule,
     ) -> Result<CovenLibrary, String> {
+        validate_library_id(library_id)?;
         let open_guard = WasmLibraryOpenGuard::acquire(library_id)?;
 
         install_browser_storage()
@@ -390,6 +393,10 @@ impl CovenLibrary {
     ) -> Option<std::rc::Rc<std::cell::Cell<bool>>> {
         self.runtime.active_token_for_test()
     }
+}
+
+fn validate_library_id(library_id: &str) -> Result<(), String> {
+    crate::library_dir::validate_path_token(library_id).map_err(|e| format!("library_id {e}"))
 }
 
 /// The sync loop's real cadence: a 3 s startup grace so the loop does not race
