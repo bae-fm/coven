@@ -411,6 +411,7 @@ pub struct MockSyncStorage {
     /// is built for.
     hidden_from_listing: Mutex<std::collections::HashSet<(String, u64)>>,
     fail_blob_puts: std::sync::atomic::AtomicUsize,
+    fail_changeset_puts: std::sync::atomic::AtomicUsize,
 }
 
 impl MockSyncStorage {
@@ -433,6 +434,7 @@ impl MockSyncStorage {
             membership_get_count: std::sync::atomic::AtomicUsize::new(0),
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
             fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
+            fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -469,6 +471,11 @@ impl MockSyncStorage {
 
     pub fn fail_next_blob_puts(&self, count: usize) {
         self.fail_blob_puts
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn fail_next_changeset_puts(&self, count: usize) {
+        self.fail_changeset_puts
             .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -638,6 +645,19 @@ impl SyncStorage for MockSyncStorage {
         seq: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
+        if self
+            .fail_changeset_puts
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(StorageError::Storage(format!(
+                "forced changeset publish failure for {device_id}/{seq}"
+            )));
+        }
         let key = format!("changes/{device_id}/{seq}");
         self.objects.lock().unwrap().insert(key, data);
         Ok(())
@@ -693,6 +713,16 @@ impl SyncStorage for MockSyncStorage {
             .get(&key)
             .cloned()
             .ok_or(StorageError::NotFound(key))
+    }
+
+    async fn blob_exists(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let key = blob_key(namespace, id, cloud_path);
+        Ok(self.objects.lock().unwrap().contains_key(&key))
     }
 
     async fn read_blob_range(

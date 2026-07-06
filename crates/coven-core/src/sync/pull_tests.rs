@@ -513,6 +513,7 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
 
     cycle::push_changeset(
         &storage,
+        &db1,
         "dev1",
         outgoing.seq,
         outgoing.packed,
@@ -661,6 +662,17 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     .await;
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
+    storage
+        .put_blob(
+            "audio",
+            "audio1",
+            crate::blob::ResolvedScope::Master,
+            None,
+            b"AUDIO-PAYLOAD".to_vec(),
+        )
+        .await
+        .expect("plant audio blob before publish");
+
     // Drive the real push path. The inline push uploads only host-provided blobs, so
     // the user-provided audio is NOT uploaded here — it goes via the durable outbox in
     // the make_remote flow, not this changeset-blob upload.
@@ -684,6 +696,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
+        &db1,
         "dev1",
         outgoing.seq,
         outgoing.packed,
@@ -694,26 +707,14 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     .expect("push_changeset");
 
     // The user-provided blob was NOT uploaded by the inline push.
-    assert!(
+    assert_eq!(
         storage
             .get_blob("audio", "audio1", crate::blob::ResolvedScope::Master, None)
             .await
-            .is_err(),
-        "the inline push must not upload a user-provided blob",
+            .expect("audio blob remains present"),
+        b"AUDIO-PAYLOAD",
+        "the inline push must not rewrite a user-provided blob",
     );
-
-    // The blob reaches the cloud by some other path (the outbox, in the real flow);
-    // plant it so the puller could fetch it, to prove the pull deliberately skips it.
-    storage
-        .put_blob(
-            "audio",
-            "audio1",
-            crate::blob::ResolvedScope::Master,
-            None,
-            b"AUDIO-PAYLOAD".to_vec(),
-        )
-        .await
-        .expect("plant audio blob");
 
     // Destination pulls.
     let db2 = open_test_db_with_blob(BlobDecl::new(
@@ -740,6 +741,255 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         !ld.pinned_blob_path("audio", "audio1").unwrap().exists()
             && !ld.cache_blob_path("audio", "audio1").unwrap().exists(),
         "a CacheLazy blob must NOT be downloaded on pull — it stays in the cloud for on-demand fetch",
+    );
+}
+
+#[tokio::test]
+async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
+    let (tmp, ld) = temp_library_dir();
+    let external = tmp.path().join("audio.flac");
+    std::fs::write(&external, b"local audio").expect("write external file");
+    db.register_external_blob("audio1", "audio", &external, 11)
+        .await
+        .expect("register external ref");
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db.take_changeset().await.expect("capture outgoing");
+
+    let result = service::sync(
+        "dev1",
+        &db,
+        &test_synced_tables_with_blob(BlobDecl::new(
+            "audio",
+            Provenance::UserProvided,
+            CacheFill::CacheLazy,
+        )),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &UserKeypair::generate(),
+        &ld,
+    )
+    .await;
+    let err = match result {
+        Err(err) => err,
+        Ok(_) => panic!("local user-provided blob must abort publish"),
+    };
+
+    assert!(
+        matches!(err, SyncCycleError::BlobMissing(_)),
+        "local user-provided blob must fail as BlobMissing: {err:?}",
+    );
+    assert!(
+        storage.list_heads().await.expect("list heads").is_empty(),
+        "sync returned no outgoing changeset for a caller to publish"
+    );
+}
+
+#[tokio::test]
+async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db.take_changeset().await.expect("capture outgoing");
+    let (_tmp, ld) = temp_library_dir();
+
+    let result = service::sync(
+        "dev1",
+        &db,
+        &test_synced_tables_with_blob(BlobDecl::new(
+            "audio",
+            Provenance::UserProvided,
+            CacheFill::CacheLazy,
+        )),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &UserKeypair::generate(),
+        &ld,
+    )
+    .await;
+    let err = match result {
+        Err(err) => err,
+        Ok(_) => panic!("missing remote user-provided blob must abort publish"),
+    };
+
+    assert!(
+        matches!(err, SyncCycleError::BlobMissing(_)),
+        "missing remote user-provided blob must fail as BlobMissing: {err:?}",
+    );
+    assert!(
+        storage.list_heads().await.expect("list heads").is_empty(),
+        "sync returned no outgoing changeset for a caller to publish"
+    );
+}
+
+#[tokio::test]
+async fn present_remote_user_provided_blob_can_publish_changeset() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
+    storage
+        .put_blob(
+            "audio",
+            "audio1",
+            crate::blob::ResolvedScope::Master,
+            None,
+            b"AUDIO-PAYLOAD".to_vec(),
+        )
+        .await
+        .expect("plant remote blob");
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let outgoing = db.take_changeset().await.expect("capture outgoing");
+    let (_tmp, ld) = temp_library_dir();
+
+    let result = service::sync(
+        "dev1",
+        &db,
+        &test_synced_tables_with_blob(BlobDecl::new(
+            "audio",
+            Provenance::UserProvided,
+            CacheFill::CacheLazy,
+        )),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &UserKeypair::generate(),
+        &ld,
+    )
+    .await
+    .expect("remote user-provided blob is publishable");
+    let outgoing = result.outgoing.expect("outgoing changeset");
+    cycle::push_changeset(
+        &storage,
+        &db,
+        "dev1",
+        outgoing.seq,
+        outgoing.packed,
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .await
+    .expect("push changeset");
+
+    assert_eq!(
+        storage.list_heads().await.expect("list heads")[0].seq,
+        1,
+        "publish advances the head after the remote blob exists",
+    );
+}
+
+#[tokio::test]
+async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    let _ = db.take_changeset().await.expect("clear insert changeset");
+    exec(&db, "DELETE FROM note_photos WHERE id = 'audio1'").await;
+    let outgoing = db.take_changeset().await.expect("capture delete");
+    let (_tmp, ld) = temp_library_dir();
+
+    let result = service::sync(
+        "dev1",
+        &db,
+        &test_synced_tables_with_blob(BlobDecl::new(
+            "audio",
+            Provenance::UserProvided,
+            CacheFill::CacheLazy,
+        )),
+        outgoing,
+        0,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &UserKeypair::generate(),
+        &ld,
+    )
+    .await
+    .expect("delete does not require the removed blob to exist remotely");
+    let outgoing = result.outgoing.expect("outgoing delete changeset");
+    cycle::push_changeset(
+        &storage,
+        &db,
+        "dev1",
+        outgoing.seq,
+        outgoing.packed,
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .await
+    .expect("push delete changeset");
+
+    assert_eq!(
+        storage.list_heads().await.expect("list heads")[0].seq,
+        1,
+        "delete publishes even when the removed blob is absent remotely",
     );
 }
 
@@ -858,6 +1108,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
+        &db1,
         "dev1",
         outgoing.seq,
         outgoing.packed,
@@ -963,6 +1214,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let outgoing = result.outgoing.expect("outgoing changeset");
     cycle::push_changeset(
         &storage,
+        &db1,
         "dev1",
         outgoing.seq,
         outgoing.packed,

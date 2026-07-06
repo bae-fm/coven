@@ -21,6 +21,7 @@ mod item_key_tests;
 pub mod loop_policy;
 pub mod membership;
 pub mod membership_ops;
+pub(crate) mod publish_blobs;
 pub mod pull;
 #[cfg(test)]
 mod pull_tests;

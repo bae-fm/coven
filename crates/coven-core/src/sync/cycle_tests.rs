@@ -578,6 +578,14 @@ impl SyncStorage for HostWriteInjector {
     ) -> Result<Vec<u8>, StorageError> {
         self.inner.get_blob(namespace, id, scope, cloud_path).await
     }
+    async fn blob_exists(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        self.inner.blob_exists(namespace, id, cloud_path).await
+    }
     async fn read_blob_range(
         &self,
         namespace: &str,
@@ -880,6 +888,94 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     assert!(
         storage.exists("photos/hponly").await.expect("exists check"),
         "the retried captured changeset uploads the host-provided blob"
+    );
+}
+
+#[tokio::test]
+async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [10u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "audio",
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+    ));
+    storage
+        .put_blob(
+            "audio",
+            "audio1",
+            crate::blob::ResolvedScope::Master,
+            None,
+            b"AUDIO".to_vec(),
+        )
+        .await
+        .expect("plant remote user-provided blob");
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+
+    storage.fail_next_changeset_puts(1);
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        cycle::read_staged_changeset(&ld).await.is_some(),
+        "the packed changeset remains staged after the publish write fails"
+    );
+    assert!(
+        storage.get_changeset("M", 1).await.is_err(),
+        "the failed publish did not write the changeset"
+    );
+
+    storage.delete_blob_object("audio", "audio1").await;
+    let retry = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await;
+    let err = match retry {
+        Err(err) => err,
+        Ok(_) => panic!("staged retry must recheck the remote user-provided blob"),
+    };
+
+    assert!(
+        err.contains("user-provided blob audio/audio1 is absent from remote storage"),
+        "staged retry surfaces the missing blob: {err}",
+    );
+    assert!(
+        storage.get_changeset("M", 1).await.is_err(),
+        "the retry aborts before writing the changeset"
+    );
+    assert!(
+        storage
+            .list_heads()
+            .await
+            .expect("list heads")
+            .into_iter()
+            .all(|head| head.seq == 0),
+        "the retry aborts before advancing a head"
     );
 }
 

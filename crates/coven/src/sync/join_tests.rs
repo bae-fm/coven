@@ -28,7 +28,8 @@ use crate::sync::hlc::Hlc;
 use crate::sync::join::{join_from_invite_code, open_db_and_pull, JoinError};
 use crate::sync::session::BlobDecl;
 use crate::sync::snapshot::{
-    bootstrap_from_snapshot, create_snapshot, push_snapshot, SNAPSHOT_BLOB_BACKFILL_PENDING,
+    bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
+    SNAPSHOT_BLOB_BACKFILL_PENDING,
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
@@ -198,6 +199,10 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         db_a.schema_version(),
         &UserKeypair::generate(),
         &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_a,
+            blobs: &[],
+        },
     )
     .await
     .expect("push empty snapshot");
@@ -337,6 +342,10 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         db_a.schema_version(),
         &UserKeypair::generate(),
         &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_a,
+            blobs: &[],
+        },
     )
     .await
     .expect("push snapshot");
@@ -459,6 +468,10 @@ async fn snapshot_blob_backfill_retries_on_a_later_cycle() {
         db_a.schema_version(),
         &UserKeypair::generate(),
         &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_a,
+            blobs: &[],
+        },
     )
     .await
     .expect("push snapshot");

@@ -27,6 +27,9 @@ use crate::sync::session::SyncedTable;
 use super::envelope;
 use super::gate;
 use super::membership::{self, MembershipCoord};
+use super::publish_blobs::{
+    ensure_publishable_blobs, publish_blobs_from_changes, PublishBlobError,
+};
 use super::pull::{self, PullResult};
 use super::push::OutgoingChangeset;
 use super::storage::SyncStorage;
@@ -161,6 +164,7 @@ pub async fn sync(
     if let Some(ref cs) = outgoing_cs {
         let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
         let blob_decls = db.blob_decls();
+        let publish_blobs = publish_blobs_from_changes(&blob_decls, &changes);
         let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes);
         let make_remote_intents = make_remote_intents_for_blobs(db, &host_blobs).await?;
         let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
@@ -187,6 +191,9 @@ pub async fn sync(
         if !consumed_intents.is_empty() {
             delete_make_remote_intents(db, consumed_intents).await?;
         }
+        ensure_publishable_blobs(db, storage, &publish_blobs)
+            .await
+            .map_err(SyncCycleError::from)?;
     }
 
     // Bind the outgoing changeset to the membership entry that authorizes us
@@ -604,3 +611,19 @@ impl std::fmt::Display for SyncCycleError {
 }
 
 impl std::error::Error for SyncCycleError {}
+
+impl From<PublishBlobError> for SyncCycleError {
+    fn from(e: PublishBlobError) -> Self {
+        match e {
+            PublishBlobError::LocalUserProvided { .. } | PublishBlobError::MissingRemote { .. } => {
+                SyncCycleError::BlobMissing(e.to_string())
+            }
+            PublishBlobError::PackedChangeset(_) | PublishBlobError::ChangesetScan(_) => {
+                SyncCycleError::AssetScan(e.to_string())
+            }
+            PublishBlobError::ExternalLookup { .. } | PublishBlobError::RemoteCheck { .. } => {
+                SyncCycleError::AssetUpload(e.to_string())
+            }
+        }
+    }
+}

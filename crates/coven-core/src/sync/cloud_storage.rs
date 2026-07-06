@@ -581,6 +581,16 @@ impl SyncStorage for CloudSyncStorage {
             .await
     }
 
+    async fn blob_exists(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        self.home.exists(&key).await.map_err(StorageError::from)
+    }
+
     async fn read_blob_range(
         &self,
         namespace: &str,

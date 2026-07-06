@@ -22,7 +22,9 @@ use crate::sync::cycle::push_changeset;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::pull::pull_changes;
 use crate::sync::session::{BlobDecl, BlobScopeSpec};
-use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot, push_snapshot};
+use crate::sync::snapshot::{
+    bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
+};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     capture_bytes, exec, temp_library_dir, test_migrations, test_synced_tables,
@@ -211,9 +213,17 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
         signature: None,
     };
     let packed = envelope::pack(&env, &changeset);
-    push_changeset(storage, "dev-a", 1, packed, None, "2026-01-01T00:00:00Z")
-        .await
-        .expect("publish device A's changeset");
+    push_changeset(
+        storage,
+        db_a,
+        "dev-a",
+        1,
+        packed,
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .await
+    .expect("publish device A's changeset");
 }
 
 /// Changeset-replay multi-device join, through the REAL pull path: device A mints
@@ -382,6 +392,10 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
         db_a.schema_version(),
         &UserKeypair::generate(),
         &crate::clock::SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_a,
+            blobs: &[],
+        },
     )
     .await
     .expect("push snapshot");

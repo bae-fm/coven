@@ -178,6 +178,17 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError>;
 
+    /// Check whether a blob object exists at the same key [`Self::put_blob`] and
+    /// [`Self::get_blob`] use. This does not read or open the blob; publish
+    /// preflights use it to prove a row about to be published will not point at a
+    /// missing remote object.
+    async fn blob_exists(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<bool, StorageError>;
+
     /// Serve `len` plaintext bytes of a blob starting at `offset`, without
     /// downloading the whole object — the ranged sibling of [`Self::get_blob`].
     /// Keyed the same way `get_blob` keys it (hashed shard or `cloud_path`), and

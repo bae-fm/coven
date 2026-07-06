@@ -975,6 +975,12 @@ pub(crate) fn host_provided_blobs(
 ) -> Vec<crate::blob::BlobRef> {
     changes
         .iter()
+        .filter(|change| {
+            matches!(
+                change.op,
+                crate::changeset::ChangeOp::Insert | crate::changeset::ChangeOp::Update
+            )
+        })
         .filter_map(|change| blob_decls.ref_from_change(change))
         .filter(|blob| blob.provenance == Provenance::HostProvided)
         .collect()

@@ -23,6 +23,7 @@ use crate::storage::cloud::CloudHome;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
+use super::publish_blobs::{ensure_publishable_changeset_blobs, PublishBlobError};
 use super::storage::SyncStorage;
 
 /// Result of a single sync cycle.
@@ -137,15 +138,26 @@ where
         .map_err(|e| format!("Corrupt {key} value: {e}"))
 }
 
+/// Errors from publishing a changeset and its head.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ChangesetPublishError {
+    #[error("{0}")]
+    BlobPreflight(#[from] PublishBlobError),
+    #[error("{0}")]
+    Storage(#[from] super::storage::StorageError),
+}
+
 /// Push a changeset to the sync storage and update the device head.
-pub async fn push_changeset(
+pub(crate) async fn push_changeset(
     storage: &dyn SyncStorage,
+    db: &Database,
     device_id: &str,
     seq: u64,
     packed: Vec<u8>,
     snapshot_seq: Option<u64>,
     timestamp: &str,
-) -> Result<(), super::storage::StorageError> {
+) -> Result<(), ChangesetPublishError> {
+    ensure_publishable_changeset_blobs(db, storage, &packed).await?;
     storage.put_changeset(device_id, seq, packed).await?;
     storage
         .put_head(device_id, seq, snapshot_seq, timestamp)
@@ -299,6 +311,7 @@ pub async fn run_single_sync_cycle(
 
             match push_changeset(
                 storage,
+                db,
                 device_id,
                 seq,
                 staged_data,
@@ -397,6 +410,7 @@ pub async fn run_single_sync_cycle(
 
         match push_changeset(
             storage,
+            db,
             device_id,
             seq,
             outgoing.packed.clone(),
@@ -677,6 +691,10 @@ pub async fn run_single_sync_cycle(
                     db.schema_version(),
                     user_keypair,
                     clock,
+                    super::snapshot::SnapshotBlobPreflight {
+                        db,
+                        blobs: &snapshot.publish_blobs,
+                    },
                 )
                 .await
                 {

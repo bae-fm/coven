@@ -38,10 +38,12 @@ use super::membership_ops::{
     authorize_loaded_membership_author, authorize_membership_author, load_membership_chain,
     MembershipAuthorAuthorizationError, MembershipAuthorRequirement,
 };
+use super::publish_blobs::ensure_publishable_blobs;
 use super::session::SyncedTable;
 use super::signed_control::{AckJson, SnapshotMetaJson, SnapshotPointerJson};
 use super::storage::{StorageError, SyncStorage};
 use crate::blob::{BlobRef, Provenance};
+use crate::database::Database;
 use crate::keys::UserKeypair;
 
 /// Default: create a snapshot after this many changesets since the last one.
@@ -53,6 +55,12 @@ const SNAPSHOT_HOURS_THRESHOLD: u64 = 24;
 pub(crate) struct CreatedSnapshot {
     pub encrypted: Vec<u8>,
     pub host_blobs: Vec<BlobRef>,
+    pub publish_blobs: Vec<BlobRef>,
+}
+
+pub struct SnapshotBlobPreflight<'a> {
+    pub db: &'a Database,
+    pub blobs: &'a [BlobRef],
 }
 
 /// Error type for snapshot operations.
@@ -120,6 +128,8 @@ pub enum SnapshotError {
         snapshot_version: u32,
         supported: u32,
     },
+    #[error("snapshot blob preflight failed: {0}")]
+    PublishBlobs(String),
 }
 
 fn prepare_snapshot_path(temp_dir: &Path) -> Result<std::path::PathBuf, SnapshotError> {
@@ -225,13 +235,18 @@ pub(crate) fn create_snapshot_with_host_blobs(
         return Err(e);
     }
 
-    let host_blobs = match snapshot_host_blobs(&snapshot_path, tables) {
+    let publish_blobs = match snapshot_publish_blobs(&snapshot_path, tables) {
         Ok(blobs) => blobs,
         Err(e) => {
             cleanup_snapshot_path(&snapshot_path);
             return Err(e);
         }
     };
+    let host_blobs = publish_blobs
+        .iter()
+        .filter(|blob| blob.provenance == Provenance::HostProvided)
+        .cloned()
+        .collect();
 
     // Read the cleared snapshot file and seal it for storage.
     let plaintext = read_and_remove_snapshot(&snapshot_path)?;
@@ -248,10 +263,14 @@ pub(crate) fn create_snapshot_with_host_blobs(
     Ok(CreatedSnapshot {
         encrypted: sealed,
         host_blobs,
+        publish_blobs,
     })
 }
 
-fn snapshot_host_blobs(path: &Path, tables: &[SyncedTable]) -> Result<Vec<BlobRef>, SnapshotError> {
+fn snapshot_publish_blobs(
+    path: &Path,
+    tables: &[SyncedTable],
+) -> Result<Vec<BlobRef>, SnapshotError> {
     let conn = Connection::open(path)
         .map_err(|e| SnapshotError::ClearFailed(format!("failed to open snapshot copy: {e}")))?;
     let decls = crate::blob::decl::BlobDecls::from_tables(&conn, tables)
@@ -262,10 +281,7 @@ fn snapshot_host_blobs(path: &Path, tables: &[SyncedTable]) -> Result<Vec<BlobRe
         .map_err(|e| SnapshotError::ClearFailed(e.to_string()))
         .map(|refs| {
             refs.into_iter()
-                .filter(|blob| {
-                    blob.provenance == Provenance::HostProvided
-                        && seen.insert((blob.namespace.clone(), blob.id.clone()))
-                })
+                .filter(|blob| seen.insert((blob.namespace.clone(), blob.id.clone())))
                 .collect()
         })
 }
@@ -389,6 +405,7 @@ pub async fn push_snapshot(
     schema_version: u32,
     keypair: &UserKeypair,
     clock: &dyn crate::clock::Clock,
+    blob_preflight: SnapshotBlobPreflight<'_>,
 ) -> Result<(), SnapshotError> {
     let size = sealed_snapshot.len();
 
@@ -402,6 +419,12 @@ pub async fn push_snapshot(
     // downloads the generation re-hashes those same bytes and detects a
     // substituted image.
     let db_hash = snapshot_db_hash(&sealed_snapshot);
+
+    if !blob_preflight.blobs.is_empty() {
+        ensure_publishable_blobs(blob_preflight.db, storage, blob_preflight.blobs)
+            .await
+            .map_err(|e| SnapshotError::PublishBlobs(e.to_string()))?;
+    }
 
     // Write the DB image first, before anything lists or points at this
     // generation. A generation becomes a sweep/reader candidate only once its meta
@@ -470,6 +493,38 @@ pub async fn push_snapshot(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn push_snapshot_without_blob_refs(
+    storage: &dyn SyncStorage,
+    library_id: &str,
+    sealed_snapshot: Vec<u8>,
+    device_id: &str,
+    applied_cursors: HashMap<String, u64>,
+    current_seq: u64,
+    schema_version: u32,
+    keypair: &UserKeypair,
+    clock: &dyn crate::clock::Clock,
+) -> Result<(), SnapshotError> {
+    let db = crate::sync::test_helpers::open_test_db();
+    push_snapshot(
+        storage,
+        library_id,
+        sealed_snapshot,
+        device_id,
+        applied_cursors,
+        current_seq,
+        schema_version,
+        keypair,
+        clock,
+        SnapshotBlobPreflight {
+            db: &db,
+            blobs: &[],
+        },
+    )
+    .await
 }
 
 /// Reclaim superseded snapshot generations that THIS device published.
@@ -1115,9 +1170,15 @@ async fn publish_signed_generation<I, K>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blob::{local_files, CacheFill, ResolvedScope};
+    use crate::database::DbError;
     use crate::encryption::EncryptionService;
     use crate::sync::apply::apply_changeset_lww;
-    use crate::sync::test_helpers::MockSyncStorage;
+    use crate::sync::session::BlobDecl;
+    use crate::sync::test_helpers::{
+        open_test_db_with_user_and_host_blobs, temp_library_dir,
+        test_synced_tables_with_user_and_host_blobs, MockSyncStorage,
+    };
     use rusqlite::session::Session as RqSession;
     use rusqlite::{Connection, OptionalExtension};
     use std::collections::HashMap;
@@ -1387,7 +1448,7 @@ mod tests {
             create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
         let storage = MockSyncStorage::new();
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             encrypted,
@@ -1452,7 +1513,7 @@ mod tests {
 
         // Publish the generation stamped at synced-schema version 2.
         let storage = MockSyncStorage::new();
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             encrypted,
@@ -1539,7 +1600,7 @@ mod tests {
             create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
         let storage = MockSyncStorage::new();
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             encrypted,
@@ -1661,7 +1722,7 @@ mod tests {
             create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snapshot");
 
         let storage = MockSyncStorage::new();
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             encrypted,
@@ -1721,7 +1782,7 @@ mod tests {
         // The snapshotting device has applied dev-2 up to seq 15.
         let applied = HashMap::from([("dev-2".to_string(), 15)]);
 
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             data.clone(),
@@ -1753,6 +1814,185 @@ mod tests {
         assert_eq!(meta.cursors.get("dev-1"), Some(&42));
         assert_eq!(meta.cursors.get("dev-2"), Some(&15));
         assert_eq!(meta.cursors.len(), 2);
+    }
+
+    fn user_blob_decl() -> BlobDecl {
+        BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy)
+    }
+
+    fn host_blob_decl() -> BlobDecl {
+        BlobDecl::new("covers", Provenance::HostProvided, CacheFill::CacheEager)
+    }
+
+    async fn snapshot_from_blob_db(
+        db: &Database,
+        temp_dir: &Path,
+        enc: &CloudCipher,
+    ) -> CreatedSnapshot {
+        let tables =
+            test_synced_tables_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
+        let temp_dir = temp_dir.to_path_buf();
+        let enc = enc.clone();
+        db.call(move |conn| {
+            create_snapshot_with_host_blobs(conn, &temp_dir, &tables, &enc)
+                .map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("create blob-bearing snapshot")
+    }
+
+    async fn insert_snapshot_blob_rows(db: &Database, include_host_blob: bool) {
+        crate::sync::test_helpers::exec(
+            db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
+             INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+             VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+        )
+        .await;
+        if include_host_blob {
+            crate::sync::test_helpers::exec(
+                db,
+                "INSERT INTO note_covers (id, note_id, _updated_at, created_at) \
+                 VALUES ('cover1', 'n1', '0000000001000-0000-dev1', '2026-01-01')",
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_local_user_provided_blob_aborts_before_publish_markers() {
+        let db = open_test_db_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
+        let (tmp, _ld) = temp_library_dir();
+        let external = tmp.path().join("audio.flac");
+        std::fs::write(&external, b"local audio").expect("write external file");
+        db.register_external_blob("audio1", "audio", &external, 11)
+            .await
+            .expect("register external ref");
+        insert_snapshot_blob_rows(&db, false).await;
+
+        let enc = test_encryption();
+        let snapshot = snapshot_from_blob_db(&db, tmp.path(), &enc).await;
+        let storage = MockSyncStorage::new();
+
+        let err = push_snapshot(
+            &storage,
+            TEST_LIBRARY_ID,
+            snapshot.encrypted,
+            "dev-1",
+            HashMap::new(),
+            7,
+            db.schema_version(),
+            &test_keypair(),
+            &crate::clock::SystemClock,
+            SnapshotBlobPreflight {
+                db: &db,
+                blobs: &snapshot.publish_blobs,
+            },
+        )
+        .await
+        .expect_err("local user-provided blob must abort snapshot publish");
+
+        assert!(
+            matches!(err, SnapshotError::PublishBlobs(_)),
+            "local user-provided blob must fail during snapshot preflight: {err:?}",
+        );
+        assert!(storage.current_snapshot_db().await.is_none());
+        assert!(storage.list_heads().await.expect("list heads").is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_missing_remote_user_provided_blob_aborts_before_publish_markers() {
+        let db = open_test_db_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
+        let (tmp, _ld) = temp_library_dir();
+        insert_snapshot_blob_rows(&db, false).await;
+
+        let enc = test_encryption();
+        let snapshot = snapshot_from_blob_db(&db, tmp.path(), &enc).await;
+        let storage = MockSyncStorage::new();
+
+        let err = push_snapshot(
+            &storage,
+            TEST_LIBRARY_ID,
+            snapshot.encrypted,
+            "dev-1",
+            HashMap::new(),
+            7,
+            db.schema_version(),
+            &test_keypair(),
+            &crate::clock::SystemClock,
+            SnapshotBlobPreflight {
+                db: &db,
+                blobs: &snapshot.publish_blobs,
+            },
+        )
+        .await
+        .expect_err("missing remote user-provided blob must abort snapshot publish");
+
+        assert!(
+            matches!(err, SnapshotError::PublishBlobs(_)),
+            "missing remote user-provided blob must fail during snapshot preflight: {err:?}",
+        );
+        assert!(storage.current_snapshot_db().await.is_none());
+        assert!(storage.list_heads().await.expect("list heads").is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_remote_user_and_uploaded_host_blobs_publishes() {
+        let db = open_test_db_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
+        let (tmp, ld) = temp_library_dir();
+        insert_snapshot_blob_rows(&db, true).await;
+        local_files::store(&ld, "covers", "cover1", b"COVER")
+            .await
+            .expect("store host-provided cover");
+
+        let enc = test_encryption();
+        let snapshot = snapshot_from_blob_db(&db, tmp.path(), &enc).await;
+        let storage = MockSyncStorage::new();
+        storage
+            .put_blob(
+                "audio",
+                "audio1",
+                ResolvedScope::Master,
+                None,
+                b"AUDIO".to_vec(),
+            )
+            .await
+            .expect("plant remote user-provided blob");
+        crate::sync::service::upload_snapshot_host_blobs(&db, &storage, &ld, &snapshot.host_blobs)
+            .await
+            .expect("upload host-provided snapshot blobs");
+        assert_eq!(
+            storage
+                .get_blob("covers", "cover1", ResolvedScope::Master, None)
+                .await
+                .expect("host cover uploaded"),
+            b"COVER",
+        );
+
+        push_snapshot(
+            &storage,
+            TEST_LIBRARY_ID,
+            snapshot.encrypted.clone(),
+            "dev-1",
+            HashMap::new(),
+            7,
+            db.schema_version(),
+            &test_keypair(),
+            &crate::clock::SystemClock,
+            SnapshotBlobPreflight {
+                db: &db,
+                blobs: &snapshot.publish_blobs,
+            },
+        )
+        .await
+        .expect("snapshot is publishable once user and host blobs are remote");
+
+        assert_eq!(
+            storage.current_snapshot_db().await,
+            Some(snapshot.encrypted)
+        );
+        assert_eq!(storage.list_heads().await.expect("list heads")[0].seq, 7);
     }
 
     // ---- bootstrap_from_snapshot tests ----
@@ -1834,7 +2074,7 @@ mod tests {
 
         let encrypted =
             create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snapshot");
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             encrypted,
@@ -2019,7 +2259,7 @@ mod tests {
              VALUES ('n1', 'old', 1, '0000000001000-0000-self', '2026-01-01')",
         );
         let snap_a = create_snapshot(&db_a, temp.path(), &synced_tables(), &enc).expect("snap A");
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             snap_a,
@@ -2459,7 +2699,7 @@ mod tests {
 
         let kp = test_keypair();
         let applied = HashMap::from([("M".to_string(), k)]);
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             snapshot,
@@ -2532,7 +2772,7 @@ mod tests {
         let db_owner = synced_conn();
         apply(&db_owner, &cs1);
         let snap1 = create_snapshot(&db_owner, temp.path(), &synced_tables(), &enc).expect("snap1");
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             snap1,
@@ -2591,7 +2831,7 @@ mod tests {
 
         // B snapshots its now-current state with honest cursors {owner: 2}.
         let snap2 = create_snapshot(&db_b, temp.path(), &synced_tables(), &enc).expect("snap2");
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             snap2,
@@ -2640,7 +2880,7 @@ mod tests {
 
         // Snapshot honestly covers M only through seq 2.
         let applied = HashMap::from([("M".to_string(), 2)]);
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             vec![0u8; 4],
@@ -2680,7 +2920,7 @@ mod tests {
         let snap = create_snapshot(&db, temp.path(), &synced_tables(), &enc).expect("snap");
 
         let applied = HashMap::from([("M".to_string(), 7)]);
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             snap,
@@ -2712,7 +2952,7 @@ mod tests {
 
         // The snapshotting device B has only applied M through seq 4.
         let applied = HashMap::from([("M".to_string(), 4)]);
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             vec![0u8; 4],
@@ -2782,7 +3022,7 @@ mod authorization_tests {
         let storage = MockSyncStorage::new();
         found_chain(&storage, &owner).await;
 
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -2833,7 +3073,7 @@ mod authorization_tests {
         // The owner publishes a generation with valid signatures, db, and pointer —
         // but bound to library X.
         let library_x = "library-x";
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             library_x,
             fake_snapshot(),
@@ -2888,7 +3128,7 @@ mod authorization_tests {
         // The outsider forges a fully-signed snapshot+meta: valid signature, valid
         // DB hash — only the AUTHOR is unauthorized. This is exactly what a
         // bucket-write-capable non-member can produce.
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -2940,7 +3180,7 @@ mod authorization_tests {
         found_chain(&storage, &owner).await;
 
         // The owner publishes a real, member-signed generation at seq 1.
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3011,7 +3251,7 @@ mod authorization_tests {
             .await
             .unwrap();
 
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3070,7 +3310,7 @@ mod authorization_tests {
             .unwrap();
 
         // The owner's snapshot is adopted.
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3101,7 +3341,7 @@ mod authorization_tests {
         // The Member overwrites the snapshot with one it signs. Its changesets are
         // accepted (it is write-capable), but a catalog image is owner-only — so
         // bootstrap refuses, the pointer's author judged not a current Owner.
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3143,7 +3383,7 @@ mod authorization_tests {
         let storage = MockSyncStorage::new();
         found_chain(&storage, &owner).await;
 
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3203,7 +3443,7 @@ mod authorization_tests {
         found_chain(&storage, &owner).await;
 
         // A complete, self-consistent generation at seq 1 (meta + db + pointer agree).
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3257,7 +3497,7 @@ mod authorization_tests {
         let storage = MockSyncStorage::new();
         found_chain(&storage, &owner).await;
 
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3318,7 +3558,7 @@ mod authorization_tests {
         found_chain(&storage, &owner).await;
 
         // Member-signed snapshot: adopted even with no pinned owner.
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3341,7 +3581,7 @@ mod authorization_tests {
 
         // Now an outsider overwrites the snapshot. Even with no pinned owner, the
         // author is judged against the chain and refused.
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3377,7 +3617,7 @@ mod authorization_tests {
         let storage = MockSyncStorage::new();
         found_chain(&storage, &owner).await;
 
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3413,7 +3653,7 @@ mod authorization_tests {
         let storage = MockSyncStorage::new();
         // Deliberately do NOT found a chain: the listing is empty.
 
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
@@ -3465,7 +3705,7 @@ mod authorization_tests {
 
         // The snapshot is signed by the chain's own founder — a valid member of the
         // chain that exists, the strongest forge a takeover can mount.
-        push_snapshot(
+        push_snapshot_without_blob_refs(
             &storage,
             TEST_LIBRARY_ID,
             fake_snapshot(),
