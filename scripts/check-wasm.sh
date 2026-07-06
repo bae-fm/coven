@@ -10,11 +10,6 @@
 # Pass-through args go to `cargo check`, e.g. `scripts/check-wasm.sh --tests`.
 set -eu
 
-if [ "$(uname -s)" = "Darwin" ]; then
-    llvm_prefix="$(brew --prefix llvm)"
-    CC_wasm32_unknown_unknown="$llvm_prefix/bin/clang"
-    AR_wasm32_unknown_unknown="$llvm_prefix/bin/llvm-ar"
-    export CC_wasm32_unknown_unknown AR_wasm32_unknown_unknown
-fi
+. "$(dirname -- "$0")/wasm-toolchain-env.sh"
 
 exec cargo check -p coven-wasm --target wasm32-unknown-unknown "$@"
