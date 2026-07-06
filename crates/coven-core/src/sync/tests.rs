@@ -269,3 +269,31 @@ async fn delete_applies() {
     apply_to_db(&target, &cs, &test_synced_tables()).await;
     assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
 }
+
+#[tokio::test]
+async fn concurrent_delete_and_update_converge_to_deleted() {
+    let src = open_test_db();
+    exec(
+        &src,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'title0', 'body0', '0000000005000-0000-d', '2026-01-01')",
+    )
+    .await;
+    let _ = capture_bytes(&src, &[]).await;
+    let cs = capture_bytes(&src, &["DELETE FROM notes WHERE id = 'n1'"]).await;
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'title0', 'body0', '0000000005000-0000-d', '2026-01-01');
+         UPDATE notes \
+         SET title = 'local update', _updated_at = '0000000020000-0000-u' \
+         WHERE id = 'n1';",
+    )
+    .await;
+
+    apply_to_db(&target, &cs, &test_synced_tables()).await;
+
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+}

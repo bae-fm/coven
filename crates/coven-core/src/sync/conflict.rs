@@ -113,7 +113,8 @@ pub fn compare_lww_stamps(
 /// The production LWW decision for one conflicting changeset row.
 ///
 /// Rules:
-/// - **DATA** (same row, both sides edited): compare `_updated_at`. Newer wins.
+/// - **DATA** (same row, both sides edited): incoming DELETE removes the row;
+///   otherwise compare `_updated_at`. Newer wins.
 /// - **NOTFOUND** (row deleted locally, incoming UPDATE): OMIT (delete wins).
 /// - **CONFLICT** (row exists, incoming INSERT): compare `_updated_at`. Newer wins.
 /// - **CONSTRAINT** (uniqueness/other constraint): OMIT and flag for retry.
@@ -125,12 +126,13 @@ pub fn compare_lww_stamps(
 /// records — `item.new_value(uat)` for an INSERT/UPDATE, `item.old_value(uat)` for
 /// a DELETE (which has no "new" side) — and `item.conflict(uat)` is the existing
 /// local one; either can be absent (an unchanged column in an UPDATE) → `None` →
-/// OMIT (keep local). So a DELETE wins the conflict iff its recorded stamp is newer
-/// than the local row's, the same LWW rule as every other op. Both are parsed
-/// as HLC [`Timestamp`]s; an unparseable value keeps local. A grossly-future
-/// incoming stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`]
-/// — is refused (kept local) so a broken clock can't win every conflict. `fk_flag`
-/// is set on a CONSTRAINT so the caller can retry the changeset once its missing
+/// OMIT (keep local). Incoming DELETE conflicts are remove-wins because a hard
+/// delete carries only the row's pre-delete stamp and cannot be reconstructed
+/// from a later partial UPDATE. Non-delete conflicts parse both stamps as HLC
+/// [`Timestamp`]s; an unparseable value keeps local. A grossly-future incoming
+/// stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`] — is
+/// refused (kept local) so a broken clock can't win every conflict. `fk_flag` is
+/// set on a CONSTRAINT so the caller can retry the changeset once its missing
 /// parents have landed.
 pub fn lww_conflict_handler(
     conflict_type: ConflictType,
@@ -173,13 +175,22 @@ pub fn lww_conflict_handler(
             // peer's copy unapplied — a zombie (the exact strand gate retract fixes,
             // where the retracted root's flip bumped its gate column + `_updated_at`
             // so its synthetic DELETE no longer matches the peer's pre-flip row).
-            let incoming_is_delete =
-                matches!(item.op().map(|o| o.code()), Ok(Action::SQLITE_DELETE));
-            let incoming_raw = if incoming_is_delete {
-                item.old_value(uat)
-            } else {
-                item.new_value(uat)
+            let incoming_code = match item.op() {
+                Ok(op) => op.code(),
+                Err(error) => {
+                    warn!(
+                        table,
+                        error = %error,
+                        "failed to read changeset operation for conflict resolution; aborting apply"
+                    );
+                    return ConflictAction::SQLITE_CHANGESET_ABORT;
+                }
             };
+            let incoming_is_delete = incoming_code == Action::SQLITE_DELETE;
+            if incoming_is_delete {
+                return ConflictAction::SQLITE_CHANGESET_REPLACE;
+            }
+            let incoming_raw = item.new_value(uat);
             let incoming = read_stamp(incoming_raw, "incoming");
             let local = read_stamp(item.conflict(uat), "local");
 
