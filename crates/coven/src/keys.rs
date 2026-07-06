@@ -27,7 +27,9 @@ fn map_keyring_error(e: keyring_core::Error) -> KeyError {
 pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
     let entry = keyring_core::Entry::new(keyring_service(), account).map_err(map_keyring_error)?;
     match entry.get_password() {
-        Ok(p) if p.is_empty() => Ok(None),
+        Ok(p) if p.is_empty() => Err(KeyError::Persistence(format!(
+            "keyring entry {account} is present but empty (corrupt)"
+        ))),
         Ok(p) => Ok(Some(p)),
         Err(keyring_core::Error::NoEntry) => Ok(None),
         Err(e) => Err(map_keyring_error(e)),
@@ -216,5 +218,48 @@ pub(crate) mod test_keyring {
             );
             super::set_keyring_service("coven-tests");
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_keyring_entry_is_an_error_not_absence() {
+        test_keyring::install();
+        let account = "empty-keyring-entry";
+        keyring_core::Entry::new(keyring_service(), account)
+            .expect("create keyring entry")
+            .set_password("")
+            .expect("write empty keyring entry");
+
+        let error = read_keyring(account).expect_err("empty entry is corrupt");
+
+        assert!(error.to_string().contains("present but empty"));
+        assert!(error.to_string().contains(account));
+    }
+
+    #[test]
+    fn get_or_create_encryption_key_does_not_overwrite_a_corrupt_empty_entry() {
+        test_keyring::install();
+        let service = KeyService::new("empty-encryption-key-library".to_string());
+        let account = service.account("encryption_master_key");
+        let entry = keyring_core::Entry::new(keyring_service(), &account)
+            .expect("create encryption key entry");
+        entry
+            .set_password("")
+            .expect("write empty encryption key entry");
+
+        let error = service
+            .get_or_create_encryption_key()
+            .expect_err("empty entry is corrupt");
+
+        assert!(error.to_string().contains("present but empty"));
+        assert_eq!(
+            entry.get_password().expect("read corrupt entry"),
+            "",
+            "corrupt value is not overwritten"
+        );
     }
 }
