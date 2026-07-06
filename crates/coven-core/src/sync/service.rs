@@ -82,6 +82,19 @@ pub async fn complete_host_provided_make_remotes(
     Ok(completed)
 }
 
+pub(super) async fn upload_snapshot_host_blobs(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    library_dir: &LibraryDir,
+    blobs: &[BlobRef],
+) -> Result<(), SyncCycleError> {
+    for blob in blobs {
+        let uploaded = upload_host_provided_blob(db, storage, library_dir, blob, false).await?;
+        uploaded.drop_local_store(library_dir).await?;
+    }
+    Ok(())
+}
+
 /// Gate the captured `outgoing` changeset, prepare its push envelope, and
 /// pull remote changes.
 ///

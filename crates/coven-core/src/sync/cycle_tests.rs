@@ -23,7 +23,7 @@ use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
-use crate::sync::session::BlobDecl;
+use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::signed_control::AckJson;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
@@ -219,6 +219,131 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
         SyncStorage::get_snapshot_pointer(&storage).await.is_ok(),
         "the snapshot must publish even while an upload is pending — the gate, not a \
          global flag, decides what it carries",
+    );
+}
+
+#[tokio::test]
+async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_schema(
+        vec![
+            SyncedTable::new("notes").remote_root(),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos").carries_blob(BlobDecl::new(
+                "photos",
+                Provenance::HostProvided,
+                CacheFill::CacheEager,
+            )),
+        ],
+        test_migrations(),
+    );
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [11u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('cover1', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
+        .await
+        .expect("store host-provided blob");
+    db.take_changeset()
+        .await
+        .expect("clear captured existing rows");
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+
+    assert!(
+        storage.exists("photos/cover1").await.expect("exists check"),
+        "the blob referenced by the initial snapshot is uploaded before the pointer publishes",
+    );
+    assert!(
+        SyncStorage::get_snapshot_pointer(&storage).await.is_ok(),
+        "the snapshot pointer publishes after its referenced blob exists",
+    );
+}
+
+#[tokio::test]
+async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_schema(
+        vec![
+            SyncedTable::new("notes").remote_root(),
+            SyncedTable::new("note_tags"),
+            SyncedTable::new("note_photos").carries_blob(BlobDecl::new(
+                "photos",
+                Provenance::HostProvided,
+                CacheFill::CacheEager,
+            )),
+        ],
+        test_migrations(),
+    );
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [12u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('cover1', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
+        .await
+        .expect("store host-provided blob");
+    db.take_changeset()
+        .await
+        .expect("clear captured existing rows");
+    storage.fail_next_blob_puts(1);
+
+    let failed = match run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(_) => panic!("snapshot publish should fail when a referenced blob cannot upload"),
+        Err(error) => error,
+    };
+
+    assert!(
+        failed.contains("forced blob upload failure"),
+        "cycle surfaces the blob upload failure: {failed}",
+    );
+    assert!(
+        SyncStorage::get_snapshot_pointer(&storage).await.is_err(),
+        "the snapshot pointer is not published when a referenced blob upload fails",
     );
 }
 

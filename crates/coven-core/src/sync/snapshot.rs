@@ -41,6 +41,7 @@ use super::membership_ops::{
 use super::session::SyncedTable;
 use super::signed_control::{AckJson, SnapshotMetaJson, SnapshotPointerJson};
 use super::storage::{StorageError, SyncStorage};
+use crate::blob::{BlobRef, Provenance};
 use crate::keys::UserKeypair;
 
 /// Default: create a snapshot after this many changesets since the last one.
@@ -48,6 +49,11 @@ const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
 
 /// Default: create a snapshot after this many hours since the last one.
 const SNAPSHOT_HOURS_THRESHOLD: u64 = 24;
+
+pub(crate) struct CreatedSnapshot {
+    pub encrypted: Vec<u8>,
+    pub host_blobs: Vec<BlobRef>,
+}
 
 /// Error type for snapshot operations.
 #[derive(Debug, thiserror::Error)]
@@ -184,6 +190,16 @@ pub fn create_snapshot(
     tables: &[SyncedTable],
     cipher: &CloudCipher,
 ) -> Result<Vec<u8>, SnapshotError> {
+    create_snapshot_with_host_blobs(conn, temp_dir, tables, cipher)
+        .map(|snapshot| snapshot.encrypted)
+}
+
+pub(crate) fn create_snapshot_with_host_blobs(
+    conn: &Connection,
+    temp_dir: &Path,
+    tables: &[SyncedTable],
+    cipher: &CloudCipher,
+) -> Result<CreatedSnapshot, SnapshotError> {
     // A snapshot with no synced set would either leak every local-only table or
     // clear the whole DB — both wrong. Refuse before doing any work.
     if tables.is_empty() {
@@ -209,6 +225,14 @@ pub fn create_snapshot(
         return Err(e);
     }
 
+    let host_blobs = match snapshot_host_blobs(&snapshot_path, tables) {
+        Ok(blobs) => blobs,
+        Err(e) => {
+            cleanup_snapshot_path(&snapshot_path);
+            return Err(e);
+        }
+    };
+
     // Read the cleared snapshot file and seal it for storage.
     let plaintext = read_and_remove_snapshot(&snapshot_path)?;
     let plaintext_size = plaintext.len();
@@ -221,7 +245,29 @@ pub fn create_snapshot(
         "created snapshot"
     );
 
-    Ok(sealed)
+    Ok(CreatedSnapshot {
+        encrypted: sealed,
+        host_blobs,
+    })
+}
+
+fn snapshot_host_blobs(path: &Path, tables: &[SyncedTable]) -> Result<Vec<BlobRef>, SnapshotError> {
+    let conn = Connection::open(path)
+        .map_err(|e| SnapshotError::ClearFailed(format!("failed to open snapshot copy: {e}")))?;
+    let decls = crate::blob::decl::BlobDecls::from_tables(&conn, tables)
+        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
+    let mut seen = HashSet::new();
+    decls
+        .refs_in_db(&conn)
+        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))
+        .map(|refs| {
+            refs.into_iter()
+                .filter(|blob| {
+                    blob.provenance == Provenance::HostProvided
+                        && seen.insert((blob.namespace.clone(), blob.id.clone()))
+                })
+                .collect()
+        })
 }
 
 /// Delete every non-synced table's rows from the snapshot copy at `path`,

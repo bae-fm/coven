@@ -650,18 +650,27 @@ pub async fn run_single_sync_cycle(
             let cipher = cipher.read().unwrap().clone();
             let tables = tables.to_vec();
             db.call(move |conn| {
-                super::snapshot::create_snapshot(conn, &temp_dir, &tables, &cipher)
+                super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables, &cipher)
                     .map_err(|e| crate::database::DbError(e.to_string()))
             })
             .await
         };
 
         match snapshot_result {
-            Ok(encrypted) => {
+            Ok(snapshot) => {
+                super::service::upload_snapshot_host_blobs(
+                    db,
+                    storage,
+                    library_dir,
+                    &snapshot.host_blobs,
+                )
+                .await
+                .map_err(|e| format!("Snapshot host-provided blob upload failed: {e}"))?;
+
                 match super::snapshot::push_snapshot(
                     storage,
                     library_id,
-                    encrypted,
+                    snapshot.encrypted,
                     device_id,
                     sync_result.updated_cursors.clone(),
                     local_seq,
