@@ -49,10 +49,7 @@ pub async fn sign_in_google_drive(
     // Create or find the folder
     let folder_name = format!("your-app - {library_name}");
 
-    let search_query = format!(
-        "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-        folder_name.replace('\'', "\\'")
-    );
+    let search_query = super::google_drive::folder_search_query(&folder_name);
     let search_resp = client
         .get("https://www.googleapis.com/drive/v3/files")
         .bearer_auth(&tokens.access_token)

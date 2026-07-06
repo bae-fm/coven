@@ -27,6 +27,86 @@ use crate::oauth::{OAuthConfig, OAuthTokens};
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
 const CREATE_TOKEN_PROPERTY: &str = "covenCreateToken";
+const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
+
+fn escape_drive_query_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+enum DriveNameMatch {
+    Equals,
+    Contains,
+}
+
+impl DriveNameMatch {
+    fn operator(&self) -> &'static str {
+        match self {
+            Self::Equals => "=",
+            Self::Contains => "contains",
+        }
+    }
+}
+
+fn drive_file_query(
+    folder_id: Option<&str>,
+    name_match: DriveNameMatch,
+    name_value: &str,
+    extra_predicate: Option<&str>,
+) -> String {
+    let mut predicates = Vec::new();
+    if let Some(folder_id) = folder_id {
+        let folder_id = escape_drive_query_value(folder_id);
+        predicates.push(format!("'{folder_id}' in parents"));
+    }
+
+    let name_value = escape_drive_query_value(name_value);
+    predicates.push(format!("name {} '{name_value}'", name_match.operator()));
+
+    if let Some(extra_predicate) = extra_predicate {
+        predicates.push(extra_predicate.to_string());
+    }
+    predicates.push("trashed = false".to_string());
+    predicates.join(" and ")
+}
+
+fn drive_app_property_predicate(key: &str, value: &str) -> String {
+    let key = escape_drive_query_value(key);
+    let value = escape_drive_query_value(value);
+    format!("appProperties has {{ key='{key}' and value='{value}' }}")
+}
+
+fn find_file_query(folder_id: &str, encoded_name: &str) -> String {
+    drive_file_query(Some(folder_id), DriveNameMatch::Equals, encoded_name, None)
+}
+
+fn find_created_file_query(folder_id: &str, encoded_name: &str, create_token: &str) -> String {
+    let app_property = drive_app_property_predicate(CREATE_TOKEN_PROPERTY, create_token);
+    drive_file_query(
+        Some(folder_id),
+        DriveNameMatch::Equals,
+        encoded_name,
+        Some(&app_property),
+    )
+}
+
+fn list_file_query(folder_id: &str, prefix: &str) -> String {
+    let encoded_prefix = encode_key(prefix);
+    drive_file_query(
+        Some(folder_id),
+        DriveNameMatch::Contains,
+        &encoded_prefix,
+        None,
+    )
+}
+
+pub(super) fn folder_search_query(folder_name: &str) -> String {
+    drive_file_query(
+        None,
+        DriveNameMatch::Equals,
+        folder_name,
+        Some(&format!("mimeType = '{DRIVE_FOLDER_MIME_TYPE}'")),
+    )
+}
 
 /// Google Drive cloud home backend.
 pub struct GoogleDriveCloudHome {
@@ -77,10 +157,7 @@ impl GoogleDriveCloudHome {
 
     /// Find a file's Google Drive ID by name within our folder.
     async fn find_file_id(&self, encoded_name: &str) -> Result<Option<String>, CloudHomeError> {
-        let query = format!(
-            "'{}' in parents and name = '{}' and trashed = false",
-            self.folder_id, encoded_name
-        );
+        let query = find_file_query(&self.folder_id, encoded_name);
         let resp = self
             .session
             .api_call(|token| {
@@ -150,10 +227,7 @@ impl GoogleDriveCloudHome {
         encoded_name: &str,
         create_token: &str,
     ) -> Result<Option<String>, CloudHomeError> {
-        let query = format!(
-            "'{}' in parents and name = '{}' and appProperties has {{ key='{}' and value='{}' }} and trashed = false",
-            self.folder_id, encoded_name, CREATE_TOKEN_PROPERTY, create_token
-        );
+        let query = find_created_file_query(&self.folder_id, encoded_name, create_token);
         let resp = self
             .session
             .api_call(|token| {
@@ -480,11 +554,7 @@ impl OAuthRestHome for GoogleDriveCloudHome {
         prefix: &str,
         cursor: Option<&str>,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        let query = format!(
-            "'{}' in parents and name contains '{}' and trashed = false",
-            self.folder_id,
-            encode_key(prefix)
-        );
+        let query = list_file_query(&self.folder_id, prefix);
         let page = cursor.map(str::to_string);
         self.session
             .api_call(|token| {
@@ -673,6 +743,39 @@ mod tests {
         assert!(parse_google_api_error_reason("<html>500</html>").is_none());
         assert!(parse_google_api_error_reason("{}").is_none());
         assert!(parse_google_api_error_reason(r#"{"error":"flat"}"#).is_none());
+    }
+
+    #[test]
+    fn find_file_query_escapes_encoded_name_and_folder() {
+        let query = find_file_query("folder'1", &encode_key("artist's-live/cover.jpg"));
+
+        assert!(query.contains("'folder\\'1' in parents"));
+        assert!(query.contains("name = 'artist\\'s-live__cover.jpg'"));
+        assert!(!query.contains("artist's-live__cover.jpg"));
+    }
+
+    #[test]
+    fn find_created_file_query_escapes_name_and_create_token() {
+        let query = find_created_file_query("folder-id", "object'1", r"token\2");
+
+        assert!(query.contains("name = 'object\\'1'"));
+        assert!(query.contains(r"value='token\\2'"));
+    }
+
+    #[test]
+    fn list_file_query_escapes_encoded_prefix() {
+        let query = list_file_query("folder-id", "artist's-live/");
+
+        assert!(query.contains("name contains 'artist\\'s-live__'"));
+        assert!(!query.contains("artist's-live__"));
+    }
+
+    #[test]
+    fn folder_search_query_escapes_folder_name() {
+        let query = folder_search_query("your-app - artist's live");
+
+        assert!(query.contains("name = 'your-app - artist\\'s live'"));
+        assert!(query.contains("mimeType = 'application/vnd.google-apps.folder'"));
     }
 
     #[test]
