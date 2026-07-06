@@ -114,6 +114,18 @@ pub struct GoogleDriveCloudHome {
     session: OAuthSession,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DriveFileIdentity {
+    id: String,
+    create_token: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreatedDriveFile {
+    id: String,
+    create_token: String,
+}
+
 impl GoogleDriveCloudHome {
     pub fn new(
         folder_id: String,
@@ -157,34 +169,56 @@ impl GoogleDriveCloudHome {
 
     /// Find a file's Google Drive ID by name within our folder.
     async fn find_file_id(&self, encoded_name: &str) -> Result<Option<String>, CloudHomeError> {
+        let files = self.list_file_identities(encoded_name).await?;
+        Ok(select_drive_file(&files).map(|file| file.id.clone()))
+    }
+
+    async fn list_file_identities(
+        &self,
+        encoded_name: &str,
+    ) -> Result<Vec<DriveFileIdentity>, CloudHomeError> {
         let query = find_file_query(&self.folder_id, encoded_name);
-        let resp = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .get(format!("{}/files", DRIVE_API))
-                    .bearer_auth(token)
-                    .query(&[
-                        ("q", query.as_str()),
-                        ("fields", "files(id)"),
-                        ("pageSize", "1"),
-                    ])
-            })
-            .await?;
-        let resp = ensure_ok(resp, "list files", NotFound::Status).await?;
-        let json: serde_json::Value = ok_json(resp, "parse list response").await?;
-        Ok(json["files"]
-            .as_array()
-            .and_then(|files| files.first())
-            .and_then(|first| first["id"].as_str())
-            .map(String::from))
+        let mut page_token: Option<String> = None;
+        let mut files = Vec::new();
+
+        loop {
+            let page = page_token.clone();
+            let resp = self
+                .session
+                .api_call(|token| {
+                    let mut req = self
+                        .client()
+                        .get(format!("{}/files", DRIVE_API))
+                        .bearer_auth(token)
+                        .query(&[
+                            ("q", query.as_str()),
+                            ("fields", "nextPageToken,files(id,appProperties)"),
+                            ("pageSize", "1000"),
+                        ]);
+                    if let Some(ref page) = page {
+                        req = req.query(&[("pageToken", page.as_str())]);
+                    }
+                    req
+                })
+                .await?;
+            let resp = ensure_ok(resp, "list files", NotFound::Status).await?;
+            let json: serde_json::Value = ok_json(resp, "parse list response").await?;
+            files.extend(parse_drive_file_identities(&json));
+
+            match json["nextPageToken"].as_str() {
+                Some(next) => page_token = Some(next.to_string()),
+                None => break,
+            }
+        }
+
+        Ok(files)
     }
 
     async fn create_file_metadata(
         &self,
         key: &str,
         encoded: &str,
-    ) -> Result<String, CloudHomeError> {
+    ) -> Result<CreatedDriveFile, CloudHomeError> {
         let create_token = uuid::Uuid::new_v4().to_string();
         let metadata = create_file_metadata_body(encoded, &self.folder_id, &create_token);
         let resp = self
@@ -220,6 +254,48 @@ impl GoogleDriveCloudHome {
             |file_id| async move { self.delete_created_file(key, &file_id).await },
         )
         .await
+        .map(|id| CreatedDriveFile { id, create_token })
+    }
+
+    async fn create_file_for_key(
+        &self,
+        key: &str,
+        encoded: &str,
+    ) -> Result<String, CloudHomeError> {
+        let created = self.create_file_metadata(key, encoded).await?;
+        self.reconcile_created_file(key, encoded, created).await
+    }
+
+    async fn reconcile_created_file(
+        &self,
+        key: &str,
+        encoded: &str,
+        created: CreatedDriveFile,
+    ) -> Result<String, CloudHomeError> {
+        let files = self.list_file_identities(encoded).await?;
+        if !files.iter().any(|file| {
+            file.id == created.id && file.create_token.as_deref() == Some(&created.create_token)
+        }) {
+            return Err(CloudHomeError::Storage(format!(
+                "create {key}: created file {} with token {} was not returned by duplicate check",
+                created.id, created.create_token
+            )));
+        }
+        let Some(winner) = select_drive_file(&files) else {
+            return Err(CloudHomeError::Storage(format!(
+                "create {key}: created file {} was not returned by duplicate check",
+                created.id
+            )));
+        };
+        let winner_id = winner.id.clone();
+
+        for file in files {
+            if file.id != winner_id {
+                self.delete_created_file(key, &file.id).await?;
+            }
+        }
+
+        Ok(winner_id)
     }
 
     async fn find_created_file_id(
@@ -298,58 +374,32 @@ impl GoogleDriveCloudHome {
         )))
     }
 
-    /// Open a resumable upload session and return its session URL (the `Location`
-    /// header Google returns). `existing` selects update (PATCH an existing file
-    /// id) vs create (POST with metadata).
-    async fn open_resumable_session(
+    /// Open a resumable upload session for an existing Drive file and return its
+    /// session URL (the `Location` header Google returns).
+    async fn open_resumable_update_session(
         &self,
         key: &str,
-        encoded: &str,
-        existing: Option<&str>,
+        file_id: &str,
     ) -> Result<String, CloudHomeError> {
-        let resp = match existing {
-            Some(file_id) => {
-                let url = format!("{}/files/{}?uploadType=resumable", UPLOAD_API, file_id);
-                self.session
-                    .api_call(|token| {
-                        self.client()
-                            .patch(&url)
-                            .bearer_auth(token)
-                            .header("Content-Type", "application/json; charset=UTF-8")
-                            .body("{}")
-                    })
-                    .await?
-            }
-            None => {
-                let metadata = serde_json::json!({
-                    "name": encoded,
-                    "parents": [self.folder_id],
-                })
-                .to_string();
-                self.session
-                    .api_call(|token| {
-                        self.client()
-                            .post(format!("{}/files?uploadType=resumable", UPLOAD_API))
-                            .bearer_auth(token)
-                            .header("Content-Type", "application/json; charset=UTF-8")
-                            .body(metadata.clone())
-                    })
-                    .await?
-            }
-        };
+        let url = format!("{}/files/{}?uploadType=resumable", UPLOAD_API, file_id);
+        let resp = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .patch(&url)
+                    .bearer_auth(token)
+                    .header("Content-Type", "application/json; charset=UTF-8")
+                    .body("{}")
+            })
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
-            let op = if existing.is_some() {
-                "update"
-            } else {
-                "create"
-            };
             return Err(classify_write_error(
                 status,
                 &http::body_text(resp).await,
                 key,
-                op,
+                "update",
             ));
         }
         resp.headers()
@@ -362,6 +412,31 @@ impl GoogleDriveCloudHome {
                 ))
             })
     }
+}
+
+fn parse_drive_file_identities(page: &serde_json::Value) -> Vec<DriveFileIdentity> {
+    page["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let id = file["id"].as_str()?.to_string();
+            let create_token = file["appProperties"][CREATE_TOKEN_PROPERTY]
+                .as_str()
+                .map(String::from);
+            Some(DriveFileIdentity { id, create_token })
+        })
+        .collect()
+}
+
+fn select_drive_file(files: &[DriveFileIdentity]) -> Option<&DriveFileIdentity> {
+    files.iter().min_by(|left, right| {
+        let left_token = left.create_token.as_deref().unwrap_or(left.id.as_str());
+        let right_token = right.create_token.as_deref().unwrap_or(right.id.as_str());
+        left_token
+            .cmp(right_token)
+            .then_with(|| left.id.cmp(&right.id))
+    })
 }
 
 fn parse_create_file_id(body: &str, key: &str) -> Result<String, CloudHomeError> {
@@ -611,7 +686,7 @@ impl CloudHome for GoogleDriveCloudHome {
         } else {
             create_file_with_media(
                 key,
-                || self.create_file_metadata(key, &encoded),
+                || self.create_file_for_key(key, &encoded),
                 |file_id| {
                     let body = media_body.clone();
                     async move { self.upload_file_media(key, &file_id, body, "create").await }
@@ -630,14 +705,12 @@ impl CloudHome for GoogleDriveCloudHome {
     ) -> Result<BoxPartSink<'a>, CloudHomeError> {
         let encoded = encode_key(key);
         let existing = self.find_file_id(&encoded).await?;
-        let op = if existing.is_some() {
-            "update"
+        let (file_id, op) = if let Some(file_id) = existing {
+            (file_id, "update")
         } else {
-            "create"
+            (self.create_file_for_key(key, &encoded).await?, "create")
         };
-        let session_url = self
-            .open_resumable_session(key, &encoded, existing.as_deref())
-            .await?;
+        let session_url = self.open_resumable_update_session(key, &file_id).await?;
         let key_owned = key.to_string();
         let classify =
             Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned, op));
@@ -813,6 +886,69 @@ mod tests {
             .expect("encode next page")
             .as_deref(),
             Some("https://www.googleapis.com/drive/v3/files/folder/permissions?fields=permissions(id,emailAddress),nextPageToken&pageToken=tok%2Fen%2B1")
+        );
+    }
+
+    #[test]
+    fn parse_drive_file_identities_reads_create_tokens() {
+        let page = serde_json::json!({
+            "files": [
+                {"id": "file-a", "appProperties": {"covenCreateToken": "token-b"}},
+                {"id": "file-b", "appProperties": {"other": "ignored"}},
+                {"name": "missing-id"}
+            ]
+        });
+
+        assert_eq!(
+            parse_drive_file_identities(&page),
+            vec![
+                DriveFileIdentity {
+                    id: "file-a".to_string(),
+                    create_token: Some("token-b".to_string()),
+                },
+                DriveFileIdentity {
+                    id: "file-b".to_string(),
+                    create_token: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn select_drive_file_uses_deterministic_create_token_tiebreak() {
+        let files = vec![
+            DriveFileIdentity {
+                id: "local-loser".to_string(),
+                create_token: Some("token-z".to_string()),
+            },
+            DriveFileIdentity {
+                id: "peer-winner".to_string(),
+                create_token: Some("token-a".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            select_drive_file(&files).map(|file| file.id.as_str()),
+            Some("peer-winner")
+        );
+    }
+
+    #[test]
+    fn select_drive_file_is_stable_for_files_without_tokens() {
+        let files = vec![
+            DriveFileIdentity {
+                id: "file-b".to_string(),
+                create_token: None,
+            },
+            DriveFileIdentity {
+                id: "file-a".to_string(),
+                create_token: None,
+            },
+        ];
+
+        assert_eq!(
+            select_drive_file(&files).map(|file| file.id.as_str()),
+            Some("file-a")
         );
     }
 
