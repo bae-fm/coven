@@ -159,7 +159,6 @@ impl TokenResponse {
     fn into_tokens(
         self,
         status: reqwest::StatusCode,
-        body: &str,
         clock: &dyn crate::clock::Clock,
     ) -> Result<OAuthTokens, OAuthError> {
         if let Some(error) = self.error {
@@ -177,7 +176,7 @@ impl TokenResponse {
 
         let access_token = self.access_token.ok_or_else(|| {
             OAuthError::TokenExchange(format!(
-                "provider response missing access_token (HTTP {status}, body: {body})"
+                "provider response missing access_token (HTTP {status})"
             ))
         })?;
 
@@ -218,10 +217,11 @@ async fn post_token_request(
         .await
         .map_err(|e| OAuthError::TokenExchange(format!("read body: {e}")))?;
 
-    let token_resp: TokenResponse = serde_json::from_str(&body)
-        .map_err(|e| OAuthError::TokenExchange(format!("parse response: {e} (body: {body})")))?;
+    let token_resp: TokenResponse = serde_json::from_str(&body).map_err(|e| {
+        OAuthError::TokenExchange(format!("parse token response (HTTP {status}): {e}"))
+    })?;
 
-    token_resp.into_tokens(status, &body, clock)
+    token_resp.into_tokens(status, clock)
 }
 
 /// Generate a random PKCE code verifier (43-128 URL-safe characters).
@@ -773,11 +773,8 @@ mod tests {
     fn into_tokens_classifies_invalid_grant_as_reauthorize() {
         let body =
             r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked"}"#;
-        let result = parse_token_response(body).into_tokens(
-            reqwest::StatusCode::BAD_REQUEST,
-            body,
-            &crate::clock::SystemClock,
-        );
+        let result = parse_token_response(body)
+            .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
         match result {
             Err(OAuthError::Reauthorize(detail)) => {
                 assert!(
@@ -793,11 +790,8 @@ mod tests {
     fn into_tokens_classifies_unauthorized_client_as_reauthorize() {
         let body =
             r#"{"error":"unauthorized_client","error_description":"Client has been revoked"}"#;
-        let result = parse_token_response(body).into_tokens(
-            reqwest::StatusCode::BAD_REQUEST,
-            body,
-            &crate::clock::SystemClock,
-        );
+        let result = parse_token_response(body)
+            .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
         assert!(
             matches!(result, Err(OAuthError::Reauthorize(_))),
             "expected Reauthorize, got {result:?}",
@@ -807,11 +801,8 @@ mod tests {
     #[test]
     fn into_tokens_leaves_other_provider_errors_as_token_exchange() {
         let body = r#"{"error":"invalid_request","error_description":"missing parameter"}"#;
-        let result = parse_token_response(body).into_tokens(
-            reqwest::StatusCode::BAD_REQUEST,
-            body,
-            &crate::clock::SystemClock,
-        );
+        let result = parse_token_response(body)
+            .into_tokens(reqwest::StatusCode::BAD_REQUEST, &crate::clock::SystemClock);
         match result {
             Err(OAuthError::TokenExchange(msg)) => {
                 assert!(
@@ -827,7 +818,7 @@ mod tests {
     fn into_tokens_returns_tokens_on_success() {
         let body = r#"{"access_token":"new_at","refresh_token":"new_rt","expires_in":3600}"#;
         let tokens = parse_token_response(body)
-            .into_tokens(reqwest::StatusCode::OK, body, &crate::clock::SystemClock)
+            .into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock)
             .expect("into_tokens");
         assert_eq!(tokens.access_token, "new_at");
         assert_eq!(tokens.refresh_token.as_deref(), Some("new_rt"));
@@ -837,16 +828,73 @@ mod tests {
     #[test]
     fn into_tokens_errors_when_success_response_missing_access_token() {
         let body = r#"{}"#;
-        let result = parse_token_response(body).into_tokens(
-            reqwest::StatusCode::OK,
-            body,
-            &crate::clock::SystemClock,
-        );
+        let result = parse_token_response(body)
+            .into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock);
         match result {
             Err(OAuthError::TokenExchange(msg)) => {
                 assert!(
                     msg.contains("missing access_token"),
                     "expected access_token error, got: {msg}",
+                );
+            }
+            other => panic!("expected TokenExchange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn into_tokens_missing_access_token_error_does_not_include_tokens() {
+        let body = r#"{"refresh_token":"refresh-token-that-must-not-be-logged"}"#;
+        let result = parse_token_response(body)
+            .into_tokens(reqwest::StatusCode::OK, &crate::clock::SystemClock);
+        match result {
+            Err(OAuthError::TokenExchange(msg)) => {
+                assert!(
+                    msg.contains("missing access_token"),
+                    "expected access_token error, got: {msg}",
+                );
+                assert!(
+                    msg.contains("HTTP 200"),
+                    "expected status in error, got: {msg}",
+                );
+                assert!(
+                    !msg.contains("refresh-token-that-must-not-be-logged"),
+                    "error included refresh token: {msg}",
+                );
+            }
+            other => panic!("expected TokenExchange, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[tokio::test]
+    async fn parse_failure_error_does_not_include_tokens() {
+        let (token_url, _request_body, server) =
+            serve_token_response(r#"{"access_token":"access-token-that-must-not-be-logged""#).await;
+        let config = oauth_config(token_url);
+
+        let result = exchange_code(
+            &config,
+            "auth-code",
+            "pkce-verifier",
+            "http://localhost/callback",
+            &crate::clock::SystemClock,
+        )
+        .await;
+
+        server.await.expect("token server");
+        match result {
+            Err(OAuthError::TokenExchange(msg)) => {
+                assert!(
+                    msg.contains("parse token response"),
+                    "expected parse error, got: {msg}",
+                );
+                assert!(
+                    msg.contains("HTTP 200"),
+                    "expected status in error, got: {msg}",
+                );
+                assert!(
+                    !msg.contains("access-token-that-must-not-be-logged"),
+                    "error included access token: {msg}",
                 );
             }
             other => panic!("expected TokenExchange, got {other:?}"),
