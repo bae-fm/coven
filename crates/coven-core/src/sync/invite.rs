@@ -64,7 +64,7 @@ fn ed25519_hex_to_x25519(
 /// Seal the library key to one member and wrap it in an owner-signed
 /// [`WrappedLibraryKey`], serialized to the bytes stored at
 /// `keys/{recipient_pubkey}`. The signature binds `(library_id,
-/// recipient_pubkey, sealed)` so the joiner can prove the key came from the
+/// recipient_pubkey, author_pubkey, sealed)` so the joiner can prove the key came from the
 /// owner and was meant for them, not substituted by a bucket writer.
 ///
 /// `owner_keypair` is whatever Owner is performing the invite/revoke — NOT
@@ -72,20 +72,11 @@ fn ed25519_hex_to_x25519(
 /// own keypair, and the membership chain authorizes any current Owner to add or
 /// remove members, so a second Owner can reach here and sign with their own key.
 ///
-/// But a joining (or rotating) device pins exactly ONE clear-text authority: the
-/// founder the invite carries (`InviteCode::owner_pubkey`, set from
-/// `chain.founder_pubkey()`), because the joiner has no membership chain yet — it
-/// is bootstrapping into the library and the chain itself is sealed under the very
-/// key it is trying to adopt. [`WrappedLibraryKey::verify_and_unwrap`] therefore
-/// checks the signature against that founder and nothing else. So a wrapped key an
-/// adopting device accepts MUST be signed by the founder; one signed by a
-/// non-founder Owner fails that check and the join/rotation fails closed (a loud
-/// [`InviteError`], never a silent adoption of the wrong key). The practical
-/// limitation: only the founder can issue or rotate library keys that a fresh
-/// device will accept. A non-founder Owner can still author membership-chain
-/// changes that existing members honor; what they cannot do is hand a brand-new
-/// device a key it will adopt. Widening that would mean giving the joiner more
-/// than one pinned authority — a multi-owner trust shape this code does not have.
+/// A joining device pins exactly one clear-text authority: the founder the invite
+/// carries (`InviteCode::owner_pubkey`, set from `chain.founder_pubkey()`),
+/// because the joiner has no membership chain yet. Existing members are different:
+/// they reload the anchored chain first and authorize rotated wrapped keys
+/// against the current Owner set.
 fn signed_wrapped_key(
     library_id: &str,
     recipient_ed25519_pubkey: &str,
@@ -194,8 +185,8 @@ pub async fn create_invitation_with_encryption(
     // Seal the library key to the invitee and sign the binding so the joiner can
     // authenticate it on adoption. The joiner verifies this signature against the
     // founder the invite pins, so for the invitee to actually adopt the key
-    // `owner_keypair` must be the founder's (see `signed_wrapped_key`); a
-    // non-founder Owner's invite fails closed at the joiner.
+    // `owner_keypair` must be the founder's for a fresh joiner; existing members
+    // authorize rotated keys against the current Owner set during refresh.
     let wrapped_key = signed_wrapped_key(
         library_id,
         invitee_ed25519_pubkey,
@@ -284,8 +275,8 @@ pub async fn create_invitation_with_encryption(
 /// credential, and a sealed box authenticates only its recipient — so without
 /// this check a bucket writer could overwrite the object with a box wrapping a
 /// key of their choosing and the joiner would adopt it. Verifying the owner's
-/// signature over `(library_id, recipient_pubkey, sealed)` rejects any such
-/// substitution.
+/// signature over `(library_id, recipient_pubkey, author_pubkey, sealed)` rejects
+/// any such substitution.
 pub async fn unwrap_library_key(
     cloud_home: &dyn CloudHome,
     keypair: &UserKeypair,
@@ -305,6 +296,21 @@ pub async fn unwrap_library_keyring(
     library_id: &str,
     expected_owner: &str,
 ) -> Result<EncryptionService, InviteError> {
+    unwrap_library_keyring_for_owners(
+        cloud_home,
+        keypair,
+        library_id,
+        std::iter::once(expected_owner),
+    )
+    .await
+}
+
+pub(crate) async fn unwrap_library_keyring_for_owners<'a>(
+    cloud_home: &dyn CloudHome,
+    keypair: &UserKeypair,
+    library_id: &str,
+    expected_owners: impl IntoIterator<Item = &'a str>,
+) -> Result<EncryptionService, InviteError> {
     let pubkey_hex = hex::encode(keypair.public_key());
 
     // Download the wrapped key directly off the cloud home (not through
@@ -318,12 +324,12 @@ pub async fn unwrap_library_keyring(
     let wrapped: WrappedLibraryKey = serde_json::from_slice(&wrapped_bytes)
         .map_err(|e| InviteError::Crypto(format!("malformed wrapped key: {e}")))?;
 
-    // Authenticate the wrapped key against the owner the invite pins before
-    // adopting anything. A failure here is a substituted, forged, or relocated
-    // key, or a corrupt object — refuse it loudly, surfacing which, rather than
-    // decrypt whatever bytes are present.
+    // Authenticate the wrapped key against the supplied authorized owner set
+    // before adopting anything. A failure here is a substituted, forged,
+    // relocated, replayed, or corrupt object — refuse it loudly, surfacing which,
+    // rather than decrypt whatever bytes are present.
     let sealed = wrapped
-        .verify_and_unwrap(library_id, &pubkey_hex, expected_owner)
+        .verify_and_unwrap(library_id, &pubkey_hex, expected_owners)
         .map_err(|e| InviteError::Crypto(format!("wrapped library key: {e}")))?;
 
     // Decrypt with our X25519 secret key.
@@ -796,9 +802,9 @@ mod tests {
     /// authorizes any current Owner), but `create_invitation` signs the wrapped
     /// key with that inviting Owner's own key, while the invitee pins the founder.
     /// So the invitee cannot adopt a second Owner's key: verification is against
-    /// the founder and fails closed. This is the founder-only key-issuance limit,
-    /// asserted to fail loudly (an `InviteError`) rather than silently adopt a key
-    /// signed by the wrong authority.
+    /// the founder and fails closed. This is the fresh-joiner founder-pinned
+    /// key-issuance limit, asserted to fail loudly (an `InviteError`) rather than
+    /// silently adopt a key signed by the wrong authority.
     #[tokio::test]
     async fn second_owner_invite_is_unadoptable_by_the_joiner() {
         use crate::sync::membership::MembershipAction;

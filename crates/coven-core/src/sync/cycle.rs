@@ -219,14 +219,14 @@ pub async fn run_single_sync_cycle(
     let tables = db.synced_tables();
 
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
-    // judges, or decrypts (#85/#87). Membership and the rotatable library key are
+    // judges, or decrypts. Membership and the rotatable library key are
     // per-cycle preconditions, not init-time bootstraps:
     // re-read them now so a removed member's writes are rejected and a rotated key
     // is adopted on a running device without a restart. Runs before the blob drain
     // so the drain (and every push/pull below) uses the current key. A failure here
     // aborts the cycle and retries next time — a refresh that can't complete must
     // not also corrupt state, and a chain reload that can't verify must fail closed,
-    // never fall open to "no rules apply" (#88).
+    // never fall open to "no rules apply".
     if let Some(ch) = cloud_home {
         refresh_authorization_state(
             storage,
@@ -786,8 +786,8 @@ pub async fn run_single_sync_cycle(
 /// the membership chain (re-anchored to the pinned owner) and the rotatable
 /// library key. Membership and key state are per-cycle preconditions, not
 /// init-time bootstraps — without this a running device acts on a stale member
-/// set (#85) and keeps a dead library key after a rotation it did not perform
-/// (#87), recovering only on restart.
+/// set and keeps a dead library key after a rotation it did not perform,
+/// recovering only on restart.
 ///
 /// A plaintext (browsable) home has no membership chain and no wrapped library
 /// key — it is open by design — so the whole refresh is a no-op there, mirroring
@@ -795,8 +795,7 @@ pub async fn run_single_sync_cycle(
 ///
 /// Fail-closed: for an owner-pinned (opaque) library a chain that can't be listed,
 /// loaded, or anchored aborts the cycle (it retries next cycle) rather than
-/// proceeding with no chain — the #88 invariant that a failed membership load must
-/// never fall open. The wrapped-key read likewise surfaces its failure as an
+/// proceeding with no chain. The wrapped-key read likewise surfaces its failure as an
 /// aborted cycle: a refresh that can't complete must not leave durable state
 /// half-updated.
 async fn refresh_authorization_state(
@@ -815,15 +814,13 @@ async fn refresh_authorization_state(
         return Ok(());
     }
 
-    // The library's owner, pinned at create/join/restore (#102). The whole refresh
-    // anchors to it: the chain reload anchors to the owner, and the wrapped key is
-    // verified against the owner's signature. Without a pinned owner there is nothing
-    // to anchor against — and a production library always has one, since founding
-    // precedes any sync cycle — so a missing pin means there is no shared state to
-    // refresh this cycle; skip it. Critically we do NOT fall back to loading the chain
-    // unanchored: that would reopen the refound-owner bypass (#95), acting on a forged
-    // member set. So no owner ⇒ skip; an owner ⇒ the chain load below is always
-    // owner-anchored.
+    // The library's founder, pinned at create/join/restore, anchors chain
+    // identity. Wrapped-key adoption is authorized later against the current
+    // Owner set from that anchored chain. Without a pinned founder there is
+    // nothing to anchor against — and a production library always has one, since
+    // founding precedes any sync cycle — so a missing pin means there is no shared
+    // state to refresh this cycle; skip it. Critically we do NOT fall back to
+    // loading the chain unanchored: that would act on a forged member set.
     let Some(owner) = db
         .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await
@@ -835,41 +832,63 @@ async fn refresh_authorization_state(
 
     // 1. Reload + anchor the membership chain, the same load+anchor the pull and
     //    snapshot-authorize paths run. Fail closed: a chain that can't be listed, is
-    //    wiped, won't validate, or is founded by a different key is a tamper/takeover
-    //    (#95/#104), so abort rather than act on a stale or forged member set. Never
-    //    set `chain = None` and continue (#88).
+    //    wiped, won't validate, or is founded by a different key is a tamper/takeover,
+    //    so abort rather than act on a stale or forged member set. Never set
+    //    `chain = None` and continue.
     let entries = storage
         .list_membership_entries()
         .await
         .map_err(|e| format!("refresh: list membership entries: {e}"))?;
     if entries.is_empty() {
         // The founder write precedes the pin, so an owner-pinned library with no
-        // chain is a wiped chain, not a fresh library — refuse (#104).
+        // chain is a wiped chain, not a fresh library — refuse.
         return Err(format!(
             "refresh: membership chain is empty but owner {owner} is pinned \
              (wiped membership/*)"
         ));
     }
-    super::membership_ops::load_anchored_chain(storage, &entries, Some(owner.as_str()))
+    let chain = super::membership_ops::load_anchored_chain(storage, &entries, Some(owner.as_str()))
         .await
         .map_err(|e| format!("refresh: load/anchor membership chain: {e}"))?;
+    let current_owners: Vec<String> = chain
+        .current_members()
+        .into_iter()
+        .filter_map(|(pubkey, role)| {
+            (role == super::membership::MemberRole::Owner).then_some(pubkey)
+        })
+        .collect();
 
-    // 2. Adopt a rotated library key (#87). Read this device's own re-wrapped key at
-    //    `keys/{self}` and authenticate it the way join does — the owner signature
-    //    over (library_id, recipient, sealed) verified against the pinned owner
-    //    (#99) — so a bucket writer can't substitute it. If it differs from the key
-    //    in use, swap the live cipher (and persist to the keyring) via
-    //    `apply_key_rotation`, so this same cycle's push/pull/blob ops use it.
-    match super::invite::unwrap_library_keyring(cloud_home, user_keypair, library_id, &owner).await
+    // 2. Adopt a rotated library key. Read this device's own re-wrapped key at
+    //    `keys/{self}` and authenticate it against the current Owners from the
+    //    anchored chain. The signature binds (library_id, recipient, author, sealed),
+    //    so a bucket writer can't substitute it, relocate it, or change its signer.
+    //    If the decrypted keyring carries a strictly newer generation, swap the
+    //    live cipher (and persist to the keyring) via `apply_key_rotation`, so
+    //    this same cycle's push/pull/blob ops use it.
+    let (in_use, accepted_generation) = match &*cipher.read().unwrap() {
+        CloudCipher::Encrypted(enc) => (enc.keyring_entries(), enc.current_generation()),
+        CloudCipher::Plaintext => {
+            return Err(
+                "refresh: encrypted library became plaintext during key refresh".to_string(),
+            )
+        }
+    };
+    match super::invite::unwrap_library_keyring_for_owners(
+        cloud_home,
+        user_keypair,
+        library_id,
+        current_owners.iter().map(String::as_str),
+    )
+    .await
     {
         Ok(new_encryption) => {
-            let in_use = match &*cipher.read().unwrap() {
-                CloudCipher::Encrypted(enc) => Some(enc.keyring_entries()),
-                // Re-checked under the lock; an opaque library is Encrypted, but if a
-                // race left it Plaintext there is no key to compare against.
-                CloudCipher::Plaintext => None,
-            };
-            if in_use != Some(new_encryption.keyring_entries()) {
+            let incoming_generation = new_encryption.current_generation();
+            if incoming_generation <= accepted_generation {
+                debug!(
+                    incoming_generation,
+                    accepted_generation, "refresh: ignored non-newer wrapped library key"
+                );
+            } else if in_use != new_encryption.keyring_entries() {
                 let key_persistence = key_persistence.ok_or_else(|| {
                     "refresh: rotated library key needs platform key persistence".to_string()
                 })?;
@@ -923,9 +942,9 @@ pub async fn init_sync_over_storage(
     let cipher_lock = storage.shared_cipher();
 
     // Opaque (encrypted) home: every library has an owner-anchored membership
-    // chain from creation (issue #102). Establish it on first connect, and on
-    // every connect verify the chain is still founded by the pinned owner —
-    // refusing a missing or refounded chain as a takeover attempt (#95/#104). A
+    // chain from creation. Establish it on first connect, and on every connect
+    // verify the chain is still founded by the pinned owner — refusing a missing
+    // or refounded chain as a takeover attempt. A
     // plaintext (browsable) home has no chain — open by design — so this is
     // skipped there.
     if !cipher.is_plaintext() {
@@ -947,15 +966,14 @@ pub async fn init_sync_over_storage(
     })
 }
 
-/// Establish or verify the owner-anchored membership chain for an opaque library
-/// (issue #102). Returns once the chain is established and verified, or an error
-/// to abort sync.
+/// Establish or verify the owner-anchored membership chain for an opaque library.
+/// Returns once the chain is established and verified, or an error to abort sync.
 ///
 /// Founding is two non-atomic writes — the founder entry to cloud storage and the
 /// owner pin to the local DB — so this completes a half-done founding (in either
 /// order) idempotently when the chain is founded by *our* key, and otherwise
 /// refuses. It never adopts a chain founded by a *different* key with no owner
-/// pinned: that is the first-connect takeover window (#95). Every legitimate
+/// pinned: that is the first-connect takeover window. Every legitimate
 /// non-creator pins the owner before this runs — join from the invite's owner,
 /// restore from the chain founder — so an absent pin against a foreign founder is
 /// either an attacker who seeded the bucket or an unestablished library, both of
@@ -985,7 +1003,7 @@ pub async fn ensure_owner_anchored_chain(
             // An owner is pinned but the chain is gone. Founding writes the entry
             // before pinning, so a crash never leaves this state — it means an
             // established chain was wiped. Re-founding would silently drop every
-            // member, so refuse and surface it (#104) rather than self-heal.
+            // member, so refuse and surface it.
             Some(p) => Err(format!(
                 "membership chain is missing but owner {p} is pinned for this library \
                  — refusing (wiped or tampered membership/*)"
@@ -1000,7 +1018,7 @@ pub async fn ensure_owner_anchored_chain(
         match pinned.as_deref() {
             // Anchored: the founder is the pinned owner.
             Some(p) if p == founder => Ok(()),
-            // Refounded under a different key (#95) — refuse.
+            // Refounded under a different key — refuse.
             Some(p) => Err(format!(
                 "membership chain founder {founder} does not match the pinned owner \
                  {p} — refusing (owner-takeover attempt)"
@@ -1008,8 +1026,8 @@ pub async fn ensure_owner_anchored_chain(
             // No pin, but the chain is founded by our own key. Founding is two
             // non-atomic writes — the cloud founder entry, then the local pin — and
             // `found_and_pin` already fails loud (sync does not start) if either
-            // fails; this is that same founding operation's idempotent retry, not a
-            // separate self-heal pass. Cross-store atomicity isn't available, so a
+            // fails; this is that same founding operation's idempotent retry.
+            // Cross-store atomicity isn't available, so a
             // crash after the founder write but before the pin lands here; the next
             // connect completes the pin. Refusing instead would brick the library
             // forever on a mid-founding crash. Safe: an attacker cannot forge a

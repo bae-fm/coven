@@ -1,11 +1,11 @@
-//! Per-cycle authorization/decryption refresh (#85/#87).
+//! Per-cycle authorization/decryption refresh.
 //!
 //! `run_single_sync_cycle` re-reads membership and the rotatable library key at
 //! the top of every cycle, so a running device picks up a membership change or a
 //! key rotation made by another device without a restart. Loaded only once at
-//! init/join, a removed member would keep acting on stale authorization (#85) and
+//! init/join, a removed member would keep acting on stale authorization and
 //! a non-rotating device would keep using a dead library key after a rotation it
-//! didn't perform, silently diverging (#87).
+//! didn't perform, silently diverging.
 //!
 //! Each test proves fail-before/pass-after: the assertion that passes with the
 //! refresh in place fails when the corresponding refresh step is dropped (the
@@ -103,10 +103,10 @@ async fn run_cycle(
     .map(|_| ())
 }
 
-/// #87: a NON-rotating running device B adopts a rotated library key on its next
-/// cycle, with no restart. Device A removes a member, which rotates the key and
-/// re-wraps B's `keys/{B}` under the new key; B's next `run_single_sync_cycle`
-/// re-reads that wrapped key, authenticates it against the pinned owner, and swaps
+/// A non-rotating running device B adopts a rotated library key on its next cycle,
+/// with no restart. Device A removes a member, which rotates the key and re-wraps
+/// B's `keys/{B}` under the new key; B's next `run_single_sync_cycle` re-reads
+/// that wrapped key, authenticates it against the current Owner set, and swaps
 /// its live cipher — so it can now decrypt content sealed under the new key, and
 /// its keyring holds the new key for the next restart.
 ///
@@ -229,7 +229,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     assert_eq!(
         cipher_key(&cipher_b),
         new_key.key_bytes(),
-        "B adopted the rotated key into its live cipher without a restart (#87)",
+        "B adopted the rotated key into its live cipher without a restart",
     );
     assert_eq!(
         ks_b.stored_key().as_deref(),
@@ -245,11 +245,342 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     assert_eq!(reunwrapped, new_key.key_bytes());
 }
 
-/// #87 (authentication invariant, #99): the wrapped-key adoption refuses a forged
-/// `keys/{self}` — one not signed by the pinned owner. A bucket writer overwrites
-/// B's slot with a key they chose, sealed to B's public key and signed by an
-/// attacker. B's refresh authenticates against the pinned owner, so it does NOT
-/// adopt the attacker's key; the cycle fails closed and B keeps its real key.
+#[tokio::test]
+async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
+    let owner = UserKeypair::generate();
+    let device_b = UserKeypair::generate();
+    let victim = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let old_key: [u8; 32] = [12u8; 32];
+
+    let storage = MockSyncStorage::new();
+    let mut chain = bootstrap_chain(&owner);
+    chain
+        .add_entry(make_entry(
+            &owner,
+            MembershipAction::Add,
+            &device_b,
+            MemberRole::Member,
+            "0000000002000-0000-A",
+        ))
+        .unwrap();
+    chain
+        .add_entry(make_entry(
+            &owner,
+            MembershipAction::Add,
+            &victim,
+            MemberRole::Member,
+            "0000000003000-0000-A",
+        ))
+        .unwrap();
+    upload_chain(&storage, &chain).await;
+
+    let b_x = device_b.to_x25519_public_key();
+    let wrapped_old =
+        signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &old_key, &owner);
+    storage
+        .put_wrapped_key(&pubkey_hex(&device_b), wrapped_old.clone())
+        .await
+        .unwrap();
+
+    let db_b = open_test_db();
+    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(old_key);
+    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+    let (_tmp_b, ld_b) = temp_library_dir();
+
+    let new_key = revoke_member(
+        &storage,
+        &storage,
+        &mut chain,
+        storage.list_membership_entries().await.unwrap(),
+        &owner,
+        &pubkey_hex(&victim),
+        LIB_ID,
+        "0000000004000-0000-A",
+        &EncryptionService::from_key(old_key),
+    )
+    .await
+    .expect("revoke rotates key");
+
+    run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await
+    .expect("adopt generation 2");
+    assert_eq!(cipher_generation(&cipher_b), new_key.current_generation());
+
+    storage
+        .put_wrapped_key(&pubkey_hex(&device_b), wrapped_old)
+        .await
+        .unwrap();
+
+    run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await
+    .expect("replayed old wrapped key is ignored");
+
+    assert_eq!(
+        cipher_key(&cipher_b),
+        new_key.key_bytes(),
+        "a replayed older wrapped key must not roll the device back",
+    );
+    assert_eq!(
+        cipher_generation(&cipher_b),
+        new_key.current_generation(),
+        "the accepted generation floor remains at the rotated generation",
+    );
+}
+
+#[tokio::test]
+async fn same_generation_wrapped_key_is_not_adopted() {
+    let owner = UserKeypair::generate();
+    let device_b = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let current_key: [u8; 32] = [13u8; 32];
+    let replacement_key: [u8; 32] = [14u8; 32];
+
+    let storage = MockSyncStorage::new();
+    let mut chain = bootstrap_chain(&owner);
+    chain
+        .add_entry(make_entry(
+            &owner,
+            MembershipAction::Add,
+            &device_b,
+            MemberRole::Member,
+            "0000000002000-0000-A",
+        ))
+        .unwrap();
+    upload_chain(&storage, &chain).await;
+
+    let b_x = device_b.to_x25519_public_key();
+    let same_generation_replacement = signed_wrapped_key_for_test(
+        LIB_ID,
+        &pubkey_hex(&device_b),
+        &b_x,
+        &replacement_key,
+        &owner,
+    );
+    storage
+        .put_wrapped_key(&pubkey_hex(&device_b), same_generation_replacement)
+        .await
+        .unwrap();
+
+    let db_b = open_test_db();
+    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(current_key);
+    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        current_key,
+    )));
+    let (_tmp_b, ld_b) = temp_library_dir();
+
+    run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await
+    .expect("same-generation wrapped key is ignored");
+
+    assert_eq!(
+        cipher_key(&cipher_b),
+        current_key,
+        "same-generation wrapped keys are not adopted even when signed by an owner",
+    );
+}
+
+#[tokio::test]
+async fn second_owner_rotation_is_adoptable_by_existing_members() {
+    let founder = UserKeypair::generate();
+    let second_owner = UserKeypair::generate();
+    let device_b = UserKeypair::generate();
+    let victim = UserKeypair::generate();
+    let founder_pk = pubkey_hex(&founder);
+    let old_key: [u8; 32] = [15u8; 32];
+
+    let storage = MockSyncStorage::new();
+    let mut chain = bootstrap_chain(&founder);
+    chain
+        .add_entry(make_entry(
+            &founder,
+            MembershipAction::Add,
+            &second_owner,
+            MemberRole::Owner,
+            "0000000002000-0000-A",
+        ))
+        .unwrap();
+    chain
+        .add_entry(make_entry(
+            &founder,
+            MembershipAction::Add,
+            &device_b,
+            MemberRole::Member,
+            "0000000003000-0000-A",
+        ))
+        .unwrap();
+    chain
+        .add_entry(make_entry(
+            &founder,
+            MembershipAction::Add,
+            &victim,
+            MemberRole::Member,
+            "0000000004000-0000-A",
+        ))
+        .unwrap();
+    upload_chain(&storage, &chain).await;
+
+    let db_b = open_test_db();
+    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
+        .await
+        .unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(old_key);
+    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+    let (_tmp_b, ld_b) = temp_library_dir();
+
+    let new_key = revoke_member(
+        &storage,
+        &storage,
+        &mut chain,
+        storage.list_membership_entries().await.unwrap(),
+        &second_owner,
+        &pubkey_hex(&victim),
+        LIB_ID,
+        "0000000005000-0000-B",
+        &EncryptionService::from_key(old_key),
+    )
+    .await
+    .expect("second owner can revoke");
+
+    run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await
+    .expect("existing member adopts a current owner's rotation");
+
+    assert_eq!(cipher_key(&cipher_b), new_key.key_bytes());
+}
+
+#[tokio::test]
+async fn removed_owner_key_is_not_adopted() {
+    let founder = UserKeypair::generate();
+    let second_owner = UserKeypair::generate();
+    let device_b = UserKeypair::generate();
+    let founder_pk = pubkey_hex(&founder);
+    let current_key: [u8; 32] = [16u8; 32];
+    let removed_owner_key: [u8; 32] = [17u8; 32];
+
+    let storage = MockSyncStorage::new();
+    let mut chain = bootstrap_chain(&founder);
+    chain
+        .add_entry(make_entry(
+            &founder,
+            MembershipAction::Add,
+            &second_owner,
+            MemberRole::Owner,
+            "0000000002000-0000-A",
+        ))
+        .unwrap();
+    chain
+        .add_entry(make_entry(
+            &founder,
+            MembershipAction::Add,
+            &device_b,
+            MemberRole::Member,
+            "0000000003000-0000-A",
+        ))
+        .unwrap();
+    chain
+        .add_entry(make_entry(
+            &second_owner,
+            MembershipAction::Remove,
+            &founder,
+            MemberRole::Owner,
+            "0000000004000-0000-B",
+        ))
+        .unwrap();
+    upload_chain(&storage, &chain).await;
+
+    let b_x = device_b.to_x25519_public_key();
+    let removed_owner_wrapped = signed_wrapped_key_for_test(
+        LIB_ID,
+        &pubkey_hex(&device_b),
+        &b_x,
+        &removed_owner_key,
+        &founder,
+    );
+    storage
+        .put_wrapped_key(&pubkey_hex(&device_b), removed_owner_wrapped)
+        .await
+        .unwrap();
+
+    let db_b = open_test_db();
+    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
+        .await
+        .unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(current_key);
+    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        current_key,
+    )));
+    let (_tmp_b, ld_b) = temp_library_dir();
+
+    let result = run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a key signed by a removed owner must fail closed, not be adopted",
+    );
+    assert_eq!(
+        cipher_key(&cipher_b),
+        current_key,
+        "the removed owner's key must not replace the current key",
+    );
+}
+
+/// Wrapped-key adoption refuses a forged `keys/{self}` — one not signed by a
+/// current Owner. A bucket writer overwrites B's slot with a key they chose,
+/// sealed to B's public key and signed by an attacker. B's refresh authenticates
+/// against current Owners, so it does NOT adopt the attacker's key; the cycle
+/// fails closed and B keeps its real key.
 #[tokio::test]
 async fn refresh_rejects_a_forged_wrapped_key() {
     let owner = UserKeypair::generate();
@@ -316,7 +647,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     assert_eq!(
         cipher_key(&cipher_b),
         real_key,
-        "B keeps its real key; the unauthenticated forged key is never adopted (#99)",
+        "B keeps its real key; the unauthenticated forged key is never adopted",
     );
     assert_ne!(
         cipher_key(&cipher_b),
@@ -325,10 +656,9 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     );
 }
 
-/// #88 invariant carried into the refresh: for an owner-pinned library a chain the
-/// refresh can't load must ABORT the cycle, never fall open to "no chain, act
-/// anyway". A membership LIST that fails (the wiped/flaky case) aborts B's cycle
-/// rather than letting it push or judge under no authorization.
+/// For an owner-pinned library, a chain the refresh can't load must abort the
+/// cycle, never fall open to "no chain, act anyway". A membership list that fails
+/// aborts B's cycle rather than letting it push or judge under no authorization.
 #[tokio::test]
 async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let owner = UserKeypair::generate();
@@ -373,8 +703,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     .await;
     assert!(
         result.is_err(),
-        "a membership-list failure under a pinned owner must abort the cycle, not \
-         fall open (#88): {result:?}",
+        "a membership-list failure under a pinned owner must abort the cycle, not fall open: {result:?}",
     );
 }
 
@@ -383,6 +712,13 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
 fn cipher_key(cipher: &RwLock<CloudCipher>) -> [u8; 32] {
     match &*cipher.read().unwrap() {
         CloudCipher::Encrypted(enc) => enc.key_bytes(),
+        CloudCipher::Plaintext => panic!("expected an encrypted cipher"),
+    }
+}
+
+fn cipher_generation(cipher: &RwLock<CloudCipher>) -> u64 {
+    match &*cipher.read().unwrap() {
+        CloudCipher::Encrypted(enc) => enc.current_generation(),
         CloudCipher::Plaintext => panic!("expected an encrypted cipher"),
     }
 }
