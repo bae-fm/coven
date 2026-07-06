@@ -22,7 +22,7 @@ use std::sync::RwLock;
 use rusqlite::OptionalExtension;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
-use crate::blob::{local_files, CacheFill, Provenance};
+use crate::blob::{local_files, BlobRef, BlobScope, CacheFill, Provenance, ResolvedScope};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
@@ -32,6 +32,7 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::session::BlobDecl;
+use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -169,6 +170,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 
     let db_a = open_device("device-a");
     let db_b = open_device("device-b");
+    let photo_bytes = b"\x89PNG\r\n\x1a\n fake image bytes for photo-1".to_vec();
 
     // Device A: a shared note plus a `note_photos` row (the blob-bearing child,
     // which inherits the note's `shared` gate through its foreign key).
@@ -176,8 +178,8 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         conn.execute_batch(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('note-1', 'has a photo', 'body', 1, '0000000001000-0000-device-a', '2026-01-01');\
-             INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-             VALUES ('photo-1', 'note-1', 'thumb', '0000000001001-0000-device-a', '2026-01-01');",
+             INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+             VALUES ('photo-1', 'note-1', 'thumb', 37, '0000000001001-0000-device-a', '2026-01-01');",
         )
         .map_err(DbError::from)
     })
@@ -187,7 +189,6 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     // The host stores the cover (host-provided) in A's local store — its Local home,
     // which the inline push reads to upload. On wasm this exercises the local-store
     // write over OPFS.
-    let photo_bytes = b"\x89PNG\r\n\x1a\n fake image bytes for photo-1".to_vec();
     local_files::store(&lib_a, "photos", "photo-1", &photo_bytes)
         .await
         .expect("store photo in A's local store");
@@ -243,6 +244,73 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
             .expect("read photo from B's OPFS"),
         photo_bytes,
         "the photo blob reached B's evictable cache with its original bytes",
+    );
+}
+
+#[wasm_bindgen_test]
+async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
+    console_error_panic_hook::set_once();
+
+    let cloud = InMemoryCloudHome::new();
+    let lib_b = LibraryDir::new(std::path::Path::new("/coven-blob-torn/lib-b"));
+    let db_b = open_device("device-b-torn");
+    let photo_bytes = b"complete opfs cache payload".to_vec();
+
+    db_b.call(|conn| {
+        conn.execute_batch(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('note-torn', 'has a photo', 'body', 1, '0000000001000-0000-device-b-torn', '2026-01-01');\
+             INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+             VALUES ('photo-torn', 'note-torn', 'thumb', 27, '0000000001001-0000-device-b-torn', '2026-01-01');",
+        )
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("device B insert");
+
+    let storage_b = CloudSyncStorage::new(
+        std::sync::Arc::new(cloud.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Hashed,
+        "wasm-blob-torn",
+        UserKeypair::generate(),
+    );
+    storage_b
+        .put_blob(
+            "photos",
+            "photo-torn",
+            ResolvedScope::Master,
+            None,
+            photo_bytes.clone(),
+        )
+        .await
+        .expect("seed cloud blob");
+
+    let cache_path = lib_b
+        .cache_blob_path("photos", "photo-torn")
+        .expect("cache blob path");
+    coven_core::local_blob::write_atomic(&cache_path, &photo_bytes[..8])
+        .await
+        .expect("simulate a torn OPFS cache file");
+
+    let blob = BlobRef {
+        namespace: "photos".to_string(),
+        id: "photo-torn".to_string(),
+        scope: BlobScope::Master,
+        cloud_path: None,
+        provenance: Provenance::HostProvided,
+        fill: CacheFill::CacheEager,
+    };
+    let read = crate::blob::cache::read_blob(&db_b, &lib_b, Some(&storage_b), &blob)
+        .await
+        .expect("short OPFS cache file is a miss");
+    assert_eq!(read, photo_bytes);
+    assert_eq!(
+        coven_core::local_blob::read(&cache_path)
+            .await
+            .expect("cache was rewritten"),
+        photo_bytes,
+        "the OPFS cache is restored to the full blob",
     );
 }
 

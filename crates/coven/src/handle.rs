@@ -913,7 +913,7 @@ mod tests {
         // so plant that Remote state now (a gated `notes` root with the `note_photos`
         // child carrying this id) so the read resolves the blob's locality to Remote
         // and fetches it back out of the home (rather than failing locality resolution).
-        plant_blob_row(&db, "cover-1", true).await;
+        plant_blob_row(&db, "cover-1", true, plaintext.len() as u64).await;
 
         // Read through the handle: a Remote miss resolves back out of the same home.
         let blob = BlobRef {

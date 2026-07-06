@@ -184,6 +184,8 @@ pub struct BlobDecl {
     /// The column holding the blob id. Defaults to the primary key (`id`, column
     /// 0), which is the blob id for most tables.
     pub id_column: String,
+    /// The column holding the blob's plaintext length in bytes.
+    pub size_column: String,
     /// Cloud namespace for the blob, e.g. `"images"` or `"audio"`.
     pub namespace: String,
     /// The column holding the consumer's readable cloud-relative path, used as the
@@ -228,6 +230,7 @@ impl BlobDecl {
     ) -> Self {
         BlobDecl {
             id_column: "id".to_string(),
+            size_column: "size".to_string(),
             namespace: namespace.into(),
             cloud_path_column: None,
             scope: BlobScopeSpec::Master,
@@ -239,6 +242,12 @@ impl BlobDecl {
     /// Take the blob id from `column` instead of the primary key.
     pub fn with_id_column(mut self, column: impl Into<String>) -> Self {
         self.id_column = column.into();
+        self
+    }
+
+    /// Take the plaintext byte length from `column` instead of `size`.
+    pub fn with_size_column(mut self, column: impl Into<String>) -> Self {
+        self.size_column = column.into();
         self
     }
 

@@ -74,7 +74,6 @@ impl PlatformLocalBlobBackend for OpfsLocalBlobBackend {
         imp::remove_file(path).await
     }
 
-    #[cfg(test)]
     async fn remove_dir_all(&self, path: &Path) -> Result<bool, String> {
         imp::remove_dir_all(path).await
     }

@@ -21,15 +21,16 @@ async fn store_read_drop_round_trip() {
         "the bytes land at storage/local/<namespace>/<id>",
     );
 
-    let read = local_files::read(&ld, "covers", "cov0aaaa")
+    let read = local_files::read(&ld, "covers", "cov0aaaa", bytes.len() as u64)
         .await
         .expect("read");
     assert_eq!(read, Some(bytes.clone()), "the whole blob round-trips");
 
     let (offset, len) = (500u64, 300u64);
-    let ranged = local_files::read_range(&ld, "covers", "cov0aaaa", offset, len)
-        .await
-        .expect("ranged read");
+    let ranged =
+        local_files::read_range(&ld, "covers", "cov0aaaa", bytes.len() as u64, offset, len)
+            .await
+            .expect("ranged read");
     assert_eq!(
         ranged,
         Some(bytes[offset as usize..(offset + len) as usize].to_vec()),
@@ -39,7 +40,9 @@ async fn store_read_drop_round_trip() {
     // A blob that isn't stored reads back as None (no error), so a caller falls
     // through to the cache/cloud path.
     assert_eq!(
-        local_files::read(&ld, "covers", "absent00").await.unwrap(),
+        local_files::read(&ld, "covers", "absent00", bytes.len() as u64)
+            .await
+            .unwrap(),
         None,
         "an unstored blob reads back as None",
     );
@@ -49,7 +52,9 @@ async fn store_read_drop_round_trip() {
         .expect("drop");
     assert!(removed, "drop reports the file was there");
     assert_eq!(
-        local_files::read(&ld, "covers", "cov0aaaa").await.unwrap(),
+        local_files::read(&ld, "covers", "cov0aaaa", bytes.len() as u64)
+            .await
+            .unwrap(),
         None,
         "after the drop the blob is gone",
     );
@@ -105,7 +110,9 @@ async fn local_store_blob_survives_an_evict_to_budget_sweep() {
         "the local-store blob survives — the budget sweep never walks storage/local/",
     );
     assert_eq!(
-        local_files::read(&ld, "covers", "keep0aaa").await.unwrap(),
+        local_files::read(&ld, "covers", "keep0aaa", store_bytes.len() as u64)
+            .await
+            .unwrap(),
         Some(store_bytes),
         "and its bytes are intact",
     );

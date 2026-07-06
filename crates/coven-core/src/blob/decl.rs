@@ -40,6 +40,8 @@ pub enum BlobDeclError {
     MissingColumn { table: String, column: String },
     /// A schema read (`PRAGMA table_info`) failed.
     Sqlite(rusqlite::Error),
+    /// A row's declared size column is negative.
+    InvalidSize { table: String, value: i64 },
     /// Walking the gate's FK graph for [`BlobDecls::refs_for_root`] failed.
     Gate(String),
 }
@@ -54,6 +56,9 @@ impl std::fmt::Display for BlobDeclError {
                 )
             }
             BlobDeclError::Sqlite(e) => write!(f, "blob declaration schema read failed: {e}"),
+            BlobDeclError::InvalidSize { table, value } => {
+                write!(f, "blob declaration found invalid size in {table}: {value}")
+            }
             BlobDeclError::Gate(e) => write!(f, "blob declaration FK walk failed: {e}"),
         }
     }
@@ -79,6 +84,8 @@ struct TableBlob {
     /// keys a lookup the other way ([`BlobDecls::row_for_blob_in_namespace`]: which row
     /// carries a given blob id), so both directions resolve off the same declaration.
     id_col_name: String,
+    /// Name of the plaintext-size column.
+    size_col_name: String,
     /// Index of the readable cloud-path column, if declared.
     cloud_path_col: Option<usize>,
     /// Name of the readable cloud-path column, if declared.
@@ -117,7 +124,7 @@ impl TableBlob {
     /// indices address a `SELECT *` row in schema order, exactly as they address a
     /// changeset row. Shared by [`BlobDecls::refs_in_db`] (whole DB) and
     /// [`BlobDecls::refs_for_root`] (one root's subtree).
-    fn ref_from_row(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<BlobRef>> {
+    fn ref_from_row(&self, row: &rusqlite::Row<'_>) -> Result<Option<BlobRef>, BlobDeclError> {
         let Some(id) = row.get::<_, Option<String>>(self.id_col)? else {
             return Ok(None);
         };
@@ -184,6 +191,7 @@ impl BlobDecls {
             };
 
             let id_col = index_of(&decl.id_column)?;
+            index_of(&decl.size_column)?;
             let cloud_path_col = match &decl.cloud_path_column {
                 Some(c) => Some(index_of(c)?),
                 None => None,
@@ -202,6 +210,7 @@ impl BlobDecls {
                     fill: decl.fill,
                     id_col,
                     id_col_name: decl.id_column.clone(),
+                    size_col_name: decl.size_column.clone(),
                     cloud_path_col,
                     cloud_path_col_name: decl.cloud_path_column.clone(),
                     scope,
@@ -215,9 +224,13 @@ impl BlobDecls {
     /// carries no blob or the blob id is absent/NULL. Reads the declared columns
     /// off the changeset row (which reports columns in schema order, the order the
     /// resolved indices address).
-    pub fn ref_from_change(&self, change: &RowChange) -> Option<BlobRef> {
-        let tb = self.tables.get(&change.table)?;
-        let id = change.col(tb.id_col)?.to_string();
+    pub fn ref_from_change(&self, change: &RowChange) -> Result<Option<BlobRef>, BlobDeclError> {
+        let Some(tb) = self.tables.get(&change.table) else {
+            return Ok(None);
+        };
+        let Some(id) = change.col(tb.id_col).map(str::to_string) else {
+            return Ok(None);
+        };
         let cloud_path = tb
             .cloud_path_col
             .and_then(|i| change.col(i))
@@ -225,9 +238,14 @@ impl BlobDecls {
         let scope = match &tb.scope {
             ResolvedScopeSpec::Master => BlobScope::Master,
             ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
-            ResolvedScopeSpec::ItemColumn(i) => BlobScope::Item(change.col(*i)?.to_string()),
+            ResolvedScopeSpec::ItemColumn(i) => {
+                let Some(item) = change.col(*i) else {
+                    return Ok(None);
+                };
+                BlobScope::Item(item.to_string())
+            }
         };
-        Some(tb.blob_ref(id, scope, cloud_path))
+        Ok(Some(tb.blob_ref(id, scope, cloud_path)))
     }
 
     /// Every blob the rows currently in `conn` reference — the snapshot-bootstrap
@@ -278,9 +296,12 @@ impl BlobDecls {
             // The subtree keys rows by primary key (`id`), the same column the gate
             // walks; read that row's declared blob columns by `SELECT *`.
             let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(&table));
-            let blob = conn.query_row(&sql, [&pk], |row| tb.ref_from_row(row))?;
-            if let Some(blob) = blob {
-                out.push(blob);
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = stmt.query([&pk])?;
+            if let Some(row) = rows.next()? {
+                if let Some(blob) = tb.ref_from_row(row)? {
+                    out.push(blob);
+                }
             }
         }
         Ok(out)
@@ -303,6 +324,19 @@ impl BlobDecls {
             return Ok(None);
         };
         Ok(pk_carrying_blob(conn, table, tb, blob_id)?.map(|pk| (table.clone(), pk)))
+    }
+
+    /// The plaintext byte length from the row carrying `blob_id` in `namespace`.
+    pub fn size_for_blob_in_namespace(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<Option<u64>, BlobDeclError> {
+        let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
+            return Ok(None);
+        };
+        pk_carrying_blob_size(conn, table, tb, blob_id)
     }
 
     /// The `(table, primary key)` of a live row whose declared blob resolves to
@@ -358,6 +392,31 @@ fn pk_carrying_blob(
     conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
         .optional()
         .map_err(BlobDeclError::from)
+}
+
+fn pk_carrying_blob_size(
+    conn: &Connection,
+    table: &str,
+    tb: &TableBlob,
+    blob_id: &str,
+) -> Result<Option<u64>, BlobDeclError> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE {} = ?1",
+        quote_ident(&tb.size_col_name),
+        quote_ident(table),
+        quote_ident(&tb.id_col_name),
+    );
+    let size = conn
+        .query_row(&sql, [blob_id], |row| row.get::<_, i64>(0))
+        .optional()
+        .map_err(BlobDeclError::from)?;
+    size.map(|value| {
+        u64::try_from(value).map_err(|_| BlobDeclError::InvalidSize {
+            table: table.to_string(),
+            value,
+        })
+    })
+    .transpose()
 }
 
 fn pk_carrying_cloud_path(

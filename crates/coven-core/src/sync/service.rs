@@ -56,6 +56,7 @@ pub enum DeferredLocalBlobDisposition {
 pub struct DeferredLocalBlobDrop {
     pub namespace: String,
     pub id: String,
+    pub size: u64,
     pub disposition: DeferredLocalBlobDisposition,
 }
 
@@ -177,8 +178,9 @@ pub async fn sync(
     if let Some(ref cs) = outgoing_cs {
         let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
         let blob_decls = db.blob_decls();
-        let publish_blobs = publish_blobs_from_changes(&blob_decls, &changes);
-        let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes);
+        let publish_blobs = publish_blobs_from_changes(&blob_decls, &changes)?;
+        let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes)
+            .map_err(|e| SyncCycleError::AssetScan(e.to_string()))?;
         let make_remote_intents = make_remote_intents_for_blobs(db, &host_blobs).await?;
         let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
         for blob in host_blobs {
@@ -305,6 +307,7 @@ struct ReadyHostProvidedMakeRemote {
 
 struct UploadedHostBlob {
     blob: BlobRef,
+    expected_size: u64,
     cleanup_local_store_after_publish: bool,
 }
 
@@ -317,6 +320,7 @@ impl UploadedHostBlob {
             .then_some(DeferredLocalBlobDrop {
                 namespace: self.blob.namespace,
                 id: self.blob.id,
+                size: self.expected_size,
                 disposition,
             })
     }
@@ -334,6 +338,7 @@ impl UploadedHostBlob {
                 &DeferredLocalBlobDrop {
                     namespace: self.blob.namespace,
                     id: self.blob.id,
+                    size: self.expected_size,
                     disposition,
                 },
             )
@@ -349,33 +354,45 @@ async fn upload_host_provided_blob(
     library_dir: &LibraryDir,
     blob: &BlobRef,
 ) -> Result<UploadedHostBlob, SyncCycleError> {
+    let expected_size = expected_blob_size(db, blob).await?;
     let exists = storage
         .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
         .await
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     if exists {
-        let local = crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id)
-            .await
-            .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        let local =
+            crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id, expected_size)
+                .await
+                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
         return Ok(UploadedHostBlob {
             blob: blob.clone(),
+            expected_size,
             cleanup_local_store_after_publish: local.is_some(),
         });
     }
 
-    let local = match crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Err(SyncCycleError::AssetUpload(format!(
-                "reading local-store blob for {}: {e}",
-                blob.id
-            )));
-        }
-    };
+    let local =
+        match crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id, expected_size)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(SyncCycleError::AssetUpload(format!(
+                    "reading local-store blob for {}: {e}",
+                    blob.id
+                )));
+            }
+        };
     let was_in_local_store = local.is_some();
     let bytes = match local {
         Some(bytes) => bytes,
-        None => match crate::blob::cache::read_staged(library_dir, &blob.namespace, &blob.id).await
+        None => match crate::blob::cache::read_staged(
+            library_dir,
+            &blob.namespace,
+            &blob.id,
+            expected_size,
+        )
+        .await
         {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
@@ -416,7 +433,27 @@ async fn upload_host_provided_blob(
 
     Ok(UploadedHostBlob {
         blob: blob.clone(),
+        expected_size,
         cleanup_local_store_after_publish: was_in_local_store,
+    })
+}
+
+async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCycleError> {
+    let decls = db.blob_decls();
+    let namespace = blob.namespace.clone();
+    let id = blob.id.clone();
+    db.call(move |conn| {
+        decls
+            .size_for_blob_in_namespace(conn, &namespace, &id)
+            .map_err(|e| crate::database::DbError(e.to_string()))
+    })
+    .await
+    .map_err(|e| SyncCycleError::AssetScan(e.0))?
+    .ok_or_else(|| {
+        SyncCycleError::AssetScan(format!(
+            "cannot read expected size for blob {}/{}: no carrying row",
+            blob.namespace, blob.id
+        ))
     })
 }
 
@@ -425,9 +462,14 @@ pub async fn apply_deferred_local_blob_drop(
     library_dir: &LibraryDir,
     deferred: &DeferredLocalBlobDrop,
 ) -> Result<(), SyncCycleError> {
-    let local = crate::blob::local_files::read(library_dir, &deferred.namespace, &deferred.id)
-        .await
-        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+    let local = crate::blob::local_files::read(
+        library_dir,
+        &deferred.namespace,
+        &deferred.id,
+        deferred.size,
+    )
+    .await
+    .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     match (deferred.disposition, local) {
         (DeferredLocalBlobDisposition::Pin, Some(bytes)) => {
             let pinned = library_dir

@@ -1807,15 +1807,15 @@ mod tests {
             db,
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
-             INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-             VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+             INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+             VALUES ('audio1', 'n1', 'audio', 11, '0000000001000-0000-dev1', '2026-01-01')",
         )
         .await;
         if include_host_blob {
             crate::sync::test_helpers::exec(
                 db,
-                "INSERT INTO note_covers (id, note_id, _updated_at, created_at) \
-                 VALUES ('cover1', 'n1', '0000000001000-0000-dev1', '2026-01-01')",
+                "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at) \
+                 VALUES ('cover1', 'n1', 5, '0000000001000-0000-dev1', '2026-01-01')",
             )
             .await;
         }

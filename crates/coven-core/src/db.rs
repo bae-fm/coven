@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS published_blob_drop_intents (
     seq INTEGER NOT NULL,
     namespace TEXT NOT NULL,
     blob_id TEXT NOT NULL,
+    size INTEGER NOT NULL,
     disposition TEXT NOT NULL CHECK (disposition IN ('drop', 'cache', 'pin')),
     PRIMARY KEY (seq, namespace, blob_id)
 );

@@ -28,7 +28,6 @@ pub trait PlatformLocalBlobBackend: crate::MaybeThreadSafe {
     async fn exists(&self, path: &Path) -> Result<bool, String>;
     async fn rename(&self, from: &Path, to: &Path) -> Result<(), String>;
     async fn remove_file(&self, path: &Path) -> Result<bool, String>;
-    #[cfg(test)]
     async fn remove_dir_all(&self, path: &Path) -> Result<bool, String>;
     async fn create_dir_all(&self, path: &Path) -> Result<(), String>;
     async fn sync_parent_dir(&self, _path: &Path) -> Result<(), String> {
@@ -73,7 +72,7 @@ pub async fn remove_file(path: &Path) -> Result<bool, String> {
     backend().remove_file(path).await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
     backend().remove_dir_all(path).await
 }

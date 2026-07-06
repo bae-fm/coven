@@ -591,8 +591,8 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_covers (id, note_id, _updated_at, created_at, cloud_path) \
-         VALUES ('coveraaa', 'n1', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+        "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
+         VALUES ('coveraaa', 'n1', 13, '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
     )
     .await;
     local_files::store(&lib_a, "covers", "coveraaa", &cover)
@@ -746,8 +746,8 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_covers (id, note_id, _updated_at, created_at, cloud_path) \
-         VALUES ('coverhost', 'n-host', '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
+        "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
+         VALUES ('coverhost', 'n-host', 15, '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
     )
     .await;
     local_files::store(&lib_a, "covers", "coverhost", &cover)
@@ -847,8 +847,8 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
+         VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
     )
     .await;
     local_files::store(&lib_a, "covers", "coverrrr", &cover)

@@ -221,14 +221,16 @@ async fn persist_staged_push_state(
         for drop in drops {
             tx.execute(
                 "INSERT INTO published_blob_drop_intents \
-                 (seq, namespace, blob_id, disposition) \
-                 VALUES (?1, ?2, ?3, ?4) \
+                 (seq, namespace, blob_id, size, disposition) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
                  ON CONFLICT(seq, namespace, blob_id) DO UPDATE SET \
+                 size = excluded.size, \
                  disposition = excluded.disposition",
                 rusqlite::params![
                     seq as i64,
                     drop.namespace,
                     drop.id,
+                    drop.size as i64,
                     disposition_to_db(drop.disposition),
                 ],
             )
@@ -274,7 +276,7 @@ async fn load_published_blob_drop_intents(
     db.call(move |conn| {
         let mut stmt = conn
             .prepare(
-                "SELECT seq, namespace, blob_id, disposition \
+                "SELECT seq, namespace, blob_id, size, disposition \
                  FROM published_blob_drop_intents \
                  WHERE seq <= ?1 \
                  ORDER BY seq, namespace, blob_id",
@@ -282,10 +284,31 @@ async fn load_published_blob_drop_intents(
             .map_err(DbError::from)?;
         let intents = stmt
             .query_map([max_seq as i64], |row| {
-                let disposition_raw: String = row.get(3)?;
-                let disposition = disposition_from_db(&disposition_raw).map_err(|message| {
+                let size: Option<i64> = row.get(3)?;
+                let size = size.ok_or_else(|| {
                     rusqlite::Error::FromSqlConversionFailure(
                         3,
+                        rusqlite::types::Type::Integer,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "published blob drop intent is missing size",
+                        )),
+                    )
+                })?;
+                if size < 0 {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Integer,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("published blob drop intent has negative size {size}"),
+                        )),
+                    ));
+                }
+                let disposition_raw: String = row.get(4)?;
+                let disposition = disposition_from_db(&disposition_raw).map_err(|message| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
                         rusqlite::types::Type::Text,
                         Box::new(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
@@ -298,6 +321,7 @@ async fn load_published_blob_drop_intents(
                     drop: super::service::DeferredLocalBlobDrop {
                         namespace: row.get(1)?,
                         id: row.get(2)?,
+                        size: size as u64,
                         disposition,
                     },
                 })

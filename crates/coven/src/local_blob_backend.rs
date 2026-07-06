@@ -239,6 +239,14 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         }
     }
 
+    async fn remove_dir_all(&self, path: &Path) -> Result<bool, String> {
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("remove dir tree {}: {e}", path.display())),
+        }
+    }
+
     async fn create_dir_all(&self, path: &Path) -> Result<(), String> {
         tokio::fs::create_dir_all(path)
             .await

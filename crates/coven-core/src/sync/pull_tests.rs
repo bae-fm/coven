@@ -642,8 +642,8 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', 8, '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
     )
     .await;
     db1.take_changeset().await.expect("drain insert changeset");
@@ -1253,8 +1253,8 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     // The cover's readable key lives in the row's `cloud_path` column.
     exec(
         &db1,
-        "INSERT INTO note_photos (id, note_id, kind, cloud_path, _updated_at, created_at) \
-         VALUES ('p1cover', 'n1', 'cover', 'n1/cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
+         VALUES ('p1cover', 'n1', 'cover', 8, 'n1/cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
     // The host stages the cover into the cache before the inline push reads it.
@@ -1360,8 +1360,8 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('p1cover', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('p1cover', 'n1', 'cover', 15, '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
     // The host stages the cover into the cache before the inline push reads it.
@@ -1458,14 +1458,14 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('peager01', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('peager01', 'n1', 'cover', 11, '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
     exec(
         &db1,
-        "INSERT INTO note_covers (id, note_id, _updated_at, created_at) \
-         VALUES ('clazy001', 'n1', '0000000001001-0000-dev1', '2026-01-01')",
+        "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at) \
+         VALUES ('clazy001', 'n1', 10, '0000000001001-0000-dev1', '2026-01-01')",
     )
     .await;
     // The host stores both blobs in the local store (their Local home) before the

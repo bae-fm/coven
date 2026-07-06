@@ -32,11 +32,15 @@ pub(crate) enum PublishBlobError {
 pub(crate) fn publish_blobs_from_changes(
     blob_decls: &crate::blob::decl::BlobDecls,
     changes: &[RowChange],
-) -> Vec<BlobRef> {
+) -> Result<Vec<BlobRef>, PublishBlobError> {
     changes
         .iter()
         .filter(|change| matches!(change.op, ChangeOp::Insert | ChangeOp::Update))
-        .filter_map(|change| blob_decls.ref_from_change(change))
+        .filter_map(|change| match blob_decls.ref_from_change(change) {
+            Ok(Some(blob)) => Some(Ok(blob)),
+            Ok(None) => None,
+            Err(e) => Some(Err(PublishBlobError::ChangesetScan(e.to_string()))),
+        })
         .collect()
 }
 
@@ -48,7 +52,7 @@ pub(crate) async fn ensure_publishable_changeset_blobs(
     let (_envelope, changeset) =
         envelope::unpack(packed).map_err(PublishBlobError::PackedChangeset)?;
     let changes = crate::changeset::walk(&changeset).map_err(PublishBlobError::ChangesetScan)?;
-    let blobs = publish_blobs_from_changes(&db.blob_decls(), &changes);
+    let blobs = publish_blobs_from_changes(&db.blob_decls(), &changes)?;
     ensure_publishable_blobs(db, storage, &blobs).await
 }
 

@@ -600,14 +600,20 @@ pub async fn pull_changes(
             // can't carry the cursor past the failed seq (its blobs would then
             // never be re-fetched). The next cycle resumes at this seq. CacheLazy
             // blobs are not downloaded here — they are fetched on first read.
-            let blobs_ok = download_blobs(
-                db,
-                cache_eager_blobs(&blob_decls, &changes),
-                storage,
-                library_dir,
-                &in_changeset_keys,
-            )
-            .await;
+            let cache_eager = match cache_eager_blobs(&blob_decls, &changes) {
+                Ok(blobs) => blobs,
+                Err(e) => {
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        "failed to scan blob declarations from changeset, skipping without applying: {e}"
+                    );
+                    result.asset_downloads_failed = true;
+                    break;
+                }
+            };
+            let blobs_ok =
+                download_blobs(db, cache_eager, storage, library_dir, &in_changeset_keys).await;
             if !blobs_ok {
                 warn!(
                     "Blob download failed for {}/{}, not applying; cursor not advanced",
@@ -1117,11 +1123,14 @@ fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8;
 pub(crate) fn cache_eager_blobs(
     blob_decls: &BlobDecls,
     changes: &[RowChange],
-) -> Vec<crate::blob::BlobRef> {
+) -> Result<Vec<crate::blob::BlobRef>, crate::blob::decl::BlobDeclError> {
     changes
         .iter()
-        .filter_map(|change| blob_decls.ref_from_change(change))
-        .filter(|blob| blob.fill == CacheFill::CacheEager)
+        .filter_map(|change| match blob_decls.ref_from_change(change) {
+            Ok(Some(blob)) if blob.fill == CacheFill::CacheEager => Some(Ok(blob)),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        })
         .collect()
 }
 
@@ -1134,7 +1143,7 @@ pub(crate) fn cache_eager_blobs(
 pub(crate) fn host_provided_blobs(
     blob_decls: &BlobDecls,
     changes: &[RowChange],
-) -> Vec<crate::blob::BlobRef> {
+) -> Result<Vec<crate::blob::BlobRef>, crate::blob::decl::BlobDeclError> {
     changes
         .iter()
         .filter(|change| {
@@ -1143,8 +1152,11 @@ pub(crate) fn host_provided_blobs(
                 crate::changeset::ChangeOp::Insert | crate::changeset::ChangeOp::Update
             )
         })
-        .filter_map(|change| blob_decls.ref_from_change(change))
-        .filter(|blob| blob.provenance == Provenance::HostProvided)
+        .filter_map(|change| match blob_decls.ref_from_change(change) {
+            Ok(Some(blob)) if blob.provenance == Provenance::HostProvided => Some(Ok(blob)),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        })
         .collect()
 }
 
@@ -1174,12 +1186,20 @@ async fn drop_deleted_blob_local(
     }
     for (old, new) in old_changes.iter().zip(new_changes) {
         let old_blob_to_drop = match old.op {
-            crate::changeset::ChangeOp::Delete => blob_decls.ref_from_change(old),
+            crate::changeset::ChangeOp::Delete => blob_decls
+                .ref_from_change(old)
+                .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?,
             crate::changeset::ChangeOp::Update => {
-                let Some(old_blob) = blob_decls.ref_from_change(old) else {
+                let Some(old_blob) = blob_decls
+                    .ref_from_change(old)
+                    .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?
+                else {
                     continue;
                 };
-                let should_drop = match blob_decls.ref_from_change(new) {
+                let should_drop = match blob_decls
+                    .ref_from_change(new)
+                    .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?
+                {
                     Some(new_blob) => {
                         old_blob.namespace != new_blob.namespace || old_blob.id != new_blob.id
                     }
@@ -1353,10 +1373,9 @@ pub(crate) async fn download_blobs(
             .await
         {
             Ok(bytes) => {
-                // Atomic write so a crash can't leave a torn `cache/<id>` a later
-                // read trusts as complete: the file appears whole or not at all,
-                // which the row-before-blob ordering and the cache's presence-is-truth
-                // model both depend on.
+                // Whole-blob cache populate. Later reads verify the cache file's
+                // length against the row before trusting it, so a short local file
+                // is not served as complete.
                 if let Err(e) = crate::local_blob::write_atomic(&dest, &bytes).await {
                     warn!(id = %blob.id, error = %e, "failed to write blob");
                     all_ok = false;

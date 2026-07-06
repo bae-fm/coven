@@ -120,7 +120,6 @@ impl PlatformLocalBlobBackend for TestLocalBlobBackend {
         }
     }
 
-    #[cfg(test)]
     async fn remove_dir_all(&self, path: &Path) -> Result<bool, String> {
         match tokio::fs::remove_dir_all(path).await {
             Ok(()) => Ok(true),

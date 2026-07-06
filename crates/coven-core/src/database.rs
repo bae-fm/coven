@@ -94,6 +94,7 @@ impl DatabaseCore {
         // versioned ledger can't track them; the host's synced ladder version rides
         // inside the snapshot's DB header.
         conn.execute_batch(MIGRATION_SQL).map_err(DbError::from)?;
+        migrate_bookkeeping_schema(&conn)?;
         let schema_version = run_migrations(&conn, migrations)?;
 
         // `item_keys` is coven-owned but is library-global content every member
@@ -1362,6 +1363,33 @@ fn open_connection(path: &Path) -> Result<Connection, DbError> {
         .ok_or_else(|| DbError("platform SQLite connection opener is not registered".to_string()))?(
         path,
     )
+}
+
+fn migrate_bookkeeping_schema(conn: &Connection) -> Result<(), DbError> {
+    if !table_has_column(conn, "published_blob_drop_intents", "size")? {
+        conn.execute(
+            "ALTER TABLE published_blob_drop_intents ADD COLUMN size INTEGER",
+            [],
+        )
+        .map_err(DbError::from)?;
+    }
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DbError> {
+    let sql = format!(
+        "PRAGMA table_info({})",
+        crate::sync::session::quote_ident(table)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
+    let mut rows = stmt.query([]).map_err(DbError::from)?;
+    while let Some(row) = rows.next().map_err(DbError::from)? {
+        let name: String = row.get(1).map_err(DbError::from)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

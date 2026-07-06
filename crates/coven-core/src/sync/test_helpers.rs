@@ -101,7 +101,7 @@ pub fn read_test_db(namespace: &str) -> Database {
 /// `remote = false` ⇒ **Local** (and the read then dispatches on the `BlobRef`'s
 /// provenance — external file vs local store). Requires a db whose `note_photos`
 /// carries a blob (e.g. [`read_test_db`] / [`open_test_db_with_blob`]).
-pub async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool) {
+pub async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool, size: u64) {
     let note = format!("note-{blob_id}");
     let blob_id = blob_id.to_string();
     db.call(move |conn| {
@@ -112,9 +112,9 @@ pub async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool) {
         )
         .map_err(DbError::from)?;
         conn.execute(
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-             VALUES (?1, ?2, 'attach', '0000000001000-0000-dev1', '2026-01-01')",
-            (blob_id.as_str(), note.as_str()),
+            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+             VALUES (?1, ?2, 'attach', ?3, '0000000001000-0000-dev1', '2026-01-01')",
+            (blob_id.as_str(), note.as_str(), size as i64),
         )
         .map_err(DbError::from)?;
         Ok(())
@@ -185,6 +185,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
             kind TEXT NOT NULL,
+            size INTEGER NOT NULL DEFAULT 0,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             cloud_path TEXT,
@@ -193,6 +194,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
         CREATE TABLE note_covers (
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
+            size INTEGER NOT NULL DEFAULT 0,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             cloud_path TEXT,

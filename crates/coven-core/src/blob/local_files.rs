@@ -57,10 +57,9 @@ impl From<PathTokenError> for LocalBlobError {
 
 /// Store a host-provided blob in the local store at
 /// `storage/local/<namespace>/<id>`, so a read serves it locally while its release
-/// is Local. The write is atomic ([`crate::local_blob::write_atomic`]), the same
-/// torn-file guard every blob write relies on. There is NO eviction: the local
-/// store is never swept (the bytes here ARE the blob while Local, not a re-fetchable
-/// cache mirror).
+/// is Local. Reads verify the file length against the blob's declared row size.
+/// There is NO eviction: the local store is never swept (the bytes here ARE the
+/// blob while Local, not a re-fetchable cache mirror).
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn store(
     library_dir: &LibraryDir,
@@ -83,13 +82,17 @@ pub async fn read(
     library_dir: &LibraryDir,
     namespace: &str,
     id: &str,
+    expected_size: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
     let path = library_dir.local_blob_path(namespace, id)?;
     match crate::local_blob::exists(&path).await {
-        Ok(true) => crate::local_blob::read(&path)
-            .await
-            .map(Some)
-            .map_err(LocalBlobError::Io),
+        Ok(true) => {
+            ensure_file_len(&path, expected_size).await?;
+            crate::local_blob::read(&path)
+                .await
+                .map(Some)
+                .map_err(LocalBlobError::Io)
+        }
         Ok(false) => Ok(None),
         Err(e) => Err(LocalBlobError::Io(e)),
     }
@@ -97,24 +100,41 @@ pub async fn read(
 
 /// Serve `len` plaintext bytes at `offset` from the local store, or `None` when no
 /// file is stored there. The local store holds the whole blob, so a request the
-/// caller has bounded against the blob's length reads exactly `len`; a short file
-/// is torn and fails loud in [`crate::local_blob::read_range`].
+/// caller has bounded against the blob's length reads exactly `len`; a file whose
+/// length differs from the declared size fails before the range read.
 pub async fn read_range(
     library_dir: &LibraryDir,
     namespace: &str,
     id: &str,
+    expected_size: u64,
     offset: u64,
     len: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
     let path = library_dir.local_blob_path(namespace, id)?;
     match crate::local_blob::exists(&path).await {
-        Ok(true) => crate::local_blob::read_range(&path, offset, len)
-            .await
-            .map(Some)
-            .map_err(LocalBlobError::Io),
+        Ok(true) => {
+            ensure_file_len(&path, expected_size).await?;
+            crate::local_blob::read_range(&path, offset, len)
+                .await
+                .map(Some)
+                .map_err(LocalBlobError::Io)
+        }
         Ok(false) => Ok(None),
         Err(e) => Err(LocalBlobError::Io(e)),
     }
+}
+
+async fn ensure_file_len(path: &std::path::Path, expected_size: u64) -> Result<(), LocalBlobError> {
+    let actual = crate::local_blob::file_len(path)
+        .await
+        .map_err(LocalBlobError::Io)?;
+    if actual != expected_size {
+        return Err(LocalBlobError::Io(format!(
+            "local blob {} has {actual} bytes, expected {expected_size}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Drop a host-provided blob from the local store, returning whether a file

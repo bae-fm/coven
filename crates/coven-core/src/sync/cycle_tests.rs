@@ -263,8 +263,8 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('cover1', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('cover1', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
@@ -316,8 +316,8 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('cover1', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('cover1', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
@@ -849,8 +849,8 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('hponly', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('hponly', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
@@ -928,10 +928,10 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('firstblob', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01'); \
-         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('secondblob', 'n1', 'cover', '0000000001001-0000-M', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('firstblob', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01'); \
+         INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('secondblob', 'n1', 'cover', 6, '0000000001001-0000-M', '2026-01-01')",
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "firstblob", b"first")
@@ -973,7 +973,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         "the first blob reached cloud before the second upload failed"
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "firstblob")
+        crate::blob::local_files::read(&ld, "photos", "firstblob", 5)
             .await
             .expect("read first local")
             .is_some(),
@@ -1023,8 +1023,8 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('remoteonly', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('remoteonly', 'n1', 'cover', 15, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
 
@@ -1062,8 +1062,8 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('lazyblob', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('lazyblob', 'n1', 'cover', 4, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "lazyblob", b"lazy")
@@ -1077,7 +1077,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the first push attempt did not publish the changeset"
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "lazyblob")
+        crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
             .await
             .expect("read lazy local")
             .is_some(),
@@ -1090,7 +1090,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the staged retry publishes the changeset"
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "lazyblob")
+        crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
             .await
             .expect("read lazy local after publish")
             .is_none(),
