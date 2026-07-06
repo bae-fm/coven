@@ -37,8 +37,9 @@ use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    exec, open_test_db_schema, open_test_db_with_blob, open_test_db_with_user_and_host_blobs,
-    query_text, row_exists, temp_library_dir, test_migrations, MockSyncStorage,
+    host_exec as exec, open_test_db_schema, open_test_db_with_blob,
+    open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_library_dir,
+    test_migrations, MockSyncStorage,
 };
 
 /// The blob declaration for `note_photos`: a release file — user-provided ·

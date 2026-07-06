@@ -218,8 +218,13 @@ impl CovenLibrary {
         // drives it to its value without awaiting. It returns `None` only if a
         // wasm `Database` method ever gained a real suspension point — a bug to
         // surface, not to paper over.
+        let tables = self.db.synced_tables().to_vec();
         self.db
-            .call(move |conn| conn.execute_batch(&sql).map_err(DbError::from))
+            .call_with_capture_reset(move |conn| {
+                Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                    tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
+                })
+            })
             .now_or_never()
             .expect("wasm Database::call returns a ready future")
             .map_err(|e| JsValue::from_str(&format!("exec failed: {e}")))

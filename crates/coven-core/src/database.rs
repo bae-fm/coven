@@ -1,25 +1,25 @@
 //! The owned SQLite connection.
 //!
-//! coven owns one `rusqlite::Connection` together with a persistent session
-//! attached to the synced tables. Every database access — the host's app SQL,
-//! coven's bookkeeping, changeset capture and apply — runs against that one
-//! connection, so access is serialized and the session sees every write.
+//! coven owns one `rusqlite::Connection` together with the sync bookkeeping
+//! beside it. Every database access — the host's app SQL, coven's bookkeeping,
+//! changeset capture and apply — runs against that one connection, so access is
+//! serialized.
 //!
 //! Native hosts open coven with [`crate::Coven::builder`] and run app SQL through
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`]. Platform crates
 //! choose how a SQLite connection is opened and held.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::blob::decl::BlobDecls;
 use crate::db::{ExternalBlob, OutboxEntry, OutboxOperation, MIGRATION_SQL};
 use crate::migration::{run_migrations, Migration};
-use crate::sync::gate::Gates;
+use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
 
@@ -169,10 +169,6 @@ impl DatabaseCore {
         f(&self.conn)
     }
 
-    fn capture_changeset(&mut self) -> Result<Vec<u8>, DbError> {
-        capture_changeset(self.session.as_mut())
-    }
-
     fn with_capture_disabled<R>(&mut self, f: impl FnOnce(&Connection) -> R) -> R {
         let DatabaseCore { session, conn, .. } = self;
         if let Some(s) = session.as_mut() {
@@ -225,6 +221,11 @@ pub struct Database {
 pub struct Database {
     core: std::rc::Rc<std::cell::RefCell<DatabaseCore>>,
     state: DatabaseState,
+}
+
+pub(crate) enum PendingChangesetBatch {
+    Empty,
+    Pending { max_id: i64, changeset: Vec<u8> },
 }
 
 /// Erase a capture session's connection-borrow lifetime to `'static`.
@@ -357,9 +358,10 @@ impl Database {
 
     /// Run `f` against the connection and await the result.
     ///
-    /// This is how the host runs its app SQL and how coven runs bookkeeping,
-    /// gating, and apply — anything that needs `&Connection`. Writes issued here
-    /// are captured by the attached session.
+    /// This is how coven runs bookkeeping, gating reads, raw test writes, and
+    /// apply — anything that needs `&Connection`. Public host writes and coven
+    /// transitions that mutate synced rows use [`Self::call_with_capture_reset`]
+    /// plus a transaction-scoped pending journal instead.
     ///
     /// Native serializes access behind a mutex; wasm runs `f` directly on the
     /// borrowed connection on this Worker and returns a ready future, so it needs
@@ -386,56 +388,144 @@ impl Database {
         core.with_connection(f)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[doc(hidden)]
+    pub async fn call_with_capture_reset<F, R>(&self, f: F) -> Result<R, DbError>
+    where
+        F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
+        R: Send + 'static,
+    {
+        let mut core = self.core.lock().await;
+        let result = f(core.connection());
+        core.reset_session();
+        result
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[doc(hidden)]
+    pub async fn call_with_capture_reset<F, R>(&self, f: F) -> Result<R, DbError>
+    where
+        F: FnOnce(&Connection) -> Result<R, DbError> + 'static,
+        R: 'static,
+    {
+        let mut core = self.core.borrow_mut();
+        let result = core.with_connection(f);
+        core.reset_session();
+        result
+    }
+
+    fn start_host_change_journal_on<'c>(
+        conn: &'c Connection,
+        synced_tables: &[SyncedTable],
+    ) -> Result<rusqlite::session::Session<'c>, DbError> {
+        attach_session(conn, synced_tables)
+    }
+
+    fn drain_host_change_journal_on(
+        session: &mut rusqlite::session::Session<'_>,
+    ) -> Result<Vec<u8>, DbError> {
+        capture_changeset(Some(session))
+    }
+
+    fn insert_pending_changeset_on(
+        tx: &rusqlite::Transaction<'_>,
+        changeset: &[u8],
+    ) -> Result<(), DbError> {
+        if changeset.is_empty() {
+            debug!("journaled transaction produced no synced changes");
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT INTO pending_changesets (changeset) VALUES (?1)",
+            [changeset],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    pub fn run_pending_journaled_transaction_on<R, E>(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<DbError>,
+    {
+        let mut journal =
+            Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(DbError::from)
+            .map_err(E::from)?;
+        let value = f(&tx)?;
+        let changeset = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
+        Self::insert_pending_changeset_on(&tx, &changeset).map_err(E::from)?;
+        tx.commit().map_err(DbError::from).map_err(E::from)?;
+        Ok(value)
+    }
+
+    pub(crate) async fn pending_changeset_batch(&self) -> Result<PendingChangesetBatch, DbError> {
+        self.call(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, changeset FROM pending_changesets ORDER BY id")
+                .map_err(DbError::from)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(DbError::from)?;
+            let mut max_id = None;
+            let mut changesets = Vec::new();
+            for row in rows {
+                let (id, changeset) = row.map_err(DbError::from)?;
+                max_id = Some(id);
+                changesets.push(changeset);
+            }
+            if changesets.iter().any(Vec::is_empty) {
+                return Err(DbError(
+                    "pending_changesets contains an empty changeset".to_string(),
+                ));
+            }
+            let changeset = match changesets.as_slice() {
+                [] => return Ok(PendingChangesetBatch::Empty),
+                [single] => single.clone(),
+                _ => gate::combine_changesets(conn, &changesets)
+                    .map_err(|e| DbError(format!("combine pending changesets: {e}")))?,
+            };
+            let max_id = max_id.expect("non-empty pending changeset batch has a max id");
+            Ok(PendingChangesetBatch::Pending { max_id, changeset })
+        })
+        .await
+    }
+
+    pub(crate) async fn clear_pending_changesets_through(
+        &self,
+        max_id: i64,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            conn.execute("DELETE FROM pending_changesets WHERE id <= ?1", [max_id])
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
     /// Test-only raw capture path for tests that inspect changeset bytes directly.
     #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
     pub async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
         let mut core = self.core.lock().await;
-        let bytes = core.capture_changeset();
+        let bytes = capture_changeset(core.session.as_mut());
         core.reset_session();
         bytes
-    }
-
-    /// Capture the outgoing changeset and stage non-empty bytes at `path` before
-    /// resetting the recorded batch. If staging fails, the session is left
-    /// un-reset so the same batch can be captured again on the next cycle.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn take_changeset_staged(&self, path: PathBuf) -> Result<Vec<u8>, DbError> {
-        let mut core = self.core.lock().await;
-        let bytes = core.capture_changeset()?;
-        if !bytes.is_empty() {
-            crate::local_blob::write_atomic(&path, &bytes)
-                .await
-                .map_err(DbError)?;
-        }
-        core.reset_session();
-        Ok(bytes)
     }
 
     /// Test-only raw capture path for tests that inspect changeset bytes directly.
     #[cfg(all(any(test, feature = "test-utils"), target_arch = "wasm32"))]
     pub async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
         let mut core = self.core.borrow_mut();
-        let bytes = core.capture_changeset();
+        let bytes = capture_changeset(core.session.as_mut());
         core.reset_session();
         bytes
-    }
-
-    /// See the native `take_changeset_staged`. wasm runs the same
-    /// stage-before-reset ordering inline on the owned connection.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn take_changeset_staged(&self, path: PathBuf) -> Result<Vec<u8>, DbError> {
-        let _ = path;
-        let mut core = self.core.borrow_mut();
-        let bytes = core.capture_changeset()?;
-        if !bytes.is_empty() {
-            drop(core);
-            crate::local_blob::write_atomic(&path, &bytes)
-                .await
-                .map_err(DbError)?;
-            core = self.core.borrow_mut();
-        }
-        core.reset_session();
-        Ok(bytes)
     }
 
     /// Apply an incoming changeset with capture disabled around just the apply, so

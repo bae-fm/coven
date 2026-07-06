@@ -260,6 +260,18 @@ pub async fn exec(db: &Database, sql: &str) {
         .unwrap_or_else(|e| panic!("exec failed: {e}"));
 }
 
+pub async fn host_exec(db: &Database, sql: &str) {
+    let sql = sql.to_string();
+    let tables = db.synced_tables().to_vec();
+    db.call_with_capture_reset(move |conn| {
+        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+            tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
+        })
+    })
+    .await
+    .unwrap_or_else(|e| panic!("exec failed: {e}"));
+}
+
 /// Query a single text value from the test database.
 pub async fn query_text(db: &Database, sql: &str) -> String {
     let sql = sql.to_string();

@@ -164,6 +164,21 @@ impl Changegroup {
         Ok(())
     }
 
+    /// Append a complete changeset.
+    fn add_changeset(&self, changeset: &[u8]) -> Result<(), GateError> {
+        let rc = unsafe {
+            ffi::sqlite3changegroup_add(
+                self.raw,
+                changeset.len() as c_int,
+                changeset.as_ptr() as *mut c_void,
+            )
+        };
+        if rc != ffi::SQLITE_OK as c_int {
+            return Err(GateError::Ffi("sqlite3changegroup_add", rc));
+        }
+        Ok(())
+    }
+
     /// Concatenate everything added so far into one changeset's bytes.
     fn output(&self) -> Result<Vec<u8>, GateError> {
         let mut len: c_int = 0;
@@ -787,6 +802,20 @@ pub fn gate_outbound(
     gates: &Gates,
 ) -> Result<Vec<u8>, GateError> {
     unsafe { gate_outbound_raw(conn, changeset, gates) }
+}
+
+pub(crate) fn combine_changesets(
+    conn: &Connection,
+    changesets: &[Vec<u8>],
+) -> Result<Vec<u8>, GateError> {
+    let group = Changegroup::new()?;
+    unsafe {
+        group.set_schema(conn.handle())?;
+    }
+    for changeset in changesets {
+        group.add_changeset(changeset)?;
+    }
+    group.output()
 }
 
 /// # Safety

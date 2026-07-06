@@ -533,7 +533,8 @@ async fn commit_after_upload(
     stamp: String,
     now_rfc: String,
 ) -> Result<PostUpload, DbError> {
-    db.call(move |conn| {
+    let tables = db.synced_tables().to_vec();
+    db.call_with_capture_reset(move |conn| {
         // Map the uploaded blob to its row, then up to its gated root. The blob's
         // namespace is the first component of its durable cloud key, so the row is
         // looked up in exactly that namespace's table (never a scan-all that could
@@ -607,18 +608,18 @@ async fn commit_after_upload(
                 "make_remote completion: gated root {root_table} has no gate column"
             ))
         })?;
-        let tx = conn.unchecked_transaction()?;
-        finish_outbox_row(&tx, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
-        crate::sync::gate::write_gate(&tx, &root_table, gate_col, true, &stamp, &root_id)
-            .map_err(DbError::from)?;
-        for id in &blob_ids {
-            Database::clear_external_blob_on(&tx, id)?;
-        }
-        Database::delete_make_remote_intent_on(&tx, &root_table, &root_id)?;
-        tx.commit().map_err(DbError::from)?;
-        Ok(PostUpload::MadeRemote {
-            root_table,
-            root_id,
+        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+            finish_outbox_row(tx, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+            crate::sync::gate::write_gate(tx, &root_table, gate_col, true, &stamp, &root_id)
+                .map_err(DbError::from)?;
+            for id in &blob_ids {
+                Database::clear_external_blob_on(tx, id)?;
+            }
+            Database::delete_make_remote_intent_on(tx, &root_table, &root_id)?;
+            Ok(PostUpload::MadeRemote {
+                root_table,
+                root_id,
+            })
         })
     })
     .await

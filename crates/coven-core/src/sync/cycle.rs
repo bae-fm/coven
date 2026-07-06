@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 use crate::config::Config;
-use crate::database::{Database, DbError};
+use crate::database::{Database, DbError, PendingChangesetBatch};
 use crate::keys::{KeyPersistence, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
@@ -69,30 +69,11 @@ pub fn staging_path(library_dir: &LibraryDir) -> PathBuf {
     library_dir.join("sync_staging.bin")
 }
 
-/// Path for staging captured changeset bytes before fallible blob uploads.
-pub fn captured_staging_path(library_dir: &LibraryDir) -> PathBuf {
-    library_dir.join("sync_capture_staging.bin")
-}
+const STAGED_PENDING_CHANGESET_ID_KEY: &str = "staged_pending_changeset_id";
 
 /// Clear the staged changeset after a successful push.
 pub async fn clear_staged_changeset(library_dir: &LibraryDir) {
     let _ = crate::local_blob::remove_file(&staging_path(library_dir)).await;
-}
-
-pub async fn read_staged_captured_changeset(
-    library_dir: &LibraryDir,
-) -> Result<Option<Vec<u8>>, String> {
-    let path = captured_staging_path(library_dir);
-    match crate::local_blob::exists(&path).await? {
-        true => crate::local_blob::read(&path).await.map(Some),
-        false => Ok(None),
-    }
-}
-
-pub async fn clear_staged_captured_changeset(library_dir: &LibraryDir) -> Result<(), String> {
-    crate::local_blob::remove_file(&captured_staging_path(library_dir))
-        .await
-        .map(|_| ())
 }
 
 /// Read a previously staged changeset (if any) for retry.
@@ -132,6 +113,16 @@ where
         Ok(None) => Ok(None),
         Err(e) => Err(format!("Failed to read {key}: {e}")),
     }
+}
+
+async fn delete_sync_state(db: &Database, key: &'static str) -> Result<(), String> {
+    db.call(move |conn| {
+        conn.execute("DELETE FROM sync_state WHERE key = ?1", [key])
+            .map(|_| ())
+            .map_err(DbError::from)
+    })
+    .await
+    .map_err(|e| format!("Failed to delete {key}: {e}"))
 }
 
 fn parse_sync_state<T>(key: &str, value: &str) -> Result<T, String>
@@ -182,12 +173,19 @@ async fn commit_push_success(
     db: &Database,
     library_dir: &LibraryDir,
     seq: u64,
+    pending_changeset_max_id: Option<i64>,
     local_seq: &mut u64,
 ) -> Result<(), String> {
     *local_seq = seq;
     db.set_sync_state("local_seq", &seq.to_string())
         .await
         .map_err(|e| format!("Failed to persist local_seq after push: {e}"))?;
+    if let Some(max_id) = pending_changeset_max_id {
+        db.clear_pending_changesets_through(max_id)
+            .await
+            .map_err(|e| format!("Failed to clear pending changesets after push: {e}"))?;
+    }
+    delete_sync_state(db, STAGED_PENDING_CHANGESET_ID_KEY).await?;
     db.set_sync_state("staged_seq", "")
         .await
         .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
@@ -199,6 +197,7 @@ async fn commit_push_success(
 async fn persist_staged_push_state(
     db: &Database,
     seq: u64,
+    pending_changeset_max_id: i64,
     deferred_local_blob_drops: &[super::service::DeferredLocalBlobDrop],
 ) -> Result<(), String> {
     let drops = deferred_local_blob_drops.to_vec();
@@ -208,6 +207,15 @@ async fn persist_staged_push_state(
             "INSERT INTO sync_state (key, value) VALUES ('staged_seq', ?1) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [seq.to_string()],
+        )
+        .map_err(DbError::from)?;
+        tx.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![
+                STAGED_PENDING_CHANGESET_ID_KEY,
+                pending_changeset_max_id.to_string()
+            ],
         )
         .map_err(DbError::from)?;
         for drop in drops {
@@ -352,12 +360,14 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
     }
 }
 
-/// Run a single sync cycle: capture + gate + push, pull, bookkeeping, snapshot.
+/// Run a single sync cycle: drain pending local changes + gate + push, pull,
+/// bookkeeping, snapshot.
 ///
-/// All connection access goes through `db`. Capture stays ENABLED for the whole
-/// cycle — the pull's apply disables it around just the apply (see
-/// [`Database::apply_changeset`]), so a host write that lands during the network
-/// phases is captured into the next outgoing changeset rather than lost.
+/// All connection access goes through `db`. Local writes are published from the
+/// durable pending-changeset journal. The pull's apply disables the legacy raw
+/// capture session around just the apply (see [`Database::apply_changeset`]), so
+/// applied rows are not echoed by tests and helpers that still inspect raw
+/// session bytes.
 /// Loads/persists all cycle state (local_seq, cursors, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
 pub async fn run_single_sync_cycle(
@@ -413,6 +423,12 @@ pub async fn run_single_sync_cycle(
         .filter(|value| !value.is_empty())
         .map(|value| parse_sync_state("staged_seq", &value))
         .transpose()?;
+    let staged_pending_changeset_id: Option<i64> =
+        read_sync_state::<String>(db, STAGED_PENDING_CHANGESET_ID_KEY)
+            .await?
+            .filter(|value| !value.is_empty())
+            .map(|value| parse_sync_state(STAGED_PENDING_CHANGESET_ID_KEY, &value))
+            .transpose()?;
     drain_published_blob_drop_intents(db, library_dir, local_seq).await?;
 
     // A snapshot bootstrap that could not land every blob it references records a
@@ -495,7 +511,14 @@ pub async fn run_single_sync_cycle(
             {
                 Ok(()) => {
                     info!(seq, "Staged changeset push succeeded");
-                    commit_push_success(db, library_dir, seq, &mut local_seq).await?;
+                    commit_push_success(
+                        db,
+                        library_dir,
+                        seq,
+                        staged_pending_changeset_id,
+                        &mut local_seq,
+                    )
+                    .await?;
                 }
                 Err(e) => return Err(format!("Staged changeset push failed: {e}")),
             }
@@ -512,6 +535,7 @@ pub async fn run_single_sync_cycle(
             db.set_sync_state("staged_seq", "")
                 .await
                 .map_err(|e| format!("Failed to clear stale staged_seq: {e}"))?;
+            delete_sync_state(db, STAGED_PENDING_CHANGESET_ID_KEY).await?;
         }
     }
 
@@ -530,19 +554,13 @@ pub async fn run_single_sync_cycle(
         resume_drain_promptly = true;
     }
 
-    // Capture the outgoing changeset and reset the recorded batch, or retry a
-    // captured batch whose blob upload failed before an envelope existed. While
-    // retrying a captured batch, leave the live session untouched so writes made
-    // after the failed cycle remain captured for the next successful cycle.
-    let retrying_captured = read_staged_captured_changeset(library_dir)
+    let pending_changesets = db
+        .pending_changeset_batch()
         .await
-        .map_err(|e| format!("Failed to read staged captured changeset: {e}"))?;
-    let outgoing = match retrying_captured {
-        Some(bytes) => bytes,
-        None => db
-            .take_changeset_staged(captured_staging_path(library_dir))
-            .await
-            .map_err(|e| format!("Failed to stage captured changeset: {e}"))?,
+        .map_err(|e| format!("Failed to load pending changesets: {e}"))?;
+    let (pending_changeset_max_id, outgoing_changeset) = match &pending_changesets {
+        PendingChangesetBatch::Empty => (None, Vec::new()),
+        PendingChangesetBatch::Pending { max_id, changeset } => (Some(*max_id), changeset.clone()),
     };
 
     // Run the core gate + push-prep + pull.
@@ -550,7 +568,7 @@ pub async fn run_single_sync_cycle(
         device_id,
         db,
         tables,
-        outgoing,
+        outgoing_changeset,
         local_seq,
         &cursors,
         storage,
@@ -562,7 +580,7 @@ pub async fn run_single_sync_cycle(
     .await
     .map_err(|e| format!("Sync cycle error: {e}"))?;
 
-    // Propagate the captured changeset. The gate already cut any row whose
+    // Propagate the pending changesets. The gate already cut any row whose
     // gate column is off (the host keeps a blob-bearing row gated until its
     // blobs upload), so whatever the gate emitted is safe to publish now —
     // there is no global upload deferral. Stage the bytes before pushing so a
@@ -570,14 +588,19 @@ pub async fn run_single_sync_cycle(
     // the session); the staged-retry above re-pushes on the next cycle.
     if let Some(outgoing) = &sync_result.outgoing {
         let seq = outgoing.seq;
+        let pending_changeset_max_id = pending_changeset_max_id
+            .ok_or_else(|| "outgoing changeset without pending journal rows".to_string())?;
 
         crate::local_blob::write_atomic(&staging_path(library_dir), &outgoing.packed)
             .await
             .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
-        persist_staged_push_state(db, seq, &outgoing.deferred_local_blob_drops).await?;
-        clear_staged_captured_changeset(library_dir)
-            .await
-            .map_err(|e| format!("Failed to clear staged captured changeset: {e}"))?;
+        persist_staged_push_state(
+            db,
+            seq,
+            pending_changeset_max_id,
+            &outgoing.deferred_local_blob_drops,
+        )
+        .await?;
 
         match push_changeset(
             storage,
@@ -591,17 +614,24 @@ pub async fn run_single_sync_cycle(
         .await
         {
             Ok(()) => {
-                commit_push_success(db, library_dir, seq, &mut local_seq).await?;
+                commit_push_success(
+                    db,
+                    library_dir,
+                    seq,
+                    Some(pending_changeset_max_id),
+                    &mut local_seq,
+                )
+                .await?;
                 info!(seq, "Pushed changeset");
             }
             Err(e) => {
                 warn!(seq, "Push failed, changeset staged for retry: {e}");
             }
         }
-    } else {
-        clear_staged_captured_changeset(library_dir)
+    } else if let Some(max_id) = pending_changeset_max_id {
+        db.clear_pending_changesets_through(max_id)
             .await
-            .map_err(|e| format!("Failed to clear staged captured changeset: {e}"))?;
+            .map_err(|e| format!("Failed to clear gated-empty pending changesets: {e}"))?;
     }
 
     // Persist updated cursors. A failure here aborts the cycle like the

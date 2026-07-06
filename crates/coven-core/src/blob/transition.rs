@@ -546,33 +546,35 @@ pub async fn make_local(
     // only) + enqueue the cloud deletes, together. The destructive cloud delete is
     // durable inside this commit, so a crash right after can never leave the root
     // Local with the cloud blobs un-tombstoned.
-    db.call(move |conn| {
-        let tx = conn.unchecked_transaction()?;
-        crate::sync::gate::write_gate(
-            &tx,
-            &root_table_owned,
-            &gate_col,
-            false,
-            &stamp,
-            &root_id_owned,
-        )
-        .map_err(DbError::from)?;
-        for (id, namespace, external_path, size, cloud_key) in &commit {
-            // A user-provided blob now lives at the user's path — register the
-            // external ref. A host-provided blob lives in the local store, tracked by
-            // file presence, so it registers no ref.
-            if let Some(path) = external_path {
-                Database::register_external_blob_on(
-                    &tx,
-                    id,
-                    namespace,
-                    std::path::Path::new(path),
-                    *size,
-                )?;
+    let tables = db.synced_tables().to_vec();
+    db.call_with_capture_reset(move |conn| {
+        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+            crate::sync::gate::write_gate(
+                tx,
+                &root_table_owned,
+                &gate_col,
+                false,
+                &stamp,
+                &root_id_owned,
+            )
+            .map_err(DbError::from)?;
+            for (id, namespace, external_path, size, cloud_key) in &commit {
+                // A user-provided blob now lives at the user's path — register the
+                // external ref. A host-provided blob lives in the local store, tracked by
+                // file presence, so it registers no ref.
+                if let Some(path) = external_path {
+                    Database::register_external_blob_on(
+                        tx,
+                        id,
+                        namespace,
+                        std::path::Path::new(path),
+                        *size,
+                    )?;
+                }
+                Database::enqueue_delete_on(tx, cloud_key, &stamp)?;
             }
-            Database::enqueue_delete_on(&tx, cloud_key, &stamp)?;
-        }
-        tx.commit().map_err(DbError::from)
+            Ok(())
+        })
     })
     .await?;
 

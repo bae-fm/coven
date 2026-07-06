@@ -584,22 +584,27 @@ async fn finish_host_provided_make_remote(
     root: ReadyHostProvidedMakeRemote,
     stamp: String,
 ) -> Result<(), SyncCycleError> {
-    db.call(move |conn| {
-        let tx = conn.unchecked_transaction()?;
-        crate::sync::gate::write_gate(
-            &tx,
-            &root.intent.root_table,
-            &root.gate_column,
-            true,
-            &stamp,
-            &root.intent.root_id,
-        )
-        .map_err(crate::database::DbError::from)?;
-        for id in &root.user_blob_ids {
-            Database::clear_external_blob_on(&tx, id)?;
-        }
-        Database::delete_make_remote_intent_on(&tx, &root.intent.root_table, &root.intent.root_id)?;
-        tx.commit().map_err(crate::database::DbError::from)
+    let tables = db.synced_tables().to_vec();
+    db.call_with_capture_reset(move |conn| {
+        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+            crate::sync::gate::write_gate(
+                tx,
+                &root.intent.root_table,
+                &root.gate_column,
+                true,
+                &stamp,
+                &root.intent.root_id,
+            )
+            .map_err(crate::database::DbError::from)?;
+            for id in &root.user_blob_ids {
+                Database::clear_external_blob_on(tx, id)?;
+            }
+            Database::delete_make_remote_intent_on(
+                tx,
+                &root.intent.root_table,
+                &root.intent.root_id,
+            )
+        })
     })
     .await
     .map_err(|e| SyncCycleError::AssetUpload(e.0))

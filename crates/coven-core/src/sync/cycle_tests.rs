@@ -61,6 +61,17 @@ async fn run_cycle_m(
     .expect("cycle");
 }
 
+async fn pending_changeset_count(db: &Database) -> i64 {
+    db.call(|conn| {
+        conn.query_row("SELECT COUNT(*) FROM pending_changesets", [], |row| {
+            row.get(0)
+        })
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("pending changeset count")
+}
+
 /// Queue a pending upload whose source file doesn't exist, so the cycle's drain
 /// can't clear it — the entry stays pending, modeling a slow or stuck upload
 /// while we assert the changeset/snapshot aren't held back by it.
@@ -109,13 +120,13 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 
     // One shareable note (its blobs are up → gate on) and one still-private note
     // (its blobs aren't up yet → gate off; the host hasn't flipped it).
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('pub', 'Shareable', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('priv', 'NotYet', NULL, 0, '0000000002000-0000-M', '2026-01-01')",
@@ -158,7 +169,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     let hlc = Hlc::new("M".to_string());
 
     // A note whose blobs aren't up yet: gate off.
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album Title', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
@@ -175,7 +186,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
 
     // The blobs land; the host flips the gate on. The next cycle re-emits the
     // now-shareable row.
-    exec(
+    host_exec(
         &db,
         "UPDATE notes SET shared = 1, _updated_at = '0000000003000-0000-M' WHERE id = 'n1'",
     )
@@ -244,13 +255,13 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('cover1', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
@@ -297,13 +308,13 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('cover1', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
@@ -500,10 +511,9 @@ use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError};
 ///
 /// This models the real hazard in issue #92: a host edit committed while the
 /// cycle is in its network phase. The write goes through the actor's one
-/// connection (the only door) at an `await` the cycle is parked on, while capture
-/// is live. If the cycle suspended capture for the whole span (the bug), the write
-/// would not be recorded into the next outgoing changeset and would be lost; with
-/// capture live across push/pull (the fix), it is recorded.
+/// connection (the only door) at an `await` the cycle is parked on, and the host
+/// write path appends it to the durable pending-changeset journal for the next
+/// cycle.
 struct HostWriteInjector {
     inner: MockSyncStorage,
     db: Database,
@@ -527,10 +537,9 @@ impl HostWriteInjector {
 impl SyncStorage for HostWriteInjector {
     async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
         // Fire the host write exactly once, at this `await` inside the pull's
-        // network phase — capture is live here, and the apply (which disables it)
-        // has not started for this changeset yet.
+        // network phase.
         if !self.fired.swap(true, Ordering::SeqCst) {
-            exec(&self.db, &self.write_sql).await;
+            host_exec(&self.db, &self.write_sql).await;
         }
         self.inner.get_changeset(device_id, seq).await
     }
@@ -690,20 +699,18 @@ impl SyncStorage for HostWriteInjector {
 }
 
 /// Issue #92: a host write made WHILE a cycle is in its push/pull network phase
-/// must land in the device's NEXT outgoing changeset. It is captured because the
-/// cycle keeps the capture session enabled across push/pull — disabling it only
-/// around the apply of incoming rows.
+/// must land in the device's NEXT outgoing changeset. It is recorded by the same
+/// durable journal path as any other host write.
 ///
 /// Setup: a peer "A" has a changeset in shared storage. Device "M" runs a cycle
 /// that pulls it; the storage wrapper injects a host INSERT into M at the
-/// `get_changeset` await (inside the pull, capture live). We then assert the
+/// `get_changeset` await inside the pull. We then assert the
 /// injected row is (a) present locally on M and (b) carried in M's next outgoing
 /// changeset — proven by pulling that changeset into a fresh peer.
 ///
-/// Mutation proof: revert the cycle to suspending capture across the whole span
-/// (drop the per-apply disable and instead suspend at the top / resume at the
-/// bottom). The injected write then lands while capture is off, so it is absent
-/// from M's next changeset and assertion (b) fails.
+/// Mutation proof: route the injected write through raw `Database::call` instead
+/// of the host journal. The row commits locally, but it is absent from M's next
+/// changeset and assertion (b) fails.
 #[tokio::test]
 async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
@@ -728,7 +735,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     inner.store_changeset("A", 1, &a_cs, SCHEMA_VERSION);
 
     // M's database. The injector runs this INSERT into M at the get_changeset
-    // await, mid-pull, while capture is live.
+    // await, mid-pull.
     let db_m = open_test_db();
     let storage = HostWriteInjector::new(
         inner,
@@ -747,9 +754,9 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
         "the mid-cycle host write committed to M's local db",
     );
 
-    // (b) The injected row is in M's NEXT outgoing changeset. Cycle 2 captures the
-    // batch recorded since cycle 1's capture — which includes the mid-pull write —
-    // and pushes it. A fresh peer C pulls M's output and must receive 'm_mid'.
+    // (b) The injected row is in M's NEXT outgoing changeset. Cycle 2 drains the
+    // pending journal row written during cycle 1 and pushes it. A fresh peer C
+    // pulls M's output and must receive 'm_mid'.
     run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
     let db_c = open_test_db();
@@ -757,8 +764,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     assert_eq!(
         query_text(&db_c, "SELECT title FROM notes WHERE id = 'm_mid'").await,
         "WrittenMidCycle",
-        "the mid-cycle host write reached a peer via M's next outgoing changeset — \
-         it was NOT lost to a capture-off window during push/pull",
+        "the mid-cycle host write reached a peer via M's next outgoing changeset",
     );
 }
 
@@ -835,13 +841,13 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('hponly', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
@@ -876,11 +882,8 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         "cycle surfaces the blob upload failure: {failed}"
     );
     assert!(
-        cycle::read_staged_captured_changeset(&ld)
-            .await
-            .expect("read staged captured changeset")
-            .is_some(),
-        "the captured changeset stays staged for retry"
+        pending_changeset_count(&db).await > 0,
+        "the pending changesets remain queued for retry"
     );
     assert!(
         !storage.exists("photos/hponly").await.expect("exists check"),
@@ -888,16 +891,14 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     );
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
-    assert!(
-        cycle::read_staged_captured_changeset(&ld)
-            .await
-            .expect("read staged captured changeset")
-            .is_none(),
-        "the staged capture clears once the retry reaches packed staging"
+    assert_eq!(
+        pending_changeset_count(&db).await,
+        0,
+        "the pending changesets clear once the retry publishes"
     );
     assert!(
         storage.exists("photos/hponly").await.expect("exists check"),
-        "the retried captured changeset uploads the host-provided blob"
+        "the retried pending changeset uploads the host-provided blob"
     );
 }
 
@@ -919,13 +920,13 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('firstblob', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01'); \
@@ -1014,13 +1015,13 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         )
         .await
         .expect("plant remote blob");
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('remoteonly', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
@@ -1053,13 +1054,13 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('lazyblob', 'n1', 'cover', '0000000001000-0000-M', '2026-01-01')",
@@ -1121,13 +1122,13 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
         )
         .await
         .expect("plant remote user-provided blob");
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-M', '2026-01-01')",
@@ -1186,30 +1187,7 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
 }
 
 #[tokio::test]
-async fn staged_captured_changeset_read_errors_are_returned() {
-    let (_tmp, ld) = temp_library_dir();
-    std::fs::create_dir(cycle::captured_staging_path(&ld)).expect("block staged capture read");
-    let error = cycle::read_staged_captured_changeset(&ld)
-        .await
-        .expect_err("directory at staged capture path is a read error");
-    assert!(
-        error.contains("read local blob"),
-        "read error is surfaced: {error}"
-    );
-}
-
-#[tokio::test]
-async fn staged_captured_changeset_clear_errors_are_returned() {
-    let (_tmp, ld) = temp_library_dir();
-    std::fs::create_dir(cycle::captured_staging_path(&ld)).expect("block staged capture clear");
-    let error = cycle::clear_staged_captured_changeset(&ld)
-        .await
-        .expect_err("directory at staged capture path is a clear error");
-    assert!(error.contains("remove"), "clear error is surfaced: {error}");
-}
-
-#[tokio::test]
-async fn capture_stage_failure_keeps_session_batch_for_retry() {
+async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let (_tmp, ld) = temp_library_dir();
@@ -1223,7 +1201,7 @@ async fn capture_stage_failure_keeps_session_batch_for_retry() {
         .await
         .expect("seed an un-acked peer head");
 
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('stage-fail', 'Stage Fail', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
@@ -1253,12 +1231,17 @@ async fn capture_stage_failure_keeps_session_batch_for_retry() {
     )
     .await
     {
-        Ok(_) => panic!("capture staging should fail"),
+        Ok(_) => panic!("outgoing staging should fail"),
         Err(error) => error,
     };
     assert!(
-        failed.contains("Failed to stage captured changeset"),
-        "cycle surfaces the capture staging failure: {failed}"
+        failed.contains("Failed to stage outgoing changeset"),
+        "cycle surfaces the outgoing staging failure: {failed}"
+    );
+    assert_eq!(
+        pending_changeset_count(&db).await,
+        1,
+        "the pending batch remains queued when outgoing staging fails"
     );
     assert!(
         storage.get_changeset("M", 1).await.is_err(),
@@ -1269,7 +1252,12 @@ async fn capture_stage_failure_keeps_session_batch_for_retry() {
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         storage.get_changeset("M", 1).await.is_ok(),
-        "the same captured batch publishes after staging is available"
+        "the same pending batch publishes after staging is available"
+    );
+    assert_eq!(
+        pending_changeset_count(&db).await,
+        0,
+        "the pending batch clears after the retry publishes"
     );
 }
 
@@ -1462,7 +1450,7 @@ async fn member_device_does_not_create_a_snapshot() {
     // Local data: a shareable note (gate on). With no prior snapshot, pushing it
     // trips `should_create_snapshot`, so the owner gate is the only thing that can
     // stop the snapshot.
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
@@ -1514,7 +1502,7 @@ async fn owner_device_creates_a_snapshot() {
         .await
         .expect("pin owner");
 
-    exec(
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album', NULL, 1, '0000000001000-0000-M', '2026-01-01')",

@@ -295,12 +295,12 @@ impl CovenHandle {
         R: Send + 'static,
     {
         let stamper = self.stamper();
+        let tables = self.db().synced_tables().to_vec();
         self.db()
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let value = f(SqlContext::new(&tx, stamper)).map_err(|e| DbError(e.to_string()))?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(value)
+            .call_with_capture_reset(move |conn| {
+                Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                    f(SqlContext::new(tx, stamper)).map_err(|e| DbError(e.to_string()))
+                })
             })
             .await
             .map_err(CovenError::from)
@@ -326,7 +326,7 @@ impl CovenHandle {
         let deleted = batch.deleted_blobs;
         let library_dir = self.library_dir();
         let outcome = match db
-            .call(move |conn| {
+            .call_with_capture_reset(move |conn| {
                 Ok(run_write_batch_on_connection(
                     conn,
                     stamper,
@@ -587,106 +587,72 @@ fn run_write_batch_on_connection<R>(
     tables: Vec<SyncedTable>,
     sql: WriteSql<R>,
 ) -> WriteDbOutcome<R> {
-    let tx = match conn.unchecked_transaction() {
-        Ok(tx) => tx,
-        Err(e) => {
-            return WriteDbOutcome::RolledBack {
-                error: CovenError::from(e),
-            }
-        }
-    };
     let mut moved = Vec::new();
-    let decls = match crate::blob::decl::BlobDecls::from_tables(&tx, &tables)
-        .map_err(|e| CovenError::Blob(e.to_string()))
-    {
-        Ok(decls) => decls,
-        Err(e) => {
-            return rollback_write_batch(e, moved);
-        }
-    };
-    for blob in &staged {
-        match decls.row_for_blob_in_namespace(&tx, &blob.namespace, &blob.id) {
-            Ok(Some(_)) => {
-                return rollback_write_batch(
-                    CovenError::BlobAlreadyReferenced {
-                        namespace: blob.namespace.clone(),
-                        id: blob.id.clone(),
-                    },
-                    moved,
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return rollback_write_batch(CovenError::Blob(e.to_string()), moved);
-            }
-        }
-        if let Some(parent) = blob.final_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return rollback_write_batch(
-                    CovenError::Blob(format!(
-                        "create local blob parent {}: {e}",
-                        parent.display()
-                    )),
-                    moved,
-                );
-            }
-        }
-        if let Err(e) = std::fs::rename(&blob.staged, &blob.final_path) {
-            return rollback_write_batch(
-                CovenError::Blob(format!(
-                    "install staged blob {} -> {}: {e}",
-                    blob.staged.display(),
-                    blob.final_path.display()
-                )),
-                moved,
-            );
-        }
-        moved.push(blob.clone());
-        if let Err(e) = sync_parent_dir(&blob.final_path) {
-            return rollback_write_batch(
-                CovenError::Blob(format!(
-                    "sync local blob parent after installing {}: {e}",
-                    blob.final_path.display()
-                )),
-                moved,
-            );
-        }
-    }
-
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        sql(SqlContext::new(&tx, stamper))
-    })) {
-        Ok(Ok(value)) => {
-            for blob in &deleted {
-                match decls.row_for_blob_in_namespace(&tx, &blob.namespace, &blob.id) {
+    let result =
+        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| -> CovenResult<R> {
+            let decls = crate::blob::decl::BlobDecls::from_tables(tx, &tables)
+                .map_err(|e| CovenError::Blob(e.to_string()))?;
+            for blob in &staged {
+                match decls.row_for_blob_in_namespace(tx, &blob.namespace, &blob.id) {
                     Ok(Some(_)) => {
-                        return rollback_write_batch(
-                            CovenError::BlobStillReferenced {
-                                namespace: blob.namespace.clone(),
-                                id: blob.id.clone(),
-                            },
-                            moved,
-                        );
+                        return Err(CovenError::BlobAlreadyReferenced {
+                            namespace: blob.namespace.clone(),
+                            id: blob.id.clone(),
+                        });
                     }
                     Ok(None) => {}
-                    Err(e) => {
-                        return rollback_write_batch(CovenError::Blob(e.to_string()), moved);
-                    }
+                    Err(e) => return Err(CovenError::Blob(e.to_string())),
                 }
+                if let Some(parent) = blob.final_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        CovenError::Blob(format!(
+                            "create local blob parent {}: {e}",
+                            parent.display()
+                        ))
+                    })?;
+                }
+                std::fs::rename(&blob.staged, &blob.final_path).map_err(|e| {
+                    CovenError::Blob(format!(
+                        "install staged blob {} -> {}: {e}",
+                        blob.staged.display(),
+                        blob.final_path.display()
+                    ))
+                })?;
+                moved.push(blob.clone());
+                sync_parent_dir(&blob.final_path).map_err(|e| {
+                    CovenError::Blob(format!(
+                        "sync local blob parent after installing {}: {e}",
+                        blob.final_path.display()
+                    ))
+                })?;
             }
-            if let Err(e) = record_local_cleanup_intents(&tx, &library_dir, &deleted) {
-                return rollback_write_batch(e, moved);
+
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sql(SqlContext::new(tx, stamper))
+            })) {
+                Ok(Ok(value)) => {
+                    for blob in &deleted {
+                        match decls.row_for_blob_in_namespace(tx, &blob.namespace, &blob.id) {
+                            Ok(Some(_)) => {
+                                return Err(CovenError::BlobStillReferenced {
+                                    namespace: blob.namespace.clone(),
+                                    id: blob.id.clone(),
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(e) => return Err(CovenError::Blob(e.to_string())),
+                        }
+                    }
+                    record_local_cleanup_intents(tx, &library_dir, &deleted)?;
+                    Ok(value)
+                }
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(CovenError::Blob("write SQL closure panicked".to_string())),
             }
-            if let Err(e) = tx.commit() {
-                return rollback_write_batch(CovenError::from(e), moved);
-            }
-            WriteDbOutcome::Committed(value)
-        }
-        Ok(Err(error)) => rollback_write_batch(error, moved),
-        Err(_) => rollback_write_batch(
-            CovenError::Blob("write SQL closure panicked".to_string()),
-            moved,
-        ),
+        });
+    match result {
+        Ok(value) => WriteDbOutcome::Committed(value),
+        Err(error) => rollback_write_batch(error, moved),
     }
 }
 
@@ -712,8 +678,15 @@ mod tests {
     use crate::blob::{BlobScope, CacheFill, Provenance};
     use crate::config::Config;
     use crate::library_dir::LibraryDir;
+    use crate::sync::cloud_storage::CloudCipher;
+    use crate::sync::cycle::run_single_sync_cycle;
+    use crate::sync::hlc::Hlc;
     use crate::sync::session::BlobDecl;
+    use crate::sync::storage::SyncStorage;
+    use crate::sync::test_helpers::{pull_into, query_text, row_exists, MockSyncStorage};
     use rusqlite::params;
+    use std::collections::HashMap;
+    use std::sync::RwLock;
 
     fn config(dir: LibraryDir) -> Config {
         Config::with_defaults(
@@ -816,6 +789,226 @@ mod tests {
             .open()
             .expect("open handle");
         (tmp, handle)
+    }
+
+    fn open_files_handle_in(dir: LibraryDir) -> CovenHandle {
+        Coven::builder(config(dir))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open()
+            .expect("open handle")
+    }
+
+    async fn run_test_cycle(storage: &MockSyncStorage, handle: &CovenHandle) {
+        let cipher = RwLock::new(CloudCipher::Plaintext);
+        let keypair = crate::keys::UserKeypair::generate();
+        let hlc = Hlc::new("device-test".to_string());
+        handle
+            .db()
+            .set_sync_state("snapshot_seq", "0")
+            .await
+            .expect("seed snapshot floor");
+        run_single_sync_cycle(
+            storage,
+            "lib-test",
+            "device-test",
+            &hlc,
+            &SystemClock,
+            handle.db(),
+            &cipher,
+            &keypair,
+            None,
+            &handle.library_dir(),
+            None,
+            None,
+        )
+        .await
+        .expect("sync cycle");
+    }
+
+    #[tokio::test]
+    async fn write_survives_reopen_before_sync_cycle() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = open_files_handle_in(dir.clone());
+        handle
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('file-before-reopen', NULL, 0, ?1)",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("write before reopen");
+        drop(handle);
+
+        let reopened = open_files_handle_in(dir);
+        let storage = MockSyncStorage::new();
+        run_test_cycle(&storage, &reopened).await;
+
+        let (_peer_tmp, peer) = open_files_handle();
+        pull_into(
+            peer.db(),
+            &storage,
+            "peer",
+            &HashMap::new(),
+            &peer.library_dir(),
+        )
+        .await;
+        assert_eq!(
+            query_text(
+                peer.db(),
+                "SELECT id FROM files WHERE id = 'file-before-reopen'"
+            )
+            .await,
+            "file-before-reopen",
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_pending_writes_publish_after_reopen() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = open_files_handle_in(dir.clone());
+        for id in ["file-pending-a", "file-pending-b"] {
+            handle
+                .sql(move |sql| {
+                    sql.tx().execute(
+                        "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
+                        (id, sql.stamp()),
+                    )?;
+                    Ok(())
+                })
+                .await
+                .expect("write before reopen");
+        }
+        drop(handle);
+
+        let reopened = open_files_handle_in(dir);
+        let storage = MockSyncStorage::new();
+        run_test_cycle(&storage, &reopened).await;
+
+        let (_peer_tmp, peer) = open_files_handle();
+        pull_into(
+            peer.db(),
+            &storage,
+            "peer",
+            &HashMap::new(),
+            &peer.library_dir(),
+        )
+        .await;
+        assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-a'").await);
+        assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-b'").await);
+    }
+
+    #[tokio::test]
+    async fn delete_survives_reopen_before_sync_cycle() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = open_files_handle_in(dir.clone());
+        handle
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('file-delete-reopen', NULL, 0, ?1)",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("insert before first cycle");
+        let storage = MockSyncStorage::new();
+        run_test_cycle(&storage, &handle).await;
+
+        let (_peer_tmp, peer) = open_files_handle();
+        pull_into(
+            peer.db(),
+            &storage,
+            "peer",
+            &HashMap::new(),
+            &peer.library_dir(),
+        )
+        .await;
+        assert!(
+            row_exists(
+                peer.db(),
+                "SELECT 1 FROM files WHERE id = 'file-delete-reopen'"
+            )
+            .await,
+            "the peer receives the insert before the delete",
+        );
+
+        handle
+            .sql(|sql| {
+                sql.tx()
+                    .execute("DELETE FROM files WHERE id = 'file-delete-reopen'", [])?;
+                Ok(())
+            })
+            .await
+            .expect("delete before reopen");
+        drop(handle);
+
+        let reopened = open_files_handle_in(dir);
+        run_test_cycle(&storage, &reopened).await;
+
+        let mut cursors = HashMap::new();
+        cursors.insert("device-test".to_string(), 1);
+        pull_into(peer.db(), &storage, "peer", &cursors, &peer.library_dir()).await;
+        assert!(
+            !row_exists(
+                peer.db(),
+                "SELECT 1 FROM files WHERE id = 'file-delete-reopen'"
+            )
+            .await,
+            "the delete changeset reaches the peer after reopening",
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_write_drains_only_after_changeset_push() {
+        let (_tmp, handle) = open_files_handle();
+        handle
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('file-retry-publish', NULL, 0, ?1)",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("write before failed push");
+        let storage = MockSyncStorage::new();
+        storage.fail_next_changeset_puts(1);
+
+        let first = run_single_sync_cycle(
+            &storage,
+            "lib-test",
+            "device-test",
+            &Hlc::new("device-test".to_string()),
+            &SystemClock,
+            handle.db(),
+            &RwLock::new(CloudCipher::Plaintext),
+            &crate::keys::UserKeypair::generate(),
+            None,
+            &handle.library_dir(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            first.is_ok(),
+            "the first cycle records the failed push for retry",
+        );
+        assert!(storage.get_changeset("device-test", 1).await.is_err());
+
+        run_test_cycle(&storage, &handle).await;
+        assert!(
+            storage.get_changeset("device-test", 1).await.is_ok(),
+            "the pending write is still published after the failed push",
+        );
     }
 
     async fn write_raw_file(path: &std::path::Path, bytes: &[u8]) {
