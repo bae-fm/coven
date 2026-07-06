@@ -395,6 +395,54 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     assert_eq!(fetched, bytes, "B reads the original photo from the cloud");
 }
 
+#[tokio::test]
+async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_library_dir();
+    let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
+
+    seed_local_release(
+        &db,
+        &tmp.path().join("user"),
+        "n1",
+        "photoaaa",
+        "cv/photoaaa.jpg",
+        &bytes,
+    )
+    .await;
+    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", false)
+        .await
+        .expect("make_remote");
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert_eq!(shared_flag(&db, "n1").await, 1, "the root is Remote");
+    assert!(
+        !has_intent(&db, "notes", "n1").await,
+        "completion deleted the make_remote intent",
+    );
+    assert!(
+        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
+        "the published blob exists in cloud",
+    );
+
+    cancel_make_remote(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
+        .await
+        .expect("cancel after completion");
+
+    assert!(
+        pending_deletes(&db).await.is_empty(),
+        "a cancel racing after completion must not tombstone published blobs",
+    );
+    assert!(
+        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
+        "the cloud blob remains present",
+    );
+}
+
 /// A makes a Remote release Local. B's subtree is DELETEd (gate retract) and the
 /// cloud blob is tombstoned, while A keeps the external file and reads from it.
 #[tokio::test]

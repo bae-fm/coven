@@ -345,6 +345,9 @@ pub async fn cancel_make_remote(
     let dropped: Vec<(String, String)> = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            if !Database::make_remote_intent_exists(&tx, &root_table_owned, &root_id_owned)? {
+                return Ok(Vec::new());
+            }
             let mut dropped = Vec::new();
             for (id, namespace, cloud_key) in &keyed {
                 let still_pending: bool = tx

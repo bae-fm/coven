@@ -202,6 +202,7 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
     // GC authorizes on the verified signature alone — the open-library path, with no
     // pinned owner. The test below exercises the owner-anchored path.
     let reclaimed = crate::blob::delete::gc_tombstones(
+        &db_a,
         &storage,
         &storage,
         &enc_a,
@@ -334,6 +335,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
         chrono::Utc::now() + crate::blob::delete::BLOB_TOMBSTONE_GRACE + chrono::Duration::days(1),
     );
     let reclaimed = crate::blob::delete::gc_tombstones(
+        &db_a,
         &storage,
         &storage,
         &enc_a,
@@ -415,6 +417,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
         .expect("plant forged tombstone");
 
     let n = crate::blob::delete::gc_tombstones(
+        &db_a,
         &storage,
         &storage,
         &enc_a,

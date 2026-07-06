@@ -1534,6 +1534,85 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
 }
 
 #[tokio::test]
+async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_it() {
+    let storage = MockSyncStorage::new();
+    let decl = photo_decl_with_blob_id_column();
+
+    let db1 = open_test_db_with_blob(decl.clone());
+    let cs1 = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'SharedBlob', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, cloud_path, _updated_at, created_at) \
+             VALUES ('photo-a', 'n1', 'cover', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, cloud_path, _updated_at, created_at) \
+             VALUES ('photo-b', 'n1', 'cover', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage
+        .put_blob(
+            "photos",
+            "sharedblob",
+            crate::blob::ResolvedScope::Master,
+            None,
+            b"SHARED-BYTES".to_vec(),
+        )
+        .await
+        .expect("plant shared blob");
+    storage.store_changeset("dev1", 1, &cs1, SCHEMA_VERSION);
+
+    let db2 = open_test_db_with_blob(decl);
+    let (_tmp, ld) = temp_library_dir();
+    let (cursors, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    assert_eq!(result.changesets_applied, 1);
+    assert!(
+        ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
+        "the shared CacheEager blob lands in the cache",
+    );
+
+    storage
+        .put_blob(
+            "photos",
+            "newblob",
+            crate::blob::ResolvedScope::Master,
+            None,
+            b"NEW-BYTES".to_vec(),
+        )
+        .await
+        .expect("plant replacement blob");
+    let cs2 = capture_bytes(
+        &db1,
+        &["UPDATE note_photos \
+             SET cloud_path = 'newblob', _updated_at = '0000000002000-0000-dev1' \
+             WHERE id = 'photo-a'"],
+    )
+    .await;
+    storage.store_changeset("dev1", 2, &cs2, SCHEMA_VERSION);
+
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &cursors, &ld).await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(
+        row_exists(
+            &db2,
+            "SELECT 1 FROM note_photos WHERE id = 'photo-b' AND cloud_path = 'sharedblob'",
+        )
+        .await,
+        "another row still references the old blob",
+    );
+    assert!(
+        ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
+        "a blob-changing update must not drop a copy another live row still references",
+    );
+    assert!(
+        ld.cache_blob_path("photos", "newblob").unwrap().exists(),
+        "the replacement blob lands in the cache",
+    );
+}
+
+#[tokio::test]
 async fn pull_rejects_unsigned_changeset_when_chain_exists() {
     // A membership chain exists. Coven always signs its changesets, so an
     // unsigned one here is forged; a chained library must reject it. The mock

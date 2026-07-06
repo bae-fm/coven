@@ -712,6 +712,7 @@ pub async fn run_single_sync_cycle(
             {
                 Ok(pinned_owner) => {
                     match crate::blob::delete::gc_tombstones(
+                        db,
                         storage,
                         ch,
                         cipher,

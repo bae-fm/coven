@@ -81,6 +81,8 @@ struct TableBlob {
     id_col_name: String,
     /// Index of the readable cloud-path column, if declared.
     cloud_path_col: Option<usize>,
+    /// Name of the readable cloud-path column, if declared.
+    cloud_path_col_name: Option<String>,
     /// The encryption scope, with any column reference resolved to an index.
     scope: ResolvedScopeSpec,
 }
@@ -201,6 +203,7 @@ impl BlobDecls {
                     id_col,
                     id_col_name: decl.id_column.clone(),
                     cloud_path_col,
+                    cloud_path_col_name: decl.cloud_path_column.clone(),
                     scope,
                 },
             );
@@ -301,6 +304,41 @@ impl BlobDecls {
         };
         Ok(pk_carrying_blob(conn, table, tb, blob_id)?.map(|pk| (table.clone(), pk)))
     }
+
+    /// The `(table, primary key)` of a live row whose declared blob resolves to
+    /// `cloud_key`. Hashed homes encode namespace + blob id in the key itself;
+    /// readable homes encode namespace + declared `cloud_path`. This is the GC-side
+    /// lookup: before honoring a tombstone for `cloud_key`, ask whether current DB
+    /// state still names that exact cloud object.
+    pub fn row_for_blob_cloud_key(
+        &self,
+        conn: &Connection,
+        cloud_key: &str,
+    ) -> Result<Option<(String, String)>, BlobDeclError> {
+        if let Some((namespace, blob_id)) = hashed_blob_key_parts(cloud_key) {
+            if let Some(row) = self.row_for_blob_in_namespace(conn, &namespace, &blob_id)? {
+                return Ok(Some(row));
+            }
+        }
+
+        for (table, tb) in &self.tables {
+            let Some(cloud_path_col_name) = &tb.cloud_path_col_name else {
+                continue;
+            };
+            let Some(cloud_path) = cloud_key
+                .strip_prefix(&tb.namespace)
+                .and_then(|rest| rest.strip_prefix('/'))
+            else {
+                continue;
+            };
+            if let Some(pk) = pk_carrying_cloud_path(conn, table, cloud_path_col_name, cloud_path)?
+            {
+                return Ok(Some((table.clone(), pk)));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 /// The primary key (`id`) of the row in `table` whose declared blob-id column equals
@@ -320,6 +358,37 @@ fn pk_carrying_blob(
     conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
         .optional()
         .map_err(BlobDeclError::from)
+}
+
+fn pk_carrying_cloud_path(
+    conn: &Connection,
+    table: &str,
+    cloud_path_col_name: &str,
+    cloud_path: &str,
+) -> Result<Option<String>, BlobDeclError> {
+    let sql = format!(
+        "SELECT id FROM {} WHERE {} = ?1",
+        quote_ident(table),
+        quote_ident(cloud_path_col_name),
+    );
+    conn.query_row(&sql, [cloud_path], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(BlobDeclError::from)
+}
+
+fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
+    let mut parts = cloud_key.split('/');
+    let namespace = parts.next()?;
+    let _first = parts.next()?;
+    let _second = parts.next()?;
+    let id = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    match crate::library_dir::LibraryDir::hashed_path(namespace, id) {
+        Ok(rebuilt) if rebuilt == cloud_key => Some((namespace.to_string(), id.to_string())),
+        _ => None,
+    }
 }
 
 /// Column names of `table`, in declared (schema) order, via `PRAGMA table_info` —

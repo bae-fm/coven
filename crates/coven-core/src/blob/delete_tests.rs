@@ -15,18 +15,22 @@ use crate::blob::delete::{
     drain_tombstone_cancels, drain_tombstones, gc_tombstones, BlobTombstoneJson,
     BLOB_TOMBSTONE_GRACE,
 };
-use crate::blob::BlobScope;
+use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::FixedClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::storage::cloud::{
+    no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectState,
+    CloudObjectVersion, ConditionalDelete,
+};
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
-    append_membership_entry, founder_entry, make_linked_entry, pubkey_hex,
-    publish_membership_chain_head, MockSyncStorage,
+    append_membership_entry, exec, founder_entry, make_linked_entry, open_test_db_with_blob,
+    pubkey_hex, publish_membership_chain_head, MockSyncStorage,
 };
 use rusqlite::OptionalExtension;
 
@@ -50,6 +54,27 @@ fn open_outbox_db() -> Database {
     )
     .expect("open outbox database");
     db
+}
+
+async fn gc_tombstones_without_live_refs(
+    storage: &dyn crate::sync::storage::SyncStorage,
+    cloud_home: &dyn CloudHome,
+    cipher: &RwLock<CloudCipher>,
+    library_id: &str,
+    pinned_owner: Option<&str>,
+    clock: &dyn crate::clock::Clock,
+) -> Result<usize, String> {
+    let db = open_outbox_db();
+    gc_tombstones(
+        &db,
+        storage,
+        cloud_home,
+        cipher,
+        library_id,
+        pinned_owner,
+        clock,
+    )
+    .await
 }
 
 /// Read back `(attempt_count, last_error, last_attempt_at)` for a delete entry, or
@@ -179,6 +204,114 @@ impl CloudHome for CancelTombstoneOnExists<'_> {
         self.inner.exists(key).await
     }
 
+    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
+        self.inner.object_state(key).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        key: &str,
+        version: &CloudObjectVersion,
+    ) -> Result<ConditionalDelete, CloudHomeError> {
+        self.inner.delete_if_version(key, version).await
+    }
+
+    async fn grant_access(
+        &self,
+        grant: crate::storage::cloud::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        self.inner.grant_access(grant).await
+    }
+
+    async fn revoke_access(
+        &self,
+        revoke: crate::storage::cloud::CloudAccessRevoke,
+    ) -> Result<(), CloudHomeError> {
+        self.inner.revoke_access(revoke).await
+    }
+}
+
+struct ReuploadAfterBlobObserved<'a> {
+    inner: &'a MockSyncStorage,
+    blob_key: String,
+    fresh_contents: Vec<u8>,
+    fired: AtomicBool,
+}
+
+impl ReuploadAfterBlobObserved<'_> {
+    async fn reupload_once(&self) -> Result<(), CloudHomeError> {
+        if self.fired.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.inner
+            .write(
+                &self.blob_key,
+                crate::storage::cloud::BlobBody::from_bytes(self.fresh_contents.clone()),
+                &no_progress(),
+            )
+            .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl CloudHome for ReuploadAfterBlobObserved<'_> {
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        self.inner.put_object(key, data).await
+    }
+
+    async fn open_multipart<'b>(
+        &'b self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<crate::storage::cloud::BoxPartSink<'b>, CloudHomeError> {
+        self.inner.open_multipart(key, total_len).await
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        self.inner.multipart_threshold()
+    }
+
+    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        self.inner.read(key).await
+    }
+
+    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
+        self.inner.read_range(key, start, end).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        self.inner.list(prefix).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+        self.inner.delete(key).await
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        let exists = self.inner.exists(key).await?;
+        if key == self.blob_key && exists {
+            self.reupload_once().await?;
+        }
+        Ok(exists)
+    }
+
+    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
+        let state = self.inner.object_state(key).await?;
+        if key == self.blob_key && matches!(state, CloudObjectState::Present(_)) {
+            self.reupload_once().await?;
+        }
+        Ok(state)
+    }
+
+    async fn delete_if_version(
+        &self,
+        key: &str,
+        version: &CloudObjectVersion,
+    ) -> Result<ConditionalDelete, CloudHomeError> {
+        self.inner.delete_if_version(key, version).await
+    }
+
     async fn grant_access(
         &self,
         grant: crate::storage::cloud::CloudAccessGrant,
@@ -199,6 +332,7 @@ enum FailingCloudOp {
     Delete,
     Exists,
     PutObject,
+    Read,
 }
 
 /// A `CloudHome` wrapper that fails one operation on one named key for the first
@@ -260,6 +394,11 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        if self.should_fail(FailingCloudOp::Read, key) {
+            return Err(CloudHomeError::Storage(format!(
+                "injected read failure for {key}"
+            )));
+        }
         self.inner.read(key).await
     }
 
@@ -287,6 +426,18 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
             )));
         }
         self.inner.exists(key).await
+    }
+
+    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
+        self.inner.object_state(key).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        key: &str,
+        version: &CloudObjectVersion,
+    ) -> Result<ConditionalDelete, CloudHomeError> {
+        self.inner.delete_if_version(key, version).await
     }
 
     async fn grant_access(
@@ -361,6 +512,75 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     );
 }
 
+#[tokio::test]
+async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
+    let db = open_outbox_db();
+    let cloud = InMemoryCloudHome::new();
+    let cipher = plaintext_cipher();
+    let kp = UserKeypair::generate();
+    cloud
+        .write(
+            "blob_tombstones/blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"not a tombstone".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .expect("plant garbage");
+
+    db.enqueue_delete("blob-key", T0).await.expect("enqueue");
+    let clock = FixedClock(at("2024-06-10T00:00:00Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &clock)
+        .await
+        .expect("drain");
+
+    assert_eq!(n, 1, "the garbage object is replaced by a signed tombstone");
+    let stored = cloud
+        .get("blob_tombstones/blob-key")
+        .expect("tombstone object present");
+    let tombstone: BlobTombstoneJson = serde_json::from_slice(&stored).expect("parse tombstone");
+    assert_eq!(tombstone.cloud_key, "blob-key");
+    assert!(tombstone.verify("lib"));
+    assert!(
+        db.get_pending_cloud_deletes().await.unwrap().is_empty(),
+        "the delete row clears only after a valid tombstone is present",
+    );
+}
+
+#[tokio::test]
+async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
+    let db = open_outbox_db();
+    let cloud = InMemoryCloudHome::new();
+    let cipher = plaintext_cipher();
+    let kp = UserKeypair::generate();
+    let original = BlobTombstoneJson::signed(
+        "lib",
+        "blob-key".to_string(),
+        "2024-06-01T00:00:00+00:00".to_string(),
+        &kp,
+    );
+    plant_tombstone(&cloud, &original).await;
+    let original_bytes = cloud
+        .get("blob_tombstones/blob-key")
+        .expect("original tombstone");
+
+    db.enqueue_delete("blob-key", T0).await.expect("enqueue");
+    let clock = FixedClock(at("2024-06-10T00:00:00Z"));
+    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &clock)
+        .await
+        .expect("drain");
+
+    assert_eq!(n, 0, "an existing valid tombstone is not rewritten");
+    assert_eq!(
+        cloud.get("blob_tombstones/blob-key"),
+        Some(original_bytes),
+        "the existing tombstone remains byte-for-byte unchanged",
+    );
+    assert!(
+        db.get_pending_cloud_deletes().await.unwrap().is_empty(),
+        "the delete row clears because the valid tombstone is already present",
+    );
+}
+
 /// An upload row reads back as an `Upload` carrying its scope; a delete row reads
 /// back as a `Delete`. The operation-specific fields live in the variant, so a
 /// delete has no scope to be `None` — the shared `cloud_outbox` row-shape
@@ -395,19 +615,14 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
     assert_eq!(deletes[0].operation, OutboxOperation::Delete);
 }
 
-/// A failed tombstone existence check records durable retry state, then the
+/// A failed tombstone validation records durable retry state, then the
 /// delete drain skips the row inside the backoff window and retries once the
 /// window has elapsed.
 #[tokio::test]
-async fn delete_existence_failure_backs_off_then_retries() {
+async fn delete_validation_failure_backs_off_then_retries() {
     let db = open_outbox_db();
     let inner = InMemoryCloudHome::new();
-    let cloud = FailCloudOpOnKey::new(
-        &inner,
-        FailingCloudOp::Exists,
-        "blob_tombstones/blob-key",
-        1,
-    );
+    let cloud = FailCloudOpOnKey::new(&inner, FailingCloudOp::Read, "blob_tombstones/blob-key", 1);
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
 
@@ -416,7 +631,7 @@ async fn delete_existence_failure_backs_off_then_retries() {
     let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
         .await
         .expect("first drain");
-    assert_eq!(n, 0, "the failed existence check writes no tombstone");
+    assert_eq!(n, 0, "the failed validation writes no tombstone");
     assert_eq!(cloud.matching_calls(), 1);
 
     let first_row = get_delete(&db, 1).await.expect("delete row remains");
@@ -426,7 +641,7 @@ async fn delete_existence_failure_backs_off_then_retries() {
             .1
             .as_deref()
             .unwrap()
-            .contains("tombstone existence check failed"),
+            .contains("tombstone validation failed"),
         "the failure reason is recorded",
     );
     let recorded = chrono::DateTime::parse_from_rfc3339(first_row.2.as_deref().unwrap()).unwrap();
@@ -440,7 +655,7 @@ async fn delete_existence_failure_backs_off_then_retries() {
     assert_eq!(
         cloud.matching_calls(),
         1,
-        "inside the backoff window no cloud existence check runs",
+        "inside the backoff window no cloud validation runs",
     );
     assert_eq!(
         get_delete(&db, 1).await.expect("delete row remains"),
@@ -528,12 +743,7 @@ async fn delete_write_failure_backs_off_then_retries() {
 async fn corrupt_delete_backoff_timestamp_does_not_strand_the_row() {
     let db = open_outbox_db();
     let inner = InMemoryCloudHome::new();
-    let cloud = FailCloudOpOnKey::new(
-        &inner,
-        FailingCloudOp::Exists,
-        "blob_tombstones/blob-key",
-        1,
-    );
+    let cloud = FailCloudOpOnKey::new(&inner, FailingCloudOp::Read, "blob_tombstones/blob-key", 1);
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
 
@@ -598,7 +808,7 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
 
     // A GC one day later — well inside the 7-day grace — keeps the blob.
     let inside = FixedClock(at("2024-06-02T00:00:00Z"));
-    let n = gc_tombstones(
+    let n = gc_tombstones_without_live_refs(
         &storage,
         &storage,
         &cipher,
@@ -620,9 +830,16 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
 
     // A GC just past the grace reclaims the blob and the tombstone.
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("gc past grace");
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc past grace");
     assert_eq!(n, 1, "one blob reclaimed past the grace");
     assert!(
         storage.read("blob-key").await.is_err(),
@@ -631,6 +848,70 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
     assert!(
         storage.read("blob_tombstones/blob-key").await.is_err(),
         "the tombstone is deleted after reclaiming its blob",
+    );
+}
+
+#[tokio::test]
+async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let owner = pubkey_hex(&founder);
+    let cipher = plaintext_cipher();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    let cloud_key = LibraryDir::hashed_path("photos", "bloblive").expect("hashed blob key");
+
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'LiveBlob', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('bloblive', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    storage
+        .write(
+            &cloud_key,
+            crate::storage::cloud::BlobBody::from_bytes(b"live contents".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    let tombstone = BlobTombstoneJson::signed(
+        "test-lib",
+        cloud_key.clone(),
+        deleted_at.to_string(),
+        &member,
+    );
+    plant_tombstone(&storage, &tombstone).await;
+
+    let past = FixedClock(at(&past_grace_instant(deleted_at)));
+    let n = gc_tombstones(
+        &db,
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
+
+    assert_eq!(n, 0, "a live blob reference prevents reclaim");
+    assert!(
+        storage.read(&cloud_key).await.is_ok(),
+        "the referenced blob remains in cloud",
+    );
+    assert!(
+        storage
+            .read(&format!("blob_tombstones/{cloud_key}"))
+            .await
+            .is_err(),
+        "the stale tombstone is canceled",
     );
 }
 
@@ -677,7 +958,7 @@ async fn tombstone_canceled_mid_gc_leaves_the_reuploaded_blob() {
     };
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(
+    let n = gc_tombstones_without_live_refs(
         &storage,
         &racing_home,
         &cipher,
@@ -691,6 +972,58 @@ async fn tombstone_canceled_mid_gc_leaves_the_reuploaded_blob() {
     assert!(
         storage.read("blob-key").await.is_ok(),
         "the re-uploaded blob survives a tombstone canceled in the TOCTOU window",
+    );
+}
+
+#[tokio::test]
+async fn blob_reuploaded_after_gc_observes_it_is_not_deleted() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let owner = pubkey_hex(&founder);
+    let cipher = plaintext_cipher();
+    storage
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"old contents".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    let tombstone = BlobTombstoneJson::signed(
+        "test-lib",
+        "blob-key".to_string(),
+        deleted_at.to_string(),
+        &member,
+    );
+    plant_tombstone(&storage, &tombstone).await;
+
+    let racing_home = ReuploadAfterBlobObserved {
+        inner: &storage,
+        blob_key: "blob-key".to_string(),
+        fresh_contents: b"fresh contents".to_vec(),
+        fired: AtomicBool::new(false),
+    };
+    let past = FixedClock(at(&past_grace_instant(deleted_at)));
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &racing_home,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
+
+    assert_eq!(n, 0, "a changed object is not reclaimed");
+    assert_eq!(
+        storage.read("blob-key").await.unwrap(),
+        b"fresh contents",
+        "the re-uploaded blob remains",
+    );
+    assert!(
+        storage.read("blob_tombstones/blob-key").await.is_err(),
+        "the tombstone is canceled once its target object changed",
     );
 }
 
@@ -731,9 +1064,16 @@ async fn tombstone_by_a_non_member_is_ignored() {
     plant_tombstone(&storage, &tombstone).await;
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("gc");
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
     assert_eq!(n, 0, "a non-member tombstone reclaims nothing");
     assert!(
         storage.read("blob-key").await.is_ok(),
@@ -801,7 +1141,7 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // attacker, not the pin, so authorization fails and the blob survives.
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let cipher = plaintext_cipher();
-    let n = gc_tombstones(
+    let n = gc_tombstones_without_live_refs(
         &storage,
         &storage,
         &cipher,
@@ -856,7 +1196,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let cipher = plaintext_cipher();
-    let n = gc_tombstones(
+    let n = gc_tombstones_without_live_refs(
         &storage,
         &storage,
         &cipher,
@@ -912,9 +1252,16 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
     plant_tombstone(&storage, &tombstone).await;
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("gc");
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
     assert_eq!(n, 0, "a tombstone with a bad signature reclaims nothing");
     assert!(
         storage.read("blob-key").await.is_ok(),
@@ -958,9 +1305,16 @@ async fn tombstone_bound_to_a_different_library_is_ignored() {
     plant_tombstone(&storage, &tombstone).await;
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("gc");
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
     assert_eq!(n, 0, "a foreign-library tombstone reclaims nothing");
     assert!(
         storage.read("blob-key").await.is_ok(),
@@ -1091,9 +1445,16 @@ async fn reupload_through_the_drain_cancels_a_prior_cycle_tombstone() {
 
     // A GC long past the grace now finds no tombstone and leaves the live blob.
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let gc = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("gc");
+    let gc = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
     assert_eq!(
         gc, 0,
         "no tombstone remains to reclaim the re-uploaded blob"
@@ -1268,9 +1629,16 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
 
     // A GC long past the grace now finds no tombstone and keeps the live blob.
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let gc = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("gc");
+    let gc = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
     assert_eq!(
         gc, 0,
         "no tombstone remains to reclaim the re-uploaded blob"
@@ -1320,9 +1688,16 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         1,
     );
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(&storage, &failing, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("first gc");
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &failing,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("first gc");
     assert_eq!(n, 1, "the blob is reclaimed");
     assert!(
         storage.read("blob-key").await.is_err(),
@@ -1335,9 +1710,16 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
 
     // Second GC: the blob is already gone, so the leftover tombstone is a no-op
     // cleanup — it is removed and reports zero reclaims (no phantom re-count).
-    let n = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("second gc");
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("second gc");
     assert_eq!(
         n, 0,
         "the leftover tombstone reclaims nothing the second pass"
@@ -1384,9 +1766,16 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         storage.read("blob_tombstones/blob-key").await.is_err(),
         "the re-upload's cancel removed the leftover tombstone",
     );
-    let n = gc_tombstones(&storage, &storage, &cipher, "test-lib", Some(&owner), &past)
-        .await
-        .expect("gc after re-upload");
+    let n = gc_tombstones_without_live_refs(
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc after re-upload");
     assert_eq!(n, 0, "no tombstone remains to delete the re-uploaded blob");
     assert!(
         storage.read("blob-key").await.is_ok(),

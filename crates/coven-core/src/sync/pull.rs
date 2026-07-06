@@ -640,6 +640,7 @@ pub async fn pull_changes(
                     changes: &changes,
                 },
                 &blob_decls,
+                db,
                 library_dir,
                 &schema,
                 receiver_wall_ms,
@@ -695,6 +696,7 @@ pub async fn pull_changes(
                     changes: &d.changes,
                 },
                 &blob_decls,
+                db,
                 library_dir,
                 &schema,
                 receiver_wall_ms,
@@ -717,6 +719,7 @@ async fn finish_applied_changeset(
     applied_devices: &mut HashSet<String>,
     applied: CompletedChangeset<'_>,
     blob_decls: &BlobDecls,
+    db: &Database,
     library_dir: &LibraryDir,
     schema: &TableSchema,
     receiver_wall_ms: u64,
@@ -729,6 +732,7 @@ async fn finish_applied_changeset(
         applied.old_changes,
         applied.changes,
         blob_decls,
+        db,
         library_dir,
     )
     .await
@@ -1108,6 +1112,7 @@ async fn drop_deleted_blob_local(
     old_changes: &[RowChange],
     new_changes: &[RowChange],
     blob_decls: &BlobDecls,
+    db: &Database,
     library_dir: &LibraryDir,
 ) -> Result<(), crate::blob::cache::BlobCacheError> {
     if old_changes.len() != new_changes.len() {
@@ -1138,6 +1143,20 @@ async fn drop_deleted_blob_local(
             crate::changeset::ChangeOp::Insert => None,
         };
         if let Some(blob) = old_blob_to_drop {
+            let decls = db.blob_decls();
+            let namespace = blob.namespace.clone();
+            let id = blob.id.clone();
+            let live_row = db
+                .call(move |conn| {
+                    decls
+                        .row_for_blob_in_namespace(conn, &namespace, &id)
+                        .map_err(|e| crate::database::DbError(e.to_string()))
+                })
+                .await
+                .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?;
+            if live_row.is_some() {
+                continue;
+            }
             crate::blob::cache::drop_all_local_copies(library_dir, &blob.namespace, &blob.id)
                 .await?;
         }
@@ -1368,10 +1387,17 @@ mod tests {
         let new_changes = Vec::new();
         let tmp = tempfile::tempdir().expect("temp dir");
         let library_dir = LibraryDir::new(tmp.path());
-        let db = rusqlite::Connection::open_in_memory().expect("db");
-        let decls = BlobDecls::from_tables(&db, &[]).expect("decls");
+        let (db, _stamper) = Database::open(
+            std::path::Path::new(":memory:"),
+            Vec::new(),
+            "test-device".to_string(),
+            &[],
+        )
+        .expect("open database");
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        let decls = BlobDecls::from_tables(&conn, &[]).expect("decls");
 
-        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &library_dir)
+        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &db, &library_dir)
             .await
             .expect_err("mismatched changeset walks fail");
 

@@ -15,7 +15,8 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudObjectState, CloudObjectVersion, ConditionalDelete,
 };
 
 /// A coven-owned tokio runtime whose worker threads have a large stack, used to
@@ -608,6 +609,67 @@ impl CloudHome for S3CloudHome {
                     }
                 }
             }
+        })
+        .await
+    }
+
+    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
+        let full = self.full_key(key);
+        let key = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        on_s3_rt(async move {
+            use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+            match client.head_object().bucket(&bucket).key(&full).send().await {
+                Ok(resp) => match resp.e_tag() {
+                    Some(etag) => Ok(CloudObjectState::Present(CloudObjectVersion::new(etag))),
+                    None => Ok(CloudObjectState::VersionUnavailable),
+                },
+                Err(e) => {
+                    let status = match &e {
+                        SdkError::ServiceError(svc) => Some(svc.raw().status().as_u16()),
+                        _ => None,
+                    };
+                    if is_not_found_code(e.code()) || status == Some(404) {
+                        Ok(CloudObjectState::Absent)
+                    } else {
+                        Err(CloudHomeError::Storage(format!("head {key}: {e}")))
+                    }
+                }
+            }
+        })
+        .await
+    }
+
+    async fn delete_if_version(
+        &self,
+        key: &str,
+        version: &CloudObjectVersion,
+    ) -> Result<ConditionalDelete, CloudHomeError> {
+        let full = self.full_key(key);
+        let key = key.to_string();
+        let etag = version.as_str().to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        on_s3_rt(async move {
+            use aws_sdk_s3::error::ProvideErrorMetadata;
+            if let Err(e) = client
+                .delete_object()
+                .bucket(&bucket)
+                .key(&full)
+                .if_match(etag)
+                .send()
+                .await
+            {
+                match e.code() {
+                    Some("PreconditionFailed") => return Ok(ConditionalDelete::Changed),
+                    Some(code) if is_not_found_code(Some(code)) => {
+                        return Ok(ConditionalDelete::NotFound);
+                    }
+                    _ => return Err(CloudHomeError::Storage(format!("delete {key}: {e}"))),
+                }
+            }
+            Ok(ConditionalDelete::Deleted)
         })
         .await
     }
