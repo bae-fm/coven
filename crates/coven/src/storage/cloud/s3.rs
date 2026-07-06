@@ -546,7 +546,12 @@ impl CloudHome for S3CloudHome {
                 }
 
                 if resp.is_truncated() == Some(true) {
-                    continuation_token = resp.next_continuation_token().map(|s| s.to_string());
+                    let token = resp.next_continuation_token().ok_or_else(|| {
+                        CloudHomeError::Storage(format!(
+                            "list {prefix}: S3 truncated but returned no continuation token"
+                        ))
+                    })?;
+                    continuation_token = Some(token.to_string());
                 } else {
                     break;
                 }
@@ -704,6 +709,7 @@ mod tests {
     use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
     use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
     use axum::Router;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[test]
@@ -786,6 +792,79 @@ mod tests {
         (endpoint, shutdown_tx)
     }
 
+    #[derive(Clone)]
+    struct FakeListState {
+        bucket: String,
+        request_count: Arc<AtomicUsize>,
+    }
+
+    async fn fake_s3_truncated_list_endpoint(
+        State(state): State<FakeListState>,
+        method: Method,
+        uri: Uri,
+    ) -> Response<Body> {
+        state.request_count.fetch_add(1, Ordering::SeqCst);
+
+        let expected_path = format!("/{}/", state.bucket);
+        if method != Method::GET || uri.path() != expected_path {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!(
+                    "unexpected request: method={method}, path={}, query={:?}",
+                    uri.path(),
+                    uri.query()
+                )))
+                .expect("build bad-request response");
+        }
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/xml")
+            .body(Body::from(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>coven-s3-list-test</Name>
+  <Prefix>heads/</Prefix>
+  <KeyCount>1</KeyCount>
+  <IsTruncated>true</IsTruncated>
+  <Contents>
+    <Key>heads/dev1.json</Key>
+    <Size>10</Size>
+  </Contents>
+</ListBucketResult>"#,
+            ))
+            .expect("build fake list response")
+    }
+
+    async fn spawn_fake_s3_truncated_list_endpoint(
+        bucket: String,
+    ) -> (String, tokio::sync::oneshot::Sender<()>, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake S3 endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let state = FakeListState {
+            bucket,
+            request_count: request_count.clone(),
+        };
+        let app = Router::new()
+            .fallback(fake_s3_truncated_list_endpoint)
+            .with_state(state);
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("fake S3 endpoint failed");
+        });
+
+        (endpoint, shutdown_tx, request_count)
+    }
+
     #[tokio::test]
     async fn read_range_accepts_s3_compatible_full_object_checksum_header() {
         let range_body = b"abcdefghijklmnopqrstuvwx".to_vec();
@@ -821,6 +900,45 @@ mod tests {
             .expect("read range");
 
         assert_eq!(bytes, range_body);
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn list_errors_when_truncated_response_has_no_continuation_token() {
+        let bucket = "coven-s3-list-test".to_string();
+        let (endpoint, shutdown, request_count) =
+            spawn_fake_s3_truncated_list_endpoint(bucket.clone()).await;
+
+        if !loopback_connects(&endpoint).await {
+            return;
+        }
+
+        let home = S3CloudHome::new(
+            bucket,
+            "us-central1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), home.list("heads/"))
+            .await
+            .expect("list should return instead of refetching the first page");
+        let err = result.expect_err("truncated response without token must fail");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("truncated") && msg.contains("continuation token"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "malformed page must not be refetched"
+        );
         let _ = shutdown.send(());
     }
 

@@ -569,16 +569,22 @@ struct ListBucketObject {
 fn parse_list_objects_v2(xml: &str) -> Result<ListPage, CloudHomeError> {
     let parsed: ListBucketResult =
         from_str(xml).map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?;
+    let next_continuation_token = if parsed.is_truncated {
+        Some(parsed.next_continuation_token.ok_or_else(|| {
+            CloudHomeError::Storage(
+                "S3 list truncated but response had no NextContinuationToken".to_string(),
+            )
+        })?)
+    } else {
+        None
+    };
     Ok(ListPage {
         keys: parsed
             .contents
             .into_iter()
             .filter_map(|object| object.key)
             .collect(),
-        next_continuation_token: parsed
-            .is_truncated
-            .then_some(parsed.next_continuation_token)
-            .flatten(),
+        next_continuation_token,
     })
 }
 
@@ -909,6 +915,23 @@ mod tests {
         assert_eq!(
             page.next_continuation_token,
             Some("1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_list_truncated_page_without_token_errors() {
+        let xml = r#"<ListBucketResult>
+  <IsTruncated>true</IsTruncated>
+  <Contents><Key>a/1</Key></Contents>
+</ListBucketResult>"#;
+        let err = match parse_list_objects_v2(xml) {
+            Ok(_) => panic!("missing token must fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("truncated") && msg.contains("NextContinuationToken"),
+            "unexpected error: {msg}"
         );
     }
 
