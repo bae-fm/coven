@@ -170,6 +170,10 @@ struct DeferredChangeset {
     changeset: Vec<u8>,
     old_changes: Vec<RowChange>,
     changes: Vec<RowChange>,
+    /// The `(namespace, blob_id, uploader)` records the retry re-applies alongside
+    /// the rows, so a deferred changeset records its blobs' uploaders on the pass
+    /// that finally commits it.
+    blob_uploads: Vec<(String, String, String)>,
 }
 
 struct CompletedChangeset<'a> {
@@ -684,8 +688,17 @@ pub async fn pull_changes(
                     break;
                 }
             };
-            let blobs_ok =
-                download_blobs(db, cache_eager, storage, library_dir, &in_changeset_keys).await;
+            // The author of this changeset uploaded the blobs it introduces, so it
+            // is the prefix they live under.
+            let blobs_ok = download_blobs(
+                db,
+                cache_eager,
+                storage,
+                library_dir,
+                &in_changeset_keys,
+                env.author_pubkey.as_deref(),
+            )
+            .await;
             if !blobs_ok {
                 warn!(
                     "Blob download failed for {}/{}, not applying; cursor not advanced",
@@ -699,11 +712,37 @@ pub async fn pull_changes(
             // A plain `call` — applied rows are never journaled (only a
             // `run_pending_journaled_transaction_on` host write is), so they can't
             // echo as this device's own outgoing changes.
+            // The blobs this changeset introduces are keyed under its author (who
+            // uploaded them); record that atomically with the applied rows.
+            let blob_uploads = match introduced_blob_uploads(
+                &blob_decls,
+                &old_changes,
+                &changes,
+                env.author_pubkey.as_deref(),
+            ) {
+                Ok(uploads) => uploads,
+                Err(e) => {
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        "failed to enumerate introduced blobs, skipping without applying: {e}"
+                    );
+                    result.asset_downloads_failed = true;
+                    break;
+                }
+            };
             let apply_attempt = {
                 let schema = schema.clone();
                 let bytes = changeset_bytes.clone();
+                let blob_uploads = blob_uploads.clone();
                 db.call(move |conn| {
-                    resolve_and_apply_changeset_with_schema(conn, &bytes, schema, receiver_wall_ms)
+                    resolve_and_apply_changeset_with_schema(
+                        conn,
+                        &bytes,
+                        schema,
+                        receiver_wall_ms,
+                        &blob_uploads,
+                    )
                 })
                 .await
             };
@@ -732,6 +771,7 @@ pub async fn pull_changes(
                     changeset: changeset_bytes.clone(),
                     old_changes,
                     changes,
+                    blob_uploads,
                 });
                 break;
             }
@@ -777,8 +817,15 @@ pub async fn pull_changes(
             let retry_attempt = {
                 let schema = schema.clone();
                 let bytes = d.changeset.clone();
+                let blob_uploads = d.blob_uploads.clone();
                 db.call(move |conn| {
-                    resolve_and_apply_changeset_with_schema(conn, &bytes, schema, receiver_wall_ms)
+                    resolve_and_apply_changeset_with_schema(
+                        conn,
+                        &bytes,
+                        schema,
+                        receiver_wall_ms,
+                        &blob_uploads,
+                    )
                 })
                 .await
             };
@@ -1293,6 +1340,54 @@ pub(crate) fn cache_eager_blobs(
         .collect()
 }
 
+/// The blobs a changeset *introduces* — a row whose new blob ref the pre-image
+/// lacked, or differs from — paired with the `author` that uploaded them (the
+/// author of a changeset uploads the blobs its rows introduce, into its own cloud
+/// prefix). A row updated without changing its blob re-references an existing
+/// object and introduces nothing, so it is not recorded here. Empty when the
+/// author is unknown (an unsigned browsable-library changeset carries no uploader
+/// segment). Returns `(namespace, blob_id, uploader)` for the local uploader index.
+fn introduced_blob_uploads(
+    blob_decls: &BlobDecls,
+    old_changes: &[RowChange],
+    changes: &[RowChange],
+    author: Option<&str>,
+) -> Result<Vec<(String, String, String)>, crate::blob::decl::BlobDeclError> {
+    let Some(author) = author else {
+        return Ok(Vec::new());
+    };
+    if old_changes.len() != changes.len() {
+        return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
+            old_count: old_changes.len(),
+            new_count: changes.len(),
+        });
+    }
+    let mut out = Vec::new();
+    for (old, new) in old_changes.iter().zip(changes) {
+        let Some(new_blob) = blob_decls.ref_from_change(new)? else {
+            continue;
+        };
+        // An insert always introduces its blob; an update introduces one only when
+        // it moves the row to a different blob (a same-blob update re-references an
+        // existing object and uploads nothing). A delete carries no new blob and is
+        // already skipped above.
+        let introduced = match new.op {
+            crate::changeset::ChangeOp::Insert => true,
+            crate::changeset::ChangeOp::Update => match blob_decls.ref_from_change(old)? {
+                Some(old_blob) => {
+                    old_blob.namespace != new_blob.namespace || old_blob.id != new_blob.id
+                }
+                None => true,
+            },
+            crate::changeset::ChangeOp::Delete => false,
+        };
+        if introduced {
+            out.push((new_blob.namespace, new_blob.id, author.to_string()));
+        }
+    }
+    Ok(out)
+}
+
 /// The **host-provided** blobs the `changes` reference, derived per row from the
 /// declarations. The inline push uploads these before publishing the changeset:
 /// coven owns a host-provided blob's bytes (in its local store or cache), so it can
@@ -1440,12 +1535,20 @@ async fn resolve_pull_scope(
 /// bootstrap backfill (per row in the freshly bootstrapped DB, where
 /// `in_changeset_keys` is empty and keys come from the DB the snapshot carried),
 /// so the download/decrypt/write path lives in one place.
+/// Download a set of blobs into the cache. `known_uploader` is the prefix each
+/// blob lives under when the caller already knows it — the changeset author for an
+/// incremental pull, since the author of a changeset uploaded the blobs it
+/// introduces. `None` when the caller doesn't know (a snapshot backfill, whose
+/// restored rows carry no per-blob uploader): each blob's uploader is then
+/// resolved from the local index, falling back to a listing scan that records what
+/// it finds. A browsable/plain home resolves to no uploader segment.
 pub(crate) async fn download_blobs(
     db: &Database,
     blobs: Vec<BlobDownload>,
     storage: &dyn SyncStorage,
     library_dir: &LibraryDir,
     in_changeset_keys: &HashMap<String, [u8; 32]>,
+    known_uploader: Option<&str>,
 ) -> bool {
     let mut all_ok = true;
     for download in blobs {
@@ -1531,9 +1634,24 @@ pub(crate) async fn download_blobs(
             }
         };
 
+        // The prefix the blob lives under: the known author for an incremental
+        // pull; otherwise resolved from the index, then a listing scan.
+        let uploader = match known_uploader {
+            Some(uploader) => Some(uploader.to_string()),
+            None => match crate::blob::cache::resolve_blob_uploader(db, storage, &blob).await {
+                Ok(uploader) => uploader,
+                Err(e) => {
+                    warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot resolve blob uploader, skipping download");
+                    all_ok = false;
+                    continue;
+                }
+            },
+        };
+
         match storage
             .read_blob_to_file(
                 &blob.namespace,
+                uploader.as_deref(),
                 &blob.id,
                 resolved,
                 blob.cloud_path.as_deref(),

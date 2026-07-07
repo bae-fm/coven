@@ -472,6 +472,7 @@ fn blob_key(namespace: &str, id: &str, cloud_path: Option<&str>) -> String {
         Some(path) => crate::sync::cloud_storage::CloudSyncStorage::blob_key(
             crate::sync::cloud_storage::BlobPathScheme::Plain,
             namespace,
+            None,
             id,
             Some(path),
         )
@@ -944,10 +945,14 @@ impl SyncStorage for MockSyncStorage {
     async fn get_blob(
         &self,
         namespace: &str,
+        _uploader: Option<&str>,
         id: &str,
         _scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
+        // The mock keys blobs flat by (namespace, id) and ignores the uploader
+        // prefix — the real `{namespace}/{uploader}/…` layout is exercised against
+        // `CloudSyncStorage` over an `InMemoryCloudHome`, where it can be observed.
         let key = blob_key(namespace, id, cloud_path);
         let objects = self.objects.lock().unwrap();
         objects
@@ -969,6 +974,7 @@ impl SyncStorage for MockSyncStorage {
     async fn read_blob_range(
         &self,
         namespace: &str,
+        _uploader: Option<&str>,
         id: &str,
         _scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
@@ -1002,6 +1008,7 @@ impl SyncStorage for MockSyncStorage {
     async fn read_blob_to_file(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
@@ -1013,6 +1020,7 @@ impl SyncStorage for MockSyncStorage {
         let bytes = self
             .read_blob_range(
                 namespace,
+                uploader,
                 id,
                 scope,
                 cloud_path,
@@ -1024,6 +1032,26 @@ impl SyncStorage for MockSyncStorage {
         crate::local_blob::write_atomic(dest, &bytes)
             .await
             .map_err(StorageError::Storage)
+    }
+
+    async fn find_blob_uploader(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<Option<String>, StorageError> {
+        // The mock stores blobs flat, so "which uploader holds it" is answered by
+        // presence: if the blob exists, it is ours (the mock is a single writer).
+        let key = blob_key(namespace, id, cloud_path);
+        if self.objects.lock().unwrap().contains_key(&key) {
+            Ok(Some(hex::encode(self.keypair.public_key())))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
+        crate::sync::cloud_storage::BlobPathScheme::Hashed
     }
 
     async fn put_snapshot(

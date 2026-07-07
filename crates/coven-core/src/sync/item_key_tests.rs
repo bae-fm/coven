@@ -105,7 +105,13 @@ async fn item_scoped_blob_round_trips_master_cannot_read() {
 
     // The item key reads it back.
     let got = storage
-        .get_blob("images", "item-1", resolved, None)
+        .get_blob(
+            "images",
+            Some(&storage.self_uploader()),
+            "item-1",
+            resolved,
+            None,
+        )
         .await
         .expect("get item-scoped blob");
     assert_eq!(got, plaintext);
@@ -113,7 +119,13 @@ async fn item_scoped_blob_round_trips_master_cannot_read() {
     // The master key — held by every member — cannot decrypt it.
     assert!(
         storage
-            .get_blob("images", "item-1", ResolvedScope::Master, None)
+            .get_blob(
+                "images",
+                Some(&storage.self_uploader()),
+                "item-1",
+                ResolvedScope::Master,
+                None
+            )
             .await
             .is_err(),
         "the master key must not decrypt an item-scoped blob"
@@ -354,7 +366,13 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     // The master key alone (membership) does not unlock it.
     assert!(
         storage
-            .get_blob("audio", "blob-1", ResolvedScope::Master, None)
+            .get_blob(
+                "audio",
+                Some(&storage.self_uploader()),
+                "blob-1",
+                ResolvedScope::Master,
+                None
+            )
             .await
             .is_err(),
         "membership alone (the master key) does not unlock item content"
@@ -448,7 +466,13 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
         .await
         .expect("resolve on bootstrapped B");
     let recovered = storage
-        .get_blob("audio", "item-1", resolved_b, None)
+        .get_blob(
+            "audio",
+            Some(&storage.self_uploader()),
+            "item-1",
+            resolved_b,
+            None,
+        )
         .await
         .expect("B decrypts the item-scoped blob after bootstrap");
     assert_eq!(

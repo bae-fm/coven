@@ -65,7 +65,7 @@ pub fn resolve_and_apply_changeset(
 ) -> Result<ApplyResult, DbError> {
     let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
     let schema = Arc::new(TableSchema::from_db(conn, &table_refs)?);
-    resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms)
+    resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms, &[])
 }
 
 /// Apply `bytes` to `conn`, resolving conflicts against a pre-built
@@ -85,11 +85,19 @@ pub fn resolve_and_apply_changeset(
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
 /// wall-clock millis, read once by the caller and moved into the closure to bound
 /// a grossly-future incoming `_updated_at` (see [`arbitrate_row_conflict`]).
+/// `blob_uploads` records, atomically with the applied rows, which device uploaded
+/// each blob the changeset introduces (`(namespace, blob_id, uploader)`): the read
+/// dispatch later keys a blob under its uploader's cloud prefix. Writing it inside
+/// this transaction is what keeps the index consistent with the rows that reference
+/// the blobs — a committed row always has its uploader recorded, never a later
+/// repair. Callers with no blobs to record (a test, a snapshot round-trip) pass an
+/// empty slice.
 pub fn resolve_and_apply_changeset_with_schema(
     conn: &Connection,
     bytes: &[u8],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
+    blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
     let fk_flag = Arc::new(AtomicBool::new(false));
     let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
@@ -154,6 +162,13 @@ pub fn resolve_and_apply_changeset_with_schema(
     if had_fk_violations {
         tx.rollback().map_err(DbError::from)?;
     } else {
+        // Record the uploader of each blob these rows introduce, in the same
+        // transaction, so a committed blob-bearing row always carries its
+        // uploader. Rolled back with the rows above on an FK deferral, and
+        // idempotent, so the deferred retry re-records the same fact.
+        for (namespace, blob_id, uploader) in blob_uploads {
+            crate::database::Database::record_blob_uploader_on(&tx, namespace, blob_id, uploader)?;
+        }
         tx.commit().map_err(DbError::from)?;
     }
 

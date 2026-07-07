@@ -34,6 +34,11 @@ use rusqlite::OptionalExtension;
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
+/// The `{uploader}` segment the hashed cloud keys in these GC tests sit under. Any
+/// valid token works — the GC's live-row lookup keys off namespace + id, not the
+/// uploader — so a fixed one keeps the keys deterministic.
+const GC_TEST_UPLOADER: &str = "aa11bb22";
+
 /// A wall-clock instant for the tests, fixed so the grace math is deterministic.
 fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
@@ -776,7 +781,8 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = LibraryDir::hashed_path("photos", "bloblive").expect("hashed blob key");
+    let cloud_key = LibraryDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
+        .expect("hashed blob key");
 
     exec(
         &db,
@@ -847,7 +853,8 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = LibraryDir::hashed_path("photos", "bloblive").expect("hashed blob key");
+    let cloud_key = LibraryDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
+        .expect("hashed blob key");
 
     // The peer's still-stale view: the gated root is shared (remote) and the child row
     // that carries the blob is present.
@@ -953,7 +960,8 @@ async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = LibraryDir::hashed_path("photos", "orphan").expect("hashed blob key");
+    let cloud_key = LibraryDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "orphan")
+        .expect("hashed blob key");
 
     // An orphaned child: it carries the blob but its parent note is absent, so the FK
     // up-walk that resolves locality hits a missing row. Insert it with foreign keys

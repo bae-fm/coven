@@ -594,11 +594,14 @@ impl SyncStorage for HostWriteInjector {
     async fn get_blob(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_blob(namespace, id, scope, cloud_path).await
+        self.inner
+            .get_blob(namespace, uploader, id, scope, cloud_path)
+            .await
     }
     async fn blob_exists(
         &self,
@@ -611,6 +614,7 @@ impl SyncStorage for HostWriteInjector {
     async fn read_blob_range(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
@@ -619,12 +623,22 @@ impl SyncStorage for HostWriteInjector {
         len: u64,
     ) -> Result<Vec<u8>, StorageError> {
         self.inner
-            .read_blob_range(namespace, id, scope, cloud_path, source_size, offset, len)
+            .read_blob_range(
+                namespace,
+                uploader,
+                id,
+                scope,
+                cloud_path,
+                source_size,
+                offset,
+                len,
+            )
             .await
     }
     async fn read_blob_to_file(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
@@ -632,8 +646,29 @@ impl SyncStorage for HostWriteInjector {
         dest: &std::path::Path,
     ) -> Result<(), StorageError> {
         self.inner
-            .read_blob_to_file(namespace, id, scope, cloud_path, source_size, dest)
+            .read_blob_to_file(
+                namespace,
+                uploader,
+                id,
+                scope,
+                cloud_path,
+                source_size,
+                dest,
+            )
             .await
+    }
+    async fn find_blob_uploader(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<Option<String>, StorageError> {
+        self.inner
+            .find_blob_uploader(namespace, id, cloud_path)
+            .await
+    }
+    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
+        self.inner.blob_path_scheme()
     }
     async fn put_snapshot(
         &self,

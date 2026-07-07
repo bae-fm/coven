@@ -1051,12 +1051,16 @@ pub async fn reconcile_snapshot_blobs(
     // the changeset being applied; the bootstrap has no such changeset). The blobs
     // are `CacheEager`, so `download_blobs` writes each into the evictable cache
     // `storage/cache/<namespace>/<id>` under `library_dir`.
+    // A snapshot's restored rows carry no per-blob uploader, so each blob's prefix
+    // is resolved from the index (empty on a fresh restore) and then a listing
+    // scan that records what it finds.
     let all_ok = crate::sync::pull::download_blobs(
         db,
         blobs,
         storage,
         library_dir,
         &std::collections::HashMap::new(),
+        None,
     )
     .await;
     if all_ok {
@@ -1871,7 +1875,7 @@ mod tests {
             .expect("upload host-provided snapshot blobs");
         assert_eq!(
             storage
-                .get_blob("covers", "cover1", ResolvedScope::Master, None)
+                .get_blob("covers", None, "cover1", ResolvedScope::Master, None)
                 .await
                 .expect("host cover uploaded"),
             b"COVER",

@@ -239,6 +239,14 @@ impl CloudSyncStorage {
         self.cipher().suffix()
     }
 
+    /// This device's hex public key — the `{uploader}` segment its own blob
+    /// uploads are keyed under. A device only ever writes blobs it authored, so a
+    /// write always keys under itself; a read resolves the uploader of the blob it
+    /// wants (which may be a peer) and passes it in.
+    pub(crate) fn self_uploader(&self) -> String {
+        hex::encode(self.keypair.public_key())
+    }
+
     async fn write_sealed(&self, key: &str, plaintext: Vec<u8>) -> Result<(), StorageError> {
         let stored = self.cipher().seal(plaintext, &self.aad_context(key));
         self.home
@@ -304,20 +312,33 @@ impl CloudSyncStorage {
 
     /// The cloud object key for a blob under the home's [`BlobPathScheme`].
     ///
-    /// `Hashed` ignores `cloud_path` and shards by the id:
-    /// `{namespace}/{ab}/{cd}/{id}`. `Plain` uses the consumer's `cloud_path`
-    /// verbatim: `{namespace}/{cloud_path}`. A `Plain` home with no `cloud_path`
-    /// is an error — coven never silently falls back to the hashed layout, which
-    /// would scatter readable-path blobs under unfindable shard keys.
+    /// `Hashed` ignores `cloud_path` and shards by the id under the uploading
+    /// device: `{namespace}/{uploader}/{ab}/{cd}/{id}` — the `{uploader}` segment
+    /// aligns the keyspace to the storage-access rule (a member writes only under
+    /// its own public key), so `uploader` is required and a missing one is an
+    /// error. `Plain` uses the consumer's `cloud_path` verbatim:
+    /// `{namespace}/{cloud_path}`, keeping the bucket browsable — a browsable home
+    /// has no membership chain, so it carries no uploader segment and `uploader` is
+    /// ignored. A `Plain` home with no `cloud_path` is an error — coven never
+    /// silently falls back to the hashed layout, which would scatter readable-path
+    /// blobs under unfindable shard keys.
     pub fn blob_key(
         scheme: BlobPathScheme,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<String, StorageError> {
         match scheme {
             BlobPathScheme::Hashed => {
-                Ok(crate::library_dir::LibraryDir::hashed_path(namespace, id)?)
+                let uploader = uploader.ok_or_else(|| {
+                    StorageError::Parse(format!(
+                        "an opaque-home blob requires an uploader for {namespace}/{id}"
+                    ))
+                })?;
+                Ok(crate::library_dir::LibraryDir::uploader_hashed_key(
+                    namespace, uploader, id,
+                )?)
             }
             BlobPathScheme::Plain => {
                 let path = cloud_path.ok_or_else(|| {
@@ -888,7 +909,8 @@ impl SyncStorage for CloudSyncStorage {
         cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let uploader = self.self_uploader();
+        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
         self.write_blob_sealed(&key, scope, data).await
     }
 
@@ -900,7 +922,8 @@ impl SyncStorage for CloudSyncStorage {
         cloud_path: Option<&str>,
         source_path: &std::path::Path,
     ) -> Result<(), StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let uploader = self.self_uploader();
+        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
         let cipher = self.cipher().clone();
         let body = cipher
             .open_body(scope, source_path, &self.aad_context(&key))
@@ -915,11 +938,12 @@ impl SyncStorage for CloudSyncStorage {
     async fn get_blob(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
         self.read_blob_sealed(&key, scope, &format!("blob {namespace}/{id}"))
             .await
     }
@@ -930,13 +954,17 @@ impl SyncStorage for CloudSyncStorage {
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<bool, StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        // Preflight for our own push: a device checks whether its own copy of a
+        // blob it references is already uploaded, so it keys under itself.
+        let uploader = self.self_uploader();
+        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
         self.home.exists(&key).await.map_err(StorageError::from)
     }
 
     async fn read_blob_range(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
@@ -949,7 +977,7 @@ impl SyncStorage for CloudSyncStorage {
         // fresh reader next call). The reader owns the chunk math and decryption;
         // this just resolves the key/scope/size it needs. The cipher is cloned out
         // of the lock so the reader doesn't hold the guard across its awaits.
-        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
         let cipher = self.cipher().clone();
         let aad_context = self.aad_context(&key);
         let reader = BlobRangeReader::new(
@@ -966,13 +994,14 @@ impl SyncStorage for CloudSyncStorage {
     async fn read_blob_to_file(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
         source_size: u64,
         dest: &std::path::Path,
     ) -> Result<(), StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
         let cipher = self.cipher().clone();
         let aad_context = self.aad_context(&key);
         let reader = BlobRangeReader::new(
@@ -997,6 +1026,42 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         Ok(())
+    }
+
+    async fn find_blob_uploader(
+        &self,
+        namespace: &str,
+        id: &str,
+        _cloud_path: Option<&str>,
+    ) -> Result<Option<String>, StorageError> {
+        // A plain home carries no uploader segment, so there is nothing to find.
+        if !matches!(self.blob_paths, BlobPathScheme::Hashed) {
+            return Ok(None);
+        }
+        crate::library_dir::validate_path_token(namespace)?;
+        // The hashed key is `{namespace}/{uploader}/{ab}/{cd}/{id}`. List the
+        // namespace and take the object whose shard matches this id; the single
+        // segment between the namespace and the shard is the uploader.
+        let shard = crate::library_dir::LibraryDir::id_shard(id)?;
+        let prefix = format!("{namespace}/");
+        let suffix = format!("/{shard}");
+        let keys = self.home.list(&prefix).await?;
+        for key in &keys {
+            let Some(uploader) = key
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(&suffix))
+            else {
+                continue;
+            };
+            if !uploader.is_empty() && !uploader.contains('/') {
+                return Ok(Some(uploader.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn blob_path_scheme(&self) -> BlobPathScheme {
+        self.blob_paths
     }
 
     async fn put_snapshot(
@@ -1430,8 +1495,14 @@ mod tests {
             .await
             .expect("upload file body");
 
-        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
-            .expect("blob key");
+        let key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "audio",
+            Some(&storage.self_uploader()),
+            "track1",
+            None,
+        )
+        .expect("blob key");
         assert_eq!(
             home.get(&key).expect("stored blob"),
             plaintext,
@@ -1472,6 +1543,7 @@ mod tests {
         storage
             .read_blob_to_file(
                 "audio",
+                Some(&storage.self_uploader()),
                 "track1",
                 ResolvedScope::Master,
                 None,
@@ -1599,8 +1671,15 @@ mod tests {
             .expect("put_blob with Key scope");
 
         // At rest it is ciphertext.
-        let hashed = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "item-1", None)
-            .expect("hashed key");
+        let uploader = storage.self_uploader();
+        let hashed = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "images",
+            Some(&uploader),
+            "item-1",
+            None,
+        )
+        .expect("hashed key");
         let at_rest = storage
             .cloud_home()
             .read(&hashed)
@@ -1610,13 +1689,25 @@ mod tests {
 
         // The explicit key reads it back; the master key does not.
         let got = storage
-            .get_blob("images", "item-1", ResolvedScope::Key(item_key), None)
+            .get_blob(
+                "images",
+                Some(&uploader),
+                "item-1",
+                ResolvedScope::Key(item_key),
+                None,
+            )
             .await
             .expect("get_blob with the same Key");
         assert_eq!(got, plaintext);
         assert!(
             storage
-                .get_blob("images", "item-1", ResolvedScope::Master, None)
+                .get_blob(
+                    "images",
+                    Some(&uploader),
+                    "item-1",
+                    ResolvedScope::Master,
+                    None
+                )
                 .await
                 .is_err(),
             "the master key must not decrypt a Key-scoped blob"
@@ -1655,10 +1746,23 @@ mod tests {
             .await
             .expect("put blob b");
 
-        let key_a = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "blob-a", None)
-            .expect("blob a key");
-        let key_b = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "blob-b", None)
-            .expect("blob b key");
+        let uploader = storage.self_uploader();
+        let key_a = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "images",
+            Some(&uploader),
+            "blob-a",
+            None,
+        )
+        .expect("blob a key");
+        let key_b = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "images",
+            Some(&uploader),
+            "blob-b",
+            None,
+        )
+        .expect("blob b key");
         let a_bytes = home.get(&key_a).expect("blob a at rest");
         home.write(
             &key_b,
@@ -1670,7 +1774,13 @@ mod tests {
 
         assert!(
             storage
-                .get_blob("images", "blob-b", ResolvedScope::Master, None)
+                .get_blob(
+                    "images",
+                    Some(&uploader),
+                    "blob-b",
+                    ResolvedScope::Master,
+                    None
+                )
                 .await
                 .is_err(),
             "a blob substituted at another key must fail authentication",
@@ -2070,8 +2180,15 @@ mod tests {
             )
             .await
             .expect("put_blob");
-        let hashed = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "photos", "p1cover", None)
-            .expect("hashed key");
+        let uploader = storage.self_uploader();
+        let hashed = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "photos",
+            Some(&uploader),
+            "p1cover",
+            None,
+        )
+        .expect("hashed key");
         assert_eq!(
             home.get(&hashed).as_deref(),
             Some(blob.as_slice()),
@@ -2079,7 +2196,13 @@ mod tests {
         );
         assert_eq!(
             storage
-                .get_blob("photos", "p1cover", ResolvedScope::Master, None)
+                .get_blob(
+                    "photos",
+                    Some(&uploader),
+                    "p1cover",
+                    ResolvedScope::Master,
+                    None
+                )
                 .await
                 .expect("get_blob"),
             blob
@@ -2121,18 +2244,24 @@ mod tests {
             "blob stored at the readable cloud_path key",
         );
         // The hashed shard key it would otherwise have used does not exist.
-        let hashed =
-            CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "images", "cover-row-id", None)
-                .expect("hashed key");
+        let hashed = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "images",
+            Some(&storage.self_uploader()),
+            "cover-row-id",
+            None,
+        )
+        .expect("hashed key");
         assert!(
             home.get(&hashed).is_none(),
             "the hashed shard key must be absent under the plain scheme",
         );
 
-        // Round-trips with the same cloud_path.
+        // Round-trips with the same cloud_path (a plain home carries no uploader).
         let got = storage
             .get_blob(
                 "images",
+                None,
                 "cover-row-id",
                 ResolvedScope::Master,
                 Some(cloud_path),
@@ -2142,13 +2271,64 @@ mod tests {
         assert_eq!(got, bytes);
     }
 
+    /// The listing scan resolves which uploader's prefix holds a blob: after a put
+    /// (which keys under this device), `find_blob_uploader` lists the namespace and
+    /// returns that uploader; an absent blob, and an id that does not match, both
+    /// resolve to `None`.
+    #[tokio::test]
+    async fn find_blob_uploader_locates_the_prefix_holding_a_blob() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([9u8; 32])),
+            BlobPathScheme::Hashed,
+            "test-lib",
+            UserKeypair::generate(),
+        );
+        assert_eq!(
+            storage
+                .find_blob_uploader("photos", "cover1", None)
+                .await
+                .expect("scan"),
+            None,
+            "nothing is uploaded yet",
+        );
+        storage
+            .put_blob(
+                "photos",
+                "cover1",
+                ResolvedScope::Master,
+                None,
+                b"bytes".to_vec(),
+            )
+            .await
+            .expect("put blob");
+        assert_eq!(
+            storage
+                .find_blob_uploader("photos", "cover1", None)
+                .await
+                .expect("scan"),
+            Some(storage.self_uploader()),
+            "the scan finds the prefix the blob was uploaded under",
+        );
+        assert_eq!(
+            storage
+                .find_blob_uploader("photos", "absent", None)
+                .await
+                .expect("scan"),
+            None,
+            "a different id under the same namespace is not matched",
+        );
+    }
+
     /// A plain-scheme home with no `cloud_path` is a surfaced error, never a
     /// silent fall back to the hashed shard (which would scatter readable-path
     /// blobs under unfindable keys). Asserts both `blob_key` and `put_blob` error.
     #[tokio::test]
     async fn plain_scheme_without_cloud_path_errors() {
         assert!(
-            CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", "id-1", None).is_err(),
+            CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", None, "id-1", None)
+                .is_err(),
             "blob_key for a plain home with no cloud_path must error",
         );
 
@@ -2196,8 +2376,14 @@ mod tests {
             .await
             .expect("put_blob");
 
-        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
-            .expect("blob_key");
+        let key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "audio",
+            Some(&storage.self_uploader()),
+            "track1",
+            None,
+        )
+        .expect("blob_key");
         let reader = BlobRangeReader::new(
             Arc::new(home.clone()) as Arc<dyn CloudHome>,
             &CloudCipher::Encrypted(master),
@@ -2245,8 +2431,14 @@ mod tests {
             .await
             .expect("put_blob");
 
-        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
-            .expect("blob_key");
+        let key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "audio",
+            Some(&storage.self_uploader()),
+            "track1",
+            None,
+        )
+        .expect("blob_key");
         let reader = BlobRangeReader::new(
             Arc::new(home.clone()) as Arc<dyn CloudHome>,
             &CloudCipher::Plaintext,
@@ -2288,8 +2480,14 @@ mod tests {
             .await
             .expect("put_blob");
 
-        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
-            .expect("blob_key");
+        let key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "audio",
+            Some(&storage.self_uploader()),
+            "track1",
+            None,
+        )
+        .expect("blob_key");
         let home_arc = Arc::new(home.clone()) as Arc<dyn CloudHome>;
 
         let derived = BlobRangeReader::new(
@@ -2344,8 +2542,14 @@ mod tests {
             )
             .await
             .expect("put_blob");
-        let key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "audio", "track1", None)
-            .expect("blob_key");
+        let key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Hashed,
+            "audio",
+            Some(&storage.self_uploader()),
+            "track1",
+            None,
+        )
+        .expect("blob_key");
         let reader = BlobRangeReader::new(
             Arc::new(home) as Arc<dyn CloudHome>,
             &CloudCipher::Encrypted(master),

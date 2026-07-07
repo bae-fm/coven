@@ -789,6 +789,66 @@ impl Database {
         self.set_sync_state(&key, &max_bytes.to_string()).await
     }
 
+    // ---- Bookkeeping: blob_uploaders (which device uploaded a blob) ----
+
+    /// The hex public key of the device that uploaded blob `(namespace, id)`, or
+    /// `None` if this device has never recorded one. The read dispatch consults it
+    /// to key a blob under its uploader's prefix; a `None` sends the read to the
+    /// listing-scan fallback ([`SyncStorage::find_blob_uploader`]).
+    pub(crate) async fn blob_uploader(
+        &self,
+        namespace: &str,
+        id: &str,
+    ) -> Result<Option<String>, DbError> {
+        let (namespace, id) = (namespace.to_string(), id.to_string());
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT uploader FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2",
+                (namespace, id),
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// Record blob `(namespace, id)`'s uploader on `conn`, composable inside a
+    /// caller's transaction so the record commits atomically with the changeset
+    /// apply it belongs to (never a later repair). Idempotent — re-recording the
+    /// same uploader (a changeset re-applied after an FK-deferred retry) is a
+    /// no-op; a later, authoritative uploader (a re-upload, or a scan that found
+    /// the object) overwrites.
+    pub(crate) fn record_blob_uploader_on(
+        conn: &Connection,
+        namespace: &str,
+        id: &str,
+        uploader: &str,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "INSERT INTO blob_uploaders (namespace, blob_id, uploader) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(namespace, blob_id) DO UPDATE SET uploader = excluded.uploader",
+            (namespace, id, uploader),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    /// Record a discovered uploader outside any caller transaction — used when a
+    /// read miss's listing scan finds which prefix holds a blob, so the next read
+    /// skips the scan. Recording a fact just observed, not repairing wrong state.
+    pub(crate) async fn record_blob_uploader(
+        &self,
+        namespace: &str,
+        id: &str,
+        uploader: &str,
+    ) -> Result<(), DbError> {
+        let (namespace, id, uploader) =
+            (namespace.to_string(), id.to_string(), uploader.to_string());
+        self.call(move |conn| Self::record_blob_uploader_on(conn, &namespace, &id, &uploader))
+            .await
+    }
+
     // ---- Bookkeeping: sync_cursors ----
 
     pub(crate) async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {

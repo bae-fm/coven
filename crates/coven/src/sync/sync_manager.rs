@@ -403,6 +403,7 @@ impl SyncManager {
         transition::make_remote(
             &self.db,
             self.blob_path_scheme(),
+            &self.self_uploader()?,
             &self.hlc,
             root_table,
             root_id,
@@ -411,6 +412,17 @@ impl SyncManager {
         .await?;
         self.trigger_sync();
         Ok(())
+    }
+
+    /// This device's hex public key — the `{uploader}` segment its own blob
+    /// uploads key under. Ready only once the keypair is loaded, which
+    /// `is_sync_ready` has already established at the call sites below.
+    fn self_uploader(&self) -> Result<String, MakeRemoteError> {
+        self.key_service
+            .get_user_public_key()
+            .map_err(|_| MakeRemoteError::SyncNotReady)?
+            .map(hex::encode)
+            .ok_or(MakeRemoteError::SyncNotReady)
     }
 
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent
@@ -429,6 +441,7 @@ impl SyncManager {
             &self.db,
             &library_dir,
             self.blob_path_scheme(),
+            &self.self_uploader()?,
             &self.hlc,
             root_table,
             root_id,

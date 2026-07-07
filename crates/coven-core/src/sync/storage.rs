@@ -162,9 +162,11 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     ) -> Result<(), StorageError>;
 
     /// Upload a blob. Under the hashed (default) scheme it is keyed
-    /// `{namespace}/{id[0..2]}/{id[2..4]}/{id}` and `cloud_path` is ignored; under
-    /// the plain scheme it is keyed `{namespace}/{cloud_path}` verbatim, so the
-    /// bucket is browsable, and a missing `cloud_path` is an error.
+    /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under this device's own
+    /// public key (`cloud_path` ignored); under the plain scheme it is keyed
+    /// `{namespace}/{cloud_path}` verbatim, so the bucket is browsable, and a
+    /// missing `cloud_path` is an error. A device only ever uploads blobs it
+    /// authored, so a write always keys under itself.
     /// On an encrypted home the plaintext is sealed with the key the resolved
     /// `scope` selects (master, a per-scope derived key, or an explicit item key);
     /// on a plaintext home it is stored verbatim (scope ignored). The caller
@@ -190,13 +192,19 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         source_path: &Path,
     ) -> Result<(), StorageError>;
 
-    /// Download and open a blob, keyed `{namespace}/{id[0..2]}/{id[2..4]}/{id}`
-    /// under the hashed scheme or `{namespace}/{cloud_path}` under the plain one,
-    /// using the key the resolved `scope` selects on an encrypted home (verbatim
-    /// on a plaintext one). A plain-scheme home with no `cloud_path` is an error.
+    /// Download and open a blob, keyed
+    /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under the hashed scheme
+    /// or `{namespace}/{cloud_path}` under the plain one, using the key the
+    /// resolved `scope` selects on an encrypted home (verbatim on a plaintext one).
+    /// `uploader` is the hex public key of the device that uploaded the blob (the
+    /// caller resolves it — a peer's, not necessarily this device's); it is
+    /// required by the hashed scheme and ignored by the plain one (a browsable home
+    /// carries no uploader segment). A plain-scheme home with no `cloud_path` is an
+    /// error.
     async fn get_blob(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
@@ -231,6 +239,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     async fn read_blob_range(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
@@ -245,12 +254,31 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     async fn read_blob_to_file(
         &self,
         namespace: &str,
+        uploader: Option<&str>,
         id: &str,
         scope: crate::blob::ResolvedScope,
         cloud_path: Option<&str>,
         source_size: u64,
         dest: &Path,
     ) -> Result<(), StorageError>;
+
+    /// Find which uploader's prefix holds the blob `{namespace}/*/…/{id}`, by
+    /// listing the namespace and matching the id's shard. The fallback the read
+    /// dispatch uses when the local uploader index has no entry for a blob (a
+    /// re-upload, or a snapshot-backfilled row whose uploader was never recorded):
+    /// the one blob dimension no local state holds is *which* member uploaded it,
+    /// so it is discovered by looking. Returns `None` if no prefix holds it, or for
+    /// a plain-scheme home (which carries no uploader segment).
+    async fn find_blob_uploader(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<Option<String>, StorageError>;
+
+    /// The blob-path scheme this home uses. The read dispatch consults it to decide
+    /// whether a blob key needs an uploader segment (hashed) or not (plain).
+    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme;
 
     /// Upload one snapshot generation's DB image under its publishing device.
     /// Writes to `snapshot/{author}/{seq}.db{suffix}`. Written before the

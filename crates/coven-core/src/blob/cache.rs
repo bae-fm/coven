@@ -750,9 +750,11 @@ pub(crate) async fn materialize_remote_blob_to_file(
 
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    let uploader = resolve_blob_uploader(db, storage, blob).await?;
     storage
         .read_blob_to_file(
             &blob.namespace,
+            uploader.as_deref(),
             &blob.id,
             resolved,
             blob.cloud_path.as_deref(),
@@ -1211,15 +1213,67 @@ async fn fetch_from_cloud(
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    let uploader = resolve_blob_uploader(db, storage, blob).await?;
     storage
         .get_blob(
             &blob.namespace,
+            uploader.as_deref(),
             &blob.id,
             resolved,
             blob.cloud_path.as_deref(),
         )
         .await
         .map_err(BlobCacheError::Storage)
+}
+
+/// Resolve which uploader's prefix holds `blob`, for a read. Dispatches on the
+/// local uploader index — the authoritative record written atomically at pull
+/// (the changeset author) and at our own enqueue (ourselves). On a miss — the one
+/// blob dimension no local state holds, *which* member uploaded it — it discovers
+/// the uploader by listing the namespace ([`SyncStorage::find_blob_uploader`]) and
+/// records what it found so the next read skips the scan (recording an observed
+/// fact, not repairing wrong state). `None` means a browsable/plain home, whose
+/// keys carry no uploader segment.
+pub(crate) async fn resolve_blob_uploader(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    blob: &BlobRef,
+) -> Result<Option<String>, BlobCacheError> {
+    if !matches!(
+        storage.blob_path_scheme(),
+        crate::sync::cloud_storage::BlobPathScheme::Hashed
+    ) {
+        return Ok(None);
+    }
+    if let Some(uploader) = db
+        .blob_uploader(&blob.namespace, &blob.id)
+        .await
+        .map_err(|e| BlobCacheError::Io(e.0))?
+    {
+        return Ok(Some(uploader));
+    }
+    match storage
+        .find_blob_uploader(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
+        .await
+        .map_err(BlobCacheError::Storage)?
+    {
+        Some(uploader) => {
+            db.record_blob_uploader(&blob.namespace, &blob.id, &uploader)
+                .await
+                .map_err(|e| BlobCacheError::Io(e.0))?;
+            tracing::debug!(
+                namespace = %blob.namespace,
+                id = %blob.id,
+                %uploader,
+                "resolved blob uploader by listing scan; recorded it so later reads skip the scan"
+            );
+            Ok(Some(uploader))
+        }
+        None => Err(BlobCacheError::Storage(StorageError::NotFound(format!(
+            "no uploader prefix holds blob {}/{}",
+            blob.namespace, blob.id
+        )))),
+    }
 }
 
 /// Resolve a blob's scope to its encryption key and download + decrypt a plaintext
@@ -1234,9 +1288,11 @@ async fn fetch_range_from_cloud(
     len: u64,
 ) -> Result<Vec<u8>, BlobCacheError> {
     let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    let uploader = resolve_blob_uploader(db, storage, blob).await?;
     storage
         .read_blob_range(
             &blob.namespace,
+            uploader.as_deref(),
             &blob.id,
             resolved,
             blob.cloud_path.as_deref(),

@@ -42,6 +42,11 @@ use crate::sync::test_helpers::{
     test_migrations, MockSyncStorage,
 };
 
+/// The uploader these browsable-home tests pass to the make_remote/cancel paths.
+/// A `Plain` home carries no uploader segment, so the value is ignored — it exists
+/// only to satisfy the parameter the hashed layout needs.
+const SELF_UPLOADER: &str = "self-uploader";
+
 /// The blob declaration for `note_photos`: a release file — user-provided ·
 /// `CacheLazy`, keyed by the readable cloud path (browsable home), master-scoped.
 fn photo_decl() -> BlobDecl {
@@ -386,9 +391,17 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 
     // A makes it Remote: enqueue the upload + intent, then the next cycle's drain
     // uploads the blob and flips the gate.
-    make_remote(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
-        .await
-        .expect("make_remote");
+    make_remote(
+        &db_a,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc_a,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect("make_remote");
     let recorder = Recorder::default();
     let result = run_cycle(
         &storage,
@@ -470,9 +483,17 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         &bytes,
     )
     .await;
-    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", false)
-        .await
-        .expect("make_remote");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        false,
+    )
+    .await
+    .expect("make_remote");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "the root is Remote");
@@ -485,9 +506,17 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         "the published blob exists in cloud",
     );
 
-    cancel_make_remote(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
-        .await
-        .expect("cancel after completion");
+    cancel_make_remote(
+        &db,
+        &lib,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+    )
+    .await
+    .expect("cancel after completion");
 
     assert!(
         pending_deletes(&db).await.is_empty(),
@@ -664,9 +693,17 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 
     // make_remote: the photo drains, the gate flips, and this cycle's inline push
     // uploads the cover from the local store and keeps the requested pin.
-    make_remote(&db_a, BlobPathScheme::Plain, &hlc_a, "notes", "n1", true)
-        .await
-        .expect("make_remote");
+    make_remote(
+        &db_a,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc_a,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect("make_remote");
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
 
     assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
@@ -827,6 +864,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     make_remote(
         &db_a,
         BlobPathScheme::Plain,
+        SELF_UPLOADER,
         &hlc_a,
         "notes",
         "n-host",
@@ -938,12 +976,28 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
             .await
             .expect("store host-provided cover");
     }
-    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n-pin", true)
-        .await
-        .expect("make_remote pin");
-    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n-drop", false)
-        .await
-        .expect("make_remote drop");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n-pin",
+        true,
+    )
+    .await
+    .expect("make_remote pin");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n-drop",
+        false,
+    )
+    .await
+    .expect("make_remote drop");
 
     // The crash: the changeset push fails, so the gate flip commits (with its
     // disposition intent) but the drain that applies the disposition never runs.
@@ -1194,6 +1248,7 @@ async fn make_remote_rejects_remote_root() {
     let err = make_remote(
         &db,
         BlobPathScheme::Plain,
+        SELF_UPLOADER,
         &hlc,
         "notes",
         "n-remote-root",
@@ -1269,6 +1324,7 @@ async fn cancel_make_remote_rejects_remote_root() {
         &db,
         &lib,
         BlobPathScheme::Plain,
+        SELF_UPLOADER,
         &hlc,
         "notes",
         "n-remote-root",
@@ -1307,9 +1363,17 @@ async fn make_remote_rejects_already_remote_root() {
 
     let stamp_before = gate_stamp(&db, "n-host").await;
 
-    let err = make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n-host", true)
-        .await
-        .expect_err("a root already Remote has no make_remote transition");
+    let err = make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n-host",
+        true,
+    )
+    .await
+    .expect_err("a root already Remote has no make_remote transition");
     assert!(
         matches!(
             err,
@@ -1412,9 +1476,17 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     let _src1 = seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
     let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
 
-    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
-        .await
-        .expect("make_remote");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect("make_remote");
     assert_eq!(pending_uploads(&db).await, 2, "both uploads queued");
 
     // Drain with photobbb's source removed: photoaaa uploads (not the last, no flip), photobbb fails.
@@ -1447,9 +1519,17 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
 
     // Cancel: the gate stays off, photoaaa (already uploaded) is tombstoned and its pinned
     // copy dropped, photobbb's pending upload is removed, the intent is cleared.
-    cancel_make_remote(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
-        .await
-        .expect("cancel make_remote");
+    cancel_make_remote(
+        &db,
+        &lib,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+    )
+    .await
+    .expect("cancel make_remote");
     assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
     assert!(
         !has_intent(&db, "notes", "n1").await,
@@ -1618,6 +1698,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
         storage
             .get_blob(
                 "photos",
+                None,
                 "photoaaa",
                 ResolvedScope::Master,
                 Some("cv/photoaaa.jpg")
@@ -1682,6 +1763,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
         storage
             .get_blob(
                 "photos",
+                None,
                 "photoaaa",
                 ResolvedScope::Master,
                 Some("cv/photoaaa.jpg")
@@ -1711,9 +1793,17 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
     let src2 = add_local_photo(&db, &user, "n1", "photobbb", "cv/photobbb.jpg", b"second").await;
 
-    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
-        .await
-        .expect("make_remote");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect("make_remote");
 
     // "Crash" after photoaaa uploads but before completion: remove photobbb's source so the
     // first drain uploads only photoaaa, leaving the make_remote in flight.
@@ -1862,9 +1952,17 @@ async fn round_trip_make_remote_make_local_make_remote() {
         &bytes,
     )
     .await;
-    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
-        .await
-        .expect("make_remote 1");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect("make_remote 1");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
     assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after make_remote");
 
@@ -1899,9 +1997,17 @@ async fn round_trip_make_remote_make_local_make_remote() {
 
     // Second make_remote: the external file (now at dest) is re-uploaded, the drain cancels
     // the tombstone, and the gate flips back on.
-    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n1", true)
-        .await
-        .expect("make_remote 2");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect("make_remote 2");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
     assert_eq!(
         shared_flag(&db, "n1").await,
@@ -1923,6 +2029,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         storage
             .get_blob(
                 "photos",
+                None,
                 "photoaaa",
                 ResolvedScope::Master,
                 Some("cv/photoaaa.jpg")

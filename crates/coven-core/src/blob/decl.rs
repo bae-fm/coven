@@ -501,15 +501,21 @@ fn pk_carrying_cloud_path(
 }
 
 fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
+    // `{namespace}/{uploader}/{ab}/{cd}/{id}` — five segments. The uploader segment
+    // is not recovered here (this maps a key back to its DB row, which is keyed by
+    // namespace + id, not by who uploaded it); the rebuild check confirms the key
+    // really is a hashed key rather than a plain `{namespace}/{cloud_path}` that
+    // happens to have five segments.
     let mut parts = cloud_key.split('/');
     let namespace = parts.next()?;
+    let uploader = parts.next()?;
     let _first = parts.next()?;
     let _second = parts.next()?;
     let id = parts.next()?;
     if parts.next().is_some() {
         return None;
     }
-    match crate::library_dir::LibraryDir::hashed_path(namespace, id) {
+    match crate::library_dir::LibraryDir::uploader_hashed_key(namespace, uploader, id) {
         Ok(rebuilt) if rebuilt == cloud_key => Some((namespace.to_string(), id.to_string())),
         _ => None,
     }

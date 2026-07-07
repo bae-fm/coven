@@ -244,12 +244,21 @@ async fn root_refs(
         .map_err(MakeRemoteError::from)
 }
 
-/// The final cloud object key for `blob` under `scheme`. Shared by the make_remote,
-/// cancel, and make_local paths, each wrapping the error in its own enum.
-fn cloud_key_for(scheme: BlobPathScheme, blob: &BlobRef) -> Result<String, String> {
+/// The final cloud object key for `blob` under `scheme`, keyed beneath `uploader`
+/// (the device whose prefix the object lives under; `None` for a browsable/plain
+/// home, which has no uploader segment). Shared by the make_remote, cancel, and
+/// make_local paths, each wrapping the error in its own enum. make_remote/cancel
+/// pass this device (it uploads its own blobs); make_local resolves each blob's
+/// uploader, which may be a peer whose upload this device is tombstoning.
+fn cloud_key_for(
+    scheme: BlobPathScheme,
+    uploader: Option<&str>,
+    blob: &BlobRef,
+) -> Result<String, String> {
     CloudSyncStorage::blob_key(
         scheme,
         &blob.namespace,
+        uploader,
         &blob.id,
         blob.cloud_path.as_deref(),
     )
@@ -269,6 +278,7 @@ fn cloud_key_for(scheme: BlobPathScheme, blob: &BlobRef) -> Result<String, Strin
 pub async fn make_remote(
     db: &Database,
     scheme: BlobPathScheme,
+    self_uploader: &str,
     hlc: &Hlc,
     root_table: &str,
     root_id: &str,
@@ -295,7 +305,7 @@ pub async fn make_remote(
         .filter(|b| b.provenance == Provenance::UserProvided)
         .cloned()
         .collect();
-    let mut uploads: Vec<(String, String, String, crate::blob::BlobScope)> = Vec::new();
+    let mut uploads: Vec<(String, String, String, String, crate::blob::BlobScope)> = Vec::new();
     for blob in &user_provided {
         let ext = db
             .external_blob(&blob.id)
@@ -318,7 +328,7 @@ pub async fn make_remote(
                 ),
             });
         }
-        let cloud_key = cloud_key_for(scheme, blob)
+        let cloud_key = cloud_key_for(scheme, Some(self_uploader), blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
         let source = ext.path.to_str().ok_or_else(|| MakeRemoteError::Source {
             blob_id: blob.id.clone(),
@@ -327,6 +337,7 @@ pub async fn make_remote(
         })?;
         uploads.push((
             blob.id.clone(),
+            blob.namespace.clone(),
             cloud_key,
             source.to_string(),
             blob.scope.clone(),
@@ -334,6 +345,7 @@ pub async fn make_remote(
     }
 
     let created_at = hlc.now().to_string();
+    let self_uploader = self_uploader.to_string();
     let (rt, gc, ri) = (
         root_table.to_string(),
         gate_col.clone(),
@@ -352,7 +364,7 @@ pub async fn make_remote(
                 .map_err(|e| DbError(e.to_string()))?;
             if locality == Some(false) {
                 Database::insert_make_remote_intent_on(&tx, &rt, &ri, pin)?;
-                for (id, cloud_key, source, scope) in &uploads {
+                for (id, namespace, cloud_key, source, scope) in &uploads {
                     Database::enqueue_upload_on(
                         &tx,
                         id,
@@ -362,6 +374,10 @@ pub async fn make_remote(
                         pin,
                         &created_at,
                     )?;
+                    // Record that we uploaded this blob, atomically with the enqueue,
+                    // so a later self-read after a cache eviction keys it under us
+                    // without a listing scan.
+                    Database::record_blob_uploader_on(&tx, namespace, id, &self_uploader)?;
                 }
                 tx.commit().map_err(DbError::from)?;
             }
@@ -406,6 +422,7 @@ pub async fn cancel_make_remote(
     db: &Database,
     library_dir: &LibraryDir,
     scheme: BlobPathScheme,
+    self_uploader: &str,
     hlc: &Hlc,
     root_table: &str,
     root_id: &str,
@@ -417,10 +434,11 @@ pub async fn cancel_make_remote(
         .collect();
     // The cloud key + cache namespace per blob (derived outside the closure, which
     // can't reach the home's path scheme; the namespace places the post-commit cache
-    // drop under the segmented `storage/cache/<namespace>/<id>`).
+    // drop under the segmented `storage/cache/<namespace>/<id>`). These blobs were
+    // this device's own in-flight uploads, so they key under us.
     let mut keyed: Vec<(String, String, String)> = Vec::new();
     for blob in &user_provided {
-        let cloud_key = cloud_key_for(scheme, blob)
+        let cloud_key = cloud_key_for(scheme, Some(self_uploader), blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
         keyed.push((blob.id.clone(), blob.namespace.clone(), cloud_key));
     }
@@ -859,7 +877,13 @@ async fn materialize_blobs(
             return Err(MakeLocalError::Cancelled);
         }
 
-        let cloud_key = cloud_key_for(scheme, blob)
+        // The cloud object this make_local will tombstone may sit under a peer's
+        // prefix (a peer made this root remote), so resolve its uploader rather than
+        // assuming ourselves.
+        let uploader = crate::blob::cache::resolve_blob_uploader(db, storage, blob)
+            .await
+            .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e.to_string()))?;
+        let cloud_key = cloud_key_for(scheme, uploader.as_deref(), blob)
             .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e))?;
 
         // Where the blob's bytes go is its provenance's Local home: a user-provided

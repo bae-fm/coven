@@ -998,7 +998,13 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     // The user-provided blob was NOT uploaded by the inline push.
     assert_eq!(
         storage
-            .get_blob("audio", "audio1", crate::blob::ResolvedScope::Master, None)
+            .get_blob(
+                "audio",
+                None,
+                "audio1",
+                crate::blob::ResolvedScope::Master,
+                None
+            )
             .await
             .expect("audio blob remains present"),
         b"AUDIO-PAYLOAD",
@@ -1402,8 +1408,14 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
             .expect("exists at readable key"),
         "the blob must land at the readable cloud_path key",
     );
-    let hashed = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "photos", "p1cover", None)
-        .expect("hashed key");
+    let hashed = CloudSyncStorage::blob_key(
+        BlobPathScheme::Hashed,
+        "photos",
+        Some(&storage.self_uploader()),
+        "p1cover",
+        None,
+    )
+    .expect("hashed key");
     assert!(
         !storage
             .cloud_home()
@@ -1437,13 +1449,17 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 /// blob, decrypts it, and recovers the original bytes byte-for-byte.
 #[tokio::test]
 async fn encrypted_blob_round_trips_and_second_device_decrypts() {
-    // One cloud and one library key, shared by both devices.
+    // One cloud and one library key, shared by both devices. The device that
+    // authors the changeset is the one that uploads its blobs, so storage carries
+    // the same keypair the push signs with — its public key is the `{uploader}`
+    // prefix the blob lands under and the author peers resolve it by.
+    let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
         std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
         "test-lib",
-        UserKeypair::generate(),
+        keypair.clone(),
     );
 
     // Device A: a note and its cover photo, scoped to a per-library derived key.
@@ -1468,7 +1484,6 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     )
     .await;
 
-    let keypair = UserKeypair::generate();
     let result = sync_for_test(
         "dev1",
         &db1,
@@ -1498,8 +1513,14 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     .expect("push_changeset");
 
     // At rest the cover photo is ciphertext, not the source bytes.
-    let blob_key = CloudSyncStorage::blob_key(BlobPathScheme::Hashed, "photos", "p1cover", None)
-        .expect("hashed key");
+    let blob_key = CloudSyncStorage::blob_key(
+        BlobPathScheme::Hashed,
+        "photos",
+        Some(&storage.self_uploader()),
+        "p1cover",
+        None,
+    )
+    .expect("hashed key");
     let at_rest = storage
         .cloud_home()
         .read(&blob_key)
@@ -1528,6 +1549,17 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     assert_eq!(
         downloaded, plaintext,
         "device B must recover the source bytes after decrypting with the shared key"
+    );
+
+    // The pull recorded, atomically with applying the row, that A uploaded this
+    // blob — so a later read (after a cache eviction) keys it under A's prefix
+    // without a listing scan.
+    assert_eq!(
+        db2.blob_uploader("photos", "p1cover")
+            .await
+            .expect("read uploader index"),
+        Some(hex::encode(keypair.public_key())),
+        "device B's uploader index names A as the blob's uploader",
     );
 }
 
@@ -1603,6 +1635,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
         storage
             .get_blob(
                 "photos",
+                None,
                 "peager01",
                 crate::blob::ResolvedScope::Master,
                 None
@@ -1615,6 +1648,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
         storage
             .get_blob(
                 "covers",
+                None,
                 "clazy001",
                 crate::blob::ResolvedScope::Master,
                 None

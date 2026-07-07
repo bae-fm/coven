@@ -166,7 +166,7 @@ impl LibraryDir {
     /// is bad data — it could escape the directory or crash the slice — so this
     /// returns [`PathTokenError`] rather than interpolating it or panicking; the
     /// caller refuses the blob.
-    fn id_shard(id: &str) -> Result<String, PathTokenError> {
+    pub(crate) fn id_shard(id: &str) -> Result<String, PathTokenError> {
         validate_path_token(id)?;
         let hex = id.replace('-', "");
         if !(hex.is_char_boundary(2) && hex.is_char_boundary(4)) {
@@ -187,6 +187,24 @@ impl LibraryDir {
     pub fn hashed_path(prefix: &str, id: &str) -> Result<String, PathTokenError> {
         validate_path_token(prefix)?;
         Ok(format!("{prefix}/{}", Self::id_shard(id)?))
+    }
+
+    /// The cloud object key for a Hashed-scheme blob under the device that
+    /// uploaded it: `{namespace}/{uploader}/{ab}/{cd}/{id}`. The `{uploader}`
+    /// segment is what aligns the blob keyspace to the storage-access rule (a
+    /// member writes only under its own public key), so a bucket ACL can scope each
+    /// member to `{namespace}/{self}/`. Only the *cloud* key carries it; the local
+    /// cache keeps the un-prefixed `{namespace}/{ab}/{cd}/{id}` layout because it is
+    /// per-device. `namespace` and `uploader` are validated as single path tokens;
+    /// the id must be indexable (see [`Self::id_shard`]).
+    pub fn uploader_hashed_key(
+        namespace: &str,
+        uploader: &str,
+        id: &str,
+    ) -> Result<String, PathTokenError> {
+        validate_path_token(namespace)?;
+        validate_path_token(uploader)?;
+        Ok(format!("{namespace}/{uploader}/{}", Self::id_shard(id)?))
     }
 
     pub fn storage_dir(&self) -> PathBuf {

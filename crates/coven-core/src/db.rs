@@ -118,6 +118,19 @@ macro_rules! coven_tables {
     _updated_at TEXT NOT NULL
 "
         );
+        $visit!(
+            blob_uploaders,
+            "
+    namespace TEXT NOT NULL,
+    blob_id   TEXT NOT NULL,
+    -- Hex public key of the device that uploaded this blob (its cloud key sits
+    -- under `{namespace}/{uploader}/…`). Recorded at pull (the changeset author),
+    -- at our own enqueue (ourselves), or discovered by a listing scan on a read
+    -- miss. Device-local bookkeeping; this table does not sync.
+    uploader  TEXT NOT NULL,
+    PRIMARY KEY (namespace, blob_id)
+"
+        );
     };
 }
 

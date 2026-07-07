@@ -531,9 +531,17 @@ impl CovenHandle {
     /// read key with it. A `Plain` home with no `cloud_path` is a surfaced error.
     pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
         let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
+        // This device's own blobs key under its own public key (the host asks for
+        // the key of a blob it uploaded).
+        let uploader = self
+            .key_service
+            .get_user_public_key()
+            .map_err(|e| StorageError::Storage(format!("read device public key: {e}")))?
+            .map(hex::encode);
         CloudSyncStorage::blob_key(
             scheme,
             &blob.namespace,
+            uploader.as_deref(),
             &blob.id,
             blob.cloud_path.as_deref(),
         )
