@@ -282,13 +282,16 @@ pub async fn join_library(
     on_status("Loading keypair...");
     let user_keypair = key_service.get_user_keypair()?;
 
-    // Accept the invitation to get the library encryption key. Uses CloudHome
-    // directly — wrapped keys are sealed-box encrypted, no library-key encryption
-    // needed. The key is authenticated against the owner the invite pins (the
-    // chain founder) before adoption, so a bucket writer can't substitute it.
+    // Accept the invitation to get the library encryption key. The joiner
+    // authenticates it against the current Owner set derived from the membership
+    // chain anchored to the owner the invite pins (the chain founder), so any
+    // current Owner's invite is joinable yet a bucket writer still can't
+    // substitute a key. The chain is sealed under the library key, so `Arc` the
+    // home once and reuse it for the sync storage below.
     on_status("Accepting invitation...");
+    let cloud_home: std::sync::Arc<dyn CloudHome> = std::sync::Arc::from(cloud_home);
     let encryption = unwrap_library_keyring(
-        cloud_home.as_ref(),
+        cloud_home.clone(),
         &user_keypair,
         &code.library_id,
         &code.owner_pubkey,
@@ -305,7 +308,7 @@ pub async fn join_library(
     // The device's signing identity signs the head/min_schema control objects it
     // writes; it's the same keypair the invite wrapped the library key for.
     let storage = CloudSyncStorage::new(
-        std::sync::Arc::from(cloud_home),
+        cloud_home,
         cipher.clone(),
         blob_paths,
         code.library_id.clone(),

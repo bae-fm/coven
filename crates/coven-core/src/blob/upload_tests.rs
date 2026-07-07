@@ -22,7 +22,7 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::hlc::Hlc;
-use crate::sync::invite::{create_invitation, unwrap_library_key};
+use crate::sync::invite::{create_invitation, unwrap_library_keyring_for_owners_with_activation};
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
@@ -753,15 +753,18 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
     );
 
     // --- Device B joins: unwraps the library master key with its own identity,
-    // authenticating it against the owner the invite pins. ---
-    let joined_master = unwrap_library_key(
+    // authenticating it against the owner that signed it. ---
+    let owner_pk = pubkey_hex(&owner);
+    let joined_master = unwrap_library_keyring_for_owners_with_activation(
         &membership as &dyn CloudHome,
         &joiner,
         "lib-outbox",
-        &pubkey_hex(&owner),
+        std::iter::once(owner_pk.as_str()),
+        None,
     )
     .await
-    .expect("device B unwraps the library key by joining");
+    .expect("device B unwraps the library key by joining")
+    .key_bytes();
     assert_eq!(
         joined_master, master_key,
         "joining recovers the library master key"
