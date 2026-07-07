@@ -751,17 +751,35 @@ pub(crate) async fn materialize_remote_blob_to_file(
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     let resolved = validate_and_resolve_blob_scope(db, blob).await?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
-    storage
+    match storage
         .read_blob_to_file(
             &blob.namespace,
             uploader.as_deref(),
             &blob.id,
-            resolved,
+            resolved.clone(),
             blob.cloud_path.as_deref(),
             expected_size,
             dest,
         )
-        .await?;
+        .await
+    {
+        Ok(()) => {}
+        Err(StorageError::NotFound(_)) if uploader.is_some() => {
+            let fresh = reresolve_after_stale_uploader(db, storage, blob).await?;
+            storage
+                .read_blob_to_file(
+                    &blob.namespace,
+                    fresh.as_deref(),
+                    &blob.id,
+                    resolved,
+                    blob.cloud_path.as_deref(),
+                    expected_size,
+                    dest,
+                )
+                .await?;
+        }
+        Err(e) => return Err(BlobCacheError::Storage(e)),
+    }
     Ok(expected_size)
 }
 
@@ -1207,23 +1225,62 @@ async fn read_external_file(
 /// key that could escape its prefix. The `id` is also validated by the cache
 /// path-builders, but `namespace`/`cloud_path` feed only the cloud key, so they are
 /// checked here.
-async fn fetch_from_cloud(
+pub(crate) async fn fetch_from_cloud(
     db: &Database,
     storage: &dyn SyncStorage,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     let resolved = validate_and_resolve_blob_scope(db, blob).await?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
-    storage
+    match storage
         .get_blob(
             &blob.namespace,
             uploader.as_deref(),
             &blob.id,
-            resolved,
+            resolved.clone(),
             blob.cloud_path.as_deref(),
         )
         .await
-        .map_err(BlobCacheError::Storage)
+    {
+        Ok(bytes) => Ok(bytes),
+        Err(StorageError::NotFound(_)) if uploader.is_some() => {
+            let fresh = reresolve_after_stale_uploader(db, storage, blob).await?;
+            storage
+                .get_blob(
+                    &blob.namespace,
+                    fresh.as_deref(),
+                    &blob.id,
+                    resolved,
+                    blob.cloud_path.as_deref(),
+                )
+                .await
+                .map_err(BlobCacheError::Storage)
+        }
+        Err(e) => Err(BlobCacheError::Storage(e)),
+    }
+}
+
+/// The uploader recorded (or last scanned) for `blob` no longer holds it — its copy
+/// was legitimately reclaimed while another member's copy of the same
+/// `(namespace, id)` may survive. Forget the stale record and resolve again, so the
+/// listing scan finds and records a surviving copy. Only a `NotFound` at the read
+/// reaches here: a transport error or a decrypt failure is not evidence the record
+/// is stale (AAD binds the key, so a decoy at the right key fails decryption — an
+/// integrity signal, not a miss) and those still fail loud at the call site.
+async fn reresolve_after_stale_uploader(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    blob: &BlobRef,
+) -> Result<Option<String>, BlobCacheError> {
+    db.forget_blob_uploader(&blob.namespace, &blob.id)
+        .await
+        .map_err(|e| BlobCacheError::Io(e.0))?;
+    tracing::debug!(
+        namespace = %blob.namespace,
+        id = %blob.id,
+        "recorded blob uploader no longer holds the blob; forgot it and rescanning for a surviving copy"
+    );
+    resolve_blob_uploader(db, storage, blob).await
 }
 
 /// Resolve which uploader's prefix holds `blob`, for a read. Dispatches on the
@@ -1289,19 +1346,38 @@ async fn fetch_range_from_cloud(
 ) -> Result<Vec<u8>, BlobCacheError> {
     let resolved = validate_and_resolve_blob_scope(db, blob).await?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
-    storage
+    match storage
         .read_blob_range(
             &blob.namespace,
             uploader.as_deref(),
             &blob.id,
-            resolved,
+            resolved.clone(),
             blob.cloud_path.as_deref(),
             source_size,
             offset,
             len,
         )
         .await
-        .map_err(BlobCacheError::Storage)
+    {
+        Ok(bytes) => Ok(bytes),
+        Err(StorageError::NotFound(_)) if uploader.is_some() => {
+            let fresh = reresolve_after_stale_uploader(db, storage, blob).await?;
+            storage
+                .read_blob_range(
+                    &blob.namespace,
+                    fresh.as_deref(),
+                    &blob.id,
+                    resolved,
+                    blob.cloud_path.as_deref(),
+                    source_size,
+                    offset,
+                    len,
+                )
+                .await
+                .map_err(BlobCacheError::Storage)
+        }
+        Err(e) => Err(BlobCacheError::Storage(e)),
+    }
 }
 
 async fn validate_and_resolve_blob_scope(

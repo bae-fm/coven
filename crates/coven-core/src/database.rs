@@ -849,6 +849,27 @@ impl Database {
             .await
     }
 
+    /// Forget blob `(namespace, id)`'s recorded uploader. The read path calls this
+    /// when the recorded prefix returns NotFound — its copy was legitimately
+    /// reclaimed — so a fresh listing scan can find another member's surviving copy
+    /// and record it. A no-op when no record exists.
+    pub(crate) async fn forget_blob_uploader(
+        &self,
+        namespace: &str,
+        id: &str,
+    ) -> Result<(), DbError> {
+        let (namespace, id) = (namespace.to_string(), id.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "DELETE FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2",
+                (namespace, id),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
     // ---- Bookkeeping: sync_cursors ----
 
     pub(crate) async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {

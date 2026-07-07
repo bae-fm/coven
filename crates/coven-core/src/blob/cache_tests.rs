@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 
 use super::cache::{
-    clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
-    BlobCacheError,
+    clear_cache, evict_to_budget, fetch_from_cloud, open_blob_stream, pin, read_blob, unpin,
+    write_blob, BlobCacheError,
 };
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance, ResolvedScope};
 use crate::database::Database;
@@ -2030,5 +2030,66 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
         std::fs::read(&dest).expect("committed blob readable"),
         [9u8; 100],
         "the renamed temp became the committed blob intact",
+    );
+}
+
+/// When the uploader recorded for a blob no longer holds it (its copy was
+/// legitimately reclaimed) but another member's copy of the same `(namespace, id)`
+/// survives, the read must not fail forever on the stale record. `fetch_from_cloud`
+/// treats the recorded prefix's NotFound as evidence the record is stale: it
+/// forgets the record, rescans for a surviving copy, records it, and retries.
+#[tokio::test]
+async fn stale_uploader_record_falls_back_to_a_surviving_copy() {
+    use crate::keys::UserKeypair;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::storage::cloud::CloudHome;
+    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+    use std::sync::Arc;
+
+    // A hashed home storing bytes verbatim, so a copy can be planted under any
+    // uploader prefix and read back without encryption setup.
+    let home = Arc::new(InMemoryCloudHome::new());
+    let storage = CloudSyncStorage::new(
+        home.clone(),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Hashed,
+        "test-lib",
+        UserKeypair::generate(),
+    );
+    let db = open_test_db();
+    let blob = blob_ref("blobxxxx", "photos", CacheFill::CacheLazy);
+
+    let uploader_a = hex::encode(UserKeypair::generate().public_key());
+    let uploader_b = hex::encode(UserKeypair::generate().public_key());
+
+    // Only uploader B's copy exists on the cloud, but the index (staleness) records
+    // uploader A — A's copy has been reclaimed.
+    let b_key = CloudSyncStorage::blob_key(
+        BlobPathScheme::Hashed,
+        "photos",
+        Some(&uploader_b),
+        "blobxxxx",
+        None,
+    )
+    .expect("hashed key");
+    home.put_object(&b_key, b"BLOB-BYTES".to_vec())
+        .await
+        .expect("plant B's copy");
+    db.record_blob_uploader("photos", "blobxxxx", &uploader_a)
+        .await
+        .expect("record stale uploader");
+
+    // The read finds A's prefix empty, forgets A, rescans, finds and records B, and
+    // serves B's bytes.
+    let bytes = fetch_from_cloud(&db, &storage, &blob)
+        .await
+        .expect("read falls back to the surviving copy");
+    assert_eq!(bytes, b"BLOB-BYTES");
+    assert_eq!(
+        db.blob_uploader("photos", "blobxxxx")
+            .await
+            .expect("read uploader index"),
+        Some(uploader_b),
+        "the index now points at the surviving copy's uploader",
     );
 }
