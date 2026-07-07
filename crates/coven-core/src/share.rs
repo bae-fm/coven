@@ -94,9 +94,10 @@ impl std::fmt::Debug for ShareToken {
 }
 
 /// The blobs a share authorizes, as `(namespace, id)` logical refs — never hashed
-/// cloud paths. coven hashes each ref to its cloud key internally (see
-/// [`ShareManifest::allows`]) so neither the host nor whatever serves the share
-/// reconstructs coven's `{namespace}/{ab}/{cd}/{id}` layout.
+/// cloud paths. coven parses a requested cloud key back to its `(namespace, id)`
+/// internally (see [`ShareManifest::allows`]) so neither the host nor whatever
+/// serves the share reconstructs coven's `{namespace}/{uploader}/{ab}/{cd}/{id}`
+/// layout.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareManifest {
     /// Each authorized blob's logical `(namespace, id)` reference.
@@ -106,34 +107,25 @@ pub struct ShareManifest {
 impl ShareManifest {
     /// Whether `cloud_key` is one of the authorized blobs. Whatever serves the
     /// share resolves a requested object to its cloud key and asks coven; coven
-    /// hashes each authorized [`BlobId`] to its cloud key with the same hashed
-    /// layout ([`crate::library_dir::LibraryDir::hashed_path`]) and matches. The
-    /// server therefore never learns coven's `{ab}/{cd}` partitioning. Sharing is
-    /// inherently hashed: `allows` recomputes a blob's key from its id, which only
-    /// the content-addressed layout supports — the plain (consumer-path) scheme
-    /// has no id-derivable key, so share-proxy always uses the hashed layout.
+    /// parses the requested `{namespace}/{uploader}/{ab}/{cd}/{id}` key back to its
+    /// logical `(namespace, id)` and checks the manifest. A share authorizes a
+    /// logical blob, not a particular uploader's copy, so any uploader's prefix for
+    /// an authorized `(namespace, id)` is served — the copies are byte-identical.
+    /// Parsing (which rebuilds and compares the key) refuses a request that is not
+    /// a real coven hashed key — a traversal token, or a plain path — so a bad
+    /// request can never match. Sharing is inherently hashed: it resolves a blob by
+    /// its id, which only the content-addressed layout supports — the plain
+    /// (consumer-path) scheme has no id-derivable key.
     pub fn allows(&self, cloud_key: &str) -> bool {
-        self.blobs.iter().any(|b| {
-            // This runs on the unauthenticated server gate against host-supplied
-            // refs read from a manifest that may have been tampered with in the
-            // cloud. `hashed_path` refuses a ref whose id can't form a safe,
-            // indexable cloud key (a traversal token, or one too short / misaligned
-            // to take the `{ab}/{cd}` prefix) — exactly the bad data a panic-prone
-            // slice would crash on. A real coven cloud key always has those leading
-            // byte-pairs, so a refused ref can never match one.
-            // Share-proxy always uses the hashed layout (see the doc comment).
-            match crate::library_dir::LibraryDir::hashed_path(&b.namespace, &b.id) {
-                Ok(key) => key == cloud_key,
-                Err(e) => {
-                    warn!(
-                        namespace = %b.namespace,
-                        id = %b.id,
-                        "share manifest ref is not a usable coven blob id ({e}); skipping"
-                    );
-                    false
-                }
-            }
-        })
+        let Some((namespace, _uploader, id)) =
+            crate::library_dir::LibraryDir::parse_uploader_hashed_key(cloud_key)
+        else {
+            warn!(%cloud_key, "share request is not a coven hashed blob key; rejecting");
+            return false;
+        };
+        self.blobs
+            .iter()
+            .any(|b| b.namespace == namespace && b.id == id)
     }
 }
 
@@ -366,22 +358,30 @@ mod tests {
             ],
         };
 
-        // The authorized cloud key, hardcoded as the real `{namespace}/{ab}/{cd}/{id}`
-        // layout: the dash-stripped id `blob1` partitions to `bl`/`ob`. Asserting
-        // against the literal (not against `blob_key`'s own output) makes a
+        // The authorized cloud key, hardcoded as the real
+        // `{namespace}/{uploader}/{ab}/{cd}/{id}` layout: the dash-stripped id
+        // `blob1` partitions to `bl`/`ob`, under some uploader's prefix. Asserting
+        // against the literal (not against the key builder's own output) makes a
         // regression in the path layout fail this test instead of moving in
         // lockstep with it.
         assert!(
-            manifest.allows("audio/bl/ob/blob-1"),
-            "a listed (namespace, id) resolves to its authorized cloud key"
+            manifest.allows("audio/uploaderpk/bl/ob/blob-1"),
+            "a listed (namespace, id) is authorized under any uploader's prefix"
+        );
+        // A different uploader's copy of the same logical blob is still authorized.
+        assert!(
+            manifest.allows("audio/anotherpk/bl/ob/blob-1"),
+            "the share authorizes the logical blob, not one uploader's copy"
         );
 
         assert!(
-            !manifest.allows("audio/bl/ob/blob-2"),
+            !manifest.allows("audio/uploaderpk/bl/ob/blob-2"),
             "an unlisted (namespace, id) is rejected"
         );
         // A bare id with no layout is not a cloud key and never matches.
         assert!(!manifest.allows("blob-1"));
+        // The old un-prefixed layout no longer parses as a coven key.
+        assert!(!manifest.allows("audio/bl/ob/blob-1"));
     }
 
     /// A manifest ref whose dash-stripped id is too short to partition (`{ab}/{cd}`

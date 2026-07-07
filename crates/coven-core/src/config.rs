@@ -36,8 +36,9 @@ impl CloudProvider {
 /// mechanisms together:
 ///
 /// - `Opaque` (the default): every object is encrypted at rest under the library
-///   key (the `.enc` suffix) and blobs use coven's content-addressed path
-///   `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access sees only ciphertext
+///   key (the `.enc` suffix) and blobs use coven's content-addressed path under
+///   the uploading device, `{namespace}/{uploader}/{ab}/{cd}/{id}`. Anyone with
+///   bucket access sees only ciphertext
 ///   under opaque keys. Sharing a library (inviting members) requires an opaque
 ///   home, because it wraps and rotates the library key.
 /// - `Browsable`: every object is stored in the clear (no `.enc` suffix) and

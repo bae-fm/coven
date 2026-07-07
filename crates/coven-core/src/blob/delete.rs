@@ -94,19 +94,8 @@ fn tombstone_key(cloud_key: &str, suffix: &str) -> String {
 /// uploader and no per-member prefix. The rebuild guard confirms the key really is
 /// a hashed key rather than a plain path that happens to have five segments.
 fn blob_key_uploader(cloud_key: &str) -> Option<String> {
-    let mut parts = cloud_key.split('/');
-    let namespace = parts.next()?;
-    let uploader = parts.next()?;
-    let _first = parts.next()?;
-    let _second = parts.next()?;
-    let id = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    match crate::library_dir::LibraryDir::uploader_hashed_key(namespace, uploader, id) {
-        Ok(rebuilt) if rebuilt == cloud_key => Some(uploader.to_string()),
-        _ => None,
-    }
+    crate::library_dir::LibraryDir::parse_uploader_hashed_key(cloud_key)
+        .map(|(_namespace, uploader, _id)| uploader)
 }
 
 #[derive(Debug, PartialEq, Eq)]
