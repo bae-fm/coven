@@ -248,9 +248,9 @@ reconnect message.
 
 ## Where encryption sits
 
-Keeping encryption out of the providers is what makes five of them cheap to
-maintain and impossible to get differently wrong. `CloudHome` deals only in
-raw bytes. The at-rest protection and the key layout
+Encryption stays out of the providers so that all five share one at-rest
+implementation instead of five slightly different ones. `CloudHome` deals
+only in raw bytes. The at-rest protection and the key layout
 live one level up, in
 [`CloudSyncStorage`](rustdoc:struct:coven::sync::cloud_storage::CloudSyncStorage),
 which wraps any `dyn CloudHome`: it seals on the way down, opens on the way up,
@@ -277,10 +277,9 @@ choice set when the home is created:
 
 ## Ranged reads
 
-Streaming would be impossible if reading byte 40,000,000 of a track meant
-downloading and decrypting the 39,999,999 bytes before it. A host that
-streams a large blob (audio playback, scrubbing) wants a plaintext byte
-window on its own. The cache's
+A host that streams a large blob (audio playback, scrubbing) needs a byte
+window from the middle of the file without downloading and decrypting
+everything before it. The cache's
 [`open_blob_stream`](/docs/cache#reading-a-blob) serves a window from the local
 file on a hit, and on a miss reads it from the cloud through
 [`SyncStorage::read_blob_range`](rustdoc:trait:coven::sync::storage::SyncStorage),

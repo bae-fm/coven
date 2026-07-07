@@ -193,9 +193,9 @@ that the changeset filter and the snapshot cleanup evaluate the same way.
 
 ## Flipping the gate
 
-The gate is a live switch, not a create-time choice, and both directions have
-to be whole: sharing must deliver the complete subtree, and unsharing must
-remove it from peers without destroying the owner's copy.
+The gate is a live switch, not a create-time choice, and both directions
+must move complete subtrees: sharing delivers the whole subtree, and
+unsharing removes it from peers without destroying the owner's copy.
 
 Setting a root's gate from false to true makes a previously-local subtree
 public. Peers never held it, so coven re-emits the whole now-visible connected

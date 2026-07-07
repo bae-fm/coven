@@ -262,9 +262,9 @@ with each peer.
 
 Once a snapshot covers a range of changesets, those changesets are redundant: any
 device joining now bootstraps from the snapshot instead of replaying them. But
-deleting shared state is the most dangerous thing a device can do to its
-peers, so GC trusts nothing it has not authenticated and touches nothing
-outside what the signed cursors prove redundant.
+a deletion here affects every peer, so GC trusts nothing it has not
+authenticated and touches nothing outside what the signed cursors prove
+redundant.
 [`garbage_collect`](rustdoc:fn:coven::sync::snapshot::garbage_collect) reclaims
 them, returning a [`GcResult`](rustdoc:struct:coven::sync::snapshot::GcResult) with
 counts of deleted changesets and non-fatal errors. It reclaims two kinds of

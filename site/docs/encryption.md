@@ -220,11 +220,11 @@ The two kinds of home at a glance:
 
 ## Chunked encryption
 
-Encryption normally destroys random access: flip one byte of ciphertext and
-the whole object refuses to decrypt, so reading the middle means fetching the
-whole. Chunking restores random access without giving up authentication. A
-blob can be large (a `todo_attachments` image, a snapshot), and a reader often
-wants only part of it: the first frames of a video, one page of a document. To
+A single authenticated ciphertext has no random access: the whole object
+must be fetched and decrypted to read any part of it. Chunking restores
+random access without giving up authentication. A blob can be large (a
+`todo_attachments` image, a snapshot), and a reader often wants only part of
+it: the first frames of a video, one page of a document. To
 fetch and decrypt a byte range without downloading and decrypting the whole file,
 [`encrypt`](rustdoc:method:coven::encryption::EncryptionService::encrypt) splits
 the plaintext into 64KB chunks (`CHUNK_SIZE`) and encrypts each chunk

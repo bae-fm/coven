@@ -53,9 +53,9 @@ fresh-device bootstrap from a snapshot has its own page,
 
 A missed write is a silent divergence: two devices disagree and nothing
 reports it. If capture meant the host reporting its own changes, every
-forgotten call site in every app would be such a miss. So coven doesn't ask:
-it owns the connection and records changes itself, and a host write that
-skips the recording is impossible rather than discouraged.
+forgotten call site in every app would be such a miss. So coven owns the
+connection and records changes itself; a host write that skips the recording
+cannot happen, because there is no other connection to write through.
 
 The host opens the library once through
 `Coven::builder(config).synced_tables(...).migrations(...).open()`, declaring
@@ -74,9 +74,9 @@ treats an empty set as a hard error and refuses to start.
 
 ## The sync cycle
 
-Every guarantee on this page needs a place to live, and that place is one
-deterministic loop: the same steps, in the same order, every cycle. A
-background loop runs one cycle at a time.
+Everything this page promises is enforced in one loop that runs the same
+steps in the same order every cycle. A background loop runs one cycle at a
+time.
 [`run_single_sync_cycle`](rustdoc:fn:coven::sync::cycle::run_single_sync_cycle)
 loads the persisted sync state each cycle (rather than holding it across calls)
 and drives these steps:
@@ -392,8 +392,8 @@ to its own domain events.
 
 ## Backoff
 
-A failing cycle should not hammer a struggling provider, and a healthy one
-should not lag a fresh edit. One exponential formula (`30s · 2^n`) drives the
+A failing cycle should slow its retries, and a healthy one should not delay
+a fresh edit. One exponential formula (`30s · 2^n`) drives the
 cycle wait. A successful cycle
 waits the base 30 seconds before the next run; each consecutive failure doubles
 the wait (60s, 120s, 240s), capped at 300 seconds. A success resets the count,

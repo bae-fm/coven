@@ -8,10 +8,10 @@ control, and apply remote changes back into SQLite. No coordination server.
 
 ## The round trip
 
-Why no server? Because nothing in the loop below needs one. A write is
-captured, sealed, and parked in storage; every other device picks it up from
-there. The storage never has to understand the data for this to work, which is
-exactly what lets it be storage the user already has.
+No server is needed because nothing in the loop below requires one. A write
+is captured, sealed, and parked in storage; every other device picks it up
+from there. The storage never has to understand the data, which is what lets
+it be storage the user already has.
 
 <div style="margin: 1.5rem 0; padding: 24px 28px; background: var(--vp-code-block-bg); border-radius: 8px;">
 <svg viewBox="11 18 666 232" width="100%" role="img" aria-label="On your device, your app's write is captured, signed, and encrypted by coven, then pushed to storage you own. On a teammate's device, coven pulls it back, verifies, decrypts, and applies it into their app." style="font-family: var(--vp-font-family-mono); overflow: visible;">
@@ -111,9 +111,8 @@ loop, `handle.subscribe_sync_status` streams what each cycle applied, and
 
 ## Who owns what
 
-The integration stays small because the boundary is strict: coven owns
-everything that has to be correct for sync, and nothing that makes your app
-yours.
+The integration stays small because the boundary is strict: coven owns what
+sync needs to be correct, and the host owns the product.
 
 coven owns the sync layer and the database connection:
 

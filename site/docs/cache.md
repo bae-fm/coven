@@ -78,9 +78,9 @@ the bytes the host reads.
 
 ## Reading a blob
 
-The host should never have to know where a blob's bytes are this minute
-(a user file, the local store, a cache folder, or only the cloud); it asks for
-the blob, and dispatch is coven's problem.
+The host never tracks where a blob's bytes are at the moment of a read (a
+user file, the local store, a cache folder, or only the cloud); it asks for
+the blob, and coven resolves the location.
 [`CovenHandle::read_blob`](rustdoc:method:coven::CovenHandle::read_blob) serves a
 blob's whole contents.
 

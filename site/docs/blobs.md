@@ -17,11 +17,11 @@ syncs, the photo has to reach every other device too.
 
 ## Declaring which rows carry blobs
 
-Three different paths must each work out which files a set of rows carries: an
-outgoing changeset, an incoming one, and a whole database after bootstrap. A
-runtime callback could answer only for the code path that happens to be
-running; a declaration can be evaluated by all three, identically, any time.
-So blob-bearing-ness is a per-table declaration, not a runtime callback. The host
+Three different paths must each work out which files a set of rows carries:
+an outgoing changeset, an incoming one, and a whole database after bootstrap.
+All three must derive the same set from the rows alone, and two of them run
+where the host is not involved at all. So blob-bearing-ness is a per-table
+declaration coven can evaluate anywhere, not a runtime callback. The host
 marks a synced table with
 [`carries_blob`](rustdoc:method:coven::sync::session::SyncedTable::carries_blob),
 passing a [`BlobDecl`](rustdoc:struct:coven::sync::session::BlobDecl) that names the
