@@ -48,13 +48,12 @@ don't declare.
 
 ## Declaring the set
 
-The problem: a user drafts a grocery list they never meant to share, and by
-default every row of a synced table reaches every device in the library.
-Their private list lands on a teammate's phone. If keeping rows back were
-application logic, every query and every sync path would have to remember to
-do it, and the first one that forgot would leak. Instead the host *gates* the
-table: privacy becomes a property of the schema, and coven enforces it
-everywhere a row can travel. The host declares the gate per table on
+By default, every row of a synced table reaches every device in the library,
+and some rows are not meant to: a draft, a private list. If keeping them back
+were application logic, every query and every sync path would have to
+remember it, and the first one that forgot would leak the row. Instead the
+host *gates* the table: privacy becomes a property of the schema, and coven
+enforces it everywhere a row can travel. The host declares the gate per table on
 the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values
 it passes to `Coven::builder(config).synced_tables(...)`, and coven enforces
 it on both paths a row can take to another device: the per-cycle changeset

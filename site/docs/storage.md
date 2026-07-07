@@ -48,12 +48,12 @@ keyring").
 
 ## The trait
 
-The problem with a rich storage interface: five providers means five chances
-to get encryption, ordering, or retry subtly wrong, and a sync engine's bugs
-would live in its least-tested backend. So the trait is deliberately dumb.
-Everything that has to be *correct* lives above it, written once; all a
-backend supplies is bytes by key, plus the two provider-shaped concerns no
-wrapper can hide (uploads and sharing).
+A rich storage interface would mean five implementations of encryption,
+ordering, and retry, each subtly different, with the bugs living in the
+least-tested backend. So the trait is deliberately dumb. Everything that has
+to be *correct* lives above it, written once; a backend supplies bytes by
+key, plus the two provider-shaped concerns no wrapper can hide (uploads and
+sharing).
 
 ```rust
 pub trait CloudHome: Send + Sync {

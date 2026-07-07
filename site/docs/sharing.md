@@ -32,11 +32,11 @@ the library keyring to (see [The library keyring](#the-library-keyring)).
 
 ## The membership entry
 
-The problem: a forged changeset arrives, correctly encrypted (the provider,
-or anyone who ever held bucket access, can write bytes). Who says no? There
-is no server to ask, so every device must answer "who may write?" from
-storage alone, with nothing but keys to trust. Membership changes are
-therefore themselves signed records in storage. A
+Anyone who ever held bucket access can write bytes, so a correctly encrypted
+but forged changeset is always possible, and there is no server to refuse it.
+Each device must decide who may write from storage alone, with nothing but
+keys to trust. Membership changes are therefore themselves signed records in
+storage. A
 [`MembershipEntry`](rustdoc:struct:coven::sync::membership::MembershipEntry)
 records one change:
 
