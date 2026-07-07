@@ -38,8 +38,11 @@ content-addressed shard the cloud layout uses, built by
 [`LibraryDir::pinned_blob_path`](rustdoc:method:coven::library_dir::LibraryDir::pinned_blob_path)
 / [`cache_blob_path`](rustdoc:method:coven::library_dir::LibraryDir::cache_blob_path)).
 
-There is no cache table. The file on disk *is* the presence record, and the
-folder it sits in *is* the retention class. Nothing the two directory listings
+There is no cache table, because a table would be a second copy of the truth:
+every crash between a file write and its row would leave the two disagreeing,
+and the disagreement would surface as a phantom hit or a wasted re-download.
+The file on disk *is* the presence record, and the folder it sits in *is* the
+retention class. Nothing the two directory listings
 can't answer, so there is no metadata sidecar to keep in step with the disk.
 Every cache write is atomic
 ([`local_blob::write_atomic`](rustdoc:fn:coven::local_blob::write_atomic): write a

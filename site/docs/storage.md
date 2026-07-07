@@ -48,11 +48,12 @@ keyring").
 
 ## The trait
 
-The trait is deliberately dumb. Everything that has to be *correct* (
-encryption, ordering, retry, the key layout) lives above it, so a provider
-integration cannot get sync wrong; all a backend supplies is bytes by key,
-plus the two provider-shaped concerns no wrapper can hide (uploads and
-sharing).
+The problem with a rich storage interface: five providers means five chances
+to get encryption, ordering, or retry subtly wrong, and a sync engine's bugs
+would live in its least-tested backend. So the trait is deliberately dumb.
+Everything that has to be *correct* lives above it, written once; all a
+backend supplies is bytes by key, plus the two provider-shaped concerns no
+wrapper can hide (uploads and sharing).
 
 ```rust
 pub trait CloudHome: Send + Sync {
@@ -138,9 +139,9 @@ directly on the `CloudHome`, not through the wrapper described under
 
 ## Errors
 
-The host cannot translate provider error codes, and the user cannot act on
-raw ones, so every failure crosses this boundary as a sentence a UI can show
-verbatim.
+`AccessDenied` means nothing to the person looking at a sync banner, and the
+host can't translate it either; it doesn't know S3 from Dropbox. So every
+failure crosses this boundary as a sentence a UI can show verbatim.
 
 ```rust
 pub enum CloudHomeError {

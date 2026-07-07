@@ -51,11 +51,11 @@ fresh-device bootstrap from a snapshot has its own page,
 
 ## Change capture
 
-Everything downstream (the merge, the streams, the guarantees) depends on one
-thing: knowing *exactly* what changed, with nothing missed and nothing made
-up. Asking the host to report its own changes would make every host bug a
-sync bug. So coven doesn't ask: it owns the connection and records changes
-itself.
+The problem: miss a single write and two devices disagree forever, silently.
+If capture meant the host reporting its own changes, every forgotten call
+site in every app would be one of those silent divergences. So coven doesn't
+ask. It owns the connection and records changes itself, and a host write that
+skips the recording is impossible rather than discouraged.
 
 The host opens the library once through
 `Coven::builder(config).synced_tables(...).migrations(...).open()`, declaring
@@ -193,11 +193,13 @@ its own stream.
 
 ## Hybrid logical clocks
 
-Merging needs an order for edits, and wall clocks cannot provide one: devices
-sit offline for weeks, drift, and occasionally lie. The order has to survive
-all three, and it has to guarantee one thing above all: if you pull my edit
-and then change it, your change wins. A hybrid logical clock provides exactly
-that.
+The problem: your laptop's clock runs three minutes behind your phone. You
+edit a todo on the phone, walk to the desk, and fix a typo in it on the
+laptop. Ordered by wall clock, the typo fix is "older" and loses to the edit
+it was fixing. Any ordering for edits has to survive clocks that drift, sit
+offline for weeks, or lie, and it must guarantee one thing above all: if you
+pull my edit and then change it, your change wins. A hybrid logical clock
+provides exactly that.
 
 `_updated_at` is a hybrid logical clock stamp, not wall-clock time. The host must
 treat it as opaque: bind the string coven hands it into the row and never parse
