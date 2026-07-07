@@ -189,9 +189,10 @@ Removing a member is not a temporal replay of the chain ("was this author
 allowed when they claim they wrote this?"). It is enforced by rotating the
 key. `handle.remove_member(...)`:
 
-1. Revokes the member's cloud access (an unshare on consumer clouds; on S3,
-   where one holder of a shared key cannot be cut off alone, this step reports
-   that rotating the bucket credentials is the user's job).
+1. Revokes the member's cloud access: an unshare on consumer clouds; on S3,
+   where one holder of a shared key cannot be cut off alone, the backend
+   reports the credential as unrevocable and removal proceeds, because the key
+   rotation below, not credential withdrawal, is what protects new content.
 2. Signs and appends a `Remove` entry under the removing owner's prefix.
 3. Appends a **new key generation** to the library keyring.
 4. Re-wraps the updated keyring to every remaining member at their

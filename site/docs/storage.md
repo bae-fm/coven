@@ -78,7 +78,7 @@ pub trait CloudHome: Send + Sync {
     async fn grant_access(&self, grant: CloudAccessGrant)
         -> Result<CloudHomeJoinInfo, CloudHomeError>;
     async fn revoke_access(&self, revoke: CloudAccessRevoke)
-        -> Result<(), CloudHomeError>;
+        -> Result<RevokeOutcome, CloudHomeError>;
 }
 ```
 
@@ -120,13 +120,15 @@ same cloud home:
 
 - The consumer clouds (Drive, Dropbox, OneDrive) share the library folder with
   the member's provider account and return its folder or drive id.
-  `revoke_access` unshares it.
+  `revoke_access` unshares it and reports `RevokeOutcome::Revoked`.
 - S3 returns the bucket, region, endpoint, access key, secret key, and optional
-  key prefix: access rides pre-shared credentials. Because one member's copy of
-  a shared key cannot be invalidated alone, `revoke_access` returns an error
-  saying so; cutting a removed member off S3 means rotating the bucket
-  credentials. Their *read* access to future data already dies with the
-  [key rotation](/docs/sharing#revocation) that removal performs.
+  key prefix: access rides pre-shared credentials. One member's copy of a
+  shared key cannot be withdrawn alone, so `revoke_access` reports
+  `RevokeOutcome::Unsupported` and removal proceeds anyway: the
+  [key rotation](/docs/sharing#revocation-is-key-rotation) that removal
+  performs, not credential withdrawal, is what protects post-removal content.
+  Cutting the removed member's residual *write* access means rotating the
+  bucket credentials, which is the user's call.
 - CloudKit returns a share URL.
 
 Because `grant_access`/`revoke_access` work with folder shares and share URLs,
