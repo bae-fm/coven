@@ -245,8 +245,10 @@ the loop handle and cloud home, `handle.is_syncing()` reports whether the loop
 thread is running, and `handle.sync_now()` asks the loop to run a cycle now.
 
 The keys the loop signs and encrypts with come from the OS keyring. The host
-installs the keyring service and identity at startup with
-[`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service); there is no
+names its keyring service once at startup with
+[`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service), which
+also installs the platform keyring store (apple-native on macOS and iOS,
+android-native on Android; a target with no bundled store errors). There is no
 environment-variable or dev-mode key path.
 
 The loop runs on a dedicated OS thread with its own current-thread tokio runtime.
