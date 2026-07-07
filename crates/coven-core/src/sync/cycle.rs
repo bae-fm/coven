@@ -694,22 +694,12 @@ pub async fn run_single_sync_cycle(
         warn!("Failed to republish head after pull: {e}");
     }
 
-    // Advance the HLC past every applied row's `_updated_at`, so the next
-    // local stamp sorts causally after anything just pulled. The source is the
-    // max applied-row `_updated_at` (a real HLC stamp), not the envelope/head
-    // timestamp — only the row register drives last-writer-wins. This is an
-    // authoritative register value the LWW layer already wrote to disk, so the
-    // advance is unconditional (no skew cap): capping it could mint the next
-    // local stamp below an already-stored applied row and lose LWW to it.
-    if let Some(max_applied) = &sync_result.pull.max_applied_updated_at {
-        hlc.advance_past(max_applied);
-    }
-
-    // Flush the clock's high-water mark so a restart re-seeds past it. This
-    // captures both the merge above and any host stamps minted this cycle
-    // (e.g. the changeset envelope timestamp), since `high_water` reads the
-    // clock's current state. A persist error aborts the cycle rather than
-    // risking a backward jump after restart.
+    // Flush the clock's high-water mark so a restart re-seeds past it. The pull
+    // already advanced the clock past every applied row as each changeset landed
+    // (see `finish_applied_changeset`), so `high_water` here reflects both that
+    // advance and any host stamps minted this cycle (e.g. the changeset envelope
+    // timestamp), since it reads the clock's current state. A persist error aborts
+    // the cycle rather than risking a backward jump after restart.
     db.set_sync_state(
         crate::sync::hlc::HIGHWATER_STATE_KEY,
         &hlc.high_water().to_string(),

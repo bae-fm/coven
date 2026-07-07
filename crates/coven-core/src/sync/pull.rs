@@ -160,11 +160,6 @@ pub struct PullResult {
     /// Row changes from all applied changesets, for the host to map to domain
     /// events. Empty if nothing was applied.
     pub row_changes: Vec<RowChange>,
-    /// The greatest `_updated_at` among all applied rows, parsed as an HLC
-    /// [`Timestamp`]. The caller advances the HLC past this so a subsequent
-    /// local write sorts causally after everything just pulled. `None` if
-    /// nothing applied (or no applied row carried a parseable `_updated_at`).
-    pub max_applied_updated_at: Option<Timestamp>,
 }
 
 /// A changeset that had FK violations on first apply and needs retry.
@@ -370,7 +365,6 @@ pub async fn pull_changes(
         constraint_conflicts: Vec::new(),
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
-        max_applied_updated_at: None,
     };
     let mut deferred: Vec<DeferredChangeset> = Vec::new();
     let mut applied_devices: HashSet<String> = HashSet::new();
@@ -835,12 +829,24 @@ async fn finish_applied_changeset(
         return false;
     }
 
+    // Advance the shared register past this changeset's applied rows, now — while
+    // the pull is still running (more changesets, per-changeset blob downloads, the
+    // FK retry pass all follow). The host write path stamps `_updated_at` off this
+    // same `Arc<Hlc>`, so a local write that lands between changesets must already
+    // sort above everything the pull has committed to disk; an advance deferred to
+    // the end of the cycle would let that write mint a stamp below an already-applied
+    // row and lose last-writer-wins to it. The register is itself the monotonic
+    // accumulator, so a per-changeset max (skew-bounded) is all it needs.
+    let mut changeset_max = None;
     advance_max_updated_at(
-        &mut result.max_applied_updated_at,
+        &mut changeset_max,
         applied.changes,
         schema,
         receiver_wall_ms,
     );
+    if let Some(max_applied) = &changeset_max {
+        db.hlc().advance_past(max_applied);
+    }
     result.changesets_applied += 1;
     result.row_changes.extend(applied.changes.to_vec());
     applied_devices.insert(applied.device_id.to_string());
