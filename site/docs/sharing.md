@@ -19,7 +19,9 @@ library both write todos; the owner controls who else can.
 
 ## Identity
 
-A member is an Ed25519 public key (32 bytes). Each device generates its keypair
+With no server, there is nobody to hand out accounts or vouch for names, so
+an identity has to prove itself: it is a keypair, and anything it signs is its
+own credential. A member is an Ed25519 public key (32 bytes). Each device generates its keypair
 locally; there is no identity server, and the public key is the only name a
 member has. The same public key appears in two places coven cross-checks: in
 membership entries, and in the `author_pubkey` field of every changeset
@@ -31,7 +33,10 @@ the library keyring to (see [The library keyring](#the-library-keyring)).
 
 ## The membership entry
 
-A [`MembershipEntry`](rustdoc:struct:coven::sync::membership::MembershipEntry)
+Every device must be able to answer "who may write?" from storage alone,
+offline, with nothing but keys to trust. So membership changes are themselves
+signed records in storage. A
+[`MembershipEntry`](rustdoc:struct:coven::sync::membership::MembershipEntry)
 records one change:
 
 ```rust
@@ -60,7 +65,11 @@ reads it (see [Revocation](#revocation-is-key-rotation)).
 
 ## Per-author commitment
 
-Membership entries live in per-owner streams, exactly like changesets:
+Two owners inviting people at the same moment must not be able to erase each
+other's work. Any design with one shared "latest" object has that failure
+built in: the second writer wins, the first invite vanishes. So there is no
+shared object anywhere in membership. Entries live in per-owner streams,
+exactly like changesets:
 
 ```
 membership/{author_pubkey}/{seq}.enc    one Add or Remove entry
@@ -142,7 +151,9 @@ forms:
 
 ## The library keyring
 
-A library's data is encrypted under a symmetric key that can
+Data is only as private as the distribution of its keys: encryption means
+nothing if the key travels carelessly. A library's data is encrypted under a
+symmetric key that can
 [rotate](#revocation-is-key-rotation); the keyring is the full set of those key
 generations. Each member gets their own copy of the keyring, sealed to their
 X25519 public key with libsodium's sealed box and stored at
@@ -185,9 +196,12 @@ non-empty.
 
 ## Revocation is key rotation
 
-Removing a member is not a temporal replay of the chain ("was this author
-allowed when they claim they wrote this?"). It is enforced by rotating the
-key. `handle.remove_member(...)`:
+You cannot un-send data: a removed member keeps every byte they already
+pulled. What removal *can* guarantee is that they read nothing new, and the
+only enforcement that needs no server and no honest clock is a key they never
+receive. So removal is key rotation, not a temporal replay of the chain ("was
+this author allowed when they claim they wrote this?").
+`handle.remove_member(...)`:
 
 1. Revokes the member's cloud access: an unshare on consumer clouds; on S3,
    where one holder of a shared key cannot be cut off alone, the backend
@@ -226,8 +240,10 @@ stops admitting new ones.
 
 ## Invite and join
 
-Sharing a library with a new device is a two-step handshake, so neither side
-has to enter the other's keys by hand.
+An invite has to move two different things safely: the joiner's identity to
+the owner (so the keyring can be wrapped to it), and cloud access plus the
+wrapped keyring back to the joiner. A two-step handshake moves each in the
+right direction, and neither side ever types a key by hand.
 
 <svg class="flow" viewBox="0 0 660 216" role="img" aria-label="The joiner sends a join request code; the owner grants access and returns an invite code; the joiner bootstraps from it">
 <text class="hdr" x="120" y="22" text-anchor="middle">JOINER</text>
