@@ -429,7 +429,9 @@ impl CovenHandle {
     /// from with no separate hook. A manager connected but not yet running its loop
     /// still wraps the manager's stored home; only a home-less library builds from
     /// config when a provider is configured.
-    async fn blob_storage(&self) -> Result<Option<Arc<dyn SyncStorage>>, String> {
+    async fn blob_storage(
+        &self,
+    ) -> Result<Option<Arc<dyn SyncStorage>>, crate::storage::cloud::setup::StorageSetupError> {
         if let Some(manager) = self.sync_manager() {
             if let Some(loop_handle) = manager.sync_loop_handle() {
                 let storage: Arc<dyn SyncStorage> = loop_handle.storage().clone();
@@ -442,8 +444,7 @@ impl CovenHandle {
                     &self.key_service,
                     home,
                     None,
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
                 return Ok(Some(Arc::new(storage)));
             }
         }
@@ -458,8 +459,7 @@ impl CovenHandle {
             self.clock.clone(),
             self.cloudkit_ops.clone(),
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
         Ok(Some(Arc::new(storage)))
     }
 
@@ -469,7 +469,10 @@ impl CovenHandle {
     /// from the cloud (into the cache) on a Remote miss. The host passes only the
     /// [`BlobRef`]; coven holds the database, the directory, and the storage.
     pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        let storage = self.blob_storage().await.map_err(BlobCacheError::Io)?;
+        let storage = self
+            .blob_storage()
+            .await
+            .map_err(|e| BlobCacheError::StorageSetup(e.to_string()))?;
         crate::blob::cache::read_blob(&self.db, &self.library_dir, storage.as_deref(), blob).await
     }
 
@@ -484,7 +487,10 @@ impl CovenHandle {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
-        let storage = self.blob_storage().await.map_err(BlobCacheError::Io)?;
+        let storage = self
+            .blob_storage()
+            .await
+            .map_err(|e| BlobCacheError::StorageSetup(e.to_string()))?;
         crate::blob::cache::open_blob_stream(
             &self.db,
             &self.library_dir,
@@ -501,7 +507,10 @@ impl CovenHandle {
     /// cache (`storage/pinned/`) — from the evictable cache if already there, else
     /// the cloud — exempt from the size budget. Idempotent.
     pub async fn pin(&self, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
-        let storage = self.blob_storage().await.map_err(BlobCacheError::Io)?;
+        let storage = self
+            .blob_storage()
+            .await
+            .map_err(|e| BlobCacheError::StorageSetup(e.to_string()))?;
         crate::blob::cache::pin(&self.db, &self.library_dir, storage.as_deref(), blobs).await
     }
 
@@ -718,6 +727,52 @@ mod tests {
 
     struct TestCloudKitOps {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
+    }
+
+    #[tokio::test]
+    async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
+        let (_tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+        let mut config = Config::with_defaults(
+            "lib-setup-error".to_string(),
+            "device".to_string(),
+            library_dir.clone(),
+            "Test".to_string(),
+        );
+        // A provider is selected but its bucket is unset, so the read path cannot
+        // build sync storage. That is a configuration fault the user must fix — it
+        // must reach the caller as StorageSetup, not be mislabeled as a disk I/O
+        // error the way the old catch-all Io variant did.
+        config.cloud_home.provider = Some(CloudProvider::S3);
+        let config_provider: ConfigProvider = Arc::new(move || config.clone());
+        let handle = CovenHandle::new(
+            db.clone(),
+            db.stamper(),
+            library_dir.clone(),
+            config_provider,
+            KeyService::new("lib-setup-error".to_string()),
+            Arc::new(SystemClock),
+            None,
+            None,
+            LibraryOpenGuard::acquire_for_test(&library_dir),
+        );
+
+        let blob = BlobRef {
+            namespace: "release_files".to_string(),
+            id: "anyblob0".to_string(),
+            scope: BlobScope::Master,
+            cloud_path: None,
+            provenance: Provenance::HostProvided,
+            fill: CacheFill::CacheLazy,
+        };
+        let err = handle
+            .read_blob(&blob)
+            .await
+            .expect_err("no sync storage can be built from the broken config");
+        assert!(
+            matches!(err, BlobCacheError::StorageSetup(_)),
+            "got {err:?}"
+        );
     }
 
     fn test_handle(library_id: &str, library_dir: LibraryDir, db: Database) -> CovenHandle {

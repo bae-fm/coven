@@ -34,6 +34,12 @@ pub enum CovenError {
     Sqlite(#[from] rusqlite::Error),
     #[error("blob error: {0}")]
     Blob(String),
+    #[error("unsafe blob path: {0}")]
+    UnsafeBlobPath(#[from] PathTokenError),
+    #[error("malformed local path: {0}")]
+    MalformedPath(String),
+    #[error("the write SQL closure panicked")]
+    WriteClosurePanicked,
     #[error("synced_tables must be set before opening a coven library")]
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven library")]
@@ -61,12 +67,6 @@ impl From<OpenError> for CovenError {
 
 impl From<LocalBlobError> for CovenError {
     fn from(value: LocalBlobError) -> Self {
-        CovenError::Blob(value.to_string())
-    }
-}
-
-impl From<PathTokenError> for CovenError {
-    fn from(value: PathTokenError) -> Self {
         CovenError::Blob(value.to_string())
     }
 }
@@ -146,7 +146,7 @@ impl LibraryOpenGuard {
     pub(crate) fn acquire(library_dir: &crate::library_dir::LibraryDir) -> CovenResult<Self> {
         let db_path = library_dir.db_path();
         let Some(dir) = db_path.parent() else {
-            return Err(CovenError::Blob(format!(
+            return Err(CovenError::MalformedPath(format!(
                 "library database path has no parent: {}",
                 db_path.display()
             )));
@@ -431,7 +431,7 @@ fn local_stage_temp_path(final_path: &Path) -> CovenResult<PathBuf> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            CovenError::Blob(format!(
+            CovenError::MalformedPath(format!(
                 "local blob path has no file name: {}",
                 final_path.display()
             ))
@@ -564,7 +564,7 @@ fn remove_file_if_present(path: &Path) -> CovenResult<()> {
 
 fn sync_parent_dir(path: &Path) -> CovenResult<()> {
     let parent = path.parent().ok_or_else(|| {
-        CovenError::Blob(format!("path has no parent directory: {}", path.display()))
+        CovenError::MalformedPath(format!("path has no parent directory: {}", path.display()))
     })?;
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
@@ -727,7 +727,7 @@ fn run_write_batch_on_connection<R>(
                     Ok(value)
                 }
                 Ok(Err(error)) => Err(error),
-                Err(_) => Err(CovenError::Blob("write SQL closure panicked".to_string())),
+                Err(_) => Err(CovenError::WriteClosurePanicked),
             }
         });
     match result {
@@ -1522,7 +1522,9 @@ mod tests {
                 },
             )
             .await;
-        assert!(result.is_err());
+        // A blob id that can't form a safe path is its own typed error, not the
+        // generic blob catch-all.
+        assert!(matches!(result, Err(CovenError::UnsafeBlobPath(_))));
         let count: i64 = handle
             .sql(|sql| {
                 sql.tx()
@@ -1802,10 +1804,7 @@ mod tests {
                 |_sql| panic!("boom"),
             )
             .await;
-        assert!(result
-            .expect_err("panic is surfaced")
-            .to_string()
-            .contains("panicked"));
+        assert!(matches!(result, Err(CovenError::WriteClosurePanicked)));
         assert!(!handle
             .library_dir()
             .local_blob_path("media-files", "panicccc")

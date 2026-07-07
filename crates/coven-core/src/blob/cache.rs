@@ -107,10 +107,21 @@ pub enum BlobCacheError {
     /// a Remote blob was read with no provider connected — a real fault, surfaced
     /// rather than masked.
     NoCloudHome,
-    /// A local-disk failure (a cache write, a folder move, or a test cache reset),
-    /// or a scope that couldn't be resolved to an encryption key. Carries a
-    /// human-readable cause.
+    /// A local-disk failure: a cache write, a folder move, or a test cache reset.
+    /// Carries a human-readable cause.
     Io(String),
+    /// A blob-metadata query failed — resolving the blob's locality, looking up its
+    /// external ref, or reading its cache budget or expected size. A database read
+    /// the blob path depends on, distinct from a disk I/O failure.
+    Metadata(String),
+    /// The blob's encryption scope could not be resolved to a key (a missing
+    /// `item_keys` row for an item-scoped blob). Distinct from a disk failure: the
+    /// bytes may be present but cannot be opened.
+    ScopeResolution(String),
+    /// Building the sync storage from config failed — missing credentials or cloud
+    /// configuration — when a Remote blob needed it. A configuration fault, not a
+    /// disk I/O error.
+    StorageSetup(String),
     /// The old-value and new-value walks of one changeset disagreed on row count.
     /// They are two views of the same changeset; a mismatch means cleanup cannot
     /// pair updated rows with their previous blob ids.
@@ -177,6 +188,9 @@ impl std::fmt::Display for BlobCacheError {
                 write!(f, "no cloud home connected to read a Remote blob")
             }
             BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
+            BlobCacheError::Metadata(e) => write!(f, "blob metadata error: {e}"),
+            BlobCacheError::ScopeResolution(e) => write!(f, "blob scope resolution failed: {e}"),
+            BlobCacheError::StorageSetup(e) => write!(f, "sync storage setup failed: {e}"),
             BlobCacheError::ChangesetWalkMismatch {
                 old_count,
                 new_count,
@@ -895,11 +909,9 @@ pub async fn evict_to_budget(
     namespace: &str,
     protect: Option<&std::path::Path>,
 ) -> Result<(), BlobCacheError> {
-    let budget = match db
-        .get_cache_budget(namespace)
-        .await
-        .map_err(|e| BlobCacheError::Io(format!("read cache budget for {namespace:?}: {e}")))?
-    {
+    let budget = match db.get_cache_budget(namespace).await.map_err(|e| {
+        BlobCacheError::Metadata(format!("read cache budget for {namespace:?}: {e}"))
+    })? {
         Some(budget) => budget,
         // This namespace has no budget set — its cache is unlimited, so there is
         // nothing to enforce. Another namespace's budget never reaches here.
@@ -1021,7 +1033,7 @@ async fn resolve_source(db: &Database, blob: &BlobRef) -> Result<BlobSource, Blo
             }
         })
         .await
-        .map_err(|e| BlobCacheError::Io(format!("resolve locality for {}: {e}", blob.id)))?;
+        .map_err(|e| BlobCacheError::Metadata(format!("resolve locality for {}: {e}", blob.id)))?;
     match kept {
         // Remote: same source for both provenances.
         Some(true) => Ok(BlobSource::Cache),
@@ -1046,7 +1058,7 @@ async fn lookup_external_ref(
 ) -> Result<Option<crate::db::ExternalBlob>, BlobCacheError> {
     db.external_blob(id)
         .await
-        .map_err(|e| BlobCacheError::Io(format!("look up external blob ref for {id}: {e}")))
+        .map_err(|e| BlobCacheError::Metadata(format!("look up external blob ref for {id}: {e}")))
 }
 
 /// The cache folder path that currently holds a Remote blob's plaintext, checking
@@ -1248,7 +1260,9 @@ async fn validate_and_resolve_blob_scope(
 
     db.resolve_blob_scope(blob.scope.clone())
         .await
-        .map_err(|e| BlobCacheError::Io(format!("resolve blob scope for {}: {e}", blob.id)))
+        .map_err(|e| {
+            BlobCacheError::ScopeResolution(format!("resolve blob scope for {}: {e}", blob.id))
+        })
 }
 
 pub(crate) async fn expected_blob_size(
@@ -1264,7 +1278,7 @@ pub(crate) async fn expected_blob_size(
             .map_err(|e| DbError(e.to_string()))
     })
     .await
-    .map_err(|e| BlobCacheError::Io(format!("read expected size for {}: {e}", blob.id)))?
+    .map_err(|e| BlobCacheError::Metadata(format!("read expected size for {}: {e}", blob.id)))?
     .ok_or_else(|| BlobCacheError::LocalityUnresolved {
         id: blob.id.clone(),
     })
