@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{params_from_iter, Connection, ToSql};
+use rusqlite::Connection;
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
@@ -500,13 +500,7 @@ async fn build_transition_models(
     db: &Database,
 ) -> Result<(Arc<Gates>, Arc<BlobDecls>, Arc<HashMap<String, String>>), String> {
     let tables = db.synced_tables().to_vec();
-    let gate_columns: HashMap<String, String> = tables
-        .iter()
-        .filter_map(|t| {
-            t.gate_column()
-                .map(|c| (t.name().to_string(), c.to_string()))
-        })
-        .collect();
+    let gate_columns = crate::blob::transition::gate_columns(&tables);
     db.call(move |conn| {
         let gates = Gates::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
         let decls = BlobDecls::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
@@ -583,7 +577,7 @@ async fn commit_after_upload(
         let has_host_provided = refs
             .iter()
             .any(|b| b.provenance == Provenance::HostProvided);
-        if count_other_pending_uploads(conn, &blob_ids, final_outbox_id)? > 0 {
+        if crate::blob::transition::pending_upload_exists(conn, &blob_ids, Some(final_outbox_id))? {
             // Not the last blob: remove this row, leave the gate off until the rest land.
             commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
             return Ok(PostUpload::Continued);
@@ -608,18 +602,24 @@ async fn commit_after_upload(
                 "make_remote completion: gated root {root_table} has no gate column"
             ))
         })?;
-        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-            finish_outbox_row(tx, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
-            crate::sync::gate::write_gate(tx, &root_table, gate_col, true, &stamp, &root_id)
-                .map_err(DbError::from)?;
-            for id in &blob_ids {
-                Database::clear_external_blob_on(tx, id)?;
-            }
-            Database::delete_make_remote_intent_on(tx, &root_table, &root_id)?;
-            Ok(PostUpload::MadeRemote {
-                root_table,
-                root_id,
-            })
+        crate::blob::transition::commit_make_remote_flip(
+            conn,
+            &tables,
+            &root_table,
+            gate_col,
+            &root_id,
+            &stamp,
+            &blob_ids,
+            crate::blob::transition::MakeRemoteCompletion::FinalOutboxRow {
+                id: final_outbox_id,
+                cloud_key,
+                cancel_failed,
+                now_rfc,
+            },
+        )?;
+        Ok(PostUpload::MadeRemote {
+            root_table,
+            root_id,
         })
     })
     .await
@@ -645,7 +645,10 @@ fn commit_finish(
 /// also enqueue a durable `cancel` row so the tombstone-cancel drain retries. Every
 /// caller runs this inside its own transaction, so the row removal and the cancel
 /// row commit together — a crash can't drop the upload while leaving the tombstone.
-fn finish_outbox_row(
+/// Shared with the make_remote completion commit
+/// ([`crate::blob::transition::commit_make_remote_flip`]), which removes the final
+/// upload's row inside the flip.
+pub(crate) fn finish_outbox_row(
     conn: &Connection,
     id: i64,
     cloud_key: &str,
@@ -663,84 +666,4 @@ fn finish_outbox_row(
         .map_err(DbError::from)?;
     }
     Ok(())
-}
-
-/// How many pending uploads remain for the given blob ids, excluding the row
-/// `exclude_id` (the just-uploaded entry, whose row is removed inside the flip
-/// commit). Zero means this upload was the last of the make_remote's subtree.
-fn count_other_pending_uploads(
-    conn: &Connection,
-    blob_ids: &[String],
-    exclude_id: i64,
-) -> Result<i64, DbError> {
-    if blob_ids.is_empty() {
-        return Ok(0);
-    }
-    let placeholders = vec!["?"; blob_ids.len()].join(", ");
-    let sql = format!(
-        "SELECT COUNT(*) FROM cloud_outbox \
-         WHERE operation = 'upload' AND id != ?1 AND file_id IN ({placeholders})"
-    );
-    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
-    let params = count_other_pending_upload_params(&exclude_id, blob_ids);
-    stmt.query_row(params_from_iter(params), |r| r.get::<_, i64>(0))
-        .map_err(DbError::from)
-}
-
-fn count_other_pending_upload_params<'a>(
-    exclude_id: &'a i64,
-    blob_ids: &'a [String],
-) -> Vec<&'a dyn ToSql> {
-    let mut params: Vec<&dyn ToSql> = Vec::with_capacity(blob_ids.len() + 1);
-    params.push(exclude_id);
-    params.extend(blob_ids.iter().map(|id| id as &dyn ToSql));
-    params
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn count_other_pending_uploads_excludes_current_row_and_counts_matching_blob_ids() {
-        let conn = Connection::open_in_memory().expect("open sqlite");
-        crate::db::apply_coven_schema(&conn).expect("create bookkeeping schema");
-        for (id, operation, file_id, cloud_key) in [
-            (1, "upload", "blob-a", "key-a-current"),
-            (2, "upload", "blob-a", "key-a-other"),
-            (3, "upload", "blob-b", "key-b"),
-            (4, "delete", "blob-a", "key-a-delete"),
-        ] {
-            conn.execute(
-                "INSERT INTO cloud_outbox (id, operation, file_id, cloud_key, scope, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z')",
-                (id, operation, file_id, cloud_key),
-            )
-            .expect("insert outbox row");
-        }
-
-        let blob_ids = vec!["blob-a".to_string()];
-        let count = count_other_pending_uploads(&conn, &blob_ids, 1).expect("count uploads");
-
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn count_other_pending_upload_params_keep_database_types() {
-        let conn = Connection::open_in_memory().expect("open sqlite");
-        let exclude_id = 1_i64;
-        let blob_ids = vec!["blob-a".to_string()];
-        let params = count_other_pending_upload_params(&exclude_id, &blob_ids);
-
-        let (id_type, blob_type): (String, String) = conn
-            .query_row(
-                "SELECT typeof(?1), typeof(?2)",
-                params_from_iter(params),
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .expect("inspect parameter types");
-
-        assert_eq!(id_type, "integer");
-        assert_eq!(blob_type, "text");
-    }
 }

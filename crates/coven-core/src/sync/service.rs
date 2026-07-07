@@ -15,7 +15,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::OptionalExtension;
 use tracing::{debug, error, info, warn};
 
 use crate::blob::{BlobRef, CacheFill, Provenance};
@@ -573,14 +572,7 @@ async fn ready_host_provided_make_remotes(
     let decls = db.blob_decls();
     let tables = tables.to_vec();
     db.call(move |conn| {
-        let gate_columns: HashMap<String, String> = tables
-            .iter()
-            .filter_map(|table| {
-                table
-                    .gate_column()
-                    .map(|column| (table.name().to_string(), column.to_string()))
-            })
-            .collect();
+        let gate_columns = crate::blob::transition::gate_columns(&tables);
         let mut stmt = conn
             .prepare(
                 "SELECT root_table, root_id, retain_pinned FROM blob_make_remote_intents \
@@ -620,7 +612,7 @@ async fn ready_host_provided_make_remotes(
                 );
                 continue;
             }
-            if has_pending_upload(conn, &user_blob_ids)? {
+            if crate::blob::transition::pending_upload_exists(conn, &user_blob_ids, None)? {
                 debug!(
                     root_table = %root_table,
                     root_id = %root_id,
@@ -651,27 +643,6 @@ async fn ready_host_provided_make_remotes(
     .map_err(|e| SyncCycleError::AssetScan(e.0))
 }
 
-fn has_pending_upload(
-    conn: &rusqlite::Connection,
-    blob_ids: &[String],
-) -> Result<bool, crate::database::DbError> {
-    for id in blob_ids {
-        let pending = conn
-            .query_row(
-                "SELECT 1 FROM cloud_outbox WHERE operation = 'upload' AND file_id = ?1 LIMIT 1",
-                [id],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(crate::database::DbError::from)?
-            .is_some();
-        if pending {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 async fn finish_host_provided_make_remote(
     db: &Database,
     root: ReadyHostProvidedMakeRemote,
@@ -685,35 +656,16 @@ async fn finish_host_provided_make_remote(
     // shares the blob is durable — matching the inline-push path.
     let intent_seq = local_seq + 1;
     db.call_with_capture_reset(move |conn| {
-        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-            crate::sync::gate::write_gate(
-                tx,
-                &root.intent.root_table,
-                &root.gate_column,
-                true,
-                &stamp,
-                &root.intent.root_id,
-            )
-            .map_err(crate::database::DbError::from)?;
-            for id in &root.user_blob_ids {
-                Database::clear_external_blob_on(tx, id)?;
-            }
-            // Commit the local-store disposition as the authoritative record, in the
-            // same transaction as the flip. The flip re-emits the subtree, so the
-            // inline push (`sync`) also scans this host blob — but the make_remote
-            // intent is gone by then (deleted below), so it can't recover
-            // `retain_pinned` and would record the default disposition. The insert's
-            // conflict clause (`DO NOTHING`) keeps this authoritative record, written
-            // first, from being overwritten by that inline re-scan.
-            for drop in &drops {
-                super::cycle::insert_published_blob_drop_intent(tx, intent_seq, drop)?;
-            }
-            Database::delete_make_remote_intent_on(
-                tx,
-                &root.intent.root_table,
-                &root.intent.root_id,
-            )
-        })
+        crate::blob::transition::commit_make_remote_flip(
+            conn,
+            &tables,
+            &root.intent.root_table,
+            &root.gate_column,
+            &root.intent.root_id,
+            &stamp,
+            &root.user_blob_ids,
+            crate::blob::transition::MakeRemoteCompletion::Dispositions { intent_seq, drops },
+        )
     })
     .await
     .map_err(|e| SyncCycleError::AssetUpload(e.0))

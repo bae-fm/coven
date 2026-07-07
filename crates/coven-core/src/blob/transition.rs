@@ -43,7 +43,9 @@
 //! See the [blob concept tree](crate::blob) for how Local/Remote, provenance, and
 //! the cache fit together.
 
-use rusqlite::OptionalExtension;
+use std::collections::HashMap;
+
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::blob::{cache, BlobRef, Provenance};
 use crate::database::{Database, DbError};
@@ -51,6 +53,7 @@ use crate::library_dir::LibraryDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use crate::sync::gate::Gates;
 use crate::sync::hlc::Hlc;
+use crate::sync::service::DeferredLocalBlobDrop;
 use crate::sync::session::SyncedTable;
 
 // `make_local` (the foreground op with a cancel signal) is native-only; its types
@@ -59,8 +62,6 @@ use crate::sync::session::SyncedTable;
 use crate::blob::BlobTransitionObserver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::storage::SyncStorage;
-#[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
@@ -148,6 +149,50 @@ fn is_remote_root(tables: &[SyncedTable], root_table: &str) -> bool {
     tables
         .iter()
         .any(|t| t.name() == root_table && t.is_remote_root())
+}
+
+/// The `root_table → gate_column` map for every gated root in `tables` — the lookup a
+/// make_remote completion uses to name the root's gate column. Built off the declared
+/// synced-table set + live schema, so it is stable across a cycle. Shared by both
+/// completion paths (the upload drain and the sync cycle's host-provided completion).
+pub(crate) fn gate_columns(tables: &[SyncedTable]) -> HashMap<String, String> {
+    tables
+        .iter()
+        .filter_map(|t| {
+            t.gate_column()
+                .map(|c| (t.name().to_string(), c.to_string()))
+        })
+        .collect()
+}
+
+/// Whether any of `blob_ids` still has a pending `upload` outbox row, optionally
+/// excluding one row by id. The upload drain excludes the just-finished upload's own
+/// row — still present until the flip commit removes it — to ask whether any OTHER
+/// blob of the subtree is still uploading; the sync cycle's host-provided completion
+/// passes `None` to ask whether any user-provided blob is still uploading at all. Zero
+/// pending means every user-provided upload of the make_remote's subtree has landed.
+pub(crate) fn pending_upload_exists(
+    conn: &Connection,
+    blob_ids: &[String],
+    exclude_id: Option<i64>,
+) -> Result<bool, DbError> {
+    for id in blob_ids {
+        // `exclude_id` binds as NULL when `None`, so `?2 IS NULL` disables the
+        // exclusion and every matching upload row counts.
+        let found = conn
+            .query_row(
+                "SELECT 1 FROM cloud_outbox \
+                 WHERE operation = 'upload' AND file_id = ?1 AND (?2 IS NULL OR id != ?2) LIMIT 1",
+                rusqlite::params![id, exclude_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if found.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Resolve the blobs of the gated root's subtree, building the gate + blob-decl
@@ -428,6 +473,120 @@ pub async fn cancel_make_remote(
         }
     }
     Ok(())
+}
+
+/// What a make_remote completion commits inside the flip transaction *besides* the
+/// shared `{flip the gate true, clear the root's user-provided external refs, delete
+/// the intent}`. The two completion paths differ only in this.
+pub(crate) enum MakeRemoteCompletion {
+    /// The upload drain's inline path: the just-finished upload was the last
+    /// user-provided blob of the subtree, so its outbox row is removed inside the
+    /// flip. Removing it here (not before) is the crash-safety invariant — until the
+    /// commit the row is present, so a crash re-runs the idempotent upload and retries
+    /// the flip. On a failed inline tombstone-cancel, a durable `cancel` row is
+    /// enqueued in the same commit so the tombstone-cancel drain retries.
+    FinalOutboxRow {
+        id: i64,
+        cloud_key: String,
+        cancel_failed: bool,
+        now_rfc: String,
+    },
+    /// The sync cycle's host-provided path: the local-store dispositions for the
+    /// host-provided blobs this cycle uploaded are committed inside the flip, keyed by
+    /// the sequence the flip's re-emitted changeset publishes at. The insert's `ON
+    /// CONFLICT DO NOTHING` keeps this authoritative record — written first, carrying
+    /// the intent's `retain_pinned` — from being overwritten by the inline push's later
+    /// default-disposition re-scan of the same re-emitted blob (the intent is gone by
+    /// then, so that re-scan cannot recover `retain_pinned`).
+    Dispositions {
+        intent_seq: u64,
+        drops: Vec<DeferredLocalBlobDrop>,
+    },
+}
+
+/// The single atomic make_remote completion commit, shared by the upload drain's
+/// inline path and the sync cycle's host-provided path: flip the root's gate true,
+/// clear its user-provided blobs' external refs, and delete the intent — plus the
+/// path-specific `completion` write — in one journaled transaction. The gate flip
+/// re-emits the now-shareable subtree into the captured changeset. Runs synchronously
+/// on a connection the caller already holds, so each path's preamble (mapping the
+/// upload to its root, or scanning the ready intents) and this flip stay in one DB
+/// call — the completion check and the flip it gates commit together.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_make_remote_flip(
+    conn: &Connection,
+    tables: &[SyncedTable],
+    root_table: &str,
+    gate_column: &str,
+    root_id: &str,
+    stamp: &str,
+    user_blob_ids: &[String],
+    completion: MakeRemoteCompletion,
+) -> Result<(), DbError> {
+    Database::run_pending_journaled_transaction_on(conn, tables, |tx| {
+        crate::sync::gate::write_gate(tx, root_table, gate_column, true, stamp, root_id)
+            .map_err(DbError::from)?;
+        for id in user_blob_ids {
+            Database::clear_external_blob_on(tx, id)?;
+        }
+        match &completion {
+            MakeRemoteCompletion::FinalOutboxRow {
+                id,
+                cloud_key,
+                cancel_failed,
+                now_rfc,
+            } => {
+                crate::blob::upload::finish_outbox_row(
+                    tx,
+                    *id,
+                    cloud_key,
+                    *cancel_failed,
+                    now_rfc,
+                )?;
+            }
+            MakeRemoteCompletion::Dispositions { intent_seq, drops } => {
+                for drop in drops {
+                    crate::sync::cycle::insert_published_blob_drop_intent(tx, *intent_seq, drop)?;
+                }
+            }
+        }
+        Database::delete_make_remote_intent_on(tx, root_table, root_id)
+    })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_upload_exists_excludes_the_named_row() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        crate::db::apply_coven_schema(&conn).expect("create bookkeeping schema");
+        for (id, operation, file_id, cloud_key) in [
+            (1, "upload", "blob-a", "key-a-current"),
+            (2, "upload", "blob-a", "key-a-other"),
+            (3, "upload", "blob-b", "key-b"),
+            (4, "delete", "blob-a", "key-a-delete"),
+        ] {
+            conn.execute(
+                "INSERT INTO cloud_outbox (id, operation, file_id, cloud_key, scope, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z')",
+                (id, operation, file_id, cloud_key),
+            )
+            .expect("insert outbox row");
+        }
+
+        let blob_ids = vec!["blob-a".to_string()];
+        // Row 2 is another pending upload for blob-a, so excluding row 1 still finds it;
+        // the `delete` row (4) never counts.
+        assert!(pending_upload_exists(&conn, &blob_ids, Some(1)).expect("query"));
+        // Drop row 2: excluding row 1 now leaves only the delete row, so nothing pending.
+        conn.execute("DELETE FROM cloud_outbox WHERE id = 2", [])
+            .expect("delete row");
+        assert!(!pending_upload_exists(&conn, &blob_ids, Some(1)).expect("query"));
+        // With no exclusion, the remaining row 1 upload for blob-a counts.
+        assert!(pending_upload_exists(&conn, &blob_ids, None).expect("query"));
+    }
 }
 
 // ===========================================================================

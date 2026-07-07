@@ -362,7 +362,7 @@ async fn clear_published_blob_drop_intent(
 /// consumed the make_remote intent that carried `retain_pinned`. `DO NOTHING` keeps
 /// the first (authoritative) record, so the flip's pin/eager choice wins over the
 /// inline re-scan's default; it also makes a crash-retried stage idempotent.
-pub(super) fn insert_published_blob_drop_intent(
+pub(crate) fn insert_published_blob_drop_intent(
     tx: &rusqlite::Transaction<'_>,
     seq: u64,
     drop: &super::service::DeferredLocalBlobDrop,
