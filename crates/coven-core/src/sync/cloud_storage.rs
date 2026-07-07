@@ -1133,8 +1133,14 @@ impl SyncStorage for CloudSyncStorage {
             .await
     }
 
-    async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        let key = format!("keys/{user_pubkey}{}", self.suffix());
+    async fn put_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        crate::library_dir::validate_path_token(owner_pubkey)?;
+        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
         // Wrapped keys are already sealed boxes; store as-is. The suffix is kept
         // uniform with the rest of the layout, but the bytes are never sealed by
         // the home cipher — wrapping a library key is meaningful only for a
@@ -1149,14 +1155,24 @@ impl SyncStorage for CloudSyncStorage {
         Ok(())
     }
 
-    async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-        let key = format!("keys/{user_pubkey}{}", self.suffix());
+    async fn get_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        crate::library_dir::validate_path_token(owner_pubkey)?;
+        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
         // Wrapped keys are already sealed boxes; return as-is.
         self.home.read(&key).await.map_err(StorageError::from)
     }
 
-    async fn delete_wrapped_key(&self, user_pubkey: &str) -> Result<(), StorageError> {
-        let key = format!("keys/{user_pubkey}{}", self.suffix());
+    async fn delete_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<(), StorageError> {
+        crate::library_dir::validate_path_token(owner_pubkey)?;
+        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
         self.home.delete(&key).await?;
         Ok(())
     }

@@ -16,8 +16,18 @@
 /// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, seq}
 /// membership/{author_pubkey}/{seq}{suffix}       -- membership entries
 /// membership/{author_pubkey}/head{suffix}        -- that author's signed head
-/// keys/{user_pubkey}{suffix}                     -- wrapped library keys per member
+/// keys/{owner_pubkey}/{recipient_pubkey}{suffix} -- library key wrapped by an owner for a member
 /// ```
+///
+/// The layout is aligned to one storage-access rule so a provider ACL can
+/// enforce it: **a member writes only under its own public key** — its changes
+/// (`changes/{device}/`), snapshots (`snapshot/{author}/`), membership entries
+/// and head (`membership/{author}/`), and the wrapped keys it authors as an owner
+/// (`keys/{owner}/`) all sit under a prefix keyed by that member's identity.
+/// Reads that must span writers scan the relevant writers' prefixes: a member
+/// resolving its rotated library key reads `keys/{owner}/{self}` across the
+/// current owners and adopts the highest-generation wrap an owner's signature
+/// authenticates.
 ///
 /// A snapshot is published as a generation under the publishing device's
 /// `{author}` (its hex public key): the `{author}/{seq}.db` and then the
@@ -334,21 +344,40 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// that author has not committed a head yet (its entries are uncommitted).
     async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError>;
 
-    /// Upload a wrapped library key for a member.
-    /// Writes to `keys/{user_pubkey_hex}{suffix}`. The bytes are already a sealed
+    /// Upload a wrapped library key that `owner_pubkey` sealed for `recipient_pubkey`.
+    /// Writes to `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner
+    /// wraps only into its own prefix, so a recipient can hold a wrap from each
+    /// owner and no two owners contend for one slot. The bytes are already a sealed
     /// box, so the home cipher stores them verbatim regardless of suffix.
-    async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError>;
+    async fn put_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError>;
 
-    /// Download a wrapped library key for a member.
-    /// Reads from `keys/{user_pubkey_hex}{suffix}`. `create_invitation` reads the
-    /// invitee's existing slot before overwriting it, so a failed invite can
-    /// restore the exact prior object rather than stripping a re-invited member's
-    /// wrapped key. Returns `NotFound` when the member has no wrapped key yet.
-    async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError>;
+    /// Download the wrapped library key `owner_pubkey` sealed for `recipient_pubkey`.
+    /// Reads from `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`.
+    /// `create_invitation` reads the inviting owner's existing slot for the invitee
+    /// before overwriting it, so a failed invite can restore the exact prior object
+    /// rather than stripping a re-invited member's wrapped key. Returns `NotFound`
+    /// when that owner has no wrapped key for the recipient yet.
+    async fn get_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<Vec<u8>, StorageError>;
 
-    /// Delete a wrapped library key.
-    /// Removes `keys/{user_pubkey_hex}{suffix}`.
-    async fn delete_wrapped_key(&self, user_pubkey: &str) -> Result<(), StorageError>;
+    /// Delete the wrapped library key `owner_pubkey` sealed for `recipient_pubkey`.
+    /// Removes `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner
+    /// can delete only wraps in its own prefix; a revoked member's wraps under
+    /// other owners' prefixes are pre-rotation (they wrap a key the member already
+    /// held) and are reclaimed when those owners next rotate.
+    async fn delete_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<(), StorageError>;
 
     /// Upload one snapshot generation's metadata (plaintext -- the implementation
     /// seals it). Writes to `snapshot/{author}/{seq}_meta.json{suffix}`. Written

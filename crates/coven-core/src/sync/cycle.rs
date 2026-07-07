@@ -1048,9 +1048,10 @@ async fn refresh_authorization_state(
         })
         .collect::<Vec<_>>();
 
-    // 2. Adopt a rotated library key. Read this device's own re-wrapped key at
-    //    `keys/{self}` and authenticate it against the current Owners from the
-    //    anchored chain. The signature binds (library_id, recipient, author, sealed),
+    // 2. Adopt a rotated library key. Scan the current Owners' prefixes for this
+    //    device's re-wrapped key (`keys/{owner}/{self}`), authenticating each
+    //    against the owner whose prefix it sits under and taking the highest
+    //    generation. The signature binds (library_id, recipient, author, sealed),
     //    so a bucket writer can't substitute it, relocate it, or change its signer.
     //    If the decrypted keyring carries a strictly newer generation, swap the
     //    live cipher (and persist to the keyring) via `apply_key_rotation`, so
@@ -1092,11 +1093,12 @@ async fn refresh_authorization_state(
                 info!(%fingerprint, "Adopted rotated library key");
             }
         }
-        // No wrapped key for this device: a solo library that has never shared (its
-        // creation key is the library key), or a device removed from the library (its
-        // `keys/{self}` was deleted). Nothing to adopt; keep the live key. A
-        // *remaining* member always has its `keys/{self}` re-wrapped on rotation, so
-        // this is never a current member silently stuck on a stale key.
+        // No wrapped key for this device under any current owner: a solo library
+        // that has never shared (its creation key is the library key), or a device
+        // removed from the library (each owner deleted its `keys/{owner}/{self}`).
+        // Nothing to adopt; keep the live key. A *remaining* member always has a
+        // `keys/{owner}/{self}` re-wrapped on rotation, so this is never a current
+        // member silently stuck on a stale key.
         Err(super::invite::InviteError::CloudHome(
             crate::storage::cloud::CloudHomeError::NotFound(_),
         )) => {

@@ -1209,19 +1209,28 @@ impl SyncStorage for MockSyncStorage {
             .ok_or_else(|| StorageError::NotFound(format!("membership/{author_pubkey}/head")))
     }
 
-    async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
+    async fn put_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
         if armed_put_failure_hits(&self.wrapped_key_put_count, &self.fail_wrapped_key_put_on) {
             return Err(StorageError::Storage(format!(
-                "forced wrapped-key upload failure for {user_pubkey}"
+                "forced wrapped-key upload failure for {owner_pubkey}/{recipient_pubkey}"
             )));
         }
-        let key = format!("keys/{user_pubkey}.enc");
+        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}.enc");
         self.objects.lock().unwrap().insert(key, data);
         Ok(())
     }
 
-    async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-        let key = format!("keys/{user_pubkey}.enc");
+    async fn get_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}.enc");
         let objects = self.objects.lock().unwrap();
         objects
             .get(&key)
@@ -1229,8 +1238,12 @@ impl SyncStorage for MockSyncStorage {
             .ok_or(StorageError::NotFound(key))
     }
 
-    async fn delete_wrapped_key(&self, user_pubkey: &str) -> Result<(), StorageError> {
-        let key = format!("keys/{user_pubkey}.enc");
+    async fn delete_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<(), StorageError> {
+        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}.enc");
         self.objects.lock().unwrap().remove(&key);
         Ok(())
     }

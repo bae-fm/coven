@@ -113,9 +113,10 @@ fn ed25519_hex_to_x25519(
 
 /// Seal the library key to one member and wrap it in an owner-signed
 /// [`WrappedLibraryKey`], serialized to the bytes stored at
-/// `keys/{recipient_pubkey}`. The signature binds `(library_id,
-/// recipient_pubkey, author_pubkey, sealed)` so the joiner can prove the key came from the
-/// owner and was meant for them, not substituted by a bucket writer.
+/// `keys/{owner_pubkey}/{recipient_pubkey}` (the owner writes into its own
+/// prefix). The signature binds `(library_id, recipient_pubkey, author_pubkey,
+/// sealed)` so the joiner can prove the key came from the owner and was meant for
+/// them, not substituted by a bucket writer.
 ///
 /// `owner_keypair` is whatever Owner is performing the invite/revoke — NOT
 /// necessarily the chain founder. The two callers below pass the local device's
@@ -315,7 +316,7 @@ pub async fn create_invitation_with_encryption(
 
     // Whether the invitee is already a current member, judged against the chain as
     // it stands before this invitation's entry is added. This — the authoritative
-    // committed state, not whether a `keys/{pk}` object happens to be present — is
+    // committed state, not whether a `keys/{owner}/{pk}` object happens to be present — is
     // what a rollback dispatches on: a current member keeps the access and the
     // wrapped-key slot they held before this invite, while an invitee who is not a
     // member has this invite's grant and slot both undone. A current member can
@@ -331,7 +332,10 @@ pub async fn create_invitation_with_encryption(
     // fails while re-inviting a current member, the rollback writes this exact prior
     // object back so the member never loses their wrapped key. Read before any
     // mutation so a read failure aborts before granting access or writing the key.
-    let prior_wrapped_key = match storage.get_wrapped_key(invitee_ed25519_pubkey).await {
+    let prior_wrapped_key = match storage
+        .get_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey)
+        .await
+    {
         Ok(bytes) => Some(bytes),
         Err(StorageError::NotFound(_)) => None,
         Err(e) => return Err(e.into()),
@@ -341,7 +345,7 @@ pub async fn create_invitation_with_encryption(
 
     // Upload wrapped key and membership entry.
     if let Err(original) = storage
-        .put_wrapped_key(invitee_ed25519_pubkey, wrapped_key)
+        .put_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey, wrapped_key)
         .await
     {
         // The write failed, so the slot is unchanged and a current member keeps
@@ -378,8 +382,9 @@ pub async fn create_invitation_with_encryption(
                 // loud, naming the slot; retrying the whole invitation overwrites the
                 // slot again and is idempotent.
                 Some(prior) => {
-                    if let Err(restore) =
-                        storage.put_wrapped_key(invitee_ed25519_pubkey, prior).await
+                    if let Err(restore) = storage
+                        .put_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey, prior)
+                        .await
                     {
                         rollback_errors.push(format!(
                             "restore wrapped key for {invitee_ed25519_pubkey}: {restore}"
@@ -390,7 +395,9 @@ pub async fn create_invitation_with_encryption(
                 // leave it absent); delete the wrap just written so the slot returns
                 // to absent, which the member's next refresh re-wraps.
                 None => {
-                    if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await
+                    if let Err(rollback) = storage
+                        .delete_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey)
+                        .await
                     {
                         rollback_errors.push(rollback.to_string());
                     }
@@ -408,7 +415,10 @@ pub async fn create_invitation_with_encryption(
                      deleting it rather than restoring an unauthorized slot"
                 );
             }
-            if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await {
+            if let Err(rollback) = storage
+                .delete_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey)
+                .await
+            {
                 rollback_errors.push(rollback.to_string());
             }
             if let Err(rollback) = cloud_home.revoke_access(revoke).await {
@@ -512,19 +522,48 @@ pub async fn unwrap_library_keyring(
     .await
 }
 
-/// Fetch and parse the joiner's own wrapped-key object off the cloud home. The
-/// `.enc` suffix is hardcoded because joining a shared library is an
-/// encrypted-home-only path — the invite wraps the library key — so
-/// `CloudSyncStorage::put_wrapped_key` always wrote the slot at
-/// `keys/{pubkey}.enc`. Read straight off the home, not through
-/// `CloudSyncStorage`, which the joiner has not built yet.
+/// Fetch and parse the wrapped-key object `owner_hex` sealed for `recipient_hex`,
+/// off the cloud home. The `.enc` suffix is hardcoded because reading a wrapped
+/// library key is an encrypted-home-only path — wrapping a key is meaningful only
+/// for a shared (encrypted) home — so `CloudSyncStorage::put_wrapped_key` always
+/// wrote the slot at `keys/{owner}/{recipient}.enc`. Read straight off the home,
+/// not through `CloudSyncStorage`, which the joiner has not built yet.
 async fn fetch_wrapped_key(
     cloud_home: &dyn CloudHome,
-    pubkey_hex: &str,
+    owner_hex: &str,
+    recipient_hex: &str,
 ) -> Result<WrappedLibraryKey, InviteError> {
-    let wrapped_bytes = cloud_home.read(&format!("keys/{pubkey_hex}.enc")).await?;
+    let wrapped_bytes = cloud_home
+        .read(&format!("keys/{owner_hex}/{recipient_hex}.enc"))
+        .await?;
     serde_json::from_slice(&wrapped_bytes)
         .map_err(|e| InviteError::Crypto(format!("malformed wrapped key: {e}")))
+}
+
+/// The owner prefixes that hold a wrapped-key object for `recipient_hex`, found by
+/// scanning the `keys/` keyspace off the cloud home. The joiner's candidate
+/// bootstrap uses this: it has no membership chain yet and so cannot name the
+/// current owners, so it discovers which prefixes actually hold a wrap for it.
+async fn wrap_owners_for_recipient(
+    cloud_home: &dyn CloudHome,
+    recipient_hex: &str,
+) -> Result<Vec<String>, InviteError> {
+    let keys = cloud_home.list("keys/").await?;
+    let suffix = format!("/{recipient_hex}.enc");
+    let mut owners = Vec::new();
+    for key in keys {
+        let Some(rest) = key.strip_prefix("keys/") else {
+            continue;
+        };
+        let Some(owner) = rest.strip_suffix(&suffix) else {
+            continue;
+        };
+        // The owner segment is a single slash-free hex pubkey token.
+        if !owner.is_empty() && !owner.contains('/') {
+            owners.push(owner.to_string());
+        }
+    }
+    Ok(owners)
 }
 
 /// Open a sealed box carrying a library keyring to `keypair` and reconstruct the
@@ -550,11 +589,49 @@ async fn decrypt_wrapped_library_key_unverified(
     cloud_home: &dyn CloudHome,
     keypair: &UserKeypair,
 ) -> Result<EncryptionService, InviteError> {
-    let pubkey_hex = hex::encode(keypair.public_key());
-    let wrapped = fetch_wrapped_key(cloud_home, &pubkey_hex).await?;
-    let sealed = hex::decode(&wrapped.sealed)
-        .map_err(|e| InviteError::Crypto(format!("wrapped library key sealed box: {e}")))?;
-    open_sealed_keyring(&sealed, keypair)
+    let recipient_hex = hex::encode(keypair.public_key());
+    let owners = wrap_owners_for_recipient(cloud_home, &recipient_hex).await?;
+
+    // The candidate is untrusted — it only has to decrypt the sealed membership
+    // chain, whose authenticated Owner set the caller then re-derives the real key
+    // against. A rotation before the join may have re-wrapped this slot under a
+    // non-founder owner, leaving the founder's original invite wrap a stale, older
+    // generation, so take the highest-generation wrap that opens: it carries the
+    // most key generations and so reads the furthest into the sealed chain.
+    let mut best: Option<EncryptionService> = None;
+    for owner in &owners {
+        let wrapped = match fetch_wrapped_key(cloud_home, owner, &recipient_hex).await {
+            Ok(wrapped) => wrapped,
+            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => continue,
+            Err(e) => return Err(e),
+        };
+        let Ok(sealed) = hex::decode(&wrapped.sealed) else {
+            tracing::debug!(
+                "skipping candidate wrap in {owner}'s prefix with a non-hex sealed box"
+            );
+            continue;
+        };
+        let candidate = match open_sealed_keyring(&sealed, keypair) {
+            Ok(candidate) => candidate,
+            Err(e) => {
+                tracing::debug!(
+                    "skipping candidate wrap in {owner}'s prefix this device cannot open: {e}"
+                );
+                continue;
+            }
+        };
+        if best
+            .as_ref()
+            .is_none_or(|best| candidate.current_generation() > best.current_generation())
+        {
+            best = Some(candidate);
+        }
+    }
+    best.ok_or_else(|| {
+        InviteError::CloudHome(CloudHomeError::NotFound(format!(
+            "keys/*/{recipient_hex}.enc"
+        )))
+    })
 }
 
 pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
@@ -564,31 +641,84 @@ pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
     expected_owners: impl IntoIterator<Item = &'a str>,
     visible_membership_entries: Option<&[MembershipCoord]>,
 ) -> Result<EncryptionService, InviteError> {
-    let pubkey_hex = hex::encode(keypair.public_key());
-    let wrapped = fetch_wrapped_key(cloud_home, &pubkey_hex).await?;
+    let recipient_hex = hex::encode(keypair.public_key());
 
-    if let Some(activation) = wrapped.activation.as_ref() {
-        let Some(entries) = visible_membership_entries else {
-            return Err(InviteError::Crypto(
-                "wrapped library key requires membership activation".to_string(),
-            ));
+    // Scan each current owner's prefix for this recipient's wrap and adopt the
+    // highest-generation one an owner's signature authenticates. An owner writes
+    // only into its own prefix, so `keys/{owner}/{recipient}` is authenticated
+    // against THAT owner; a wrap another owner rotated more recently supersedes an
+    // older one by its keyring generation.
+    let mut best: Option<EncryptionService> = None;
+    // Remember why non-adoptable wraps were rejected, so "no wrap adopted" reports
+    // the real reason rather than a bare not-found (which the caller treats as
+    // "this device has no wrapped key").
+    let mut saw_inactive: Option<MembershipCoord> = None;
+    let mut saw_unauthentic = false;
+
+    for owner in expected_owners {
+        let wrapped = match fetch_wrapped_key(cloud_home, owner, &recipient_hex).await {
+            Ok(wrapped) => wrapped,
+            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => continue,
+            Err(e) => return Err(e),
         };
-        if !entries.iter().any(|entry| entry == activation) {
-            return Err(InviteError::InactiveWrappedKey {
-                activation: activation.clone(),
-            });
+
+        // A rotated wrap names the Remove entry that must be visible before it is
+        // adopted; skip an owner's wrap whose activation the reader can't yet see.
+        if let Some(activation) = wrapped.activation.as_ref() {
+            let visible = visible_membership_entries
+                .is_some_and(|entries| entries.iter().any(|entry| entry == activation));
+            if !visible {
+                saw_inactive = Some(activation.clone());
+                continue;
+            }
+        }
+
+        // Authenticate against the owner whose prefix this wrap lives under. Any
+        // bucket writer can drop a forged or relocated object into an owner's
+        // prefix while no ACL enforces the layout; it fails to verify against that
+        // owner and is skipped, so it can neither be adopted nor block a valid wrap
+        // under another owner.
+        let sealed =
+            match wrapped.verify_and_unwrap(library_id, &recipient_hex, std::iter::once(owner)) {
+                Ok(sealed) => sealed,
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping wrapped key in {owner}'s prefix that is not authentic: {e}"
+                    );
+                    saw_unauthentic = true;
+                    continue;
+                }
+            };
+        let keyring = match open_sealed_keyring(&sealed, keypair) {
+            Ok(keyring) => keyring,
+            Err(e) => {
+                tracing::warn!("skipping corrupt wrapped key in {owner}'s prefix: {e}");
+                saw_unauthentic = true;
+                continue;
+            }
+        };
+        if best
+            .as_ref()
+            .is_none_or(|best| keyring.current_generation() > best.current_generation())
+        {
+            best = Some(keyring);
         }
     }
 
-    // Authenticate the wrapped key against the supplied authorized owner set
-    // before adopting anything. A failure here is a substituted, forged,
-    // relocated, replayed, or corrupt object — refuse it loudly, surfacing which,
-    // rather than decrypt whatever bytes are present.
-    let sealed = wrapped
-        .verify_and_unwrap(library_id, &pubkey_hex, expected_owners)
-        .map_err(|e| InviteError::Crypto(format!("wrapped library key: {e}")))?;
-
-    open_sealed_keyring(&sealed, keypair)
+    if let Some(keyring) = best {
+        return Ok(keyring);
+    }
+    if let Some(activation) = saw_inactive {
+        return Err(InviteError::InactiveWrappedKey { activation });
+    }
+    if saw_unauthentic {
+        return Err(InviteError::Crypto(format!(
+            "no authentic wrapped library key for {recipient_hex} under any current owner"
+        )));
+    }
+    Err(InviteError::CloudHome(CloudHomeError::NotFound(format!(
+        "keys/*/{recipient_hex}.enc"
+    ))))
 }
 
 /// Revoke a member from the library. This:
@@ -651,6 +781,12 @@ pub async fn revoke_member(
         }
     }
 
+    // This owner deletes only its own wrap for the revokee, from its own prefix.
+    // Any wrap another owner sealed for the revokee is a pre-rotation generation —
+    // it wraps a key the revokee already held — so leaving it is harmless; that
+    // owner reclaims it when it next rotates.
+    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
+
     if !revokee_is_current {
         let visible_coords = membership_coords(&entry_keys);
         let keyring = unwrap_library_keyring_for_owners_with_activation(
@@ -661,11 +797,12 @@ pub async fn revoke_member(
             Some(&visible_coords),
         )
         .await?;
-        storage.delete_wrapped_key(revokee_pubkey).await?;
+        storage
+            .delete_wrapped_key(&author_pubkey_hex, revokee_pubkey)
+            .await?;
         return Ok(keyring);
     }
 
-    let author_pubkey_hex = hex::encode(owner_keypair.public_key());
     let remove_coord = MembershipCoord {
         author_pubkey: author_pubkey_hex.clone(),
         seq: next_membership_seq(chain, &author_pubkey_hex),
@@ -713,11 +850,15 @@ pub async fn revoke_member(
             owner_keypair,
             Some(remove_coord.clone()),
         )?;
-        storage.put_wrapped_key(member_pubkey, wrapped).await?;
+        storage
+            .put_wrapped_key(&author_pubkey_hex, member_pubkey, wrapped)
+            .await?;
     }
 
-    // Delete the revoked member's wrapped key.
-    storage.delete_wrapped_key(revokee_pubkey).await?;
+    // Delete this owner's wrap for the revoked member, from its own prefix.
+    storage
+        .delete_wrapped_key(&author_pubkey_hex, revokee_pubkey)
+        .await?;
 
     // Don't overwrite a committed Remove another owner device already published at
     // this seq; fail loud and let the retry rebuild on top of the observed head.
@@ -1005,6 +1146,92 @@ mod tests {
         assert_eq!(unwrapped, encryption_key);
     }
 
+    /// A recipient's wrap can live under any current owner's prefix, not only the
+    /// founder's. The reader scans every current owner and resolves the wrap
+    /// wherever it sits — here only owner B (not owner A) wrapped the recipient.
+    #[tokio::test]
+    async fn unwrap_resolves_wrapped_key_from_any_owner_prefix() {
+        let owner_a = gen_keypair();
+        let owner_b = gen_keypair();
+        let recipient = gen_keypair();
+        let key: [u8; 32] = [51u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let r_x = recipient.to_x25519_public_key();
+        let wrapped =
+            signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&recipient), &r_x, &key, &owner_b);
+        storage
+            .put_wrapped_key(&pubkey_hex(&owner_b), &pubkey_hex(&recipient), wrapped)
+            .await
+            .unwrap();
+
+        let owners = [pubkey_hex(&owner_a), pubkey_hex(&owner_b)];
+        let unwrapped = unwrap_library_keyring_for_owners_with_activation(
+            &storage as &dyn CloudHome,
+            &recipient,
+            LIB_ID,
+            owners.iter().map(String::as_str),
+            None,
+        )
+        .await
+        .unwrap()
+        .key_bytes();
+        assert_eq!(unwrapped, key);
+    }
+
+    /// When more than one owner has wrapped the recipient, the reader adopts the
+    /// highest-generation wrap — the most recent rotation wins regardless of which
+    /// owner produced it.
+    #[tokio::test]
+    async fn unwrap_takes_highest_generation_across_owner_prefixes() {
+        let owner_a = gen_keypair();
+        let owner_b = gen_keypair();
+        let recipient = gen_keypair();
+        let gen1_key: [u8; 32] = [61u8; 32];
+        let gen2_key: [u8; 32] = [62u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let r_x = recipient.to_x25519_public_key();
+
+        // Owner A holds the generation-1 wrap.
+        let gen1 =
+            signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&recipient), &r_x, &gen1_key, &owner_a);
+        storage
+            .put_wrapped_key(&pubkey_hex(&owner_a), &pubkey_hex(&recipient), gen1)
+            .await
+            .unwrap();
+
+        // Owner B holds a generation-2 keyring from a later rotation.
+        let gen2_keyring = EncryptionService::from_key(gen1_key)
+            .with_appended_generation(2, gen2_key)
+            .unwrap();
+        let gen2 = signed_wrapped_keyring_for_test(
+            LIB_ID,
+            &pubkey_hex(&recipient),
+            &r_x,
+            &gen2_keyring,
+            &owner_b,
+            None,
+        );
+        storage
+            .put_wrapped_key(&pubkey_hex(&owner_b), &pubkey_hex(&recipient), gen2)
+            .await
+            .unwrap();
+
+        let owners = [pubkey_hex(&owner_a), pubkey_hex(&owner_b)];
+        let keyring = unwrap_library_keyring_for_owners_with_activation(
+            &storage as &dyn CloudHome,
+            &recipient,
+            LIB_ID,
+            owners.iter().map(String::as_str),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(keyring.current_generation(), 2);
+        assert_eq!(keyring.key_bytes(), gen2_key);
+    }
+
     /// The grant identity carries both the cryptographic member pubkey and the
     /// provider account email from the join request.
     #[tokio::test]
@@ -1103,7 +1330,7 @@ mod tests {
         )
         .unwrap();
         storage
-            .put_wrapped_key(&pubkey_hex(&joiner), forged)
+            .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&joiner), forged)
             .await
             .unwrap();
 
@@ -1141,7 +1368,7 @@ mod tests {
         )
         .unwrap();
         storage
-            .put_wrapped_key(&pubkey_hex(&member_b), for_a)
+            .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member_b), for_a)
             .await
             .unwrap();
 
@@ -1311,7 +1538,7 @@ mod tests {
 
         // Verify the wrapped key was uploaded.
         let wrapped = storage
-            .get_wrapped_key(&pubkey_hex(&invitee))
+            .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&invitee))
             .await
             .unwrap();
         assert!(!wrapped.is_empty());
@@ -1375,7 +1602,9 @@ mod tests {
         chain.validate().unwrap();
 
         // Revoked member's wrapped key was deleted from the storage.
-        let result = storage.get_wrapped_key(&pubkey_hex(&member)).await;
+        let result = storage
+            .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member))
+            .await;
         assert!(result.is_err());
 
         // Owner can still unwrap the new key.
@@ -1487,7 +1716,9 @@ mod tests {
         assert_eq!(member2_key, new_key.key_bytes());
 
         // member1 cannot get a wrapped key.
-        let result = storage.get_wrapped_key(&pubkey_hex(&member1)).await;
+        let result = storage
+            .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member1))
+            .await;
         assert!(result.is_err());
     }
 
@@ -1528,7 +1759,7 @@ mod tests {
             Some(activation.clone()),
         );
         storage
-            .put_wrapped_key(&pubkey_hex(&member), wrapped)
+            .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member), wrapped)
             .await
             .unwrap();
 
@@ -1710,7 +1941,7 @@ mod tests {
             Some(activation.clone()),
         );
         storage
-            .put_wrapped_key(&pubkey_hex(&member), wrapped)
+            .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member), wrapped)
             .await
             .unwrap();
 
@@ -1787,11 +2018,11 @@ mod tests {
         assert_eq!(joined.key_bytes(), key);
     }
 
-    /// An invite from an Owner since removed is not joinable: the joiner verifies
-    /// the wrapped key against the *current* Owner set, so once B is removed its
-    /// signature no longer belongs to an Owner and C's slot — still holding B's
-    /// signature — is refused. (The removal also rotated the key, so B's slot
-    /// wraps a stale generation regardless.)
+    /// An invite from an Owner since removed is not joinable: the joiner scans the
+    /// *current* Owner set for its wrap, and once B is removed its prefix is no
+    /// longer scanned, so C's wrap — which only ever lived under B — is unreachable
+    /// and the join finds no key to adopt. (The removal also rotated the key, so
+    /// B's wrap holds a stale generation regardless.)
     #[tokio::test]
     async fn invite_from_a_removed_owner_is_not_joinable() {
         use crate::sync::membership::MembershipAction;
@@ -1874,11 +2105,16 @@ mod tests {
             .await
             .unwrap();
 
-        // C joins: B is no longer a current Owner, so its signature is refused.
+        // C joins: B is no longer a current Owner, so its prefix is not scanned and
+        // C's wrap (only ever under B) is unreachable — no current owner vouches for
+        // C, so the join finds no adoptable key.
         let result = unwrap_library_keyring(home.clone(), &joiner, LIB_ID, &founder_pk).await;
         assert!(
-            matches!(result, Err(InviteError::Crypto(_))),
-            "an invite from a since-removed Owner must be refused, got {result:?}",
+            matches!(
+                result,
+                Err(InviteError::CloudHome(CloudHomeError::NotFound(_)))
+            ),
+            "an invite from a since-removed Owner must not be joinable, got {result:?}",
         );
     }
 
@@ -1944,7 +2180,7 @@ mod tests {
         )
         .unwrap();
         storage
-            .put_wrapped_key(&pubkey_hex(&joiner), forged)
+            .put_wrapped_key(&pubkey_hex(&founder), &pubkey_hex(&joiner), forged)
             .await
             .unwrap();
 
@@ -2033,7 +2269,7 @@ mod tests {
         )
         .unwrap();
         storage
-            .put_wrapped_key(&pubkey_hex(&joiner), forged)
+            .put_wrapped_key(&pubkey_hex(&founder), &pubkey_hex(&joiner), forged)
             .await
             .unwrap();
 
@@ -2105,7 +2341,10 @@ mod tests {
             "the Remove entry must not be published before all re-wraps land",
         );
         assert!(
-            storage.get_wrapped_key(&pubkey_hex(&revokee)).await.is_ok(),
+            storage
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&revokee))
+                .await
+                .is_ok(),
             "the revokee key is deleted only after remaining members are re-wrapped",
         );
     }
@@ -2140,7 +2379,7 @@ mod tests {
         )
         .await;
         let remaining_key_before = storage
-            .get_wrapped_key(&pubkey_hex(&remaining))
+            .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&remaining))
             .await
             .unwrap();
 
@@ -2178,7 +2417,7 @@ mod tests {
         assert!(matches!(result, Err(InviteError::Crypto(_))));
         assert_eq!(
             storage
-                .get_wrapped_key(&pubkey_hex(&remaining))
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&remaining))
                 .await
                 .unwrap(),
             remaining_key_before,
@@ -2270,7 +2509,7 @@ mod tests {
         );
         assert!(
             storage
-                .get_wrapped_key(&pubkey_hex(&revokee))
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&revokee))
                 .await
                 .is_err(),
             "retry deletes the revokee's wrapped key",
@@ -2771,7 +3010,10 @@ mod tests {
             "0000000002000-0000-dev1",
         )
         .await;
-        let prior_wrapped = storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap();
+        let prior_wrapped = storage
+            .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member))
+            .await
+            .unwrap();
 
         // Re-invite the same member with a different key, but the entry upload fails
         // after the wrapped-key slot has already been overwritten.
@@ -2796,7 +3038,10 @@ mod tests {
 
         // The slot holds the exact prior object, not the failed invite's key.
         assert_eq!(
-            storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap(),
+            storage
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member))
+                .await
+                .unwrap(),
             prior_wrapped,
             "rollback restores the member's prior wrapped key byte-for-byte",
         );
@@ -2829,7 +3074,7 @@ mod tests {
 
         assert!(
             storage
-                .get_wrapped_key(&pubkey_hex(&invitee))
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&invitee))
                 .await
                 .is_err(),
             "the invitee has no wrapped key before the invite",
@@ -2856,7 +3101,7 @@ mod tests {
 
         assert!(
             storage
-                .get_wrapped_key(&pubkey_hex(&invitee))
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&invitee))
                 .await
                 .is_err(),
             "an invitee with no prior slot has the one just written deleted on rollback",
@@ -2904,7 +3149,7 @@ mod tests {
         // interrupted earlier invite could have left; the member stays current in
         // the committed chain.
         storage
-            .delete_wrapped_key(&pubkey_hex(&member))
+            .delete_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member))
             .await
             .unwrap();
         assert!(chain
@@ -2933,7 +3178,10 @@ mod tests {
 
         // The slot returns to absent — the wrap this invite wrote is deleted.
         assert!(
-            storage.get_wrapped_key(&pubkey_hex(&member)).await.is_err(),
+            storage
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member))
+                .await
+                .is_err(),
             "the wrap written by the failed invite is deleted, returning the slot to absent",
         );
 
@@ -2960,7 +3208,11 @@ mod tests {
 
         // Seed a stray slot for a non-member (anomalous leftover state).
         storage
-            .put_wrapped_key(&pubkey_hex(&invitee), b"stray-slot".to_vec())
+            .put_wrapped_key(
+                &pubkey_hex(&owner),
+                &pubkey_hex(&invitee),
+                b"stray-slot".to_vec(),
+            )
             .await
             .unwrap();
         assert!(!chain
@@ -2991,7 +3243,7 @@ mod tests {
         // rewritten.
         assert!(
             storage
-                .get_wrapped_key(&pubkey_hex(&invitee))
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&invitee))
                 .await
                 .is_err(),
             "a non-member's slot is deleted on rollback, never restored",
@@ -3029,7 +3281,10 @@ mod tests {
             "0000000002000-0000-dev1",
         )
         .await;
-        let prior_wrapped = storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap();
+        let prior_wrapped = storage
+            .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member))
+            .await
+            .unwrap();
 
         // Re-invite the same member, but the wrapped-key upload fails outright.
         storage.fail_wrapped_key_put_on_call(1);
@@ -3053,7 +3308,10 @@ mod tests {
 
         // The failed write left the member's existing key in place.
         assert_eq!(
-            storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap(),
+            storage
+                .get_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&member))
+                .await
+                .unwrap(),
             prior_wrapped,
             "a failed overwrite leaves the member's prior wrapped key untouched",
         );

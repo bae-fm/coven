@@ -125,7 +125,7 @@ async fn run_cycle(
 
 /// A non-rotating running device B adopts a rotated library key on its next cycle,
 /// with no restart. Device A removes a member, which rotates the key and re-wraps
-/// B's `keys/{B}` under the new key; B's next `run_single_sync_cycle` re-reads
+/// B's `keys/{A}/{B}` under the new key; B's next `run_single_sync_cycle` re-reads
 /// that wrapped key, authenticates it against the current Owner set, and swaps
 /// its live cipher — so it can now decrypt content sealed under the new key, and
 /// its keyring holds the new key for the next restart.
@@ -170,7 +170,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let wrapped_old =
         signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &old_key, &owner);
     storage
-        .put_wrapped_key(&pubkey_hex(&device_b), wrapped_old)
+        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), wrapped_old)
         .await
         .unwrap();
 
@@ -204,7 +204,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         "before any rotation B keeps the key it joined with",
     );
 
-    // --- Device A removes the victim: rotates the key, re-wraps B's keys/{B}. ---
+    // --- Device A removes the victim: rotates the key, re-wraps B's keys/{A}/{B}. ---
     let new_key = revoke_member(
         &storage,
         &storage,
@@ -256,7 +256,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     );
 
     // And the rotated key B now holds is exactly the one the owner re-wrapped for
-    // it — i.e. B can independently unwrap keys/{B} to the same bytes.
+    // it — i.e. B can independently unwrap keys/{A}/{B} to the same bytes.
     let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
     let reunwrapped = unwrap_library_keyring_for_owners_with_activation(
         &storage,
@@ -317,7 +317,7 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
         Some(activation),
     );
     storage
-        .put_wrapped_key(&pubkey_hex(&device_b), pending_wrapped)
+        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), pending_wrapped)
         .await
         .unwrap();
 
@@ -384,7 +384,11 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let wrapped_old =
         signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &old_key, &owner);
     storage
-        .put_wrapped_key(&pubkey_hex(&device_b), wrapped_old.clone())
+        .put_wrapped_key(
+            &pubkey_hex(&owner),
+            &pubkey_hex(&device_b),
+            wrapped_old.clone(),
+        )
         .await
         .unwrap();
 
@@ -425,7 +429,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     assert_eq!(cipher_generation(&cipher_b), new_key.current_generation());
 
     storage
-        .put_wrapped_key(&pubkey_hex(&device_b), wrapped_old)
+        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), wrapped_old)
         .await
         .unwrap();
 
@@ -482,7 +486,11 @@ async fn same_generation_wrapped_key_is_not_adopted() {
         &owner,
     );
     storage
-        .put_wrapped_key(&pubkey_hex(&device_b), same_generation_replacement)
+        .put_wrapped_key(
+            &pubkey_hex(&owner),
+            &pubkey_hex(&device_b),
+            same_generation_replacement,
+        )
         .await
         .unwrap();
 
@@ -636,8 +644,16 @@ async fn removed_owner_key_is_not_adopted() {
         &removed_owner_key,
         &founder,
     );
+    // The removed founder, using residual bucket write, drops its wrap into the
+    // current owner's prefix — where B's scan will read it. B authenticates the
+    // wrap against that prefix's owner (second_owner), so the founder's signature
+    // fails and the key is refused.
     storage
-        .put_wrapped_key(&pubkey_hex(&device_b), removed_owner_wrapped)
+        .put_wrapped_key(
+            &pubkey_hex(&second_owner),
+            &pubkey_hex(&device_b),
+            removed_owner_wrapped,
+        )
         .await
         .unwrap();
 
@@ -674,10 +690,11 @@ async fn removed_owner_key_is_not_adopted() {
     );
 }
 
-/// Wrapped-key adoption refuses a forged `keys/{self}` — one not signed by a
-/// current Owner. A bucket writer overwrites B's slot with a key they chose,
-/// sealed to B's public key and signed by an attacker. B's refresh authenticates
-/// against current Owners, so it does NOT adopt the attacker's key; the cycle
+/// Wrapped-key adoption refuses a forged wrap — one not signed by the owner whose
+/// prefix it sits under. A bucket writer drops a key they chose, sealed to B's
+/// public key and signed by an attacker, into the current owner's `keys/{owner}/`
+/// prefix. B's refresh scans the current owners and authenticates each wrap
+/// against its prefix owner, so it does NOT adopt the attacker's key; the cycle
 /// fails closed and B keeps its real key.
 #[tokio::test]
 async fn refresh_rejects_a_forged_wrapped_key() {
@@ -702,13 +719,14 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     upload_chain(&storage, &chain, &owner).await;
 
     // The attacker forges B's wrapped key: a key THEY chose, sealed to B's real
-    // public key, signed by the attacker (not the owner), in B's slot.
+    // public key, signed by the attacker (not the owner), dropped into the current
+    // owner's prefix where B's scan will read it.
     let forged_key: [u8; 32] = [0xCDu8; 32];
     let b_x = device_b.to_x25519_public_key();
     let forged =
         signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &forged_key, &attacker);
     storage
-        .put_wrapped_key(&pubkey_hex(&device_b), forged)
+        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), forged)
         .await
         .unwrap();
 

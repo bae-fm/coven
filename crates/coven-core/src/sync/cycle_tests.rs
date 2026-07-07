@@ -694,14 +694,33 @@ impl SyncStorage for HostWriteInjector {
     async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
         self.inner.get_membership_head(author_pubkey).await
     }
-    async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        self.inner.put_wrapped_key(user_pubkey, data).await
+    async fn put_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .put_wrapped_key(owner_pubkey, recipient_pubkey, data)
+            .await
     }
-    async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_wrapped_key(user_pubkey).await
+    async fn get_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.inner
+            .get_wrapped_key(owner_pubkey, recipient_pubkey)
+            .await
     }
-    async fn delete_wrapped_key(&self, user_pubkey: &str) -> Result<(), StorageError> {
-        self.inner.delete_wrapped_key(user_pubkey).await
+    async fn delete_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .delete_wrapped_key(owner_pubkey, recipient_pubkey)
+            .await
     }
     async fn put_snapshot_meta(
         &self,
