@@ -292,8 +292,11 @@ fn log_alerts(alerts: &SyncLoopAlerts) {
             "Stalled changes with an invalid signature (forged or corrupt)",
         );
     }
-    if alerts.held_changesets > 0 {
-        error!(count = alerts.held_changesets, "Stalled invalid changes",);
+    if !alerts.held_changesets.is_empty() {
+        error!(
+            count = alerts.held_changesets.len(),
+            "Stalled invalid changes",
+        );
     }
     if alerts.asset_downloads_failed {
         warn!("Some files failed to download, will retry");

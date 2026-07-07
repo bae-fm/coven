@@ -194,8 +194,14 @@ pub use storage::cloud::{
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through
 // these instead of the desktop browser-callback `sign_in_*` above.
-// Pull-result rejection reports the host surfaces to the user.
-pub use sync::pull::{InvalidSignature, RejectedUnauthorized};
+// Pull-result rejection reports the host surfaces to the user, including the
+// per-changeset held detail (device, seq, reason) the sync-status alerts carry.
+pub use sync::pull::{HeldChangeset, HeldChangesetReason, InvalidSignature, RejectedUnauthorized};
+
+// Sync-status surface: the per-cycle alert bundle and the per-device activity a
+// host renders "which devices synced, and when" from.
+pub use sync::loop_policy::SyncLoopAlerts;
+pub use sync::status::DeviceActivity;
 
 // In-memory cloud home for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]

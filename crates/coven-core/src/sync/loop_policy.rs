@@ -7,6 +7,8 @@
 use crate::changeset::RowChange;
 
 use super::cycle::SyncCycleResult;
+use super::pull::HeldChangeset;
+use super::status::DeviceActivity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopWait {
@@ -30,12 +32,27 @@ pub struct SyncLoopAlerts {
     pub skipped_schema: u64,
     pub rejected_unauthorized: u64,
     pub invalid_signatures: u64,
-    pub held_changesets: u64,
+    /// Changesets held after a validation/apply failure, with per-changeset
+    /// detail (device, seq, reason) — so a host can name which are stalled.
+    pub held_changesets: Vec<HeldChangeset>,
     pub constraint_conflicts: u64,
     pub asset_downloads_failed: bool,
 }
 
 impl SyncLoopAlerts {
+    /// The empty set of alerts — a cycle that surfaced no warning, or one that
+    /// has not completed yet (a cycle-start status).
+    pub fn none() -> Self {
+        SyncLoopAlerts {
+            skipped_schema: 0,
+            rejected_unauthorized: 0,
+            invalid_signatures: 0,
+            held_changesets: Vec::new(),
+            constraint_conflicts: 0,
+            asset_downloads_failed: false,
+        }
+    }
+
     pub fn primary_message(&self) -> Option<String> {
         if self.skipped_schema > 0 {
             Some(format!(
@@ -52,10 +69,10 @@ impl SyncLoopAlerts {
                 "{} changes with an invalid signature are stalled.",
                 self.invalid_signatures,
             ))
-        } else if self.held_changesets > 0 {
+        } else if !self.held_changesets.is_empty() {
             Some(format!(
                 "{} invalid changes are stalled.",
-                self.held_changesets,
+                self.held_changesets.len(),
             ))
         } else if self.constraint_conflicts > 0 {
             let noun = if self.constraint_conflicts == 1 {
@@ -79,6 +96,9 @@ impl SyncLoopAlerts {
 pub struct SyncLoopSuccess {
     pub last_sync_time: String,
     pub device_count: u32,
+    /// Per-device activity of the other devices — id, member key, latest seq,
+    /// last-sync time — for a host to render which devices synced and when.
+    pub device_activity: Vec<DeviceActivity>,
     pub data_changed: bool,
     pub row_changes: Option<Vec<RowChange>>,
     pub alerts: SyncLoopAlerts,
@@ -114,7 +134,9 @@ pub fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
         },
         report: SyncLoopReport::Success(SyncLoopSuccess {
             last_sync_time: result.sync_time,
-            device_count: (result.other_device_count + 1) as u32,
+            // This device plus the others its heads reported.
+            device_count: (result.device_activity.len() + 1) as u32,
+            device_activity: result.device_activity,
             data_changed,
             row_changes,
             alerts: SyncLoopAlerts {
@@ -149,15 +171,40 @@ pub fn after_failure(
 mod tests {
     use super::*;
 
+    use crate::sync::pull::HeldChangesetReason;
+
+    fn held(n: usize) -> Vec<HeldChangeset> {
+        (0..n)
+            .map(|i| HeldChangeset {
+                device_id: format!("dev-{i}"),
+                seq: i as u64,
+                reason: HeldChangesetReason::ApplyFailed {
+                    error: "boom".to_string(),
+                },
+            })
+            .collect()
+    }
+
+    fn device_activity(n: usize) -> Vec<DeviceActivity> {
+        (0..n)
+            .map(|i| DeviceActivity {
+                device_id: format!("dev-{i}"),
+                author: format!("author-{i}"),
+                last_seq: i as u64,
+                last_sync: Some("2026-07-03T00:00:00Z".to_string()),
+            })
+            .collect()
+    }
+
     fn cycle_result() -> SyncCycleResult {
         SyncCycleResult {
             changesets_applied: 0,
             skipped_schema: 0,
             rejected_unauthorized: 0,
             invalid_signatures: 0,
-            held_changesets: 0,
+            held_changesets: Vec::new(),
             constraint_conflicts: 0,
-            other_device_count: 2,
+            device_activity: device_activity(2),
             sync_time: "2026-07-03T00:00:00Z".to_string(),
             asset_downloads_failed: false,
             row_changes: vec![],
@@ -176,6 +223,32 @@ mod tests {
                 assert_eq!(success.device_count, 3);
                 assert!(!success.data_changed);
                 assert!(success.row_changes.is_none());
+            }
+            SyncLoopReport::Failure(error) => panic!("expected success, got {error}"),
+        }
+    }
+
+    #[test]
+    fn success_carries_device_activity_and_held_detail() {
+        let mut result = cycle_result();
+        result.device_activity = device_activity(2);
+        result.held_changesets = held(3);
+
+        let decision = after_success(result);
+
+        match decision.report {
+            SyncLoopReport::Success(success) => {
+                // The per-device detail reaches the report, not just a count.
+                assert_eq!(success.device_activity.len(), 2);
+                assert_eq!(success.device_activity[0].author, "author-0");
+                assert_eq!(success.device_count, 3);
+                // Held changesets travel with device/seq/reason, not a bare count.
+                assert_eq!(success.alerts.held_changesets.len(), 3);
+                assert_eq!(success.alerts.held_changesets[0].device_id, "dev-0");
+                assert_eq!(
+                    success.alerts.primary_message().as_deref(),
+                    Some("3 invalid changes are stalled."),
+                );
             }
             SyncLoopReport::Failure(error) => panic!("expected success, got {error}"),
         }
@@ -209,7 +282,7 @@ mod tests {
             skipped_schema: 1,
             rejected_unauthorized: 2,
             invalid_signatures: 3,
-            held_changesets: 4,
+            held_changesets: held(4),
             constraint_conflicts: 5,
             asset_downloads_failed: true,
         };
@@ -226,7 +299,7 @@ mod tests {
             skipped_schema: 0,
             rejected_unauthorized: 0,
             invalid_signatures: 0,
-            held_changesets: 0,
+            held_changesets: Vec::new(),
             constraint_conflicts: 1,
             asset_downloads_failed: false,
         };

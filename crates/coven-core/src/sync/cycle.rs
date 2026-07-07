@@ -24,7 +24,9 @@ use crate::storage::cloud::CloudHome;
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
 use super::publish_blobs::{ensure_publishable_changeset_blobs, PublishBlobError};
+use super::pull::HeldChangeset;
 use super::service::DeferredLocalBlobDisposition;
+use super::status::DeviceActivity;
 use super::storage::SyncStorage;
 
 /// Result of a single sync cycle.
@@ -43,14 +45,18 @@ pub struct SyncCycleResult {
     /// is held at the bad seq for that device, and the count surfaces as a warning.
     pub invalid_signatures: u64,
     /// Changesets whose present cloud object failed validation or apply. The
-    /// cursor is held at the bad seq for that device.
-    pub held_changesets: u64,
+    /// cursor is held at the bad seq for that device. Carries per-changeset
+    /// detail (device, seq, reason) so a host can say which changesets are
+    /// stalled, not only how many.
+    pub held_changesets: Vec<HeldChangeset>,
     /// Changeset rows omitted because SQLite reported a non-retryable constraint
     /// conflict. The cursor advanced past the changeset; the count is per-cycle
     /// and surfaces as a warning.
     pub constraint_conflicts: u64,
-    /// Number of other devices seen in the sync storage.
-    pub other_device_count: usize,
+    /// Per-device activity of the other devices seen in the sync storage —
+    /// device id, its member's author key, latest seq, and RFC 3339 last-sync
+    /// time — so a host can render which devices synced and when.
+    pub device_activity: Vec<DeviceActivity>,
     /// RFC 3339 timestamp of when this cycle completed.
     pub sync_time: String,
     /// Asset downloads failed — cursor not advanced for those changesets.
@@ -966,16 +972,15 @@ pub async fn run_single_sync_cycle(
         device_id,
         Some(&sync_time),
     );
-    let other_device_count = core_status.other_devices.len();
 
     Ok(SyncCycleResult {
         changesets_applied: sync_result.pull.changesets_applied,
         skipped_schema: sync_result.pull.skipped_schema,
         rejected_unauthorized: sync_result.pull.rejected_unauthorized.len() as u64,
         invalid_signatures: sync_result.pull.invalid_signatures.len() as u64,
-        held_changesets: sync_result.pull.held_changesets.len() as u64,
+        held_changesets: sync_result.pull.held_changesets,
         constraint_conflicts: sync_result.pull.constraint_conflicts.len() as u64,
-        other_device_count,
+        device_activity: core_status.other_devices,
         sync_time,
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,
         row_changes: sync_result.pull.row_changes,

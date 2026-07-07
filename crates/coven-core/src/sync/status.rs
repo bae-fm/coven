@@ -9,9 +9,12 @@ use super::storage::DeviceHead;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceActivity {
     pub device_id: String,
+    /// Hex-encoded Ed25519 public key the device's head verified against — the
+    /// member the device belongs to. Empty only for a head that carried no author.
+    pub author: String,
     pub last_seq: u64,
     /// RFC 3339 timestamp of the device's last sync. None if the head
-    /// was written before timestamps were added.
+    /// carried no timestamp.
     pub last_sync: Option<String>,
 }
 
@@ -44,6 +47,7 @@ pub fn build_sync_status(
 
         other_devices.push(DeviceActivity {
             device_id: head.device_id.clone(),
+            author: head.author_pubkey.clone(),
             last_seq: head.seq,
             last_sync: head.last_sync.clone(),
         });
@@ -81,7 +85,7 @@ mod tests {
                 seq: 3,
                 snapshot_seq: None,
                 last_sync: Some("2026-02-10T11:55:00Z".into()),
-                author_pubkey: String::new(),
+                author_pubkey: "abcd".into(),
             },
         ];
 
@@ -92,6 +96,7 @@ mod tests {
         );
         assert_eq!(status.other_devices.len(), 1);
         assert_eq!(status.other_devices[0].device_id, "dev-2");
+        assert_eq!(status.other_devices[0].author, "abcd");
         assert_eq!(status.other_devices[0].last_seq, 3);
     }
 

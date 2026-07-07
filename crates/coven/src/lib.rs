@@ -406,6 +406,11 @@ pub use coven_core::{
     UploadProgress,
 };
 
+// Sync-status surface a host renders from `CovenHandle::subscribe_sync_status`:
+// the per-cycle alert bundle, the per-device activity, and the held-changeset
+// detail the alerts carry.
+pub use coven_core::{DeviceActivity, HeldChangeset, HeldChangesetReason, SyncLoopAlerts};
+
 // In-memory cloud home and durable upload-queue rows for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
