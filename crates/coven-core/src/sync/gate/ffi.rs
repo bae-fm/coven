@@ -208,7 +208,8 @@ pub(super) unsafe fn for_each_change(
 }
 
 /// Every DELETE in the changeset, keyed by `(table, primary key)`, holding the
-/// row's old column values. [`was_shared`] reads these to resolve a deleted row's
+/// row's old column values. `was_shared` (in the outbound pass) reads these to
+/// resolve a deleted row's
 /// pre-deletion gate state — its gate terminus is gone from the live db, so the
 /// old values in the changeset are the only record that it was shared.
 pub(super) unsafe fn collect_deletes(

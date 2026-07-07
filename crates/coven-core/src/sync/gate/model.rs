@@ -215,7 +215,7 @@ impl Gates {
     /// `DELETE`s over the live tables rather than as a changeset filter.
     ///
     /// Both channels a row can use to cross devices — the changeset
-    /// ([`gate_outbound`]) and the snapshot — must honor the same gate, so the
+    /// ([`gate_outbound`](crate::sync::gate::gate_outbound)) and the snapshot — must honor the same gate, so the
     /// snapshot calls this on its VACUUM'd copy to strip gated-false subtrees
     /// before the bytes leave the device. Sharing this method (not a parallel
     /// FK model) keeps a single definition of what the gate excludes.
@@ -507,7 +507,7 @@ fn reaches_gate_terminus(gate_map: &HashMap<String, TableGate>, name: &str) -> b
 /// The gated FK edges of the schema, as `parent table -> [(child table, child's
 /// FK column name)]`: for every gated table, each of its FKs that points at
 /// another gated table contributes an edge under the *target* (the parent). The
-/// fixpoint walk in [`connected_component`] follows these down-edges
+/// fixpoint walk in `connected_component` (the outbound pass) follows these down-edges
 /// directly; [`fk_topological_order`] uses the same edges (discarding the FK
 /// column) so the parent-first order is derived from one definition, not a second
 /// parallel FK scan.
