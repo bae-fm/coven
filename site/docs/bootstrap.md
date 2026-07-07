@@ -6,6 +6,8 @@ work but grows without bound: a library that has run for a year holds a year of
 changesets. Instead, coven keeps a full snapshot of the database in the cloud and
 lets a fresh device download that, then pull only the changesets created after it.
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
 The examples use a todos app: `workspaces` hold `lists`, a `list` holds `todos`,
 a `todo` has `todo_attachments`, and `todos` carry `labels` through a
 `todo_labels` join. A `list` has a boolean `shared` column gating it.
@@ -25,9 +27,10 @@ one pass:
    own `sync_cursors`, `sync_state`, and `cloud_outbox`) have their rows deleted.
    Their schema stays, so the restored database opens against the same schema it
    was snapshotted at, but a device-local row (say a `device_settings` table
-   holding a filesystem path) never rides along to a peer. coven keeps no
-   migration ledger: the snapshot bytes carry every table's schema, so a restored
-   database is already at the schema the snapshotting device ran.
+   holding a filesystem path) never rides along to a peer. The snapshot's
+   metadata records the publisher's [schema version](/docs/schema-evolution)
+   (the top of its migration ladder), so a reader knows what schema the bytes
+   carry before downloading them.
 3. Row-level gating is applied: gated-false roots and their foreign-key
    descendants are deleted. A private list (`shared = 0`) and the todos under it
    are removed from the copy. This reuses the same
@@ -80,6 +83,22 @@ image and meta but before the pointer leaves orphan objects that nothing
 references and the old pointer still valid; a later sweep by that device reclaims
 them. No half-published state is ever observable, and nothing relies on a later
 pass to repair a wrong state.
+
+
+<svg class="flow" viewBox="0 0 660 118" role="img" aria-label="A snapshot publish writes the image, then the signed metadata, then flips the pointer last; the pointer is the commit">
+<text class="sub" x="105" y="30" text-anchor="middle">1</text>
+<rect class="chipo" x="15" y="40" width="180" height="30" rx="8"/>
+<text class="lbl s11" x="105" y="59" text-anchor="middle">{seq}.db.enc · image</text>
+<line class="arr" x1="199" y1="55" x2="216" y2="55" marker-end="url(#fa)"/>
+<text class="sub" x="310" y="30" text-anchor="middle">2</text>
+<rect class="chipo" x="220" y="40" width="180" height="30" rx="8"/>
+<text class="lbl s11" x="310" y="59" text-anchor="middle">{seq}_meta · signed</text>
+<line class="arr" x1="404" y1="55" x2="421" y2="55" marker-end="url(#fa)"/>
+<text class="sub" x="515" y="30" text-anchor="middle">3 · last</text>
+<rect class="chipa" x="425" y="40" width="180" height="30" rx="8"/>
+<text class="lbl s11" x="515" y="59" text-anchor="middle">current.json · pointer</text>
+<text class="sub" x="330" y="100" text-anchor="middle">until the pointer flips, every reader still resolves the previous complete generation</text>
+</svg>
 
 ## Signing and authorization
 
@@ -136,6 +155,24 @@ in `sync_state`, which feed the next policy check.
 
 ## Join and restore
 
+<svg class="flow" viewBox="0 0 660 128" role="img" aria-label="Bootstrap: authenticate the pointer, download and hash-check the image, open running the ladder, then pull past the cursors">
+<rect class="chip" x="8" y="40" width="150" height="42" rx="8"/>
+<text class="lbl s11" x="83" y="57" text-anchor="middle">authenticate pointer</text>
+<text class="sub" x="83" y="72" text-anchor="middle">signatures · membership</text>
+<line class="arr" x1="162" y1="61" x2="176" y2="61" marker-end="url(#fa)"/>
+<rect class="chip" x="180" y="40" width="150" height="42" rx="8"/>
+<text class="lbl s11" x="255" y="57" text-anchor="middle">download image</text>
+<text class="sub" x="255" y="72" text-anchor="middle">hash must match meta</text>
+<line class="arr" x1="334" y1="61" x2="348" y2="61" marker-end="url(#fa)"/>
+<rect class="chip" x="352" y="40" width="150" height="42" rx="8"/>
+<text class="lbl s11" x="427" y="57" text-anchor="middle">open with the ladder</text>
+<text class="sub" x="427" y="72" text-anchor="middle">runs rungs above the image</text>
+<line class="arr" x1="506" y1="61" x2="520" y2="61" marker-end="url(#fa)"/>
+<rect class="chip" x="524" y="40" width="130" height="42" rx="8"/>
+<text class="lbl s11" x="589" y="57" text-anchor="middle">pull past cursors</text>
+<text class="sub" x="589" y="72" text-anchor="middle">then reconcile blobs</text>
+</svg>
+
 Bootstrapping happens inside the join flow (a new member added by an owner) and
 the restore flow (the owner recovering the library on new hardware). Both call
 [`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot):
@@ -154,13 +191,19 @@ the restore flow (the owner recovering the library on new hardware). Both call
    [`BootstrapResult`](rustdoc:struct:coven::sync::snapshot::BootstrapResult)
    carrying the per-device cursors from the metadata.
 
-The device then opens the bootstrapped file through
-`Coven::builder(config).open(...)` and pulls every changeset newer than the
-bootstrap cursors, so it catches up on anything written between the snapshot and
-now. coven owns the connection from this point: there is no host reopen step. The
-snapshot already carries the full schema (the host's tables and coven's
-bookkeeping), so coven's bookkeeping migration finds its `IF NOT EXISTS` tables
-already present and the host's `migrate` closure is a no-op here.
+Before downloading anything, the reader compares the generation's recorded
+schema version against its own migration ladder's top. A snapshot *newer* than
+the app understands is refused with
+[`SnapshotError::SchemaTooNew`](rustdoc:enum:coven::sync::snapshot::SnapshotError),
+writing nothing: the user updates the app and retries. A snapshot at or below
+the app's version is downloaded, and the device then opens it through
+`Coven::builder(config).synced_tables(...).migrations(...).open()`, which runs
+coven's bookkeeping migration (its `IF NOT EXISTS` tables are already present)
+and then any rungs of the host's ladder above the snapshot's version, exactly
+as an upgrade on an existing device would. Join and restore run the ladder;
+there is no separate migration path. The device then pulls every changeset
+newer than the bootstrap cursors, so it catches up on anything written between
+the snapshot and now.
 
 Capture stays enabled through the bootstrap pull. A just-bootstrapped library has
 no local writer, so there is no whole-cycle suspend to manage; the pull disables
@@ -170,7 +213,8 @@ capture only around each apply, exactly as a steady-state cycle does.
 let _bootstrap = bootstrap_from_snapshot(storage, library_id, &cipher, owner_pubkey, &db_path).await?;
 let handle = Coven::builder(config)
     .synced_tables(synced_tables.to_vec())
-    .open(|_conn| Ok(()))?; // schema already in the snapshot; nothing to migrate
+    .migrations(migrations)   // the same ladder every open passes
+    .open()?;                 // runs any rungs above the snapshot's version
 handle.connect_sync(Some(encryption_service)).await?;
 handle.sync_now();
 ```
