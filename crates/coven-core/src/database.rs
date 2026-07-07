@@ -71,10 +71,13 @@ struct DatabaseCore {
     blob_decls: Arc<BlobDecls>,
 }
 
-// Native constructs the core before spawning the actor, then moves the whole
-// owned connection/session pair into that thread and never shares it. The erased
-// session lifetime is valid because `DatabaseCore` drops the session before the
-// connection, and no table filter closure is installed.
+// Native builds the core, then hands it once — by value — to the connection
+// thread spawned in [`Database::open_with_hlc`], which owns it for its whole life
+// and is the only thread that ever touches it; no clone, mutex, or shared
+// reference reaches it afterward. This `Send` exists solely to move the core
+// across that single `thread::spawn` boundary. The erased session lifetime stays
+// sound because `DatabaseCore` drops the session before the connection, and no
+// table filter closure is installed.
 #[cfg(not(target_arch = "wasm32"))]
 unsafe impl Send for DatabaseCore {}
 
@@ -213,12 +216,86 @@ impl Drop for CaptureReenable<'_> {
     }
 }
 
-/// A handle to the owned database. Cloneable; every clone serializes access to
-/// the same connection and capture session.
+/// A unit of work for the connection thread: a caller's closure to run against
+/// the owned core, or the sentinel the last [`Database`] clone sends as it drops
+/// to stop the thread. A `Run` closure carries its own reply channel, so it
+/// returns `()` — [`Database::on_connection_thread`] builds it to capture the
+/// caller's result and send it back.
+#[cfg(not(target_arch = "wasm32"))]
+enum DbJob {
+    Run(Box<dyn FnOnce(&mut DatabaseCore) + Send>),
+    Stop,
+}
+
+/// The connection thread's send channel and join handle, shared by every
+/// [`Database`] clone through an `Arc`. The last clone to drop shuts the thread
+/// down and joins it, so the connection closes on the thread that owned it before
+/// control returns to the dropper.
+#[cfg(not(target_arch = "wasm32"))]
+struct ConnectionThread {
+    jobs: tokio::sync::mpsc::UnboundedSender<DbJob>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ConnectionThread {
+    fn drop(&mut self) {
+        // Reached only when the last `Database` clone drops — no other clone can
+        // still be sending. Queue `Stop` behind whatever jobs are already in
+        // flight so the thread drains them, exits, and drops the core (closing the
+        // connection). A send error means the thread already stopped.
+        let _ = self.jobs.send(DbJob::Stop);
+        let handle = match self.join.take() {
+            Some(handle) => handle,
+            None => return,
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // A `Database` handle roams freely across async tasks, so this last
+            // drop can land inside a runtime task. Joining here would block that
+            // worker until the queue drains — the very stall this thread exists to
+            // remove. Detach instead: the thread drains its queue, drops the core,
+            // and exits on its own. Every queued job's effect is durable, so a
+            // thread left unjoined loses nothing; only the deterministic close
+            // moves off this task.
+            drop(handle);
+        } else {
+            // Sync context — tests, process teardown — where there is no worker to
+            // stall. Join for a deterministic shutdown: the connection is fully
+            // closed before we return. Jobs run under `catch_unwind`, so the thread
+            // never unwinds from a caller's closure; a join error is a real fault
+            // (a panic in the core's own drop) and is surfaced, not swallowed.
+            if handle.join().is_err() {
+                error!("database connection thread panicked");
+            }
+        }
+    }
+}
+
+/// Own the connection on this thread and run each queued job in send order until
+/// `Stop`. The channel's FIFO is the serialization the `tokio::Mutex` used to
+/// provide, and the connection and capture session never leave this thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_connection_thread(
+    mut core: DatabaseCore,
+    mut jobs: tokio::sync::mpsc::UnboundedReceiver<DbJob>,
+) {
+    while let Some(job) = jobs.blocking_recv() {
+        match job {
+            DbJob::Run(f) => f(&mut core),
+            DbJob::Stop => break,
+        }
+    }
+    // Loop exited: drop `core` here — session before connection (field order) —
+    // closing the connection on the thread that has owned it throughout.
+}
+
+/// A handle to the owned database. Cloneable; every clone sends work to the one
+/// connection thread over the same channel, so access serializes as the channel's
+/// FIFO.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct Database {
-    core: Arc<tokio::sync::Mutex<DatabaseCore>>,
+    thread: Arc<ConnectionThread>,
     state: DatabaseState,
 }
 
@@ -444,9 +521,19 @@ impl Database {
         let (core, state, stamper) = DatabaseCore::open(path, synced_tables, hlc, migrations)?;
 
         #[cfg(not(target_arch = "wasm32"))]
-        let database = Database {
-            core: Arc::new(tokio::sync::Mutex::new(core)),
-            state,
+        let database = {
+            let (jobs_tx, jobs_rx) = tokio::sync::mpsc::unbounded_channel::<DbJob>();
+            let join = std::thread::Builder::new()
+                .name("coven-db".to_string())
+                .spawn(move || run_connection_thread(core, jobs_rx))
+                .map_err(|e| DbError(format!("spawn database connection thread: {e}")))?;
+            Database {
+                thread: Arc::new(ConnectionThread {
+                    jobs: jobs_tx,
+                    join: Some(join),
+                }),
+                state,
+            }
         };
 
         #[cfg(target_arch = "wasm32")]
@@ -515,17 +602,58 @@ impl Database {
     /// transitions that mutate synced rows use [`Self::call_with_capture_reset`]
     /// plus a transaction-scoped pending journal instead.
     ///
-    /// Native serializes access behind a mutex; wasm runs `f` directly on the
-    /// borrowed connection on this Worker and returns a ready future, so it needs
-    /// no `Send` — the closure never leaves the thread.
+    /// Native hands `f` to the connection thread and awaits its reply, so the SQL
+    /// runs off the async executor; wasm runs `f` directly on the borrowed
+    /// connection on this Worker and returns a ready future, so it needs no `Send`
+    /// — the closure never leaves the thread.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn call<F, R>(&self, f: F) -> Result<R, DbError>
     where
         F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        let core = self.core.lock().await;
-        f(core.connection())
+        self.on_connection_thread(move |core| f(core.connection()))
+            .await
+    }
+
+    /// Send `f` to the connection thread, run it against the owned core there, and
+    /// await its result. A panic in `f` is caught on the connection thread (so it
+    /// cannot unwind the thread and take the connection with it) and resumed on
+    /// this task, matching the pre-thread behavior where the closure panicked
+    /// directly on the caller.
+    ///
+    /// Cancellation: once dispatched, `f` runs to completion on the connection
+    /// thread regardless of whether the caller is still awaiting. If the caller is
+    /// cancelled between the thread committing and this reply resolving, it never
+    /// observes the result even though the effect landed — the same "the operation
+    /// may have committed" contract any network call carries. This is deliberate:
+    /// the durable database state is the source of truth, and a caller must treat
+    /// a cancelled call as possibly-committed. Follow-ups that matter beyond that
+    /// durable state — observer notifications, publish triggers — are not driven
+    /// off this return value; the sync cycle re-derives them from durable state.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn on_connection_thread<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut DatabaseCore) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let job = DbJob::Run(Box::new(move |core| {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(core)));
+            // The caller may have been cancelled and dropped `reply_rx`; a failed
+            // send is that normal outcome, not an error.
+            let _ = reply_tx.send(outcome);
+        }));
+        if self.thread.jobs.send(job).is_err() {
+            panic!("database connection thread stopped before a call completed");
+        }
+        match reply_rx.await {
+            Ok(Ok(value)) => value,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(_) => {
+                panic!("database connection thread dropped a call's reply without responding")
+            }
+        }
     }
 
     /// See the native `call`. wasm borrows the connection, runs `f`, drops the
@@ -547,10 +675,12 @@ impl Database {
         F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        let mut core = self.core.lock().await;
-        let result = f(core.connection());
-        core.reset_session();
-        result
+        self.on_connection_thread(move |core| {
+            let result = f(core.connection());
+            core.reset_session();
+            result
+        })
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -665,10 +795,12 @@ impl Database {
     /// Test-only raw capture path for tests that inspect changeset bytes directly.
     #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
     pub async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
-        let mut core = self.core.lock().await;
-        let bytes = capture_changeset(core.session.as_mut());
-        core.reset_session();
-        bytes
+        self.on_connection_thread(|core| {
+            let bytes = capture_changeset(core.session.as_mut());
+            core.reset_session();
+            bytes
+        })
+        .await
     }
 
     /// Test-only raw capture path for tests that inspect changeset bytes directly.
@@ -696,8 +828,8 @@ impl Database {
         F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        let mut core = self.core.lock().await;
-        core.with_capture_disabled(f)
+        self.on_connection_thread(move |core| core.with_capture_disabled(f))
+            .await
     }
 
     /// See the native `apply_changeset`. wasm borrows the connection, disables the
@@ -1563,6 +1695,108 @@ mod tests {
                 _updated_at TEXT NOT NULL
             );",
         )
+    }
+
+    /// A SQL closure that blocks for a while must not stall other tasks on the
+    /// same runtime, because jobs run on the dedicated connection thread rather
+    /// than the async executor. On a current-thread runtime the scheduler has to
+    /// poll the spawned DB call before it can resume us; if that call ran its
+    /// blocking closure inline on the executor thread, this single `yield_now`
+    /// would not return until the closure finished. With the closure on its own
+    /// thread we resume immediately, long before it completes.
+    #[tokio::test]
+    async fn slow_db_call_does_not_block_the_executor() {
+        use std::time::{Duration, Instant};
+
+        let (db, _stamper) = Database::open(
+            Path::new(":memory:"),
+            Vec::new(),
+            "liveness".to_string(),
+            &[],
+        )
+        .expect("open database");
+
+        let slow_db = db.clone();
+        let slow = tokio::spawn(async move {
+            slow_db
+                .call(|conn| {
+                    std::thread::sleep(Duration::from_millis(500));
+                    conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                        .map_err(DbError::from)
+                })
+                .await
+        });
+
+        let start = Instant::now();
+        tokio::task::yield_now().await;
+        let stalled = start.elapsed();
+
+        assert!(
+            stalled < Duration::from_millis(250),
+            "unrelated task stalled {stalled:?} behind the slow DB call — the executor was blocked",
+        );
+
+        let value = slow
+            .await
+            .expect("slow DB task joins")
+            .expect("slow DB call succeeds");
+        assert_eq!(value, 1, "the slow DB call still returns its result");
+    }
+
+    /// Dropping the last handle from inside a runtime task must not block that
+    /// task on the connection thread's queue, and a job already dispatched must
+    /// still run to completion. The drop detaches the thread in async context, so
+    /// it returns at once; the detached thread finishes the queued job (its effect
+    /// is durable) and exits on its own.
+    #[tokio::test]
+    async fn dropping_last_handle_in_async_context_does_not_stall_but_job_still_lands() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("db.sqlite");
+        let marker = dir.path().join("marker");
+
+        let (db, _stamper) =
+            Database::open(&db_path, Vec::new(), "drop-async".to_string(), &[]).expect("open");
+
+        // Dispatch a slow job to the connection thread, then release the clone
+        // tied to it so the job is in flight with no handle awaiting it: spawn the
+        // call, let it dispatch, then abort the task so its `Database` clone drops
+        // while the job still runs. The job writes a marker file when it finishes.
+        let job_db = db.clone();
+        let job_marker = marker.clone();
+        let task = tokio::spawn(async move {
+            let _ = job_db
+                .call(move |_conn| {
+                    std::thread::sleep(Duration::from_millis(300));
+                    std::fs::write(&job_marker, b"landed").map_err(|e| DbError(e.to_string()))
+                })
+                .await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+
+        // `db` is now the last clone; dropping it inside this runtime task must
+        // detach (not join) so it returns without waiting out the queued job.
+        let drop_start = Instant::now();
+        drop(db);
+        let drop_elapsed = drop_start.elapsed();
+        assert!(
+            drop_elapsed < Duration::from_millis(200),
+            "dropping the last handle stalled {drop_elapsed:?} — it joined the connection thread \
+             instead of detaching",
+        );
+
+        // The detached thread still runs the already-dispatched job to completion.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the dispatched job's effect never landed after the last handle dropped",
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
