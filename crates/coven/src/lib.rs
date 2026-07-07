@@ -326,6 +326,7 @@ pub mod sync {
 mod coven;
 mod database_backend;
 mod handle;
+mod keyring_backend;
 
 pub(crate) fn install_platform() {
     database_backend::install_platform_connection_opener();

@@ -38,7 +38,9 @@ This workspace has three crates:
 - Declare which rows carry blobs per table with `SyncedTable::carries_blob` (a
   `BlobDecl`: namespace, provenance, cache fill, encryption scope), and
   optionally pass a `BlobTransitionObserver` to the builder.
-- Register identity/OAuth at startup: `set_keyring_service`,
+- Register identity/OAuth at startup: `set_keyring_service` (names the keyring
+  service and installs the platform keyring store — apple-native on macOS/iOS,
+  android-native on Android; errors on a target with no bundled store) and
   `set_oauth_client_creds`.
 - Run app SQL through `handle.sql(...)`. Use `handle.write(...)` when a row write
   and host-provided blob bytes must commit together. Read blobs through

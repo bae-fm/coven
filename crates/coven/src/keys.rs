@@ -9,8 +9,28 @@ pub use coven_core::keys::{
 
 static KEYRING_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-pub fn set_keyring_service(name: impl Into<String>) {
-    let _ = KEYRING_SERVICE.set(name.into());
+/// Register the process-wide keyring: the service name every entry is stored
+/// under, and the platform keyring store that backs it. Both are one-time
+/// startup registration and must run before any key operation. The store is
+/// installed before the name is recorded, so a failed installation leaves no
+/// registration behind. Re-registering the same name is a no-op; a different
+/// name is a startup contradiction and fails. Fails with
+/// [`KeyError::UnsupportedKeyringPlatform`] on a target with no bundled store.
+pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
+    crate::keyring_backend::install_platform_store()?;
+    let name = name.into();
+    if KEYRING_SERVICE.set(name.clone()).is_err() {
+        let registered = KEYRING_SERVICE
+            .get()
+            .map(String::as_str)
+            .unwrap_or_default();
+        if registered != name {
+            return Err(KeyError::Persistence(format!(
+                "keyring service is already registered as {registered:?}; cannot re-register as {name:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn keyring_service() -> &'static str {
@@ -21,7 +41,10 @@ pub fn keyring_service() -> &'static str {
 }
 
 fn map_keyring_error(e: keyring_core::Error) -> KeyError {
-    KeyError::Persistence(e.to_string())
+    match e {
+        keyring_core::Error::NoDefaultStore => KeyError::StoreNotInstalled,
+        other => KeyError::Persistence(other.to_string()),
+    }
 }
 
 pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
@@ -213,10 +236,13 @@ pub(crate) mod test_keyring {
 
     pub(crate) fn install() {
         INSTALL.call_once(|| {
+            // Install the in-memory mock before registering the service so
+            // `set_keyring_service` keeps it instead of reaching for the OS
+            // keychain — a platform mechanism these tests never touch.
             keyring_core::set_default_store(
                 keyring_core::mock::Store::new().expect("create mock keyring store"),
             );
-            super::set_keyring_service("coven-tests");
+            super::set_keyring_service("coven-tests").expect("register keyring service");
         });
     }
 }

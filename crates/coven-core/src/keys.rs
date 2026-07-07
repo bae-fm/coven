@@ -16,6 +16,14 @@ pub enum KeyError {
     Crypto(String),
     #[error("Key persistence error: {0}")]
     Persistence(String),
+    #[error(
+        "no keyring store is installed; the host must install the platform keyring store at startup (set_keyring_service) before any key operation"
+    )]
+    StoreNotInstalled,
+    #[error(
+        "no bundled keyring store exists for this target; the host must supply one via keyring_core::set_default_store before registering the keyring service"
+    )]
+    UnsupportedKeyringPlatform,
 }
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.
