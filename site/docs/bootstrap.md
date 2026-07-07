@@ -8,9 +8,7 @@ lets a fresh device download that, then pull only the changesets created after i
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
-The examples use a todos app: `workspaces` hold `lists`, a `list` holds `todos`,
-a `todo` has `todo_attachments`, and `todos` carry `labels` through a
-`todo_labels` join. A `list` has a boolean `shared` column gating it.
+Examples use the todos app; a `list` has a boolean `shared` column gating it.
 
 ## What a snapshot is
 

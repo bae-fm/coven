@@ -41,9 +41,8 @@ Nothing in storage is ever overwritten: a device only appends to its own
 stream, so there is no write contention to coordinate. A puller tracks one
 cursor per stream, the highest sequence it has applied from that device.
 
-The examples use a todos app. A `workspace` holds `lists`, a `list` holds
-`todos`, a todo can have `todo_attachments`, and labels attach via a
-`todo_labels` join. Two people, Alice and Bob, share the library.
+Examples use the todos app (workspaces hold lists, lists hold todos, todos
+carry attachments and labels); Alice and Bob share the library.
 
 This page covers how a local write reaches every device. Row-level gating
 (which rows stay local) has its own page, [Local data](/docs/local-data);

@@ -59,9 +59,9 @@ it passes to `Coven::builder(config).synced_tables(...)`, and coven enforces
 it on both paths a row can take to another device: the per-cycle changeset
 and the bootstrap snapshot.
 
-The examples use a todos app: a `workspace` holds `lists`, and a `list` holds
-`todos`. A list has a boolean `shared` column. A private list, and the todos
-under it, should stay on the device that made it.
+Examples: a `workspace` holds `lists`, a `list` holds `todos`, and a list has
+a boolean `shared` column. A private list, and the todos under it, should stay
+on the device that made it.
 
 [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has four
 gate forms:

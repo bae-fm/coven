@@ -26,10 +26,9 @@ key.
 <text class="sub" x="330" y="208" text-anchor="middle">Google Drive · Dropbox · OneDrive · iCloud · S3</text>
 </svg>
 
-The examples use a todos app. Its synced tables are `workspaces`, `lists`,
-`todos`, `todo_attachments`, and a `todo_labels` join. The encrypted changesets,
-snapshots, attachment blobs, and membership records for that library all land in
-one cloud home under keys like `changes/dev1/42.enc`.
+Examples use the todos app. Its encrypted changesets, snapshots, attachment
+blobs, and membership records all land in one cloud home under keys like
+`changes/dev1/42.enc`.
 
 ## What the host configures
 

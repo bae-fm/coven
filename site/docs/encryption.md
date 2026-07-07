@@ -10,8 +10,7 @@ without the whole file.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
-The examples use a todos app: `workspaces` hold `lists`, a list holds `todos`, a
-todo has `todo_attachments`, and todos carry labels through a `todo_labels` join.
+Examples use the todos app; a todo's attachment is the blob being sealed.
 
 ## Three key layers
 

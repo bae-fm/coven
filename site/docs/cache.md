@@ -12,9 +12,9 @@ covers how a blob is uploaded, downloaded, and deleted across devices. This page
 covers the one device's copy: where it sits, when it is fetched, how long it is
 kept, and how a user pins a blob to keep it offline.
 
-The cache is coven's, under the library directory. The examples use a todos app
-whose `todo_attachments` rows each point at a photo; a music app would point at
-audio instead, which is the case the lazy half of the cache exists for.
+The cache is coven's, under the library directory. Examples: a todos app whose
+`todo_attachments` rows each point at a photo; audio is the case the lazy half
+exists for.
 
 The cache holds **Remote** blobs only: bytes that also live in the cloud, so a
 cache copy is always re-fetchable. A **Local** blob is never in the cache: it is
@@ -75,6 +75,9 @@ the bytes the host reads.
 
 ## Reading a blob
 
+The host should never have to know where a blob's bytes are this minute
+(a user file, the local store, a cache folder, or only the cloud); it asks for
+the blob, and dispatch is coven's problem.
 [`CovenHandle::read_blob`](rustdoc:method:coven::CovenHandle::read_blob) serves a
 blob's whole contents.
 

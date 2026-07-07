@@ -12,9 +12,8 @@ This page is the cloud lifecycle: how a blob is described, uploaded, pulled, and
 deleted across devices. The one device's copy (where a pulled blob lands, how it
 is kept and read offline) is the [cache](/docs/cache).
 
-The examples use a todos app where a todo can carry photo attachments. A
-`todo_attachments` row points at one photo file. When that row syncs, the photo
-has to reach every other device too.
+Examples: a `todo_attachments` row points at one photo file. When that row
+syncs, the photo has to reach every other device too.
 
 ## Declaring which rows carry blobs
 

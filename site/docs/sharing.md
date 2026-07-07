@@ -11,9 +11,8 @@ by sealing the library keyring to that member's keypair.
 [Item keys](#item-keys) are a separate, finer scope: a per-item key, independent
 of the library master, that gives one item its own encryption key.
 
-The examples use a todos app: `workspaces` hold `lists`, a `list` holds
-`todos`, and a todo can carry `todo_attachments`. Two people sharing the
-library both write todos; the owner controls who else can.
+Examples use the todos app; two people both write todos, and the owner
+controls who else can.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
