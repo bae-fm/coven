@@ -52,7 +52,10 @@ impl CloudHomeError {
 }
 
 /// Information needed to join a cloud home from another device.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// `Debug` is hand-written so the S3 `secret_key` prints as `<redacted>` —
+/// `{:?}` in an error path cannot leak the storage credential.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CloudHomeJoinInfo {
     S3 {
         bucket: String,
@@ -79,6 +82,56 @@ pub enum CloudHomeJoinInfo {
         owner_name: String,
         zone_name: String,
     },
+}
+
+impl std::fmt::Debug for CloudHomeJoinInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CloudHomeJoinInfo::S3 {
+                bucket,
+                region,
+                endpoint,
+                access_key,
+                secret_key: _,
+                key_prefix,
+            } => f
+                .debug_struct("S3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("endpoint", endpoint)
+                .field("access_key", access_key)
+                .field("secret_key", &"<redacted>")
+                .field("key_prefix", key_prefix)
+                .finish(),
+            CloudHomeJoinInfo::GoogleDrive { folder_id } => f
+                .debug_struct("GoogleDrive")
+                .field("folder_id", folder_id)
+                .finish(),
+            CloudHomeJoinInfo::Dropbox { shared_folder_id } => f
+                .debug_struct("Dropbox")
+                .field("shared_folder_id", shared_folder_id)
+                .finish(),
+            CloudHomeJoinInfo::OneDrive {
+                drive_id,
+                folder_id,
+            } => f
+                .debug_struct("OneDrive")
+                .field("drive_id", drive_id)
+                .field("folder_id", folder_id)
+                .finish(),
+            CloudHomeJoinInfo::CloudKit => f.write_str("CloudKit"),
+            CloudHomeJoinInfo::CloudKitShare {
+                share_url,
+                owner_name,
+                zone_name,
+            } => f
+                .debug_struct("CloudKitShare")
+                .field("share_url", share_url)
+                .field("owner_name", owner_name)
+                .field("zone_name", zone_name)
+                .finish(),
+        }
+    }
 }
 
 impl CloudHomeJoinInfo {
@@ -518,6 +571,32 @@ pub trait CloudHome: crate::MaybeThreadSafe {
         &self,
         revoke: CloudAccessRevoke,
     ) -> Result<RevokeOutcome, CloudHomeError>;
+}
+
+#[cfg(test)]
+mod join_info_tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_s3_secret_key() {
+        let info = CloudHomeJoinInfo::S3 {
+            bucket: "my-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: None,
+            access_key: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_key: "s3-secret-value-do-not-print".to_string(),
+            key_prefix: None,
+        };
+        let debug = format!("{info:?}");
+
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(debug.contains("my-bucket"), "{debug}");
+        assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"), "{debug}");
+        assert!(
+            !debug.contains("s3-secret-value-do-not-print"),
+            "S3 secret key leaked: {debug}"
+        );
+    }
 }
 
 #[cfg(test)]

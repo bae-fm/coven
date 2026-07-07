@@ -141,12 +141,31 @@ pub(crate) fn install_test_client_creds() {
 }
 
 /// Tokens returned from an OAuth authorization or refresh.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written: `access_token` and `refresh_token` are bearer
+/// credentials and print as `<redacted>` so `{:?}` in an error path cannot
+/// leak them.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
     /// Unix timestamp when the access token expires. None if unknown.
     pub expires_at: Option<i64>,
+}
+
+impl std::fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field("access_token", &"<redacted>")
+            // Presence (whether the session can refresh) is observable; the
+            // token itself is redacted.
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
@@ -816,6 +835,30 @@ mod tests {
         assert_eq!(parsed.access_token, "at_123");
         assert_eq!(parsed.refresh_token, Some("rt_456".to_string()));
         assert_eq!(parsed.expires_at, Some(1700000000));
+    }
+
+    #[test]
+    fn debug_redacts_access_and_refresh_tokens() {
+        let tokens = OAuthTokens {
+            access_token: "access-token-do-not-print".to_string(),
+            refresh_token: Some("refresh-token-do-not-print".to_string()),
+            expires_at: Some(1700000000),
+        };
+        let debug = format!("{tokens:?}");
+
+        assert!(debug.contains("<redacted>"), "{debug}");
+        // Non-secret expiry stays visible.
+        assert!(debug.contains("1700000000"), "{debug}");
+        assert!(
+            !debug.contains("access-token-do-not-print"),
+            "access token leaked: {debug}"
+        );
+        assert!(
+            !debug.contains("refresh-token-do-not-print"),
+            "refresh token leaked: {debug}"
+        );
+        // refresh_token presence is still observable.
+        assert!(debug.contains("refresh_token: Some"), "{debug}");
     }
 
     fn parse_token_response(body: &str) -> TokenResponse {

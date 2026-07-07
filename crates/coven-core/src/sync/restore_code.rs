@@ -20,7 +20,11 @@ const PREFIX: &str = "coven:";
 pub const RESTORE_CODE_VERSION: u8 = 2;
 
 /// Everything needed to restore a library from cloud storage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written: `ek` (encryption keyring) and `sk` (Ed25519 signing
+/// key) are secrets and print as `<redacted>` so `{:?}` in an error path
+/// cannot leak key material.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RestoreCode {
     /// Version (currently 2).
     pub v: u8,
@@ -40,9 +44,26 @@ pub struct RestoreCode {
     pub sk: String,
 }
 
+impl std::fmt::Debug for RestoreCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestoreCode")
+            .field("v", &self.v)
+            .field("lid", &self.lid)
+            // Presence is the storage mode (opaque vs browsable), so show
+            // Some/None; the key bytes themselves are redacted.
+            .field("ek", &self.ek.as_ref().map(|_| "<redacted>"))
+            .field("name", &self.name)
+            .field("provider", &self.provider)
+            .field("sk", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Cloud provider details. Each variant carries only the fields needed for that provider.
 /// OAuth tokens are NOT stored (they expire); the user re-authenticates during restore.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written so the S3 `secret_key` prints as `<redacted>`.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum RestoreProvider {
     #[serde(rename = "s3")]
@@ -64,6 +85,46 @@ pub enum RestoreProvider {
     Dropbox { folder_path: String },
     #[serde(rename = "od")]
     OneDrive { drive_id: String, folder_id: String },
+}
+
+impl std::fmt::Debug for RestoreProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestoreProvider::S3 {
+                bucket,
+                region,
+                endpoint,
+                key_prefix,
+                access_key,
+                secret_key: _,
+            } => f
+                .debug_struct("S3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("endpoint", endpoint)
+                .field("key_prefix", key_prefix)
+                .field("access_key", access_key)
+                .field("secret_key", &"<redacted>")
+                .finish(),
+            RestoreProvider::CloudKit => f.write_str("CloudKit"),
+            RestoreProvider::GoogleDrive { folder_id } => f
+                .debug_struct("GoogleDrive")
+                .field("folder_id", folder_id)
+                .finish(),
+            RestoreProvider::Dropbox { folder_path } => f
+                .debug_struct("Dropbox")
+                .field("folder_path", folder_path)
+                .finish(),
+            RestoreProvider::OneDrive {
+                drive_id,
+                folder_id,
+            } => f
+                .debug_struct("OneDrive")
+                .field("drive_id", drive_id)
+                .field("folder_id", folder_id)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -554,5 +615,42 @@ mod tests {
             decode_restore_code(&encoded),
             Err(RestoreCodeError::InvalidSigningKey(_))
         ));
+    }
+
+    #[test]
+    fn debug_redacts_key_material() {
+        let code = sample_s3_code();
+        let debug = format!("{code:?}");
+
+        assert!(debug.contains("<redacted>"), "{debug}");
+        // Non-secret fields are still visible.
+        assert!(debug.contains("Test Library"), "{debug}");
+        assert!(debug.contains("my-bucket"), "{debug}");
+        // The encryption keyring and signing key never appear.
+        let ek_hex = code.ek.as_deref().expect("sample has ek");
+        assert!(!debug.contains(ek_hex), "encryption key leaked: {debug}");
+        assert!(!debug.contains(&code.sk), "signing key leaked: {debug}");
+        // ek presence (the storage mode) is still observable.
+        assert!(debug.contains("ek: Some"), "{debug}");
+    }
+
+    #[test]
+    fn provider_debug_redacts_s3_secret_key() {
+        let provider = RestoreProvider::S3 {
+            bucket: "my-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: None,
+            key_prefix: None,
+            access_key: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_key: "wJalrXUtnFEMI-secret-value".to_string(),
+        };
+        let debug = format!("{provider:?}");
+
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"), "{debug}");
+        assert!(
+            !debug.contains("wJalrXUtnFEMI-secret-value"),
+            "S3 secret key leaked: {debug}"
+        );
     }
 }

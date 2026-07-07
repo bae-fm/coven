@@ -31,7 +31,10 @@ pub enum KeyError {
 }
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written so the S3 `secret_key` and the OAuth `token_json`
+/// print as `<redacted>` — `{:?}` in an error path cannot leak them.
+#[derive(Clone, Serialize, Deserialize)]
 pub enum CloudHomeCredentials {
     /// S3-compatible providers: access key + secret key.
     S3 {
@@ -42,6 +45,26 @@ pub enum CloudHomeCredentials {
     OAuth { token_json: String },
     /// iCloud: no credentials needed (macOS handles auth).
     None,
+}
+
+impl std::fmt::Debug for CloudHomeCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CloudHomeCredentials::S3 {
+                access_key,
+                secret_key: _,
+            } => f
+                .debug_struct("S3")
+                .field("access_key", access_key)
+                .field("secret_key", &"<redacted>")
+                .finish(),
+            CloudHomeCredentials::OAuth { token_json: _ } => f
+                .debug_struct("OAuth")
+                .field("token_json", &"<redacted>")
+                .finish(),
+            CloudHomeCredentials::None => f.write_str("None"),
+        }
+    }
 }
 
 /// Ed25519 keypair for signing changesets and membership changes.
@@ -347,5 +370,30 @@ mod tests {
         let kp = UserKeypair::generate();
         let result = seal_box_decrypt(&[0u8; 10], &kp.to_x25519_secret_key());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn credentials_debug_redacts_s3_secret_and_oauth_token() {
+        let s3 = CloudHomeCredentials::S3 {
+            access_key: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_key: "s3-secret-value-do-not-print".to_string(),
+        };
+        let debug = format!("{s3:?}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"), "{debug}");
+        assert!(
+            !debug.contains("s3-secret-value-do-not-print"),
+            "S3 secret key leaked: {debug}"
+        );
+
+        let oauth = CloudHomeCredentials::OAuth {
+            token_json: "{\"access_token\":\"oauth-token-do-not-print\"}".to_string(),
+        };
+        let debug = format!("{oauth:?}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(
+            !debug.contains("oauth-token-do-not-print"),
+            "OAuth token leaked: {debug}"
+        );
     }
 }
