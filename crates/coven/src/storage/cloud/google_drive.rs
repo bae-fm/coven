@@ -529,6 +529,79 @@ where
     finish_create_media_upload(key, upload_result, || delete_created_file(file_id)).await
 }
 
+/// Roll back a failed multipart upload that had to create its Drive file. When
+/// `created_file_id` is `Some`, the resumable session created a brand-new file
+/// that never received its content, so it is deleted — otherwise a failed upload
+/// would leave a zero-byte object that `exists`/`list` report and `read` returns
+/// empty for. When it is `None` the upload overwrote a pre-existing file, whose
+/// prior content stays intact (a resumable session commits only on the final
+/// part), so nothing is deleted and the original error is returned unchanged.
+async fn rollback_created_multipart<Delete, DeleteFut>(
+    key: &str,
+    created_file_id: Option<String>,
+    cause: CloudHomeError,
+    delete_created_file: Delete,
+) -> CloudHomeError
+where
+    Delete: FnOnce(String) -> DeleteFut,
+    DeleteFut: std::future::Future<Output = Result<(), CloudHomeError>>,
+{
+    let Some(file_id) = created_file_id else {
+        return cause;
+    };
+    match delete_created_file(file_id).await {
+        Ok(()) => cause,
+        Err(delete_error) => CloudHomeError::Storage(format!(
+            "multipart {key}: {cause}; rollback delete failed: {delete_error}"
+        )),
+    }
+}
+
+/// A [`PartSink`](super::PartSink) over a Drive resumable session that also owns
+/// the rollback for a file the upload created. Part uploads delegate to the shared
+/// [`RangePutSink`]; on the first part failure the created file is deleted so a
+/// failed upload leaves no zero-byte object behind. Overwrites of an existing file
+/// carry `created_file_id: None` and leave that file untouched on failure.
+struct DriveMultipartSink<'a> {
+    home: &'a GoogleDriveCloudHome,
+    inner: RangePutSink,
+    key: String,
+    created_file_id: Option<String>,
+}
+
+#[async_trait]
+impl super::PartSink for DriveMultipartSink<'_> {
+    fn part_size(&self) -> usize {
+        self.inner.part_size()
+    }
+
+    async fn send_part(
+        &mut self,
+        part: Bytes,
+        offset: u64,
+        is_last: bool,
+    ) -> Result<(), CloudHomeError> {
+        let Err(cause) = self.inner.send_part(part, offset, is_last).await else {
+            return Ok(());
+        };
+        let created = self.created_file_id.take();
+        let home = self.home;
+        let key = self.key.as_str();
+        Err(
+            rollback_created_multipart(key, created, cause, |file_id| async move {
+                home.delete_created_file(key, &file_id).await
+            })
+            .await,
+        )
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+        // The final part commits the file; the resumable session has no separate
+        // completion step, so there is nothing left that can fail here.
+        Box::new(self.inner).finish().await
+    }
+}
+
 /// First `error.errors[].reason` in a Google API error body (the shape Drive,
 /// Sheets, and other googleapis.com endpoints share), or `None` if the body isn't
 /// that JSON.
@@ -699,18 +772,33 @@ impl CloudHome for GoogleDriveCloudHome {
         total_len: u64,
     ) -> Result<BoxPartSink<'a>, CloudHomeError> {
         let encoded = encode_key(key);
-        let existing = self.find_file_id(&encoded).await?;
-        let (file_id, op) = if let Some(file_id) = existing {
-            (file_id, "update")
-        } else {
-            (self.create_file_for_key(key, &encoded).await?, "create")
+        // `created_file_id` is `Some` only when this upload creates the file, so a
+        // failure after creation deletes exactly the file we made and leaves a
+        // pre-existing one alone.
+        let (file_id, created_file_id, op) = match self.find_file_id(&encoded).await? {
+            Some(file_id) => (file_id, None, "update"),
+            None => {
+                let file_id = self.create_file_for_key(key, &encoded).await?;
+                (file_id.clone(), Some(file_id), "create")
+            }
         };
-        let session_url = self.open_resumable_update_session(key, &file_id).await?;
+        let session_url = match self.open_resumable_update_session(key, &file_id).await {
+            Ok(url) => url,
+            Err(cause) => {
+                return Err(rollback_created_multipart(
+                    key,
+                    created_file_id,
+                    cause,
+                    |file_id| async move { self.delete_created_file(key, &file_id).await },
+                )
+                .await);
+            }
+        };
         let key_owned = key.to_string();
         let classify =
             Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned, op));
         // Drive returns 308 Resume Incomplete for every non-final part.
-        Ok(Box::new(RangePutSink::new(
+        let inner = RangePutSink::new(
             self.client().clone(),
             session_url,
             308,
@@ -718,7 +806,13 @@ impl CloudHome for GoogleDriveCloudHome {
             GDRIVE_CHUNK_SIZE,
             key.to_string(),
             classify,
-        )))
+        );
+        Ok(Box::new(DriveMultipartSink {
+            home: self,
+            inner,
+            key: key.to_string(),
+            created_file_id,
+        }))
     }
 
     fn multipart_threshold(&self) -> u64 {
@@ -1194,6 +1288,70 @@ mod tests {
         assert!(
             msg.contains("media upload failed"),
             "missing upload failure: {msg}"
+        );
+        assert!(
+            msg.contains("delete failed"),
+            "missing delete failure: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_part_failure_deletes_the_created_file() {
+        let deleted_id = std::cell::RefCell::new(None);
+        let cause = CloudHomeError::Storage("multipart part 2 failed".to_string());
+        let err = rollback_created_multipart(
+            "blobs/aa/bb",
+            Some("created-file-id".to_string()),
+            cause,
+            |file_id| async {
+                deleted_id.replace(Some(file_id));
+                Ok(())
+            },
+        )
+        .await;
+
+        assert_eq!(deleted_id.into_inner().as_deref(), Some("created-file-id"));
+        assert!(
+            err.to_string().contains("multipart part 2 failed"),
+            "missing part failure: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_failure_leaves_pre_existing_file_intact() {
+        let delete_called = std::cell::Cell::new(false);
+        let cause = CloudHomeError::Storage("multipart part 2 failed".to_string());
+        let err = rollback_created_multipart("blobs/aa/bb", None, cause, |_| async {
+            delete_called.set(true);
+            Ok(())
+        })
+        .await;
+
+        assert!(
+            !delete_called.get(),
+            "overwrite of an existing file must not delete it on failure"
+        );
+        assert!(
+            err.to_string().contains("multipart part 2 failed"),
+            "missing part failure: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_rollback_reports_delete_failure_alongside_cause() {
+        let cause = CloudHomeError::Storage("multipart part 2 failed".to_string());
+        let err = rollback_created_multipart(
+            "blobs/aa/bb",
+            Some("created-file-id".to_string()),
+            cause,
+            |_| async { Err(CloudHomeError::Storage("delete failed".to_string())) },
+        )
+        .await;
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("multipart part 2 failed"),
+            "missing part failure: {msg}"
         );
         assert!(
             msg.contains("delete failed"),
