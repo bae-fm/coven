@@ -1,17 +1,16 @@
 # Overview
 
-An app that keeps its data in SQLite is fast, works offline, and holds nothing
-anywhere but the user's device. Then it needs a second device, or a second
-person, and the usual price is a backend: a server to run, accounts to manage,
-a database that holds every user's plaintext. The app is no longer local, and
-the data is no longer only the user's.
+Sync normally means a backend: a server you run and pay for, and a database
+that holds every user's data in the clear.
 
-coven is a library for keeping the first part while adding the second. You
-keep your schema; coven owns the connection and runs your queries through it,
-so it can [capture](https://www.sqlite.org/sessionintro.html) each change with
-SQLite's session extension, encrypt and sign it, move it through storage the
-user already controls, and apply remote changes back into SQLite. Multi-device
-and multi-person, with no coordination server.
+coven syncs without the server. Devices exchange end-to-end-encrypted changes
+through storage the user already has, and merge them locally.
+
+The data is SQLite. You keep your schema; coven owns the connection and runs
+your queries through it, so it can
+[capture](https://www.sqlite.org/sessionintro.html) each change with SQLite's
+session extension, encrypt and sign it, move it through the user's storage,
+and apply remote changes back.
 
 ## The round trip
 
