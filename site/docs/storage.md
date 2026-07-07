@@ -8,6 +8,24 @@ plaintext, never assigns sequence numbers, and never coordinates concurrent
 writers. It reads, writes, lists, and deletes objects addressed by a flat string
 key.
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
+<svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Sync concepts pass through the sealing layer to the raw byte trait and then to a provider">
+<rect class="lane" x="80" y="16" width="500" height="40" rx="9"/>
+<text class="lbl s11" x="330" y="34" text-anchor="middle">sync concepts</text>
+<text class="sub" x="330" y="48" text-anchor="middle">a device's changeset seq · a blob id · a member's wrapped key</text>
+<line class="arr" x1="330" y1="60" x2="330" y2="74" marker-end="url(#fa)"/>
+<rect class="chipo" x="80" y="78" width="500" height="40" rx="9"/>
+<text class="lbl s11" x="330" y="96" text-anchor="middle">CloudSyncStorage</text>
+<text class="sub" x="330" y="110" text-anchor="middle">seals and opens · maps concepts to flat keys</text>
+<line class="arr" x1="330" y1="122" x2="330" y2="136" marker-end="url(#fa)"/>
+<rect class="chipo" x="80" y="140" width="500" height="40" rx="9"/>
+<text class="lbl s11" x="330" y="158" text-anchor="middle">CloudHome</text>
+<text class="sub" x="330" y="172" text-anchor="middle">bytes by key: put_object · open_multipart · read · list · delete</text>
+<line class="arr" x1="330" y1="184" x2="330" y2="196" marker-end="url(#fa)"/>
+<text class="sub" x="330" y="208" text-anchor="middle">Google Drive · Dropbox · OneDrive · iCloud · S3</text>
+</svg>
+
 The examples use a todos app. Its synced tables are `workspaces`, `lists`,
 `todos`, `todo_attachments`, and a `todo_labels` join. The encrypted changesets,
 snapshots, attachment blobs, and membership records for that library all land in
@@ -21,27 +39,46 @@ The host selects one provider at a time and fills its settings in
 fresh on each operation rather than caching its own copy, so a provider swap or
 disconnect takes effect on the next sync cycle without rebuilding the sync layer.
 
-[`Config::sync_enabled`](rustdoc:method:coven::config::Config::sync_enabled)
-returns true only when a provider is selected and both its config fields and its
-credentials are present (an S3 bucket plus stored access keys, a Drive folder id
-plus a stored OAuth token, and so on).
+With no provider selected there is no sync layer at all; the library is
+local-only and complete. At connect time
+[`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
+reads the selected provider's settings from config and its credentials from the
+OS keyring; a missing setting or credential fails with a `Storage` error naming
+the field ("S3 bucket not configured", "Google Drive OAuth token not in
+keyring").
 
 ## The trait
 
 ```rust
 pub trait CloudHome: Send + Sync {
     async fn probe(&self) -> Result<(), CloudHomeError> { /* default: no-op list */ }
-    async fn write(&self, key: &str, data: Vec<u8>, progress: &UploadProgress<'_>)
-        -> Result<(), CloudHomeError>;
+
+    // Uploads: one bounded request, or a streaming multipart session.
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError>;
+    async fn open_multipart<'a>(&'a self, key: &str, total_len: u64)
+        -> Result<BoxPartSink<'a>, CloudHomeError>;
+    fn multipart_threshold(&self) -> u64;
+
+    // Provided: picks put_object vs multipart and pumps the parts.
+    async fn write(&self, key: &str, body: BlobBody, progress: &UploadProgress<'_>)
+        -> Result<(), CloudHomeError> { /* central driver */ }
+
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError>;
     async fn read_range(&self, key: &str, start: u64, end: u64)
         -> Result<Vec<u8>, CloudHomeError>;
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError>;
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError>;
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
-    async fn grant_access(&self, member_id: &str)
+
+    // Conditional delete, for backends that can expose an object version.
+    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError>;
+    async fn delete_if_version(&self, key: &str, version: &CloudObjectVersion)
+        -> Result<ConditionalDelete, CloudHomeError>;
+
+    async fn grant_access(&self, grant: CloudAccessGrant)
         -> Result<CloudHomeJoinInfo, CloudHomeError>;
-    async fn revoke_access(&self, member_id: &str) -> Result<(), CloudHomeError>;
+    async fn revoke_access(&self, revoke: CloudAccessRevoke)
+        -> Result<(), CloudHomeError>;
 }
 ```
 
@@ -50,41 +87,51 @@ pub trait CloudHome: Send + Sync {
   bucket fails at setup instead of via a delayed reconnect banner. The default
   implementation lists a sentinel prefix; backends override it with a cheaper
   check (S3 uses `HeadBucket`).
-- `write` creates or overwrites the key. `read` returns the whole value.
-  `read_range` returns a half-open byte range (`start` inclusive, `end`
-  exclusive), which is how coven fetches only the encrypted chunks covering a
-  blob byte range.
+- A provider implements two raw upload pieces: `put_object`, one bounded
+  single-request upload, and `open_multipart`, a streaming session that accepts
+  ordered parts. `multipart_threshold` is the cut between them. The provided
+  `write` method is the one coven calls: a central driver that picks the path
+  by size and pumps a sized [`BlobBody`] through it, reporting cumulative bytes
+  to the `progress` callback for the per-file bar. Small control files (auth
+  keys, head pointers, the snapshot) pass
+  [`no_progress`](rustdoc:fn:coven::storage::cloud::no_progress), which
+  discards the reports.
+- `read` returns the whole value. `read_range` returns a half-open byte range
+  (`start` inclusive, `end` exclusive), which is how coven fetches only the
+  encrypted chunks covering a blob byte range.
 - `list` returns every key under a prefix. `delete` is not an error when the key
   is absent. `exists` is a presence check.
+- `object_state` and `delete_if_version` support an atomic
+  compare-and-delete on backends whose API exposes an object version; a backend
+  that cannot returns `VersionUnavailable` and callers fall back to
+  coarser guards.
 - `grant_access` and `revoke_access` change who can reach the cloud home. They
   are provider-shaped and described below.
 
-The `progress` argument to `write` is a
-[`UploadProgress`](rustdoc:type:coven::storage::cloud::UploadProgress) callback,
-`dyn Fn(u64)`. coven passes one that drives the blob upload progress bar; for
-small control files (auth keys, head pointers, the snapshot) it passes
-[`no_progress`](rustdoc:fn:coven::storage::cloud::no_progress), which discards
-the reports.
-
 ## Granting and revoking access
 
-`grant_access` returns a
+`grant_access` takes a
+[`CloudAccessGrant`](rustdoc:struct:coven::storage::cloud::CloudAccessGrant)
+(the member's public key, plus the provider account email for backends that
+share by account) and returns a
 [`CloudHomeJoinInfo`](rustdoc:enum:coven::storage::cloud::CloudHomeJoinInfo), one
 variant per provider, carrying exactly what another device needs to reach the
-same cloud home. The variant the host embeds in an invite code depends on the
-provider:
+same cloud home:
 
-- S3 returns the bucket, region, endpoint, access key, secret key, and optional
-  key prefix. Access is managed outside coven through pre-shared credentials, so
-  `grant_access` ignores `member_id` and `revoke_access` is a no-op.
 - The consumer clouds (Drive, Dropbox, OneDrive) share the library folder with
-  the member's account and return its folder or drive id. `revoke_access`
-  unshares it.
+  the member's provider account and return its folder or drive id.
+  `revoke_access` unshares it.
+- S3 returns the bucket, region, endpoint, access key, secret key, and optional
+  key prefix: access rides pre-shared credentials. Because one member's copy of
+  a shared key cannot be invalidated alone, `revoke_access` returns an error
+  saying so; cutting a removed member off S3 means rotating the bucket
+  credentials. Their *read* access to future data already dies with the
+  [key rotation](/docs/sharing#revocation) that removal performs.
 - CloudKit returns a share URL.
 
-Because `grant_access`/`revoke_access` work with folder ids and share URLs, not
-encrypted payloads, they live below the encryption layer and are called directly
-on the `CloudHome`, not through the wrapper described under
+Because `grant_access`/`revoke_access` work with folder shares and share URLs,
+not encrypted payloads, they live below the encryption layer and are called
+directly on the `CloudHome`, not through the wrapper described under
 [Where encryption sits](#where-encryption-sits).
 
 ## Errors
@@ -133,14 +180,16 @@ only places a provider deviates from "write opaque bytes by key".
 
 - **Google Drive**
   ([`GoogleDriveCloudHome`](rustdoc:struct:coven::storage::cloud::google_drive::GoogleDriveCloudHome))
-  stores files flat in one folder and encodes path separators as `__`, so the
-  key `changes/dev1/42.enc` is the Drive filename `changes__dev1__42.enc`. Large
-  files use a resumable upload session in 256 KiB-aligned chunks.
+  stores files flat in one folder. Drive filenames cannot carry the key's
+  slashes, so each key is hex-encoded into a slash-free filename and decoded on
+  list; the encoding is exact and reversible, never a lossy substitution. Large
+  files use a resumable upload session in 8 MiB chunks (Drive requires 256
+  KiB alignment).
 
 - **OneDrive**
   ([`OneDriveCloudHome`](rustdoc:struct:coven::storage::cloud::onedrive::OneDriveCloudHome))
-  uses the same `__` filename encoding as Drive and a Microsoft Graph resumable
-  upload session in 320 KiB-aligned chunks for large files.
+  uses the same hex filename encoding and a Microsoft Graph resumable
+  upload session in 7.5 MiB chunks (Graph requires 320 KiB alignment).
 
 - **Dropbox**
   ([`DropboxCloudHome`](rustdoc:struct:coven::storage::cloud::dropbox::DropboxCloudHome))
@@ -151,9 +200,9 @@ only places a provider deviates from "write opaque bytes by key".
 - **CloudKit**
   ([`CloudKitCloudHome`](rustdoc:struct:coven::storage::cloud::cloudkit::CloudKitCloudHome))
   stores files in the user's iCloud private database. A `CKAsset` caps at 50 MB,
-  so a file larger than 10 MiB is split into 10 MiB records named `key.part0`,
-  `key.part1`, and so on, and read back by reassembling those parts. The raw
-  record operations are defined by the
+  so a file larger than 10 MiB is split into 10 MiB part records and read back
+  by reassembling those parts; a failed multipart upload deletes the part
+  records it wrote. The raw record operations are defined by the
   [`CloudKitOps`](rustdoc:trait:coven::storage::cloud::cloudkit::CloudKitOps)
   trait and implemented in Swift through a UniFFI callback interface;
   [`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
@@ -167,21 +216,19 @@ only places a provider deviates from "write opaque bytes by key".
   tests. It exposes `keys()`, `get()`, `len()`, and `deletes_seen()` for
   after-the-fact assertions.
 
-[`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home) reads
-the selected provider from `Config` and the matching credentials from the OS
-keyring the host installs at startup, and returns a `Box<dyn CloudHome>`. A
-missing setting fails with a `Storage` error naming the field
-("S3 bucket not configured", "Google Drive folder ID not configured"); missing
-credentials fail the same way ("S3 credentials not in keyring", "Google Drive
-OAuth token not in keyring").
+## OAuth sessions: refresh and retry
 
-## OAuth token refresh
+Drive, Dropbox, and OneDrive share their token lifecycle through an OAuth
+session. Each backend owns one and routes its requests through it. Before a
+request, the session checks the access token's expiry: if it expires within 60
+seconds it refreshes first, persisting the new tokens to the keyring. After a
+request, a `401` triggers one refresh and one retry.
 
-Drive, Dropbox, and OneDrive share their token lifecycle through an OAuth session.
-Each backend owns one and routes its requests through it. Before a request, the
-session checks the access token's expiry: if it expires within 60 seconds it
-refreshes first, persisting the new tokens to the keyring. After a request, a
-`401` triggers one refresh and one retry.
+The session also absorbs transient pressure: a `429` or any `5xx` retries up to
+four times with exponential delay (500 ms doubling, capped at 32 seconds,
+honoring a server-supplied `Retry-After`), so routine quota throttling degrades
+a cycle to slow rather than failed, while a hard outage exhausts the attempts
+in seconds and fails loud to the cycle's own minutes-long backoff.
 
 When the refresh itself fails because the grant is gone (refresh token revoked,
 expired, or the account password changed), the underlying
@@ -242,7 +289,7 @@ is built, so master-, derived-, and item-key blobs all stream the same way.
 ## Lifecycle
 
 `handle.connect_sync(...)` builds the cloud home from the current config and
-spawns the sync loop when sync is enabled. `handle.stop_sync()` drops the loop,
-and `handle.start_sync()` starts it again. Because the config is read fresh each
-operation, swapping providers is a config change followed by a stop/start, with
-no app restart.
+spawns the sync loop when a provider is configured. `handle.stop_sync()` drops
+the loop, and `handle.start_sync()` starts it again. Because the config is read
+fresh each operation, swapping providers is a config change followed by a
+stop/start, with no app restart.
