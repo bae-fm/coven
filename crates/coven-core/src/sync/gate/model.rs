@@ -11,7 +11,7 @@ use tracing::warn;
 
 use super::outbound::resolve_root;
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
-use crate::sync::session::{quote_ident, SyncedTable};
+use crate::sync::session::{quote_ident, table_columns, SyncedTable};
 
 /// How a synced table relates to the gate.
 pub(super) enum TableGate {
@@ -100,7 +100,8 @@ impl Gates {
                 continue;
             }
 
-            let cols = column_names(conn, t.name())?;
+            let cols = table_columns(conn, t.name())
+                .map_err(|e| GateError::Sql(format!("read columns of {}", t.name()), e))?;
 
             if t.is_remote_root() {
                 gate_map.insert(t.name().to_string(), TableGate::RemoteRoot);
@@ -155,7 +156,8 @@ impl Gates {
                 // Otherwise, if this table has an FK referencing the ancestor, it
                 // is a keep-child: record the FK column in that child.
                 if let Some(fk_name) = fk_col_referencing(conn, t.name(), ancestor)? {
-                    let cols = column_names(conn, t.name())?;
+                    let cols = table_columns(conn, t.name())
+                        .map_err(|e| GateError::Sql(format!("read columns of {}", t.name()), e))?;
                     let fk_col = fk_column(&cols, t.name(), &fk_name)?;
                     children.push((t.name().to_string(), fk_col));
                 }
@@ -630,12 +632,6 @@ pub(super) fn truthy(s: &str) -> bool {
 }
 
 // ---- small schema/query helpers -------------------------------------------
-
-/// Column names of `table`, in declared order, via `PRAGMA table_info`.
-pub(super) fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>, GateError> {
-    let sql = format!("PRAGMA table_info({})", quote_ident(table));
-    query_mapped_rows(conn, &sql, [], |row| row.get::<_, String>(1))
-}
 
 fn gate_column(cols: &[String], table: &str, name: &str) -> Result<GateColumn, GateError> {
     column_ref_or(cols, table, name, GateError::MissingGateColumn)

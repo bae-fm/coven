@@ -515,9 +515,8 @@ fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
     }
 }
 
-/// Column names of `table`, in declared (schema) order, via `PRAGMA table_info` —
-/// the safe-rusqlite sibling of the gate's FFI `column_names`. The index of a name
-/// here is the index a changeset reports for that column.
+/// Column names of `table`, in declared (schema) order, via `PRAGMA table_info`.
+/// The index of a name here is the index a changeset reports for that column.
 pub(crate) fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, BlobDeclError> {
     session_table_columns(conn, table).map_err(BlobDeclError::from)
 }

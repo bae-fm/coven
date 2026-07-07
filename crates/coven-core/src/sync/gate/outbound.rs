@@ -11,11 +11,10 @@ use tracing::{debug, warn};
 use super::create_table::{create_table_sql, rewrite_create_into_schema};
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{
-    column_names, foreign_keys, gated_fk_child_edges, rows_referencing, truthy, GateColumn, Gates,
-    TableGate,
+    foreign_keys, gated_fk_child_edges, rows_referencing, truthy, GateColumn, Gates, TableGate,
 };
 use super::{execute_batch, query_row_optional, row_value_to_string, GateError};
-use crate::sync::session::quote_ident;
+use crate::sync::session::{quote_ident, table_columns};
 
 /// Gate a captured outbound changeset: cut gated-false rows (and their gated
 /// descendants), re-emit the full subtree of any root that flipped false→true
@@ -200,7 +199,8 @@ fn reparent_targets(
     if row.op != ffi::SQLITE_UPDATE {
         return Ok(Vec::new());
     }
-    let cols = column_names(conn, &row.table)?;
+    let cols = table_columns(conn, &row.table)
+        .map_err(|e| GateError::Sql(format!("read columns of {}", row.table), e))?;
     let mut out = Vec::new();
     for (fk_col, parent) in foreign_keys(conn, &row.table)? {
         if parent == row.table || !gates.tables.contains_key(&parent) {
