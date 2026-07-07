@@ -215,11 +215,16 @@ Each row is an
 `Delete`, or `Cancel`.
 
 Nothing uploads at enqueue time. The next sync cycle's
-[`drain_uploads`](rustdoc:fn:coven::blob::upload::drain_uploads) reads each pending
-entry, reads the local file, resolves the scope to a key, encrypts, writes the
-bytes to the entry's `cloud_key`, and removes the entry on success. The drain runs
-before the changeset push, but the cycle does not hold the whole changeset back
-while it runs.
+[`drain_uploads`](rustdoc:fn:coven::blob::upload::drain_uploads) works through
+the pending entries; for each one it:
+
+1. reads the local file,
+2. resolves the persisted scope to a key,
+3. seals the bytes and writes them to the entry's `cloud_key`,
+4. removes the entry on success.
+
+The drain runs before the changeset push, but the cycle does not hold the
+whole changeset back while it runs.
 
 Blob-before-row ordering is owned by coven, per gated root, not by a global push
 gate. `make_remote` keeps the root's [gate column](/docs/local-data) off until

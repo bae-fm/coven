@@ -271,21 +271,31 @@ account email the owner should share to). They send it to the owner out of
 band.
 
 The owner calls `handle.invite_member(...)` with that public key and a role.
-coven grants the joiner cloud access, wraps the library keyring to their X25519
-key, signs and validates the `Add` entry against the committed chain *before*
-writing anything, then uploads the wrapped keyring, the entry, and the owner's
-updated head. It returns the cloud connection details, which `invite_member`
-packs together with the library id, name, and owner pubkey into an
+Under it, coven:
+
+1. grants the joiner cloud access,
+2. wraps the library keyring to their X25519 key,
+3. signs the `Add` entry and validates it against the committed chain,
+   *before* writing anything,
+4. uploads the wrapped keyring, the entry, and the owner's updated head.
+
+The cloud connection details come back packed with the library id, name, and
+owner pubkey into an
 [`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner sends
 that back.
 
 The joiner pastes the invite code into
 [`join_from_invite_code`](rustdoc:fn:coven::sync::join::join_from_invite_code),
-which decodes it, builds the cloud connection (running any OAuth flow inline),
-unwraps the library keyring, bootstraps the local database from the latest
-snapshot, pulls the changesets created since that snapshot, and saves the new
-library config. The device is now a writer. A join that fails partway never
-deletes a library that already existed on the device.
+which:
+
+1. decodes it and builds the cloud connection (running any OAuth flow inline),
+2. unwraps the library keyring,
+3. bootstraps the local database from the latest snapshot,
+4. pulls the changesets created since that snapshot,
+5. saves the new library config.
+
+The device is now a writer. A join that fails partway never deletes a library
+that already existed on the device.
 
 The invite code carries plaintext cloud credentials (for S3, the access key and
 secret). Treat it with the same secrecy as the encryption key, and send it over

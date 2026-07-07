@@ -253,12 +253,12 @@ Merge runs in two stages inside apply.
 
 **Stage one: column-level three-way premerge.** An UPDATE changeset carries,
 per column it changed, the value it moved *from* (the base) and the value it
-moved *to*. When an incoming update loses row arbitration, the premerge folds
-into the local row every column the incoming update moved away from a base the
-local row still holds: the local device never touched that column, so the
-incoming edit to it survives. When the incoming update *wins*, it only writes
-the columns it changed in the first place. Either way, concurrent edits to
-different columns of one row both land.
+moved *to*. When an incoming update loses row arbitration, the premerge
+rescues its column edits: any column the update moved away from a base value
+the local row still holds is folded into the local row. The local device never
+touched that column, so the incoming edit to it survives. When the incoming
+update *wins*, it only writes the columns it changed in the first place.
+Either way, concurrent edits to different columns of one row both land.
 
 <svg class="flow" viewBox="0 0 660 190" role="img" aria-label="Base row; phone edits title, laptop edits body; the merged row holds both edits">
 <text class="sub" x="330" y="20" text-anchor="middle">base row</text>

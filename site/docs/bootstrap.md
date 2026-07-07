@@ -280,12 +280,15 @@ superseded object:
   pointer still names them) nor the one it just published. Because the prefix is
   the author, it never touches a peer's generations.
 
-The metadata cursors must be honest about *applied* state. Consider two devices.
-Device A creates a snapshot while device B is at seq 30, then device B pushes seq
-31 through 35 afterward. The metadata records B at 30, so GC deletes B's 1 through
-30 and leaves 31 through 35 alone: those changesets came after the snapshot and are
-not in it, so a future restore still needs them. Had the metadata overclaimed
-(recorded B's published head of 35 instead of the 30 actually applied into the
-snapshot), GC would delete 31 through 35, and no future restore could recover them.
+The metadata cursors must be honest about *applied* state. Two devices:
+
+- Device A snapshots having applied device B through seq 30. B then pushes 31
+  through 35.
+- The metadata records B at 30, so GC deletes B's 1 through 30 and leaves 31
+  through 35 alone: they are not in the snapshot, and a future restore needs
+  them.
+- Had the metadata recorded B's published head (35) instead of the applied 30,
+  GC would delete 31 through 35, and no restore could recover them.
+
 This is why the cursors are the snapshotting device's *applied* cursors, never
 another device's published head.
