@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::database::{Database, DbError, PendingChangesetBatch};
-use crate::keys::UserKeypair;
+use crate::keys::{KeyError, KeyPersistence, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::migration::Migration;
 use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
@@ -24,6 +24,49 @@ use crate::sync::pull::pull_changes;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::signed_control::{HeadJson, MinSchemaVersionJson};
 use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
+
+/// In-memory [`KeyPersistence`] for tests, with a switch to force the keyring
+/// write to fail. The switch models a device whose keyring is momentarily
+/// unwritable, so a test can drive a key adoption into its failure path and then
+/// clear the switch to prove the retry converges.
+#[derive(Default)]
+pub struct TestKeyPersistence {
+    value: Mutex<Option<String>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+
+impl TestKeyPersistence {
+    pub fn set_initial_key(&self, key: [u8; 32]) {
+        self.set_encryption_key(&hex::encode(key))
+            .expect("initial key write succeeds");
+    }
+
+    pub fn stored_key(&self) -> Option<String> {
+        self.value.lock().unwrap().clone()
+    }
+
+    /// Make the next and every subsequent keyring write fail until cleared.
+    pub fn fail_writes(&self) {
+        self.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Let keyring writes succeed again.
+    pub fn allow_writes(&self) {
+        self.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl KeyPersistence for TestKeyPersistence {
+    fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(KeyError::Persistence(
+                "forced keyring write failure".to_string(),
+            ));
+        }
+        *self.value.lock().unwrap() = Some(value.to_string());
+        Ok(())
+    }
+}
 
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a *gated root* (`notes`,

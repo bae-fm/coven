@@ -622,7 +622,13 @@ impl SyncManager {
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
-        let new_key = crate::sync::membership_ops::remove_member(
+
+        // Removing a member commits the cloud key rotation and then adopts the
+        // rotated key into this device's keyring and live cipher. The host records
+        // the returned fingerprint and that a key is stored in its own config; an
+        // adoption failure surfaces as its own membership variant naming the
+        // half-applied state and its remedies.
+        let fingerprint = crate::sync::membership_ops::remove_member(
             storage,
             cloud_home,
             sync_loop.user_keypair(),
@@ -630,17 +636,10 @@ impl SyncManager {
             public_key_hex,
             &library_id,
             &current_encryption,
-        )
-        .await
-        .map_err(SyncError::Membership)?;
-
-        // Rotate the in-use key; the host records the returned fingerprint and
-        // that a key is stored in its own config.
-        let fingerprint = crate::sync::membership_ops::apply_key_rotation(
-            new_key,
             &self.key_service,
             sync_loop.cipher(),
         )
+        .await
         .map_err(SyncError::Membership)?;
 
         Ok(fingerprint)

@@ -11,11 +11,11 @@
 //! refresh in place fails when the corresponding refresh step is dropped (the
 //! "mutation" each test documents).
 
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
 
 use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
-use crate::keys::{KeyError, KeyPersistence, UserKeypair};
+use crate::keys::{KeyPersistence, UserKeypair};
 use crate::library_dir::LibraryDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
@@ -25,35 +25,16 @@ use crate::sync::invite::{
     unwrap_library_keyring_for_owners_with_activation,
 };
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
-use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+use crate::sync::membership_ops::{
+    load_anchored_chain, remove_member, MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
+};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    bootstrap_chain, make_linked_entry, open_test_db, pubkey_hex, temp_library_dir, MockSyncStorage,
+    bootstrap_chain, make_linked_entry, open_test_db, pubkey_hex, temp_library_dir,
+    MockSyncStorage, TestKeyPersistence,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
-
-#[derive(Default)]
-struct TestKeyPersistence {
-    value: Mutex<Option<String>>,
-}
-
-impl TestKeyPersistence {
-    fn set_initial_key(&self, key: [u8; 32]) {
-        self.set_encryption_key(&hex::encode(key)).unwrap();
-    }
-
-    fn stored_key(&self) -> Option<String> {
-        self.value.lock().unwrap().clone()
-    }
-}
-
-impl KeyPersistence for TestKeyPersistence {
-    fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
-        *self.value.lock().unwrap() = Some(value.to_string());
-        Ok(())
-    }
-}
 
 /// Upload `chain`'s entries to the mock storage exactly as the membership ops do
 /// (one object per entry under `membership/{author}/{seq}`), so the device under
@@ -907,4 +888,147 @@ fn cipher_generation(cipher: &RwLock<CloudCipher>) -> u64 {
         CloudCipher::Encrypted(enc) => enc.current_generation(),
         CloudCipher::Plaintext => panic!("expected an encrypted cipher"),
     }
+}
+
+/// Removing a member commits the cloud key rotation before this device adopts the
+/// rotated key locally. When the local keyring write fails, the removal is durable
+/// — the member is out and the library is rotated for everyone — but this device
+/// keeps sealing under the superseded generation. That half-applied state is its
+/// own typed error, and both remedies it names converge without losing the
+/// rotation: the device's next sync cycle adopts the key from its own
+/// `keys/{self}` wrap, and retrying the removal re-derives and re-adopts it.
+#[tokio::test]
+async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remedies_converge() {
+    let owner = UserKeypair::generate(); // this device — performs the removal
+    let member = UserKeypair::generate(); // the member being removed
+    let owner_pk = pubkey_hex(&owner);
+    let old_key: [u8; 32] = [11u8; 32];
+
+    let storage = MockSyncStorage::new();
+
+    // Chain: owner founds and adds the member.
+    let mut chain = bootstrap_chain(&owner);
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
+
+    // This device's steady state: keyring and live cipher hold the pre-rotation key.
+    let ks = TestKeyPersistence::default();
+    ks.set_initial_key(old_key);
+    let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+    let hlc = Hlc::new("A".to_string());
+
+    // The keyring is momentarily unwritable, so local adoption fails after the
+    // cloud rotation commits.
+    ks.fail_writes();
+    let err = remove_member(
+        &storage,
+        &storage,
+        &owner,
+        &hlc,
+        &pubkey_hex(&member),
+        LIB_ID,
+        &EncryptionService::from_key(old_key),
+        &ks,
+        &cipher,
+    )
+    .await
+    .expect_err("local adoption fails while the keyring is unwritable");
+    assert!(
+        matches!(
+            err,
+            MembershipOpsError::RotationCommittedAdoptionFailed { .. }
+        ),
+        "the failure is the rotation-committed/adoption-failed variant, got {err:?}",
+    );
+
+    // The cloud rotation committed: the member is durably removed from the
+    // committed chain even though this device could not adopt the new key.
+    let entries = storage.list_membership_entries().await.unwrap();
+    let committed = load_anchored_chain(&storage, &entries, Some(&owner_pk), None)
+        .await
+        .expect("committed chain loads");
+    assert!(
+        !committed
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&member)),
+        "the member is durably removed despite the failed local adoption",
+    );
+
+    // The failed adoption left this device's live cipher and keyring on the
+    // pre-rotation generation — no half-applied swap.
+    assert_eq!(
+        cipher_generation(&cipher),
+        1,
+        "the failed adoption did not swap the live cipher",
+    );
+    assert_eq!(
+        ks.stored_key(),
+        Some(hex::encode(old_key)),
+        "the failed adoption did not persist a new key",
+    );
+
+    // Remedy 1 — the next sync cycle: a still-stale device (generation 1) adopts
+    // the rotated key from its own `keys/{owner}/{owner}` wrap, no retry needed.
+    {
+        let db = open_test_db();
+        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+            .await
+            .unwrap();
+        let ks_refresh = TestKeyPersistence::default();
+        ks_refresh.set_initial_key(old_key);
+        let cipher_refresh =
+            RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+        let (_tmp, ld) = temp_library_dir();
+        run_cycle(
+            &storage,
+            &db,
+            &cipher_refresh,
+            &owner,
+            "A",
+            &ld,
+            Some(&ks_refresh),
+        )
+        .await
+        .expect("refresh cycle");
+        assert_eq!(
+            cipher_generation(&cipher_refresh),
+            2,
+            "the next sync cycle adopts the rotated key",
+        );
+    }
+
+    // Remedy 2 — retry the removal: the member is already removed, so the retry
+    // re-derives the rotated keyring from the current owner set and adopts it now
+    // that the keyring is writable again.
+    ks.allow_writes();
+    let fingerprint = remove_member(
+        &storage,
+        &storage,
+        &owner,
+        &hlc,
+        &pubkey_hex(&member),
+        LIB_ID,
+        &EncryptionService::from_key(old_key),
+        &ks,
+        &cipher,
+    )
+    .await
+    .expect("retrying the removal converges");
+    assert!(
+        !fingerprint.is_empty(),
+        "the retry returns the key fingerprint"
+    );
+    assert_eq!(
+        cipher_generation(&cipher),
+        2,
+        "retrying the removal adopts the rotated key",
+    );
 }

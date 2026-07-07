@@ -36,10 +36,23 @@ pub enum MembershipOpsError {
     Chain(#[from] AnchoredChainError),
     #[error("{0}")]
     Invite(#[from] InviteError),
-    #[error("failed to persist the rotated encryption key: {0}")]
-    KeyPersistence(#[from] KeyError),
-    #[error("failed to serialize the rotated encryption key: {0}")]
-    KeyringSerialize(#[from] EncryptionError),
+    /// The cloud key rotation a member removal performs is committed — the member
+    /// is out and the library is rotated for every remaining member — but this
+    /// device could not adopt the rotated key into its own keyring and live cipher.
+    /// The removal is durable; this device keeps sealing under the superseded
+    /// generation until adoption succeeds. Its two remedies are non-destructive:
+    /// retrying the removal re-derives and re-adopts the same generation (the write
+    /// is idempotent), and the next sync cycle adopts it from this device's own
+    /// `keys/{self}` wrapped key.
+    #[error(
+        "member removal committed the cloud key rotation, but this device could not \
+         adopt the rotated key locally: {source}; retry the removal to re-adopt it, \
+         or let the next sync cycle adopt it from this device's wrapped key"
+    )]
+    RotationCommittedAdoptionFailed {
+        #[source]
+        source: AdoptKeyError,
+    },
     #[error("cannot invite yourself")]
     SelfInvite,
     /// Inviting into a library whose founder entry is missing (a fresh library
@@ -169,12 +182,19 @@ pub async fn invite_member(
     })
 }
 
-/// Remove a member from the shared library.
+/// Remove a member from the shared library and adopt the rotated key locally.
 ///
-/// Downloads the membership chain, creates a signed Remove entry, rotates
-/// the encryption key, re-wraps it for remaining members, and returns the
-/// new encryption key bytes. The caller is responsible for persisting the
-/// new key to the keyring and updating config.
+/// Downloads the membership chain, creates a signed Remove entry, rotates the
+/// encryption key on the cloud (re-wrapping it for every remaining member), then
+/// swaps this device's live cipher and persists the rotated key to its keyring.
+/// Returns the rotated key's fingerprint for the host to record in its own config.
+///
+/// The cloud rotation commits before the local adoption. When adoption fails, the
+/// removal is already durable, so the failure surfaces as
+/// [`MembershipOpsError::RotationCommittedAdoptionFailed`] — distinct from a
+/// rotation that never committed — and both of its remedies converge without data
+/// loss: a retry of this call (idempotent for an already-removed member) or the
+/// device's next sync cycle.
 pub async fn remove_member(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
@@ -183,7 +203,9 @@ pub async fn remove_member(
     public_key_hex: &str,
     library_id: &str,
     current_encryption: &EncryptionService,
-) -> Result<EncryptionService, MembershipOpsError> {
+    key_persistence: &dyn KeyPersistence,
+    cipher_lock: &std::sync::RwLock<CloudCipher>,
+) -> Result<String, MembershipOpsError> {
     // Download existing membership entries and build the chain.
     let entry_keys = storage.list_membership_entries().await?;
 
@@ -193,7 +215,8 @@ pub async fn remove_member(
 
     let mut chain = load_anchored_chain(storage, &entry_keys, None, None).await?;
 
-    // Revoke the member
+    // Revoke the member and rotate the cloud key. On return the rotation is
+    // committed for every remaining member.
     let revoke_ts = hlc.now().to_string();
     let new_key = super::invite::revoke_member(
         storage,
@@ -213,7 +236,24 @@ pub async fn remove_member(
         &public_key_hex[..public_key_hex.len().min(16)]
     );
 
-    Ok(new_key)
+    // Adopt the rotated key into this device's live cipher and keyring. The cloud
+    // rotation is already committed, so a failure here is not a generic membership
+    // error but the specific half-applied state its own variant names.
+    apply_key_rotation(new_key, key_persistence, cipher_lock)
+        .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })
+}
+
+/// Why adopting a rotated library key into this device's local state failed. This
+/// is the local half of a key rotation — serialize the keyring and persist it,
+/// then swap the live cipher — kept distinct from the chain and cloud errors
+/// [`MembershipOpsError`] carries because it runs after a cloud rotation is already
+/// committed, so its two failure modes are exactly the two local writes.
+#[derive(Debug, thiserror::Error)]
+pub enum AdoptKeyError {
+    #[error("failed to persist the rotated encryption key: {0}")]
+    KeyPersistence(#[from] KeyError),
+    #[error("failed to serialize the rotated encryption key: {0}")]
+    KeyringSerialize(#[from] EncryptionError),
 }
 
 /// Rotate the in-use encryption key after a member removal: persist it to the
@@ -221,13 +261,19 @@ pub async fn remove_member(
 /// for the host to record in its own config — coven never writes the host's
 /// config.
 ///
+/// The keyring is persisted before the live cipher is swapped, so a persistence
+/// failure leaves the cipher untouched on the superseded generation rather than
+/// live on a key that never reached the keyring. The write is idempotent —
+/// persisting the same keyring and swapping to it again converges — so a caller
+/// that failed here can retry adoption alone.
+///
 /// A plaintext home has no library key to rotate, so this is an error there:
 /// sharing (and hence member removal) requires an encrypted home.
 pub fn apply_key_rotation(
     new_encryption: EncryptionService,
     key_persistence: &dyn KeyPersistence,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
-) -> Result<String, MembershipOpsError> {
+) -> Result<String, AdoptKeyError> {
     let new_fingerprint = {
         let mut cipher = cipher_lock.write().unwrap();
         match &mut *cipher {
@@ -643,11 +689,14 @@ async fn persist_head_watermark(db: &Database, author: &str, seq: u64) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::hlc::Hlc;
     use crate::sync::membership::MembershipAction;
     use crate::sync::test_helpers::{
         append_membership_entry, founder_entry, make_linked_entry, pubkey_hex, MockSyncStorage,
+        TestKeyPersistence,
     };
+    use std::sync::RwLock;
 
     /// The invite anchors the joiner to the library FOUNDER, regardless of which
     /// Owner sends it. A second Owner inviting must still hand over the founder's
@@ -787,6 +836,10 @@ mod tests {
 
         assert_eq!(storage.membership_list_count(), 1);
 
+        let key_persistence = TestKeyPersistence::default();
+        let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+            [7u8; 32],
+        )));
         remove_member(
             &storage,
             &storage,
@@ -795,6 +848,8 @@ mod tests {
             &invitee_pk,
             "lib-1",
             &EncryptionService::from_key([7u8; 32]),
+            &key_persistence,
+            &cipher,
         )
         .await
         .expect("remove");
