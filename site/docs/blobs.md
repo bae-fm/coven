@@ -305,8 +305,12 @@ deletion is signed by its author like every other control object, and a later GC
 verifies the signature and that the author is a current write-capable member
 before acting on it.
 
-The blob is held for [`BLOB_TOMBSTONE_GRACE`](rustdoc:const:coven::blob::delete::BLOB_TOMBSTONE_GRACE)
-(7 days), the convergence window. A device offline for less than the grace is never
+The blob is held for the tombstone grace, the convergence window: 7 days by
+default
+([`BLOB_TOMBSTONE_GRACE`](rustdoc:const:coven::blob::delete::BLOB_TOMBSTONE_GRACE)),
+host-configurable through
+[`CovenBuilder::blob_tombstone_grace`](rustdoc:method:coven::CovenBuilder::blob_tombstone_grace)
+(a zero-or-negative grace is refused at open). A device offline for less than the grace is never
 stranded: it comes back, pulls the row removal, and the blob is still there in the
 meantime. Once the grace passes,
 [`gc_tombstones`](rustdoc:fn:coven::blob::delete::gc_tombstones) on any device
@@ -322,7 +326,7 @@ the blob, then deletes the tombstone. An unreferenced-but-not-yet-deleted blob i
 <circle class="glyphf" cx="210" cy="66" r="4"/>
 <text class="lbl s11" x="210" y="92" text-anchor="middle">signed tombstone written</text>
 <rect class="tx" x="210" y="54" width="290" height="24" rx="6"/>
-<text class="sub" x="355" y="44" text-anchor="middle">7-day grace · blob still readable by laggards</text>
+<text class="sub" x="355" y="44" text-anchor="middle">grace (default 7 days) · blob still readable by laggards</text>
 <circle class="glyphf" cx="540" cy="66" r="4"/>
 <text class="lbl s11" x="540" y="92" text-anchor="middle">GC verifies, deletes both</text>
 </svg>

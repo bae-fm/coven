@@ -75,11 +75,6 @@ pub trait CloudHome: Send + Sync {
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError>;
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
 
-    // Conditional delete, for backends that can expose an object version.
-    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError>;
-    async fn delete_if_version(&self, key: &str, version: &CloudObjectVersion)
-        -> Result<ConditionalDelete, CloudHomeError>;
-
     async fn grant_access(&self, grant: CloudAccessGrant)
         -> Result<CloudHomeJoinInfo, CloudHomeError>;
     async fn revoke_access(&self, revoke: CloudAccessRevoke)
@@ -106,10 +101,6 @@ pub trait CloudHome: Send + Sync {
   encrypted chunks covering a blob byte range.
 - `list` returns every key under a prefix. `delete` is not an error when the key
   is absent. `exists` is a presence check.
-- `object_state` and `delete_if_version` support an atomic
-  compare-and-delete on backends whose API exposes an object version; a backend
-  that cannot returns `VersionUnavailable` and callers fall back to
-  coarser guards.
 - `grant_access` and `revoke_access` change who can reach the cloud home. They
   are provider-shaped and described below.
 
