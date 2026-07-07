@@ -154,6 +154,18 @@ pub enum BlobCacheError {
     /// ref), not a cache miss to fall through — surfaced loud so the host repairs or
     /// re-imports.
     NoExternalRef { id: String },
+    /// A Remote blob fetched whole from the cloud came back with a plaintext length
+    /// that disagrees with the row's declared size. The bytes are not what the row
+    /// describes, so they are refused before caching or returning: caching them would
+    /// fail the read's own length check on every later read, warning and refetching
+    /// the same wrong object forever. Terminal like the length checks the cache-hit
+    /// and file-download paths run.
+    CloudSizeMismatch {
+        namespace: String,
+        id: String,
+        expected: u64,
+        actual: u64,
+    },
 }
 
 impl std::fmt::Display for BlobCacheError {
@@ -193,6 +205,15 @@ impl std::fmt::Display for BlobCacheError {
             BlobCacheError::NoExternalRef { id } => write!(
                 f,
                 "user-provided Local blob {id} has no registered external ref"
+            ),
+            BlobCacheError::CloudSizeMismatch {
+                namespace,
+                id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "cloud blob {namespace}/{id} is {actual} bytes, expected {expected}"
             ),
         }
     }
@@ -494,6 +515,19 @@ async fn read_remote_whole(
     let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     let bytes = fetch_from_cloud(db, storage, blob).await?;
+    // Verify the fetched plaintext against the row's declared size before caching or
+    // returning it — the same check the cache-hit ([`cached_blob_path_with_size`]) and
+    // file-download ([`SyncStorage::read_blob_to_file`]) paths run. A wrong-length cloud
+    // object caches nothing here, so it can't poison `cache/<id>` into a read that warns,
+    // refetches, and re-poisons the same object on every later read.
+    if bytes.len() as u64 != expected_size {
+        return Err(BlobCacheError::CloudSizeMismatch {
+            namespace: blob.namespace.clone(),
+            id: blob.id.clone(),
+            expected: expected_size,
+            actual: bytes.len() as u64,
+        });
+    }
     crate::local_blob::write_atomic(&cache, &bytes)
         .await
         .map_err(BlobCacheError::Io)?;

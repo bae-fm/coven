@@ -164,6 +164,53 @@ async fn short_cached_remote_blob_is_a_miss_and_refetches() {
     );
 }
 
+/// A cloud object whose plaintext length disagrees with the row's declared size is
+/// rejected on read: the whole-blob Remote fetch verifies `bytes.len()` against the
+/// declared size before it caches or returns anything. A mismatch is a typed error
+/// and writes nothing to `cache/`, so a wrong-length cloud object cannot poison the
+/// cache into a warn-refetch-repoison loop — every read fails loud instead.
+#[tokio::test]
+async fn short_cloud_object_errors_and_caches_nothing() {
+    let db = read_test_db("audio");
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_library_dir();
+
+    let blob = blob_ref("blob-shrt", "audio", CacheFill::CacheLazy);
+    let declared = b"the full declared blob bytes".to_vec();
+    let short = declared[..8].to_vec();
+    plant_blob_row(&db, &blob.id, true, declared.len() as u64).await;
+    // The cloud object is shorter than the row's declared size.
+    put_cloud_blob(&storage, &blob.id, &blob.namespace, &short).await;
+
+    let err = read_blob(&db, &ld, Some(&storage), &blob)
+        .await
+        .expect_err("a cloud object shorter than the declared size must error");
+    assert!(
+        matches!(
+            err,
+            BlobCacheError::CloudSizeMismatch { expected, actual, .. }
+                if expected == declared.len() as u64 && actual == short.len() as u64
+        ),
+        "a short cloud object maps to CloudSizeMismatch naming expected/actual: {err:?}",
+    );
+    assert!(
+        !ld.cache_blob_path(&blob.namespace, &blob.id)
+            .unwrap()
+            .exists(),
+        "a length mismatch writes nothing to storage/cache/<id>",
+    );
+
+    // A subsequent read keeps erroring loudly — no cached wrong-length file to serve,
+    // no refetch loop that returns the short bytes.
+    let again = read_blob(&db, &ld, Some(&storage), &blob)
+        .await
+        .expect_err("subsequent reads keep erroring, never serving the short bytes");
+    assert!(
+        matches!(again, BlobCacheError::CloudSizeMismatch { .. }),
+        "the second read errors the same way, not a wrong-length hit: {again:?}",
+    );
+}
+
 #[tokio::test]
 async fn blob_reads_reuse_schema_models_built_at_open() {
     crate::sync::gate::reset_from_tables_call_count();
@@ -413,8 +460,10 @@ async fn cache_lazy_fetches_on_first_read() {
             // on the peer that pulls it.
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-             VALUES ('aud01234', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+            // size = 13 matches the `AUDIO-PAYLOAD` bytes put in the cloud below; the
+            // whole-blob read verifies the fetched length against this declared size.
+            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+             VALUES ('aud01234', 'n1', 'audio', 13, '0000000001000-0000-dev1', '2026-01-01')",
         ],
     )
     .await;
@@ -901,7 +950,9 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     db.clear_external_blob(&blob.id)
         .await
         .expect("clear external ref");
-    let cloud_bytes = b"NOW-FROM-THE-CLOUD".to_vec();
+    // The cloud object's length must match the row's declared size (1500) — the
+    // whole-blob read verifies it before serving.
+    let cloud_bytes = ramp(1500);
     put_cloud_blob(&storage, &blob.id, &blob.namespace, &cloud_bytes).await;
     let got = read_blob(&db, &ld, Some(&storage), &blob)
         .await
