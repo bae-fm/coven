@@ -2275,7 +2275,7 @@ impl std::error::Error for GateError {}
 mod tests {
     use super::*;
     use crate::changeset::{walk, ChangeOp};
-    use crate::sync::apply::apply_changeset_lww;
+    use crate::sync::apply::resolve_and_apply_changeset;
     use rusqlite::session::Session as RqSession;
 
     /// A throwaway in-memory connection with `foreign_keys=ON`, for the gate
@@ -2738,7 +2738,7 @@ mod tests {
         // Apply cycle 2's output to a fresh peer: complete consistent subtree.
         let peer = conn();
         create_synced_schema(&peer);
-        apply_changeset_lww(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
+        resolve_and_apply_changeset(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
             .expect("apply to peer");
         assert!(
             row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
@@ -2988,9 +2988,9 @@ mod tests {
         );
     }
 
-    /// Apply a changeset with the production LWW path, scoped to the album set.
+    /// Apply a changeset with the production conflict-resolving apply path, scoped to the album set.
     fn apply_album(c: &Connection, bytes: &[u8]) {
-        apply_changeset_lww(c, bytes, &album_tables(), crate::sync::hlc::now_wall_ms())
+        resolve_and_apply_changeset(c, bytes, &album_tables(), crate::sync::hlc::now_wall_ms())
             .expect("apply album changeset");
     }
 
@@ -3683,7 +3683,7 @@ mod tests {
         );
         let peer = conn();
         create_synced_schema(&peer);
-        apply_changeset_lww(&peer, &out1, &tables, crate::sync::hlc::now_wall_ms())
+        resolve_and_apply_changeset(&peer, &out1, &tables, crate::sync::hlc::now_wall_ms())
             .expect("apply share");
         assert!(row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"));
         assert!(row_exists(&peer, "SELECT 1 FROM note_tags WHERE id = 't1'"));
@@ -3698,7 +3698,7 @@ mod tests {
             &tables,
             &["UPDATE notes SET shared = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"],
         );
-        apply_changeset_lww(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
+        resolve_and_apply_changeset(&peer, &out2, &tables, crate::sync::hlc::now_wall_ms())
             .expect("apply retract");
         assert!(
             !row_exists(&peer, "SELECT 1 FROM notes WHERE id = 'n1'"),
@@ -4095,7 +4095,7 @@ mod tests {
     }
 
     fn apply_album_asset(c: &Connection, bytes: &[u8]) {
-        apply_changeset_lww(
+        resolve_and_apply_changeset(
             c,
             bytes,
             &album_asset_tables(),

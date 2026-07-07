@@ -18,7 +18,7 @@ use crate::storage::cloud::{
     BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectState,
     CloudObjectVersion, ConditionalDelete, PartSink,
 };
-use crate::sync::apply::apply_changeset_lww;
+use crate::sync::apply::resolve_and_apply_changeset;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
@@ -308,15 +308,16 @@ pub async fn capture_bytes(db: &Database, stmts: &[&str]) -> Vec<u8> {
     db.take_changeset().await.expect("capture changeset")
 }
 
-/// Apply a changeset to the test database with the production LWW path, scoped to
-/// `tables`. Goes through `apply_changeset` so capture is disabled around only the
+/// Apply a changeset to the test database with the production conflict-resolving
+/// apply path, scoped to `tables`. Goes through `apply_changeset` so capture is
+/// disabled around only the
 /// apply (the applied rows are not re-recorded), mirroring the cycle's lifecycle.
 pub async fn apply_to_db(db: &Database, bytes: &[u8], tables: &[SyncedTable]) {
     let bytes = bytes.to_vec();
     let tables = tables.to_vec();
     let receiver_wall_ms = db.receive_wall_ms();
     db.apply_changeset(move |conn| {
-        apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
+        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
     })
     .await
     .expect("apply changeset");

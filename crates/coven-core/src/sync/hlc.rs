@@ -3,8 +3,9 @@
 /// This clock is coven's `_updated_at` register: native hosts stamp every synced
 /// row's `_updated_at` with [`crate::SqlContext::stamp`], and pull records every
 /// applied row's `_updated_at` as a floor so a subsequent local write sorts causally
-/// after anything just pulled. Row-level last-writer-wins (`conflict.rs`)
-/// compares these strings lexicographically. Because the clock never mints a
+/// after anything just pulled. The row arbiter (`conflict.rs`) picks a conflict
+/// winner by comparing these strings, whose order is lexicographic. Because the
+/// clock never mints a
 /// stamp behind a value it has already seen — even under wall-clock skew or a
 /// same-millisecond restart — a device that edits a row right after pulling a
 /// peer's edit always wins, which a plain wall clock cannot guarantee.

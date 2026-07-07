@@ -1156,7 +1156,7 @@ mod tests {
     use super::*;
     use crate::blob::{local_files, CacheFill, ResolvedScope};
     use crate::database::DbError;
-    use crate::sync::apply::apply_changeset_lww;
+    use crate::sync::apply::resolve_and_apply_changeset;
     use crate::sync::session::BlobDecl;
     use crate::sync::test_helpers::{
         open_test_db_with_user_and_host_blobs, temp_library_dir,
@@ -1238,10 +1238,10 @@ mod tests {
             .is_some()
     }
 
-    /// Apply a changeset's bytes with the production LWW path scoped to the test
-    /// synced set.
+    /// Apply a changeset's bytes with the production conflict-resolving apply path
+    /// scoped to the test synced set.
     fn apply(c: &Connection, bytes: &[u8]) {
-        apply_changeset_lww(c, bytes, &synced_tables(), crate::sync::hlc::now_wall_ms())
+        resolve_and_apply_changeset(c, bytes, &synced_tables(), crate::sync::hlc::now_wall_ms())
             .expect("apply changeset");
     }
 

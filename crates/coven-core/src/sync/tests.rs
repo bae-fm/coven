@@ -185,6 +185,93 @@ async fn same_column_contention_keeps_newer() {
     );
 }
 
+/// Seed a fresh source with `base`, drain the insert capture, then capture a
+/// single UPDATE — the changeset a writer who started from that base would push.
+async fn update_from_base(base: &str, update: &str) -> Vec<u8> {
+    let src = open_test_db();
+    exec(&src, base).await;
+    let _ = capture_bytes(&src, &[]).await;
+    capture_bytes(&src, &[update]).await
+}
+
+/// Three writers contend on one column while a fourth wins the row on a *different*
+/// column, and the final value of the contended column depends on apply order.
+///
+/// This is a deliberate, documented property of the convergence model, not a bug:
+/// the schema carries a single per-row `_updated_at`, not a per-column stamp, so
+/// the column-level premerge can only fold a losing writer's column in while the
+/// local column still equals that writer's base. Once the row winner (or the other
+/// contender) has moved the column off its base, a later losing writer to the same
+/// column is dropped. Both orders therefore land a value from the contending set,
+/// stamped at the row winner's time, with no reconciling event — resolved only by
+/// the next edit to that column. The row winner's own column converges regardless
+/// of order; only the contended column diverges, and only among 3+ same-column
+/// writers interleaved with a row winner.
+///
+/// Pinned deliberately: if this assertion fails, same-column convergence semantics
+/// changed — confirm the change is intentional before updating the test.
+#[tokio::test]
+async fn three_writer_same_column_contention_is_order_dependent() {
+    // base c0; X1 and X2 both edit `title` away from c0 concurrently; M wins the
+    // row on `body` with the highest stamp (9000 > both 3000 and 4000).
+    let base = "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                VALUES ('n1', 'c0', 'b0', '0000000001000-0000-base', '2026-01-01')";
+    let x1 = update_from_base(
+        base,
+        "UPDATE notes SET title = 'c1', _updated_at = '0000000003000-0000-x1' WHERE id = 'n1'",
+    )
+    .await;
+    let x2 = update_from_base(
+        base,
+        "UPDATE notes SET title = 'c2', _updated_at = '0000000004000-0000-x2' WHERE id = 'n1'",
+    )
+    .await;
+    let m = update_from_base(
+        base,
+        "UPDATE notes SET body = 'bM', _updated_at = '0000000009000-0000-m' WHERE id = 'n1'",
+    )
+    .await;
+
+    // Apply order X1, M, X2.
+    let a = open_test_db();
+    exec(&a, base).await;
+    apply_to_db(&a, &x1, &test_synced_tables()).await;
+    apply_to_db(&a, &m, &test_synced_tables()).await;
+    apply_to_db(&a, &x2, &test_synced_tables()).await;
+
+    // Apply order X2, M, X1.
+    let b = open_test_db();
+    exec(&b, base).await;
+    apply_to_db(&b, &x2, &test_synced_tables()).await;
+    apply_to_db(&b, &m, &test_synced_tables()).await;
+    apply_to_db(&b, &x1, &test_synced_tables()).await;
+
+    // The row winner's column and stamp converge regardless of order.
+    for db in [&a, &b] {
+        assert_eq!(
+            query_text(db, "SELECT body FROM notes WHERE id = 'n1'").await,
+            "bM"
+        );
+        assert_eq!(
+            query_text(db, "SELECT _updated_at FROM notes WHERE id = 'n1'").await,
+            "0000000009000-0000-m"
+        );
+    }
+
+    // The contended column does not converge: whichever same-column writer landed
+    // first (before the row winner moved the row past its base) keeps its value.
+    let title_a = query_text(&a, "SELECT title FROM notes WHERE id = 'n1'").await;
+    let title_b = query_text(&b, "SELECT title FROM notes WHERE id = 'n1'").await;
+    assert_eq!(title_a, "c1");
+    assert_eq!(title_b, "c2");
+    assert_ne!(
+        title_a, title_b,
+        "3-writer same-column contention is a deliberately order-dependent property \
+         of the single-per-row-stamp model; if these now converge, the convergence \
+         semantics changed — confirm that is intentional before updating this test"
+    );
+}
+
 #[tokio::test]
 async fn fk_violation_is_reported_then_resolved_on_retry() {
     // Capture a child insert (note_tags -> notes) on a source that has the parent.
@@ -233,12 +320,13 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
 /// Apply a changeset and report whether it had FK violations, through the same
 /// `apply_changeset` lifecycle as [`apply_to_db`].
 async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
-    use crate::sync::apply::apply_changeset_lww;
+    use crate::sync::apply::resolve_and_apply_changeset;
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
     let receiver_wall_ms = db.receive_wall_ms();
     db.apply_changeset(move |conn| {
-        apply_changeset_lww(conn, &bytes, &tables, receiver_wall_ms).map(|r| r.had_fk_violations)
+        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms)
+            .map(|r| r.had_fk_violations)
     })
     .await
     .expect("apply")

@@ -1,4 +1,13 @@
-//! Apply a changeset to the connection with the production LWW conflict handler.
+//! Apply a changeset to the connection, resolving conflicts as each row lands.
+//!
+//! Two stages. First a column-level three-way premerge
+//! ([`premerge_losing_update_columns`]): when an incoming UPDATE loses row
+//! arbitration, the columns it moved away from a base the local row still holds
+//! are folded into the local row, so concurrent edits to *different* columns of
+//! one row both survive. Then the changeset is applied with
+//! [`arbitrate_row_conflict`] as the conflict handler, which picks the winning row
+//! by `_updated_at` (remove-wins for deletes, a future-skew bound on the
+//! comparison) for every collision the premerge did not already fold in.
 //!
 //! Within a single changeset, SQLite defers FK checks — parent and child rows in
 //! the same changeset are applied in recording order. Cross-changeset FK
@@ -21,7 +30,7 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params_from_iter, Connection, OptionalExtension, ToSql};
 use tracing::warn;
 
-use super::conflict::{compare_lww_stamps, lww_conflict_handler, LwwComparison, TableSchema};
+use super::conflict::{arbitrate_row_conflict, compare_lww_stamps, LwwComparison, TableSchema};
 use super::hlc::Timestamp;
 use super::session::quote_ident;
 #[cfg(any(test, feature = "test-utils"))]
@@ -40,15 +49,15 @@ pub struct ApplyResult {
     pub constraint_conflict_tables: Vec<String>,
 }
 
-/// Apply `bytes` to `conn` using LWW conflict resolution, building the
-/// [`TableSchema`] from `tables` once. A convenience wrapper over
-/// [`apply_changeset_lww_with_schema`] for callers that apply a single changeset
-/// and don't already hold a schema (tests, snapshot round-trips).
+/// Apply `bytes` to `conn`, resolving conflicts (premerge + row arbitration),
+/// building the [`TableSchema`] from `tables` once. A convenience wrapper over
+/// [`resolve_and_apply_changeset_with_schema`] for callers that apply a single
+/// changeset and don't already hold a schema (tests, snapshot round-trips).
 ///
 /// `receiver_wall_ms` is the receiver's current wall-clock millis, against which
-/// a grossly-future incoming `_updated_at` is refused (see [`lww_conflict_handler`]).
+/// a grossly-future incoming `_updated_at` is refused (see [`arbitrate_row_conflict`]).
 #[cfg(any(test, feature = "test-utils"))]
-pub fn apply_changeset_lww(
+pub fn resolve_and_apply_changeset(
     conn: &Connection,
     bytes: &[u8],
     tables: &[SyncedTable],
@@ -56,11 +65,13 @@ pub fn apply_changeset_lww(
 ) -> Result<ApplyResult, DbError> {
     let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
     let schema = Arc::new(TableSchema::from_db(conn, &table_refs)?);
-    apply_changeset_lww_with_schema(conn, bytes, schema, receiver_wall_ms)
+    resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms)
 }
 
-/// Apply `bytes` to `conn` using LWW conflict resolution against a pre-built
-/// [`TableSchema`].
+/// Apply `bytes` to `conn`, resolving conflicts against a pre-built
+/// [`TableSchema`]: a column-level premerge of losing UPDATEs
+/// ([`premerge_losing_update_columns`]) followed by an apply whose conflict
+/// closure arbitrates every remaining row collision.
 ///
 /// The schema's per-table `_updated_at` column index map is derived once (from
 /// the live schema, so future migrations that add columns are safe) and reused
@@ -73,8 +84,8 @@ pub fn apply_changeset_lww(
 /// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
 /// wall-clock millis, read once by the caller and moved into the closure to bound
-/// a grossly-future incoming `_updated_at` (see [`lww_conflict_handler`]).
-pub fn apply_changeset_lww_with_schema(
+/// a grossly-future incoming `_updated_at` (see [`arbitrate_row_conflict`]).
+pub fn resolve_and_apply_changeset_with_schema(
     conn: &Connection,
     bytes: &[u8],
     schema: Arc<TableSchema>,
@@ -135,7 +146,7 @@ pub fn apply_changeset_lww_with_schema(
                     }
                 }
             }
-            lww_conflict_handler(conflict_type, item, &table, &schema, receiver_wall_ms)
+            arbitrate_row_conflict(conflict_type, item, &table, &schema, receiver_wall_ms)
         },
     )
     .map_err(DbError::from)?;
@@ -353,6 +364,11 @@ fn merge_losing_update(
         }
     }
     if !applied.is_empty() {
+        // Fold the losing writer's columns into the local row WITHOUT bumping its
+        // `_updated_at`. The local row won row arbitration, so its stamp already
+        // dominates the incoming one; re-stamping the merged row could only lower
+        // it, and the row winner's stamp is what future arbitration must compare
+        // against. The merge changes a losing column's value, not the row's clock.
         apply_columns(conn, columns, update, &applied)?;
     }
 

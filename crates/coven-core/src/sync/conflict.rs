@@ -1,22 +1,30 @@
-//! Production conflict resolution for changeset application.
+//! Row arbitration for changeset application: when an incoming row collides with
+//! the local one, decide which whole row wins.
 //!
-//! Row-level Last-Writer-Wins (LWW) on the `_updated_at` column: each side's
-//! value is parsed as an HLC [`Timestamp`] and the greater one wins (the parsed
+//! The arbiter compares each side's `_updated_at`: both are parsed as HLC
+//! [`Timestamp`]s and the greater one wins — the later writer of the row (the parsed
 //! order equals the lexicographic order of the string form, but parsing also lets
-//! the receiver reject a stamp it can't trust). The `_updated_at` column index is
-//! looked up dynamically from the schema so adding columns to the end of a table
-//! is safe.
+//! the receiver reject a stamp it can't trust). An incoming DELETE is remove-wins:
+//! a hard delete carries only the row's pre-delete stamp and cannot be
+//! reconstructed from a later partial UPDATE, so the delete always wins and the row
+//! stays gone. The `_updated_at` column index is looked up dynamically from the
+//! schema so adding columns to the end of a table is safe.
+//!
+//! This is row-level: the losing row is dropped whole. Column-level survival of
+//! concurrent edits to *different* columns of one row is handled upstream by the
+//! premerge in [`super::apply`], before the changeset reaches this arbiter — the
+//! arbiter only picks a winner for the collisions the premerge did not fold in.
 //!
 //! A member is trusted to author valid changesets, so this is robustness, not a
 //! security boundary: a buggy client or a device with a grossly-wrong wall clock
-//! can stamp a row far in the future. As a value that would beat every honest
-//! stamp and win every conflict forever, so the receiver bounds an incoming stamp
-//! to its own wall clock plus a generous offline allowance
+//! can stamp a row far in the future — a value that would beat every honest stamp
+//! and win every conflict forever — so the receiver bounds an incoming stamp to
+//! its own wall clock plus an offline allowance
 //! ([`super::hlc::MAX_FUTURE_SKEW_MS`]) and refuses to let a grossly-future one win
 //! (the matching refusal to let it ratchet the clock lives in the pull's HLC
 //! advance — a rejected stamp never becomes an applied row there either).
 //!
-//! The logic runs inside the `apply_strm` conflict closure in [`super::apply`],
+//! The decision runs inside the `apply_strm` conflict closure in [`super::apply`],
 //! which is `Fn(ConflictType, ChangesetItem) -> ConflictAction + Send + 'static`.
 //! This module provides the per-table column map (moved owned into the closure)
 //! and the pure per-row decision.
@@ -107,7 +115,7 @@ pub fn compare_lww_stamps(
     }
 }
 
-/// The production LWW decision for one conflicting changeset row.
+/// Arbitrate one conflicting changeset row: pick the winning row, or omit.
 ///
 /// Rules:
 /// - **DATA** (same row, both sides edited): incoming DELETE removes the row;
@@ -130,7 +138,7 @@ pub fn compare_lww_stamps(
 /// [`Timestamp`]s; an unparseable value keeps local. A grossly-future incoming
 /// stamp — beyond `receiver_wall_ms` + [`super::hlc::MAX_FUTURE_SKEW_MS`] — is
 /// refused (kept local) so a broken clock can't win every conflict.
-pub fn lww_conflict_handler(
+pub fn arbitrate_row_conflict(
     conflict_type: ConflictType,
     item: ChangesetItem,
     table: &str,
@@ -142,7 +150,7 @@ pub fn lww_conflict_handler(
             let Some(uat) = schema.updated_at(table) else {
                 // The changeset carries a table this device doesn't declare (a
                 // newer peer's schema). We can't resolve its `_updated_at`, so we
-                // can't LWW it — omit rather than blindly apply a row we don't
+                // can't arbitrate it — omit rather than blindly apply a row we don't
                 // understand.
                 warn!(
                     table,

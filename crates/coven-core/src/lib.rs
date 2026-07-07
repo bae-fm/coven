@@ -4,7 +4,8 @@
 //! The host app owns its SQLite schema and domain. coven owns the sync layer:
 //! changesets captured via the SQLite session extension, HLC-stamped
 //! and signed per author, encrypted and pushed/pulled through a pluggable
-//! `CloudHome`, conflict-resolved by row-level last-writer-wins on `_updated_at`.
+//! `CloudHome`, conflict-resolved per row by `_updated_at` arbitration with a
+//! column-level premerge so concurrent edits to different columns of a row survive.
 //! An append-only Ed25519-signed membership chain wraps the per-library
 //! symmetric key to each member.
 //!

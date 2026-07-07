@@ -230,8 +230,8 @@ fn changeset_value(
 
 /// Render a changeset/column [`ValueRef`] as an owned `String`, or `None` for
 /// SQL NULL. Mirrors `sqlite3_value_text`: text and blob bytes become a string
-/// (lossy on invalid UTF-8), and integers/reals their decimal text — so the LWW
-/// `_updated_at` comparison and blob-plan column reads see the same strings the
+/// (lossy on invalid UTF-8), and integers/reals their decimal text — so the
+/// `_updated_at` row-arbitration comparison and blob-plan column reads see the same strings the
 /// raw FFI path (gate.rs) produces.
 ///
 /// Synced columns coven reads through here — `_updated_at`, gate columns, FK and

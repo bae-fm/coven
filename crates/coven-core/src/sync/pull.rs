@@ -4,7 +4,8 @@
 /// 1. List heads from the sync storage (one S3 LIST call).
 /// 2. Compare each device's seq to our local `sync_cursors` table.
 /// 3. For each device that's ahead of our cursor, fetch new changesets.
-/// 4. Unpack envelope, check schema_version, apply with LWW.
+/// 4. Unpack envelope, check schema_version, apply — resolving conflicts by
+///    row arbitration on `_updated_at` plus a column-level premerge.
 /// 5. Update sync_cursors for that device.
 ///
 /// After all changesets are applied, any that had FK violations are retried once
@@ -15,7 +16,7 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
-use super::apply::apply_changeset_lww_with_schema;
+use super::apply::resolve_and_apply_changeset_with_schema;
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
@@ -658,7 +659,7 @@ pub async fn pull_changes(
                 let schema = schema.clone();
                 let bytes = changeset_bytes.clone();
                 db.apply_changeset(move |conn| {
-                    apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
+                    resolve_and_apply_changeset_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await
             };
@@ -733,7 +734,7 @@ pub async fn pull_changes(
                 let schema = schema.clone();
                 let bytes = d.changeset.clone();
                 db.apply_changeset(move |conn| {
-                    apply_changeset_lww_with_schema(conn, &bytes, schema, receiver_wall_ms)
+                    resolve_and_apply_changeset_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await
             };
