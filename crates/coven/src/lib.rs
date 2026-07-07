@@ -91,6 +91,7 @@ pub mod migration {
     pub use coven_core::migration::*;
 }
 
+/// Experimental and intentionally undocumented; see [`coven_core::share`].
 #[cfg(feature = "share-proxy")]
 pub mod share {
     pub use coven_core::share::*;

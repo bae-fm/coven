@@ -22,7 +22,13 @@
 //! authorizes *fetch*; the wrapped item key authorizes *decrypt* — independent,
 //! so a foreign blob ref in a manifest leaks only undecryptable ciphertext.
 //!
-//! This module is gated behind the `share-proxy` cargo feature.
+//! # Experimental and intentionally undocumented
+//!
+//! This module is gated behind the `share-proxy` cargo feature and is
+//! deliberately absent from the published documentation (site, README,
+//! examples). The API and the wire objects under `shares/{share_id}/` may
+//! change without a deprecation cycle. Nothing in the stock integration path
+//! calls it; hosts should not build on it.
 
 use serde::{Deserialize, Serialize};
 
