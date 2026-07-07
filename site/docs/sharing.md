@@ -158,8 +158,8 @@ symmetric key that can
 [rotate](#revocation-is-key-rotation); the keyring is the full set of those key
 generations. Each member gets their own copy of the keyring, sealed to their
 X25519 public key with libsodium's sealed box and stored at
-`keys/{pubkey}.enc` in the cloud home, keyed by the member's Ed25519 public
-key. Only the holder of the matching private key can open it.
+`keys/{pubkey}.enc` in the [cloud home](/docs/storage), keyed by the member's
+Ed25519 public key. Only the holder of the matching private key can open it.
 
 Inviting a member writes two things: the signed `Add` entry under the inviting
 owner's prefix, and the keyring wrapped to that member at `keys/{pubkey}.enc`.

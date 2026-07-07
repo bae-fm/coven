@@ -91,8 +91,10 @@ and drives these steps:
 4. Sign the envelope, stage the packed bytes to disk, and push them to storage
    under the device's next sequence number; on success advance `local_seq`.
 5. Pull every remote changeset past the device's cursor, validate it, and apply
-   it (a column-level premerge, then row arbitration). The clock advances past
-   each applied changeset's stamps as it lands.
+   it: first the column-level *premerge* (concurrent edits to other columns of
+   a losing row fold in), then *row arbitration* (a collision picks one
+   winning row). The clock advances past each applied changeset's stamps as it
+   lands.
 6. Persist the updated cursors and flush the clock's high-water mark.
 7. Check snapshot policy.
 
@@ -123,16 +125,17 @@ push the staged file is cleared and `local_seq` advances. A device's sequence
 numbers start at 1; the first changeset is `local_seq + 1` over an initial
 `local_seq` of 0.
 
-Blob-before-row ordering rides the gate, owned by coven, not a global push gate.
-The cycle publishes whatever the gate emits; it does not hold the whole changeset
-back while the outbox drains. A gated root stays gated-off (local-only) while its
-blobs upload; coven's `make_remote` flips the gate on the instant the last upload
-lands, within the upload drain, and breaks the drain so the cycle publishes that
-root. While the gate is off the gate cuts the root's rows; when it flips on the
-gate re-emits the root's full subtree, so a peer never learns of a row whose blob
-is not yet in the cloud. The host's
+A peer must never learn of a row whose file is not yet in the cloud. That
+ordering rides the [gate](/docs/local-data), per root, not a global hold: the
+cycle publishes whatever the gate emits and never holds the whole changeset
+back while uploads drain. A root being made remote stays gated off
+(local-only) while its blobs upload. When the last upload lands, coven flips
+the gate on and breaks the drain, and the gate re-emits the root's full
+subtree in that same cycle. One slow upload therefore delays only its own
+root. The host's
 [`BlobTransitionObserver`](/docs/blobs#observing-transitions-and-uploads) only
-reports progress and completion; coven, not the host, decides when to publish.
+reports progress and completion; coven, not the host, decides when to
+publish.
 
 ### Pull
 
@@ -351,7 +354,7 @@ is its own page: [Schema evolution](/docs/schema-evolution).
 
 `CovenHandle` owns the sync lifecycle natively. The host calls
 `handle.connect_sync(...)` once a provider is connected; the handle builds the
-cloud home and, if sync is enabled, spawns the loop. `handle.stop_sync()` drops
+[cloud home](/docs/storage) and, if sync is enabled, spawns the loop. `handle.stop_sync()` drops
 the loop handle and cloud home, `handle.is_syncing()` reports whether the loop
 thread is running, and `handle.sync_now()` asks the loop to run a cycle now.
 
