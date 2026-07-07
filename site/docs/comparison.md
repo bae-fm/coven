@@ -59,9 +59,10 @@ membership chain on top.
 **The SQLite multi-writer primitive: cr-sqlite (Vlcn).** cr-sqlite is the merge
 layer alone: a CRDT extension that lets concurrent SQLite writers converge. It
 brings no transport, encryption, or access control, you would build a coven-like
-system on top of it. coven instead resolves conflicts with row-level
-last-writer-wins on a hybrid logical clock (see [Sync](/docs/sync-model)) and
-ships the transport, encryption, and membership with it.
+system on top of it. coven instead merges concurrent edits column by column
+over a hybrid logical clock, with the later writer winning per collision (see
+[Sync](/docs/sync-model)), and ships the transport, encryption, and membership
+with it.
 
 **Server-backed sync engines: Replicache/Zero, ElectricSQL, PowerSync.** Strong,
 mature sync engines, but they assume a server and a central database (Postgres,

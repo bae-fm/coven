@@ -13,13 +13,14 @@ them) reach teammates; the rest stay on the device that wrote them.
 
 coven owns the connection. The host opens one native handle with
 [`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
-that sync and a closure that creates the app's own tables. coven runs its
-bookkeeping migration first, then calls the closure, seeds its last-writer-wins
-clock off the rows already on disk, attaches the change-capture session to the
-synced tables, and spawns the thread that owns the connection.
+that sync and the [migration ladder](/docs/schema-evolution) that creates the
+app's own tables. coven runs its bookkeeping migration first, then any ladder
+rungs above the database's version, seeds its clock off the rows already on
+disk, attaches the change-capture session to the synced tables, and spawns the
+thread that owns the connection.
 
 ```rust
-use coven::{Coven, SyncedTable};
+use coven::{Coven, Migration, SyncedTable};
 
 const SCHEMA: &str = "
 CREATE TABLE workspaces (
@@ -49,10 +50,8 @@ let handle = Coven::builder(config)
         SyncedTable::new("lists").gated_by("shared"),
         SyncedTable::new("todos"),
     ])
-    .open(|conn| {
-        conn.execute_batch(SCHEMA)?;
-        Ok(())
-    })?;
+    .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
+    .open()?;
 ```
 
 Every synced table carries an `id` text primary key at column 0 and an
@@ -88,7 +87,7 @@ cycle.
 use coven::rusqlite::params;
 
 handle.sql(move |sql| {
-    sql.connection().execute(
+    sql.tx().execute(
         "INSERT INTO todos (id, list_id, title, done, _updated_at)
          VALUES (?1, ?2, ?3, 0, ?4)",
         params![todo_id, list_id, title, sql.stamp()],
@@ -110,7 +109,7 @@ the closure just runs your query.
 ```rust
 let titles: Vec<String> = handle
     .sql(move |sql| {
-        let mut stmt = sql.connection().prepare(
+        let mut stmt = sql.tx().prepare(
             "SELECT title FROM todos WHERE list_id = ?1 ORDER BY _updated_at",
         )?;
         let rows = stmt
@@ -213,11 +212,11 @@ SyncedTable::new("todos").carries_blob(
 ```
 
 coven resolves the declaration against the live schema each cycle and derives every
-blob a row references itself — what to upload on push, what to download on pull,
+blob a row references itself: what to upload on push, what to download on pull,
 whose cache to drop on a delete, and what to backfill after a snapshot bootstrap.
 It encrypts the file on upload; on pull it downloads, decrypts, and writes the
 plaintext into its own [cache](/docs/cache), which the host reads back through
-`handle.read_blob`. Where the bytes come from is the blob's provenance — the
+`handle.read_blob`. Where the bytes come from is the blob's provenance: the
 user's own file (user-provided) or coven's local store (host-provided). Use
 `handle.write(...)` when writing a row together with host-provided bytes. A blob
 table under `remote_root()` has no Local state: rows sync normally, host-provided
@@ -235,15 +234,15 @@ the owner calls
 
 ```rust
 let invite_code = handle
-    .invite_member(teammate_pubkey_hex, coven::sync::membership::MemberRole::Member)
+    .invite_member(&teammate_pubkey_hex, None, MemberRole::Member)
     .await?;
 ```
 
 On the teammate's device,
 [`join_from_invite_code`](rustdoc:fn:coven::sync::join::join_from_invite_code)
-decodes the code, runs the provider's auth flow, unwraps the library key sealed to
+decodes the code, runs the provider's auth flow, unwraps the library keyring sealed to
 the teammate's key, downloads the snapshot, and pulls the changesets written
 since. It returns a `Config` for the now-local library; from there the teammate
-opens a `CovenHandle` exactly as above. `handle.remove_member(...)` rotates the
-library key and returns its new fingerprint. The signed membership
+opens a `CovenHandle` exactly as above. `handle.remove_member(...)` appends a fresh
+key generation the removed member never receives. The signed membership
 chain, key wrapping, and the join flow are covered in [Sharing](/docs/sharing).
