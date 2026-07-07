@@ -120,7 +120,6 @@ export default defineConfig({
                     text: 'Docs',
                     items: [
                         { text: 'Overview', link: '/docs/' },
-                        { text: 'Comparison', link: '/docs/comparison' },
                         { text: 'Sync', link: '/docs/sync-model' },
                         { text: 'Local data', link: '/docs/local-data' },
                         { text: 'Bootstrap', link: '/docs/bootstrap' },
@@ -137,6 +136,7 @@ export default defineConfig({
                     text: 'Reference',
                     items: [
                         { text: 'Example', link: '/docs/example' },
+                        { text: 'Comparison', link: '/docs/comparison' },
                         { text: 'Rust API', link: '/rustdoc/coven/index.html', target: '_self' },
                         { text: 'Crate Index', link: '/rustdoc/coven/all.html', target: '_self' },
                     ],
