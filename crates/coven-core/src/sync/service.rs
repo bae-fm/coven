@@ -1,17 +1,19 @@
 //! Full sync orchestrator: gate + push local changes, pull remote changes.
 //!
 //! Protocol within a cycle:
-//! 1. The caller captured the outgoing changeset (resetting the recorded batch)
-//!    and passes the bytes in. Capture stays ENABLED throughout.
+//! 1. The caller drained the outgoing changeset from the pending-changeset journal
+//!    and passes the bytes in.
 //! 2. Gate the captured changeset (cut gated-false rows, re-emit on flip).
 //! 3. Push our changeset's blobs, then build the signed envelope to push.
-//! 4. Pull incoming changesets and apply them — the pull disables capture around
-//!    only each apply (so applied rows aren't echoed) and re-enables it at once,
-//!    so a host write landing during the network phases is still captured.
+//! 4. Pull incoming changesets and apply them. An apply is a plain connection
+//!    write, never a journaled one, so applied rows are never recorded as this
+//!    device's own outgoing changes — while a host write during the network phases
+//!    journals normally.
 //! 5. The caller runs snapshot policy.
 //!
-//! All connection access goes through the owned [`Database`]; capture is never
-//! suspended across the network steps — only the apply briefly disables it.
+//! All connection access goes through the owned [`Database`]; only a host write
+//! wrapped in a journaled transaction is ever captured, so applies need no special
+//! handling.
 
 use std::collections::{HashMap, HashSet};
 
@@ -119,10 +121,10 @@ pub(super) async fn upload_snapshot_host_blobs(
 /// Gate the captured `outgoing` changeset, prepare its push envelope, and
 /// pull remote changes.
 ///
-/// `outgoing` is the changeset the caller captured via
-/// `Database::take_changeset`; capture stays enabled, and the apply inside
-/// `pull` disables it around only the apply, so the applied rows are not
-/// re-recorded while host writes during the network steps are.
+/// `outgoing` is the changeset the caller drained from the pending-changeset
+/// journal. The apply inside `pull` is a plain connection write (never journaled),
+/// so applied rows are not recorded as this device's own outgoing changes, while
+/// host writes during the network steps journal normally.
 pub async fn sync(
     device_id: &str,
     db: &Database,
@@ -140,10 +142,9 @@ pub async fn sync(
 ) -> Result<SyncResult, SyncCycleError> {
     // Step 2: apply row-level sync gating. Cut gated-false rows (and their
     // FK-descendants) so they stay local; re-emit a root's full subtree when
-    // its gate flips false→true. Runs on the owned connection; capture stays
-    // enabled (gating reads current row state from the live tables, and the
-    // pull disables capture only around its apply). Done before the blob scan
-    // so blob upload sees the gated set, not the cut rows.
+    // its gate flips false→true. Runs on the owned connection (gating reads
+    // current row state from the live tables). Done before the blob scan so blob
+    // upload sees the gated set, not the cut rows.
     let outgoing_cs: Option<Vec<u8>> = if outgoing.is_empty() {
         None
     } else {
@@ -655,7 +656,7 @@ async fn finish_host_provided_make_remote(
     // disposition (keyed by that sequence) is applied only after the row that
     // shares the blob is durable — matching the inline-push path.
     let intent_seq = local_seq + 1;
-    db.call_with_capture_reset(move |conn| {
+    db.call(move |conn| {
         crate::blob::transition::commit_make_remote_flip(
             conn,
             &tables,

@@ -209,11 +209,11 @@ impl CovenLibrary {
 
     /// Run a write statement (or several, separated by `;`) against the database.
     ///
-    /// This is the host's write path: the attached capture session records these
-    /// writes into the outgoing changeset, so [`start_sync`](Self::start_sync)
-    /// publishes them. Synced rows must carry the `_updated_at` register stamp the
-    /// synced-table contract requires; wasm hosts with an open library mint those
-    /// stamps with [`stamp`](Self::stamp).
+    /// This is the host's write path: the write runs inside a journaled
+    /// transaction whose capture session records it into the pending-changeset
+    /// journal, so [`start_sync`](Self::start_sync) publishes it. Synced rows must
+    /// carry the `_updated_at` register stamp the synced-table contract requires;
+    /// wasm hosts with an open library mint those stamps with [`stamp`](Self::stamp).
     pub fn exec(&self, sql: String) -> Result<(), JsValue> {
         // The wasm `Database::call` runs the closure synchronously on the borrowed
         // connection and returns an already-complete future, so `now_or_never`
@@ -222,7 +222,7 @@ impl CovenLibrary {
         // surface, not to paper over.
         let tables = self.db.synced_tables().to_vec();
         self.db
-            .call_with_capture_reset(move |conn| {
+            .call(move |conn| {
                 Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
                     tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
                 })

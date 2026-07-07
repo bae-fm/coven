@@ -2,11 +2,11 @@
 //!
 //! Runs a single sync cycle (gate + push local changes, pull remote changes,
 //! manage snapshots) and initializes sync infrastructure. All connection access
-//! goes through the owned [`Database`]; capture stays ENABLED across the whole
-//! cycle (push, pull, snapshot), so a host write landing mid-cycle is recorded
-//! into the next outgoing changeset. Capture is disabled only around the
-//! synchronous apply of incoming rows, inside [`Database::apply_changeset`], so
-//! applied rows are not echoed.
+//! goes through the owned [`Database`]. Local changes are published from the
+//! durable pending-changeset journal, which each host write appends to inside its
+//! own journaled transaction — so a host write landing mid-cycle is captured for
+//! the next outgoing changeset, while the pull's apply is a plain connection write
+//! that is never journaled and so never echoes applied rows.
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -407,10 +407,9 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
 /// bookkeeping, snapshot.
 ///
 /// All connection access goes through `db`. Local writes are published from the
-/// durable pending-changeset journal. The pull's apply disables the legacy raw
-/// capture session around just the apply (see [`Database::apply_changeset`]), so
-/// applied rows are not echoed by tests and helpers that still inspect raw
-/// session bytes.
+/// durable pending-changeset journal; the pull's apply is a plain connection
+/// write that is never journaled, so applied rows are never republished as this
+/// device's own changes.
 /// Loads/persists all cycle state (local_seq, cursors, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
 pub async fn run_single_sync_cycle(
@@ -537,9 +536,8 @@ pub async fn run_single_sync_cycle(
         .map_err(|e| format!("Failed to load sync cursors: {e}"))?;
 
     // Retry a staged changeset left behind by a failed push in an earlier cycle.
-    // Staging exists only to let the bytes survive a push failure (the capture
-    // already consumed them from the session, so a lost push must not lose the
-    // rows); a fresh capture stages-then-pushes in the span below.
+    // Staging holds the gated, push-ready bytes so a lost push can re-push exactly
+    // them next cycle without re-deriving; the span below stages-then-pushes.
     if let Some(seq) = staged_seq {
         if let Some(staged_data) = read_staged_changeset(library_dir).await {
             let timestamp = hlc.now().to_string();
@@ -634,8 +632,8 @@ pub async fn run_single_sync_cycle(
     // gate column is off (the host keeps a blob-bearing row gated until its
     // blobs upload), so whatever the gate emitted is safe to publish now —
     // there is no global upload deferral. Stage the bytes before pushing so a
-    // push failure doesn't lose them (the capture already consumed them from
-    // the session); the staged-retry above re-pushes on the next cycle.
+    // push failure re-pushes exactly these gated bytes; the staged-retry above
+    // re-pushes on the next cycle.
     if let Some(outgoing) = &sync_result.outgoing {
         let seq = outgoing.seq;
         let pending_changeset_max_id = pending_changeset_max_id
@@ -802,9 +800,9 @@ pub async fn run_single_sync_cycle(
         elapsed.num_hours().max(0) as u64
     });
 
-    // Initial sync: library has data but the session produced no changeset (data
-    // was inserted before the cycle ran — e.g. user connected a provider to an
-    // existing library). Push a snapshot so the existing data reaches the cloud.
+    // Initial sync: library has data but the pending journal produced no changeset
+    // (data was inserted before the cycle ran — e.g. user connected a provider to
+    // an existing library). Push a snapshot so the existing data reaches the cloud.
     let is_initial_sync =
         local_seq == 0 && snapshot_seq.is_none() && sync_result.outgoing.is_none();
 

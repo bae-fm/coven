@@ -639,18 +639,17 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
 }
 
 /// Regression: a sync cycle that errors mid-cycle must still leave host-write
-/// capture working. The `Database` (and its actor) outlive the cycle and are
-/// reused every cycle, so if a failure could leave capture off, every later host
-/// write would go un-recorded and never sync. The fix makes this structural —
-/// capture is never suspended across the cycle (only an apply briefly disables it,
-/// and that closure can't be reached on this failure path) — so there is no
-/// suspended state a mid-cycle abort could strand.
+/// capture working. The `Database` and its connection thread outlive the cycle and
+/// are reused every cycle. Capture is structural — each host write records into the
+/// pending-changeset journal inside its own transaction, and the journal already
+/// holds any change a failed cycle didn't manage to push — so there is no
+/// cross-call capture state a mid-cycle abort could strand.
 ///
 /// We force the failure by blocking every `INSERT` into `sync_state` with a
 /// trigger that `RAISE(ABORT)`s. The cycle's top-of-cycle reads (plain `SELECT`s)
 /// still succeed, but the first bookkeeping persist fails, so the cycle returns
-/// `Err`. Capture must still record a subsequent host write into the next
-/// captured changeset.
+/// `Err`. A subsequent host write must still journal into the next drained
+/// changeset.
 #[tokio::test]
 async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // A db whose `sync_state` rejects every INSERT, so a `set_sync_state` inside
@@ -672,11 +671,11 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     )
     .expect("open db with sync_state-blocking trigger");
 
-    // A local insert so the cycle has an outgoing changeset to stage — the first
-    // `set_sync_state("staged_seq", ...)` is what the trigger aborts. (Even with no
-    // outgoing, the unconditional HLC high-water persist would abort; either way the
-    // cycle fails after capture.)
-    exec(
+    // A journaled local insert so the cycle has an outgoing changeset to stage —
+    // the `set_sync_state("staged_seq", ...)` that stages it is what the trigger
+    // aborts. (Even with no outgoing, the unconditional HLC high-water persist would
+    // abort; either way the cycle fails after the write has journaled.)
+    host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'First', NULL, 1, '0000000001000-0000-dev-self', '2026-01-01')",
@@ -713,18 +712,17 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     );
 
     // Capture must still be live despite the mid-cycle failure: a fresh host write
-    // is recorded into the next changeset. If a failure could leave capture off,
-    // this capture would come back empty.
-    exec(
+    // journals and is drained into the next changeset (alongside n1, which the
+    // failed cycle never pushed). If a failure could leave capture off, this drain
+    // would not carry n2.
+    let next = capture_bytes(
         &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n2', 'After failure', NULL, 1, '0000000002000-0000-dev-self', '2026-01-01')",
+        ],
     )
     .await;
-    let next = db
-        .take_changeset()
-        .await
-        .expect("capture after the failed cycle");
 
     let changes = crate::changeset::walk(&next).expect("walk next changeset");
     assert!(

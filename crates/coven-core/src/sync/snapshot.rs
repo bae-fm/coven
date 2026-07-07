@@ -1018,9 +1018,8 @@ pub async fn bootstrap_from_snapshot(
 /// the same on-disk DB the `db` actor owns; `db` is still needed because
 /// `download_blobs` resolves each blob's scope through it (an `Item`-scoped blob
 /// reads its key from the `item_keys` rows). At bootstrap the pull has not started;
-/// in a cycle this runs after the pull. It is read-only either way (a SELECT the
-/// capture session records nothing from), so it does not re-record rows or race the
-/// actor.
+/// in a cycle this runs after the pull. It is read-only either way (a SELECT, which
+/// journals nothing), so it does not re-record rows or race the connection thread.
 pub async fn reconcile_snapshot_blobs(
     db: &crate::database::Database,
     db_path: &Path,

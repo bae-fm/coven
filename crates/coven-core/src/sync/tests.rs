@@ -318,13 +318,13 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
 }
 
 /// Apply a changeset and report whether it had FK violations, through the same
-/// `apply_changeset` lifecycle as [`apply_to_db`].
+/// plain-`call` apply path as [`apply_to_db`].
 async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
     use crate::sync::apply::resolve_and_apply_changeset;
     let bytes = bytes.to_vec();
     let tables = test_synced_tables();
     let receiver_wall_ms = db.receive_wall_ms();
-    db.apply_changeset(move |conn| {
+    db.call(move |conn| {
         resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms)
             .map(|r| r.had_fk_violations)
     })

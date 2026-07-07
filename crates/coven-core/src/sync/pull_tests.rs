@@ -174,16 +174,16 @@ async fn fk_violation_still_retries_and_resolves() {
     let storage = MockSyncStorage::new();
 
     let child_source = open_test_db();
+    // The parent seed exists in the db so the child's FK is satisfiable, but goes
+    // through raw `exec` (not the journal), so it never enters the captured child
+    // changeset — the child ships the tag alone, FK-violating until the parent
+    // arrives.
     exec(
         &child_source,
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Parent', NULL, '0000000001000-0000-parent', '2026-01-01')",
     )
     .await;
-    let _ = child_source
-        .take_changeset()
-        .await
-        .expect("clear parent seed");
     let child_cs = capture_bytes(
         &child_source,
         &[
@@ -336,13 +336,14 @@ async fn push_stamps_the_dbs_schema_version() {
 
     // `shared = 1` so the gated `notes` root survives the push gate and there is an
     // outgoing changeset to inspect.
-    exec(
+    let outgoing = capture_bytes(
         &db1,
-        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'One', 1, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
     )
     .await;
-    let outgoing = db1.take_changeset().await.expect("capture insert");
 
     let keypair = UserKeypair::generate();
     let result = sync_for_test(
@@ -380,13 +381,14 @@ async fn sync_reuses_opened_schema_models() {
     assert_eq!(crate::sync::gate::from_tables_call_count(), 1);
     assert_eq!(crate::blob::decl::from_tables_call_count(), 1);
 
-    exec(
+    let outgoing = capture_bytes(
         &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'One', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
     )
     .await;
-    let outgoing = db.take_changeset().await.expect("capture outgoing");
 
     let keypair = UserKeypair::generate();
     let (_tmp, library_dir) = temp_library_dir();
@@ -569,16 +571,14 @@ async fn apply_failure_isolates_to_one_device() {
     storage.store_changeset("devA", 1, &good_cs, SCHEMA_VERSION);
 
     let bad_source = open_test_db();
+    // The base row exists (so the UPDATE below is an UPDATE, not an insert), but
+    // through raw `exec`, so only the UPDATE enters the captured changeset.
     exec(
         &bad_source,
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n-bad', 'Base', NULL, '0000000001000-0000-devB', '2026-01-01')",
     )
     .await;
-    let _ = bad_source
-        .take_changeset()
-        .await
-        .expect("clear bad source seed");
     let bad_cs = capture_bytes(
         &bad_source,
         &[
@@ -772,15 +772,15 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
          VALUES ('p-row', 'n1', 'cover', 8, '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
     )
     .await;
-    db1.take_changeset().await.expect("drain insert changeset");
-    exec(
+    // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
+    // is just the UPDATE — the update-blob-id path under test.
+    store_local(&ld1, "newaaaa", b"NEW-BLOB").await;
+    let outgoing = capture_bytes(
         &db1,
-        "UPDATE note_photos SET cloud_path = 'newaaaa', _updated_at = '0000000002000-0000-dev1' \
-         WHERE id = 'p-row'",
+        &["UPDATE note_photos SET cloud_path = 'newaaaa', _updated_at = '0000000002000-0000-dev1' \
+         WHERE id = 'p-row'"],
     )
     .await;
-    store_local(&ld1, "newaaaa", b"NEW-BLOB").await;
-    let outgoing = db1.take_changeset().await.expect("capture update");
 
     let keypair = UserKeypair::generate();
     let result = sync_for_test(
@@ -841,9 +841,6 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     )
     .await
     .expect("seed old cache");
-    db2.take_changeset()
-        .await
-        .expect("drain target seed changes");
 
     let (_updated, pull) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
     assert_eq!(pull.changesets_applied, 1);
@@ -878,7 +875,8 @@ async fn update_to_null_drops_old_local_blob_copy() {
          VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01', 'oldnull')",
     )
     .await;
-    db1.take_changeset().await.expect("drain insert changeset");
+    // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
+    // is just the UPDATE-to-NULL under test.
     let cs = capture_bytes(
         &db1,
         &[
@@ -910,9 +908,6 @@ async fn update_to_null_drops_old_local_blob_copy() {
     )
     .await
     .expect("seed old cache");
-    db2.take_changeset()
-        .await
-        .expect("drain target seed changes");
 
     let (_updated, pull) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
     assert_eq!(pull.changesets_applied, 1);
@@ -945,19 +940,16 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    exec(
+    let outgoing = capture_bytes(
         &db1,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db1,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
     )
     .await;
-    let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     storage
         .put_blob(
@@ -1055,19 +1047,16 @@ async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() 
     db.register_external_blob("audio1", "audio", &external, 11)
         .await
         .expect("register external ref");
-    exec(
+    let outgoing = capture_bytes(
         &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
     )
     .await;
-    let outgoing = db.take_changeset().await.expect("capture outgoing");
 
     let result = sync_for_test(
         "dev1",
@@ -1110,19 +1099,16 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    exec(
+    let outgoing = capture_bytes(
         &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
     )
     .await;
-    let outgoing = db.take_changeset().await.expect("capture outgoing");
     let (_tmp, ld) = temp_library_dir();
 
     let result = sync_for_test(
@@ -1176,19 +1162,16 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         )
         .await
         .expect("plant remote blob");
-    exec(
+    let outgoing = capture_bytes(
         &db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
     )
     .await;
-    let outgoing = db.take_changeset().await.expect("capture outgoing");
     let (_tmp, ld) = temp_library_dir();
 
     let result = sync_for_test(
@@ -1246,9 +1229,9 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
-    let _ = db.take_changeset().await.expect("clear insert changeset");
-    exec(&db, "DELETE FROM note_photos WHERE id = 'audio1'").await;
-    let outgoing = db.take_changeset().await.expect("capture delete");
+    // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
+    // is just the DELETE under test.
+    let outgoing = capture_bytes(&db, &["DELETE FROM note_photos WHERE id = 'audio1'"]).await;
     let (_tmp, ld) = temp_library_dir();
 
     let result = sync_for_test(
@@ -1303,19 +1286,16 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
     // stored in the local store, so the inline push finds nothing in either the local
     // store or the cache.
     let db1 = open_test_db_with_blob(photo_decl());
-    exec(
+    let outgoing = capture_bytes(
         &db1,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db1,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('p1ab', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
     )
     .await;
-    let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let keypair = UserKeypair::generate();
     let (_t1, ld1) = temp_library_dir();
@@ -1370,22 +1350,19 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 
     let db1 = open_test_db_with_blob(readable_photo_decl());
     let (_t1, ld1) = temp_library_dir();
-    exec(
-        &db1,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
     // The cover's readable key lives in the row's `cloud_path` column.
-    exec(
-        &db1,
-        "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
-         VALUES ('p1cover', 'n1', 'cover', 8, 'n1/cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
     // The host stages the cover into the cache before the inline push reads it.
     store_local(&ld1, "p1cover", plaintext).await;
-    let outgoing = db1.take_changeset().await.expect("capture outgoing");
+    let outgoing = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
+         VALUES ('p1cover', 'n1', 'cover', 8, 'n1/cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
 
     let keypair = UserKeypair::generate();
     let result = sync_for_test(
@@ -1478,21 +1455,18 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
 
     let db1 = open_test_db_with_blob(decl());
     let (_t1, ld1) = temp_library_dir();
-    exec(
-        &db1,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    exec(
-        &db1,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('p1cover', 'n1', 'cover', 15, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
     // The host stages the cover into the cache before the inline push reads it.
     store_local(&ld1, "p1cover", plaintext).await;
-    let outgoing = db1.take_changeset().await.expect("capture outgoing");
+    let outgoing = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('p1cover', 'n1', 'cover', 15, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
 
     let keypair = UserKeypair::generate();
     let result = sync_for_test(

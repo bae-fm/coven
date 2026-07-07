@@ -528,7 +528,7 @@ async fn commit_after_upload(
     now_rfc: String,
 ) -> Result<PostUpload, DbError> {
     let tables = db.synced_tables().to_vec();
-    db.call_with_capture_reset(move |conn| {
+    db.call(move |conn| {
         // Map the uploaded blob to its row, then up to its gated root. The blob's
         // namespace is the first component of its durable cloud key, so the row is
         // looked up in exactly that namespace's table (never a scan-all that could

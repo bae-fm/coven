@@ -11,9 +11,9 @@
 //!
 //! Unlike the bookkeeping tables, `item_keys` is content every member needs, so
 //! coven injects it into the synced-table set during open and it rides both sync
-//! paths: the changeset capture session records `mint_item_key` INSERTs, and the
-//! snapshot preserves it (it is in the synced set, so `clear_non_synced` keeps
-//! its rows).
+//! paths: a `mint_item_key` INSERT journals into the pending-changeset journal like
+//! any host write, and the snapshot preserves it (it is in the synced set, so
+//! `clear_non_synced` keeps its rows).
 
 /// The coven-owned synced table holding per-item content keys. Injected into the
 /// synced-table set during open, so it is captured, snapshotted, and applied

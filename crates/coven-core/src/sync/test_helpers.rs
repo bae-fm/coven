@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-use crate::database::{Database, DbError};
+use crate::database::{Database, DbError, PendingChangesetBatch};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::migration::Migration;
@@ -265,7 +265,7 @@ pub async fn exec(db: &Database, sql: &str) {
 pub async fn host_exec(db: &Database, sql: &str) {
     let sql = sql.to_string();
     let tables = db.synced_tables().to_vec();
-    db.call_with_capture_reset(move |conn| {
+    db.call(move |conn| {
         Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
             tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
         })
@@ -298,25 +298,57 @@ pub async fn row_exists(db: &Database, sql: &str) -> bool {
     .unwrap_or_else(|e| panic!("row_exists failed: {e}"))
 }
 
-/// Run `stmts` against the test database, then capture and return the recorded
-/// changeset bytes. Capture stays enabled (the batch is reset), so a later
-/// `capture_bytes` returns only the writes since this one.
+/// Run `stmts` as one journaled host transaction (the same path a host write
+/// takes), then drain the pending-changeset journal and return the combined
+/// changeset bytes. With no `stmts`, this just drains whatever the journal already
+/// holds — the "clear the captured changes" idiom. Draining clears the journal, so
+/// a later `capture_bytes` returns only the writes since this one.
 pub async fn capture_bytes(db: &Database, stmts: &[&str]) -> Vec<u8> {
-    for s in stmts {
-        exec(db, s).await;
+    if !stmts.is_empty() {
+        let owned: Vec<String> = stmts.iter().map(|s| s.to_string()).collect();
+        let tables = db.synced_tables().to_vec();
+        db.call(move |conn| {
+            Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                for s in &owned {
+                    tx.execute_batch(s).map_err(DbError::from)?;
+                }
+                Ok::<(), DbError>(())
+            })
+        })
+        .await
+        .unwrap_or_else(|e| panic!("journal writes failed: {e}"));
     }
-    db.take_changeset().await.expect("capture changeset")
+    drain_pending_changesets(db).await
+}
+
+/// Drain the pending-changeset journal, returning the combined bytes and clearing
+/// the drained rows. Empty when the journal holds nothing — the same bytes a sync
+/// cycle would read from the journal and push.
+async fn drain_pending_changesets(db: &Database) -> Vec<u8> {
+    match db
+        .pending_changeset_batch()
+        .await
+        .expect("read pending changesets")
+    {
+        PendingChangesetBatch::Empty => Vec::new(),
+        PendingChangesetBatch::Pending { max_id, changeset } => {
+            db.clear_pending_changesets_through(max_id)
+                .await
+                .expect("clear drained pending changesets");
+            changeset
+        }
+    }
 }
 
 /// Apply a changeset to the test database with the production conflict-resolving
-/// apply path, scoped to `tables`. Goes through `apply_changeset` so capture is
-/// disabled around only the
-/// apply (the applied rows are not re-recorded), mirroring the cycle's lifecycle.
+/// apply path, scoped to `tables`. A plain `call`, like the cycle's apply: an apply
+/// is never journaled, so the applied rows are not recorded as this device's own
+/// outgoing changes.
 pub async fn apply_to_db(db: &Database, bytes: &[u8], tables: &[SyncedTable]) {
     let bytes = bytes.to_vec();
     let tables = tables.to_vec();
     let receiver_wall_ms = db.receive_wall_ms();
-    db.apply_changeset(move |conn| {
+    db.call(move |conn| {
         resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
     })
     .await
@@ -1431,10 +1463,10 @@ fn mock_object_version(data: &[u8]) -> CloudObjectVersion {
     CloudObjectVersion::new(hex::encode(Sha256::digest(data)))
 }
 
-/// Pull into `db` the way production does: capture stays enabled, and
-/// `pull_changes` disables it around only each apply (so applied rows aren't
-/// re-recorded as a local change) while a host write during the pull would still
-/// be captured. Returns the updated cursors and the pull result.
+/// Pull into `db` the way production does: `pull_changes` applies each incoming
+/// changeset with a plain `call` (never journaled), so applied rows aren't
+/// recorded as a local change, while a host write during the pull journals
+/// normally. Returns the updated cursors and the pull result.
 pub async fn pull_into(
     db: &Database,
     storage: &dyn SyncStorage,

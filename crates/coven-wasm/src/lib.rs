@@ -159,6 +159,8 @@ mod wasm_opfs_test;
 mod wasm_runtime_test;
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_sync_test;
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_test_support;
 
 #[cfg(test)]
 mod tests {

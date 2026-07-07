@@ -301,7 +301,7 @@ impl CovenHandle {
         let tables = self.db().synced_tables().to_vec();
         let outcome = self
             .db()
-            .call_with_capture_reset(move |conn| {
+            .call(move |conn| {
                 Ok(Database::run_pending_journaled_transaction_on(
                     conn,
                     &tables,
@@ -333,7 +333,7 @@ impl CovenHandle {
         let deleted = batch.deleted_blobs;
         let library_dir = self.library_dir();
         let outcome = match db
-            .call_with_capture_reset(move |conn| {
+            .call(move |conn| {
                 Ok(run_write_batch_on_connection(
                     conn,
                     stamper,

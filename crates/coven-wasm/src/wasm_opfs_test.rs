@@ -1,6 +1,6 @@
 //! Headless wasm proof that coven's `Database` persists on OPFS through its own
-//! API: capture works, and a row written before a drop reads back after reopening
-//! the same database.
+//! API: a journaled write records a pending changeset, and a row written before a
+//! drop reads back after reopening the same database.
 //!
 //! Runs in a dedicated Worker because the opfs-sahpool VFS's sync access handles
 //! exist only there. Drive it with:
@@ -15,8 +15,8 @@ use crate::wasm::install_browser_storage;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-/// Two synced tables — a plain one and a foreign-key child — so the capture
-/// session attaches more than one table, as a real library does.
+/// Two synced tables — a plain one and a foreign-key child — so a journaled
+/// write's capture session attaches more than one table, as a real library does.
 fn synced_tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("items"), SyncedTable::new("item_tags")]
 }
@@ -61,9 +61,9 @@ fn open(name: &str) -> Database {
     db
 }
 
-/// Write a row, capture a changeset through coven's session path, drop the
-/// `Database`, reopen the same OPFS file, and read the row back — proving the
-/// connection is durable in OPFS through coven's own `Database`.
+/// Write a row through coven's journaled write path, confirm it recorded a pending
+/// changeset, drop the `Database`, reopen the same OPFS file, and read the row back
+/// — proving the connection is durable in OPFS through coven's own `Database`.
 #[wasm_bindgen_test]
 async fn opfs_database_persists_through_drop_and_reopen() {
     console_error_panic_hook::set_once();
@@ -84,29 +84,31 @@ async fn opfs_database_persists_through_drop_and_reopen() {
     {
         let db = open(&name);
 
-        // Write a synced row through `Database::call`, the same path the host
-        // uses; the attached capture session records it.
-        db.call(|conn| {
-            conn.execute(
-                "INSERT INTO items (id, title, _updated_at) VALUES (?1, ?2, ?3)",
-                (
-                    "item-1",
-                    "durable title",
-                    "2026-01-01T00:00:00Z-0000-wasm-test-device",
-                ),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
+        // Write a synced row through coven's journaled write path — the same path
+        // the host's `exec` takes — so the write records into the pending-changeset
+        // journal as it commits.
+        crate::wasm_test_support::journaled_exec(
+            &db,
+            "INSERT INTO items (id, title, _updated_at) VALUES \
+             ('item-1', 'durable title', '2026-01-01T00:00:00Z-0000-wasm-test-device')",
+        )
         .await
         .expect("insert row");
 
-        // Capture the outgoing changeset through coven's real session path. The
-        // write above must show up as a recorded change.
-        let changeset = db.take_changeset().await.expect("capture changeset");
-        assert!(
-            !changeset.is_empty(),
-            "capture session recorded no changes for an INSERT into a synced table"
+        // The journaled write recorded the change: the INSERT into a synced table
+        // left exactly one pending changeset for a sync cycle to push.
+        let pending = db
+            .call(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM pending_changesets", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(DbError::from)
+            })
+            .await
+            .expect("count pending changesets");
+        assert_eq!(
+            pending, 1,
+            "the journaled write recorded no pending changeset for an INSERT into a synced table"
         );
 
         // Drop the Database, closing the OPFS file. The row is now only durable

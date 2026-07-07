@@ -3,7 +3,8 @@
 //! [`SyncedTable`] is how a host declares which tables participate in changeset
 //! sync. The set is no longer a process-global: the host passes it to
 //! [`crate::CovenBuilder::synced_tables`], and coven owns it for the lifetime of
-//! the connection and hands it to the capture session, the gate, and apply.
+//! the connection and hands it to each journaled write's capture session, the
+//! gate, and apply.
 
 use rusqlite::Connection;
 

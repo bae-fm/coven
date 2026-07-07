@@ -280,12 +280,10 @@ pub async fn load_cycle_membership(
 /// Pull and apply all new changesets from the sync storage.
 ///
 /// `db` is the owned connection handle; all apply and schema reads run through
-/// it. The apply of incoming rows goes through
-/// [`Database::apply_changeset`], which disables capture around just that apply so
-/// the applied rows are not re-recorded into the next outgoing changeset — the
-/// caller leaves capture ENABLED, so a host write landing during this pull's
-/// network phases is still captured. Every other `db.call` here (schema read,
-/// blob-scope resolution, cursor bookkeeping) runs on the normal enabled path.
+/// it. The apply of incoming rows is a plain `db.call` — only a host write wrapped
+/// in a journaled transaction is ever captured, so applied rows are never recorded
+/// into the next outgoing changeset, while a host write landing during this pull's
+/// network phases journals normally.
 ///
 /// `tables` is the synced set coven owns — the host's declared tables plus
 /// coven's injected `item_keys` (for the `_updated_at` index map and apply
@@ -698,13 +696,13 @@ pub async fn pull_changes(
             }
 
             // Every referenced blob is now durable on disk: apply the changeset.
-            // Through `apply_changeset` so capture is disabled around just this
-            // apply (the applied rows must not echo as this device's own writes),
-            // while host writes outside it stay captured.
+            // A plain `call` — applied rows are never journaled (only a
+            // `run_pending_journaled_transaction_on` host write is), so they can't
+            // echo as this device's own outgoing changes.
             let apply_attempt = {
                 let schema = schema.clone();
                 let bytes = changeset_bytes.clone();
-                db.apply_changeset(move |conn| {
+                db.call(move |conn| {
                     resolve_and_apply_changeset_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await
@@ -779,7 +777,7 @@ pub async fn pull_changes(
             let retry_attempt = {
                 let schema = schema.clone();
                 let bytes = d.changeset.clone();
-                db.apply_changeset(move |conn| {
+                db.call(move |conn| {
                     resolve_and_apply_changeset_with_schema(conn, &bytes, schema, receiver_wall_ms)
                 })
                 .await

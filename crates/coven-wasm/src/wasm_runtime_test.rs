@@ -127,17 +127,14 @@ async fn runtime_drives_two_devices_to_convergence() {
     let db_b = open_device("device-b");
 
     // Device A writes a SHARED note (gate column `shared = 1`, so the gate keeps it
-    // in the outgoing changeset) through `Database::call`, the same path a host
-    // uses. A's attached capture session records it; A's runtime will push it.
-    db_a.call(|conn| {
-        conn.execute(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('note-1', 'hello from A', 'body', 1, ?1, '2026-01-01')",
-            ["0000000001000-0000-device-a"],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
+    // in the outgoing changeset) through coven's journaled write path, the same path
+    // a host write takes; the write lands in the pending-changeset journal and A's
+    // runtime pushes it.
+    crate::wasm_test_support::journaled_exec(
+        &db_a,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('note-1', 'hello from A', 'body', 1, '0000000001000-0000-device-a', '2026-01-01')",
+    )
     .await
     .expect("device A insert");
 

@@ -270,9 +270,10 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
-    db.take_changeset()
-        .await
-        .expect("clear captured existing rows");
+    // Drain the seed rows out of the pending journal so the cycle sees no outgoing
+    // changeset and takes the initial-snapshot path; the rows still reach the cloud
+    // via the snapshot, which reads them straight from the db.
+    let _ = capture_bytes(&db, &[]).await;
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
 
@@ -323,9 +324,9 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
-    db.take_changeset()
-        .await
-        .expect("clear captured existing rows");
+    // Drain the seed rows out of the pending journal so the cycle takes the
+    // initial-snapshot path (the rows reach the cloud via the snapshot).
+    let _ = capture_bytes(&db, &[]).await;
     storage.fail_next_blob_puts(1);
 
     let failed = match run_single_sync_cycle(
@@ -496,7 +497,7 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     );
 }
 
-// ---- Issue #92: the capture window is just the apply, not the whole cycle ----
+// ---- Host writes journal; applies never do ----
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -727,7 +728,7 @@ impl SyncStorage for HostWriteInjector {
     }
 }
 
-/// Issue #92: a host write made WHILE a cycle is in its push/pull network phase
+/// A host write made WHILE a cycle is in its push/pull network phase
 /// must land in the device's NEXT outgoing changeset. It is recorded by the same
 /// durable journal path as any other host write.
 ///
@@ -797,14 +798,14 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     );
 }
 
-/// Issue #92, the other half of the invariant: an APPLIED row must NOT echo. After
+/// The other half of the journal invariant: an APPLIED row must NOT echo. After
 /// M applies a peer's changeset, M's own next outgoing changeset must not carry the
-/// applied rows — capture is disabled around the apply, so the applied rows are not
-/// recorded as M's own writes.
+/// applied rows — an apply is a plain connection write, never journaled, so the
+/// applied rows are never recorded as M's own outgoing changes.
 ///
-/// Mutation proof: drop the capture-disable around the apply (apply on the normal
-/// enabled `db.call` path). The applied rows are then recorded into M's session and
-/// re-shipped on M's next changeset, so device C receives note 'a1' attributed to
+/// Mutation proof: route the apply through the pending journal (wrap it in a
+/// `run_pending_journaled_transaction_on`). The applied rows then enter the journal
+/// and re-ship on M's next changeset, so device C receives note 'a1' attributed to
 /// M and the assertion fails.
 #[tokio::test]
 async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
@@ -848,7 +849,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     assert!(
         !row_exists(&db_c, "SELECT 1 FROM notes WHERE id = 'a1'").await,
         "the row M applied from A must NOT echo back through M's own changeset \
-         (capture is disabled around the apply)",
+         (an apply is never journaled)",
     );
 }
 

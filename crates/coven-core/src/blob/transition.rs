@@ -779,7 +779,7 @@ pub async fn make_local(
     // durable inside this commit, so a crash right after can never leave the root
     // Local with the cloud blobs un-tombstoned.
     let tables = db.synced_tables().to_vec();
-    db.call_with_capture_reset(move |conn| {
+    db.call(move |conn| {
         Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
             crate::sync::gate::write_gate(
                 tx,

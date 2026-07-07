@@ -122,17 +122,14 @@ async fn row_syncs_from_one_database_to_another_through_the_engine() {
     let db_b = open_device("device-b");
 
     // Device A writes a SHARED note (gate column `shared = 1`, so the gate keeps
-    // it in the outgoing changeset) through `Database::call`, the same path a host
-    // uses. The attached capture session records it.
-    db_a.call(|conn| {
-        conn.execute(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('note-1', 'hello from A', 'body', 1, ?1, '2026-01-01')",
-            ["0000000001000-0000-device-a"],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
+    // it in the outgoing changeset) through coven's journaled write path, the same
+    // path a host write takes; the write lands in the pending-changeset journal for
+    // A's cycle to push.
+    crate::wasm_test_support::journaled_exec(
+        &db_a,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('note-1', 'hello from A', 'body', 1, '0000000001000-0000-device-a', '2026-01-01')",
+    )
     .await
     .expect("device A insert");
 

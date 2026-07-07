@@ -14,7 +14,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
-use tracing::{debug, error};
+use tracing::debug;
+// `error!` fires only from the native connection thread's shutdown path.
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::error;
 
 use crate::blob::decl::BlobDecls;
 use crate::db::{
@@ -45,24 +48,18 @@ struct DatabaseState {
     blob_decls: Arc<BlobDecls>,
 }
 
-/// The SQLite connection plus the capture state that must stay beside it.
+/// The owned SQLite connection and the sync bookkeeping resolved beside it at
+/// open. One connection thread owns this for the connection's whole life; every
+/// database access runs against it, so access is serialized. Changeset capture is
+/// per-transaction — [`Database::run_pending_journaled_transaction_on`] attaches a
+/// session for the span of one host write and drains it into the pending journal —
+/// so no capture state lives on the core between calls.
 ///
-/// `Session<'conn>` borrows the `Connection`; its `'conn` is a borrow-checker
-/// fiction over a raw `sqlite3_session*` that internally holds the connection's
-/// `sqlite3*`. Keeping both in one struct, with the session declared before the
-/// connection, means the session is dropped first (Rust drops fields
-/// top-to-bottom) and the connection it points at outlives it. The lifetime is
-/// erased to `'static` at construction ([`DatabaseCore::open`]); that erasure is
-/// sound precisely because of this co-ownership and drop order.
-///
-/// `session` is `Some` for the connection's whole life, except a transient window
-/// inside [`DatabaseCore::reset_session`] where it is dropped and immediately
-/// recreated to reset the recorded batch (SQLite cannot clear a session in
-/// place). Capture is never suspended across an `await`: an apply disables
-/// recording on the live session rather than detaching it. `None` otherwise means
-/// a prior attach failed and is reported loudly, not relied upon.
+/// `DatabaseCore` holds only `Send` fields (a `rusqlite::Connection`, which is
+/// `Send`, plus `Arc`s and a `u32`), so it is `Send` by construction — the
+/// connection thread receives it by value across a single `thread::spawn` with no
+/// manual `unsafe impl`.
 struct DatabaseCore {
-    session: Option<rusqlite::session::Session<'static>>,
     conn: Connection,
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
@@ -70,16 +67,6 @@ struct DatabaseCore {
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
 }
-
-// Native builds the core, then hands it once — by value — to the connection
-// thread spawned in [`Database::open_with_hlc`], which owns it for its whole life
-// and is the only thread that ever touches it; no clone, mutex, or shared
-// reference reaches it afterward. This `Send` exists solely to move the core
-// across that single `thread::spawn` boundary. The erased session lifetime stays
-// sound because `DatabaseCore` drops the session before the connection, and no
-// table filter closure is installed.
-#[cfg(not(target_arch = "wasm32"))]
-unsafe impl Send for DatabaseCore {}
 
 impl DatabaseCore {
     fn open(
@@ -113,10 +100,10 @@ impl DatabaseCore {
 
         // `item_keys` is coven-owned but is library-global content every member
         // needs, so coven — not the host — declares it synced. Injecting it here
-        // is the single point that puts it on every path that reads the set: the
-        // capture session attaches it, the snapshot preserves it, and the gate
-        // and apply operate over it. The host never sees or declares it. A
-        // coven-reserved table name the host cannot declare, so this appends
+        // is the single point that puts it on every path that reads the set: each
+        // journaled write's capture session attaches it, the snapshot preserves it,
+        // and the gate and apply operate over it. The host never sees or declares
+        // it. A coven-reserved table name the host cannot declare, so this appends
         // unconditionally.
         let mut synced_tables = synced_tables;
         synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
@@ -146,9 +133,7 @@ impl DatabaseCore {
         let blob_decls = Arc::new(
             BlobDecls::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
         );
-        let session = Some(attach_erased_session(&conn, &synced_tables)?);
         let core = DatabaseCore {
-            session,
             conn,
             hlc,
             synced_tables,
@@ -182,37 +167,6 @@ impl DatabaseCore {
         f: impl FnOnce(&Connection) -> Result<R, DbError>,
     ) -> Result<R, DbError> {
         f(&self.conn)
-    }
-
-    fn with_capture_disabled<R>(&mut self, f: impl FnOnce(&Connection) -> R) -> R {
-        let DatabaseCore { session, conn, .. } = self;
-        if let Some(s) = session.as_mut() {
-            s.set_enabled(false);
-        } else {
-            error!("capture session absent at apply; applying with capture off (already not recording)");
-        }
-        let _reenable = CaptureReenable { session };
-        f(conn)
-    }
-
-    fn reset_session(&mut self) {
-        self.session = None;
-        match attach_erased_session(&self.conn, &self.synced_tables) {
-            Ok(s) => self.session = Some(s),
-            Err(e) => error!("failed to recreate capture session after changeset capture: {e}"),
-        }
-    }
-}
-
-struct CaptureReenable<'a> {
-    session: &'a mut Option<rusqlite::session::Session<'static>>,
-}
-
-impl Drop for CaptureReenable<'_> {
-    fn drop(&mut self) {
-        if let Some(s) = self.session.as_mut() {
-            s.set_enabled(true);
-        }
     }
 }
 
@@ -273,7 +227,7 @@ impl Drop for ConnectionThread {
 
 /// Own the connection on this thread and run each queued job in send order until
 /// `Stop`. The channel's FIFO is the serialization the `tokio::Mutex` used to
-/// provide, and the connection and capture session never leave this thread.
+/// provide, and the connection never leaves this thread.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_connection_thread(
     mut core: DatabaseCore,
@@ -285,8 +239,8 @@ fn run_connection_thread(
             DbJob::Stop => break,
         }
     }
-    // Loop exited: drop `core` here — session before connection (field order) —
-    // closing the connection on the thread that has owned it throughout.
+    // Loop exited: drop `core` here — closing the connection on the thread that
+    // has owned it throughout.
 }
 
 /// A handle to the owned database. Cloneable; every clone sends work to the one
@@ -300,7 +254,7 @@ pub struct Database {
 }
 
 /// A handle to the owned database. Cloneable; every clone shares the one
-/// connection and capture session through the same `Rc`.
+/// connection through the same `Rc`.
 ///
 /// The browser is single-threaded (the connection lives on one Worker), so this
 /// holds the core directly behind `Rc<RefCell<…>>` instead of talking to a
@@ -315,32 +269,6 @@ pub struct Database {
 pub(crate) enum PendingChangesetBatch {
     Empty,
     Pending { max_id: i64, changeset: Vec<u8> },
-}
-
-/// Erase a capture session's connection-borrow lifetime to `'static`.
-///
-/// The lifetime is `PhantomData` over a raw pointer; the cast changes no bytes.
-/// The caller guarantees the borrowed connection outlives the returned session
-/// (here, by co-owning both in [`DatabaseCore`] and dropping the session first).
-fn erase_session_lifetime(
-    session: rusqlite::session::Session<'_>,
-) -> rusqlite::session::Session<'static> {
-    // Same type but for the lifetime parameter, which is pure `PhantomData`.
-    unsafe {
-        std::mem::transmute::<rusqlite::session::Session<'_>, rusqlite::session::Session<'static>>(
-            session,
-        )
-    }
-}
-
-/// Attach a capture session and erase its connection-borrow lifetime to `'static`
-/// for storage in [`DatabaseCore`]. The caller must keep `conn` alive at least as
-/// long as the returned session (see [`erase_session_lifetime`]).
-fn attach_erased_session(
-    conn: &Connection,
-    synced_tables: &[SyncedTable],
-) -> Result<rusqlite::session::Session<'static>, DbError> {
-    Ok(erase_session_lifetime(attach_session(conn, synced_tables)?))
 }
 
 fn validate_host_synced_tables(
@@ -491,10 +419,9 @@ impl Database {
     /// Open and own the connection at `path`.
     ///
     /// Runs coven's bookkeeping migration, then the host's synced-schema migration
-    /// ladder (`migrations`) over `PRAGMA user_version`, seeds the register clock
-    /// off the on-disk rows, and attaches the capture session to `synced_tables`.
-    /// Returns the handle plus the non-optional `_updated_at` stamper the host
-    /// binds into every synced-row write.
+    /// ladder (`migrations`) over `PRAGMA user_version`, and seeds the register
+    /// clock off the on-disk rows. Returns the handle plus the non-optional
+    /// `_updated_at` stamper the host binds into every synced-row write.
     ///
     pub fn open(
         path: &Path,
@@ -546,10 +473,10 @@ impl Database {
     }
 
     /// The host's declared synced-table set, the single owner of which tables
-    /// participate in changeset sync. The capture session attaches exactly these,
-    /// the register-clock seed scanned these, and the gate/apply operate over
-    /// these — so the sync layer reads the set from here instead of carrying a
-    /// separately-passed copy that could silently diverge.
+    /// participate in changeset sync. Each journaled write's capture session
+    /// attaches exactly these, the register-clock seed scanned these, and the
+    /// gate/apply operate over these — so the sync layer reads the set from here
+    /// instead of carrying a separately-passed copy that could silently diverge.
     pub fn synced_tables(&self) -> &[SyncedTable] {
         &self.state.synced_tables
     }
@@ -599,8 +526,9 @@ impl Database {
     ///
     /// This is how coven runs bookkeeping, gating reads, raw test writes, and
     /// apply — anything that needs `&Connection`. Public host writes and coven
-    /// transitions that mutate synced rows use [`Self::call_with_capture_reset`]
-    /// plus a transaction-scoped pending journal instead.
+    /// transitions that mutate synced rows wrap their write in a
+    /// [`Self::run_pending_journaled_transaction_on`] transaction (still through
+    /// `call`) so it lands in the pending-changeset journal.
     ///
     /// Native hands `f` to the connection thread and awaits its reply, so the SQL
     /// runs off the async executor; wasm runs `f` directly on the borrowed
@@ -668,34 +596,6 @@ impl Database {
         core.with_connection(f)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[doc(hidden)]
-    pub async fn call_with_capture_reset<F, R>(&self, f: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.on_connection_thread(move |core| {
-            let result = f(core.connection());
-            core.reset_session();
-            result
-        })
-        .await
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[doc(hidden)]
-    pub async fn call_with_capture_reset<F, R>(&self, f: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&Connection) -> Result<R, DbError> + 'static,
-        R: 'static,
-    {
-        let mut core = self.core.borrow_mut();
-        let result = core.with_connection(f);
-        core.reset_session();
-        result
-    }
-
     fn start_host_change_journal_on<'c>(
         conn: &'c Connection,
         synced_tables: &[SyncedTable],
@@ -706,7 +606,7 @@ impl Database {
     fn drain_host_change_journal_on(
         session: &mut rusqlite::session::Session<'_>,
     ) -> Result<Vec<u8>, DbError> {
-        capture_changeset(Some(session))
+        capture_changeset(session)
     }
 
     fn insert_pending_changeset_on(
@@ -790,59 +690,6 @@ impl Database {
                 .map_err(DbError::from)
         })
         .await
-    }
-
-    /// Test-only raw capture path for tests that inspect changeset bytes directly.
-    #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
-    pub async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
-        self.on_connection_thread(|core| {
-            let bytes = capture_changeset(core.session.as_mut());
-            core.reset_session();
-            bytes
-        })
-        .await
-    }
-
-    /// Test-only raw capture path for tests that inspect changeset bytes directly.
-    #[cfg(all(any(test, feature = "test-utils"), target_arch = "wasm32"))]
-    pub async fn take_changeset(&self) -> Result<Vec<u8>, DbError> {
-        let mut core = self.core.borrow_mut();
-        let bytes = capture_changeset(core.session.as_mut());
-        core.reset_session();
-        bytes
-    }
-
-    /// Apply an incoming changeset with capture disabled around just the apply, so
-    /// the applied rows are not re-recorded as this device's own writes. `f`
-    /// performs the apply on the connection and is SYNCHRONOUS (no `await`): on a
-    /// single thread nothing else runs while it executes, so no host write can
-    /// interleave inside the capture-off window. Capture is the live session's —
-    /// disabled with `set_enabled(false)` and re-enabled the instant `f` returns —
-    /// so host writes OUTSIDE this call (during push/pull) are still recorded.
-    ///
-    /// This is the ONLY thing the capture session is ever blind to: every other
-    /// `call` runs on the normal enabled path.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn apply_changeset<F, R>(&self, f: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.on_connection_thread(move |core| core.with_capture_disabled(f))
-            .await
-    }
-
-    /// See the native `apply_changeset`. wasm borrows the connection, disables the
-    /// live session, runs `f`, re-enables it, and returns a ready future — the
-    /// borrow (and the capture-off window) never spans an `.await`.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn apply_changeset<F, R>(&self, f: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&Connection) -> Result<R, DbError> + 'static,
-        R: 'static,
-    {
-        let mut core = self.core.borrow_mut();
-        core.with_capture_disabled(f)
     }
 
     // ---- Bookkeeping: sync_state ----
@@ -947,7 +794,7 @@ impl Database {
     /// key (a re-mint must not rotate it out from under blobs already encrypted
     /// under it).
     ///
-    /// The INSERT runs through [`Self::call_with_capture_reset`] inside a
+    /// The INSERT runs inside a
     /// [`Self::run_pending_journaled_transaction_on`] transaction, so it lands in
     /// the pending-changeset journal a running cycle pushes from and it replays to
     /// every member; the `_updated_at` HLC stamp satisfies the synced-table
@@ -966,7 +813,7 @@ impl Database {
         let new_key = crate::encryption::generate_random_key();
         let updated_at = self.state.hlc.now().to_string();
         let tables = self.synced_tables().to_vec();
-        self.call_with_capture_reset(move |conn| {
+        self.call(move |conn| {
             Self::run_pending_journaled_transaction_on(conn, &tables, |tx| {
                 Self::mint_item_key_on(tx, &item_id, new_key, &updated_at)
             })
@@ -1554,8 +1401,8 @@ fn scan_max_updated_at(
     Ok(overall)
 }
 
-/// Create a session and attach every synced table. Returns `None` (logging) on
-/// failure so the loop can keep serving non-capturing requests.
+/// Create a capture session and attach every synced table, so a journaled
+/// transaction records changes to exactly those tables.
 fn attach_session<'c>(
     conn: &'c Connection,
     synced_tables: &[SyncedTable],
@@ -1573,28 +1420,15 @@ fn attach_session<'c>(
     Ok(session)
 }
 
-/// Drain the session's recorded changes into a changeset, WITHOUT touching the
-/// session afterward (the caller resets it — see [`reset_session`]). An absent
-/// session is exceptional — a prior attach failed, so host writes since then were
-/// NOT recorded — and is returned as an error so the caller surfaces the lost
-/// capture loudly rather than silently reporting "no local changes" while writes
-/// went uncaptured.
-fn capture_changeset(
-    session: Option<&mut rusqlite::session::Session<'_>>,
-) -> Result<Vec<u8>, DbError> {
-    match session {
-        Some(s) => {
-            let mut buf = Vec::new();
-            s.changeset_strm(&mut buf)
-                .map(|()| buf)
-                .map_err(DbError::from)
-        }
-        None => Err(DbError(
-            "capture session absent at changeset capture; host writes since the last \
-             cycle were not recorded (a prior session attach failed)"
-                .to_string(),
-        )),
-    }
+/// Drain a journal session's recorded changes into a changeset. The caller drops
+/// the session right after (it lives only for the span of one journaled
+/// transaction), so there is nothing to reset.
+fn capture_changeset(session: &mut rusqlite::session::Session<'_>) -> Result<Vec<u8>, DbError> {
+    let mut buf = Vec::new();
+    session
+        .changeset_strm(&mut buf)
+        .map(|()| buf)
+        .map_err(DbError::from)
 }
 
 pub type PlatformConnectionOpener = fn(&Path) -> Result<Connection, DbError>;

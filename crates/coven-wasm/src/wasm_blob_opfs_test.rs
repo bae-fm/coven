@@ -173,16 +173,15 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     let photo_bytes = b"\x89PNG\r\n\x1a\n fake image bytes for photo-1".to_vec();
 
     // Device A: a shared note plus a `note_photos` row (the blob-bearing child,
-    // which inherits the note's `shared` gate through its foreign key).
-    db_a.call(|conn| {
-        conn.execute_batch(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('note-1', 'has a photo', 'body', 1, '0000000001000-0000-device-a', '2026-01-01');\
-             INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-             VALUES ('photo-1', 'note-1', 'thumb', 37, '0000000001001-0000-device-a', '2026-01-01');",
-        )
-        .map_err(DbError::from)
-    })
+    // which inherits the note's `shared` gate through its foreign key). Written
+    // through coven's journaled write path so A's cycle pushes it.
+    crate::wasm_test_support::journaled_exec(
+        &db_a,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('note-1', 'has a photo', 'body', 1, '0000000001000-0000-device-a', '2026-01-01');\
+         INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('photo-1', 'note-1', 'thumb', 37, '0000000001001-0000-device-a', '2026-01-01');",
+    )
     .await
     .expect("device A insert");
 

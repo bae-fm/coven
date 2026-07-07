@@ -14,10 +14,10 @@
 //!   [`Coven::builder(config)`], declares synced tables and its synced-schema
 //!   [`Migration`] ladder, and calls `open`: coven runs its own bookkeeping
 //!   migration, then the host's migration ladder over `PRAGMA user_version` for the
-//!   app's tables, seeds the register clock off the rows on disk, and attaches
-//!   the capture session. The host runs its SQL through [`CovenHandle::sql`] or
-//!   [`CovenHandle::write`]; coven captures those writes through the attached
-//!   session.
+//!   app's tables, and seeds the register clock off the rows on disk. The host runs
+//!   its SQL through [`CovenHandle::sql`] or [`CovenHandle::write`]; coven captures
+//!   each write into the pending-changeset journal as it commits, inside its own
+//!   journaled transaction.
 //! - Every synced table has an `id` text primary key at column 0 and an
 //!   `_updated_at TEXT NOT NULL` column, and is declared as a
 //!   [`SyncedTable`] in the builder's `synced_tables` set. A plain
