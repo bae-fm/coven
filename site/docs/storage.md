@@ -66,10 +66,6 @@ small control files (auth keys, head pointers, the snapshot) it passes
 [`no_progress`](rustdoc:fn:coven::storage::cloud::no_progress), which discards
 the reports.
 
-(The trait carries `Send + Sync` and `Send` method futures natively, where the
-sync loop awaits multi-threaded SDKs, and drops them on wasm, where the browser
-runs everything on one thread. See [Web](/docs/web).)
-
 ## Granting and revoking access
 
 `grant_access` returns a
@@ -133,8 +129,7 @@ only places a provider deviates from "write opaque bytes by key".
   aborting the in-progress upload on failure so the bucket holds no orphaned
   parts. An optional key prefix is prepended to every key (trailing slashes
   normalized), so `changes/dev1/42.enc` can become
-  `libs/abc/changes/dev1/42.enc`. (The browser uses a separate
-  [`fetch`-based S3 home](/docs/web#cloud-storage-in-the-browser) with the same key layout.)
+  `libs/abc/changes/dev1/42.enc`.
 
 - **Google Drive**
   ([`GoogleDriveCloudHome`](rustdoc:struct:coven::storage::cloud::google_drive::GoogleDriveCloudHome))

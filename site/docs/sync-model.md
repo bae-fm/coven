@@ -234,8 +234,7 @@ is its own page: [Schema evolution](/docs/schema-evolution).
 `handle.connect_sync(...)` once a provider is connected; the handle builds the
 cloud home and, if sync is enabled, spawns the loop. `handle.stop_sync()` drops
 the loop handle and cloud home, `handle.is_syncing()` reports whether the loop
-thread is running, and `handle.sync_now()` asks the loop to run a cycle now. In
-the browser the equivalent is [`WasmSyncRuntime`](/docs/web).
+thread is running, and `handle.sync_now()` asks the loop to run a cycle now.
 
 The keys the loop signs and encrypts with come from the OS keyring. The host
 installs the keyring service and identity at startup with

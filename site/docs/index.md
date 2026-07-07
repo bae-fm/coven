@@ -163,8 +163,6 @@ You own the app:
 - [Blobs](/docs/blobs): large files, the blob source, upload outbox, tombstone
   deletes.
 - [Cache](/docs/cache): the device-local blob store, pinning, eviction.
-- [Web](/docs/web): the `coven-wasm` browser crate and current unsupported
-  browser operations.
 
 ## Status
 
