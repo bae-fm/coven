@@ -1064,6 +1064,13 @@ impl SyncStorage for CloudSyncStorage {
         self.blob_paths
     }
 
+    fn own_uploader(&self) -> Option<String> {
+        match self.blob_paths {
+            BlobPathScheme::Hashed => Some(self.self_uploader()),
+            BlobPathScheme::Plain => None,
+        }
+    }
+
     async fn put_snapshot(
         &self,
         author: &str,

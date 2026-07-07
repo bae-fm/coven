@@ -1054,6 +1054,10 @@ impl SyncStorage for MockSyncStorage {
         crate::sync::cloud_storage::BlobPathScheme::Hashed
     }
 
+    fn own_uploader(&self) -> Option<String> {
+        Some(hex::encode(self.keypair.public_key()))
+    }
+
     async fn put_snapshot(
         &self,
         author: &str,

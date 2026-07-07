@@ -293,6 +293,13 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// whether a blob key needs an uploader segment (hashed) or not (plain).
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme;
 
+    /// This device's own `{uploader}` segment — the hex public key its blob uploads
+    /// key under on a hashed home, or `None` on a browsable home (which carries no
+    /// uploader segment). The upload path records it in the local uploader index so
+    /// a later self-read (after a cache eviction) resolves the blob without a
+    /// listing scan.
+    fn own_uploader(&self) -> Option<String>;
+
     /// Upload one snapshot generation's DB image under its publishing device.
     /// Writes to `snapshot/{author}/{seq}.db{suffix}`. Written before the
     /// generation's metadata, and the pointer names `{author, seq}` only after

@@ -1873,6 +1873,15 @@ mod tests {
         crate::sync::service::upload_snapshot_host_blobs(&db, &storage, &ld, &snapshot.host_blobs)
             .await
             .expect("upload host-provided snapshot blobs");
+        // The upload path records this device as the blob's uploader in the local
+        // index, so a later self-read keys it under us without a listing scan.
+        assert_eq!(
+            db.blob_uploader("covers", "cover1")
+                .await
+                .expect("read uploader index"),
+            storage.own_uploader(),
+            "the host-provided upload records this device as the blob's uploader",
+        );
         assert_eq!(
             storage
                 .get_blob("covers", None, "cover1", ResolvedScope::Master, None)

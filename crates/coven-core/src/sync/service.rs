@@ -374,6 +374,7 @@ async fn upload_host_provided_blob(
         )
         .await
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        record_self_upload(db, storage, blob).await?;
         return Ok(UploadedHostBlob {
             blob: blob.clone(),
             expected_size,
@@ -444,12 +445,31 @@ async fn upload_host_provided_blob(
         .await
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
+    record_self_upload(db, storage, blob).await?;
 
     Ok(UploadedHostBlob {
         blob: blob.clone(),
         expected_size,
         cleanup_local_store_after_publish: was_in_local_store,
     })
+}
+
+/// Record in the local uploader index that this device uploaded `blob`, so a later
+/// self-read after a cache eviction keys it under us without a listing scan. A
+/// no-op on a browsable home (no uploader segment). The upload has already
+/// succeeded when this runs, so a failure fails the push loudly and the whole
+/// (idempotent) upload retries — the record then lands on the retry.
+async fn record_self_upload(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    blob: &BlobRef,
+) -> Result<(), SyncCycleError> {
+    if let Some(uploader) = storage.own_uploader() {
+        db.record_blob_uploader(&blob.namespace, &blob.id, &uploader)
+            .await
+            .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
+    }
+    Ok(())
 }
 
 async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCycleError> {
