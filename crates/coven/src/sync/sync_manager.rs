@@ -63,7 +63,7 @@ pub enum SyncError {
     #[error("{0}")]
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
-    Membership(String),
+    Membership(crate::sync::membership_ops::MembershipOpsError),
     #[error("blob upload drain failed: {0}")]
     BlobUpload(DbError),
     #[error("sync loop error: {0}")]

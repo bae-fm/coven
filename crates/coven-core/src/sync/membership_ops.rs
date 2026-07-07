@@ -5,13 +5,14 @@
 
 use tracing::{debug, info};
 
-use crate::encryption::EncryptionService;
-use crate::keys::{KeyPersistence, UserKeypair};
+use crate::encryption::{EncryptionError, EncryptionService};
+use crate::keys::{KeyError, KeyPersistence, UserKeypair};
 #[cfg(test)]
 use crate::storage::cloud::CloudHome;
 
 use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
+use super::invite::InviteError;
 use super::membership::{
     founder_entry, AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipCoord,
     MembershipEntry,
@@ -19,6 +20,43 @@ use super::membership::{
 use super::storage::{StorageError, SyncStorage};
 use crate::database::Database;
 use std::collections::BTreeSet;
+
+/// Why a high-level membership operation (list members, invite, remove, rotate)
+/// failed. The security-critical orchestration layer that downloads the chain,
+/// performs the operation, and uploads the result: it preserves the typed error
+/// each step already produces — [`StorageError`], the owner-anchored
+/// [`AnchoredChainError`], the [`InviteError`] the invite/revoke path raises,
+/// [`KeyError`], [`EncryptionError`] — rather than flattening them into a string,
+/// and names the domain rules it enforces in place as their own variants.
+#[derive(Debug, thiserror::Error)]
+pub enum MembershipOpsError {
+    #[error("membership storage error: {0}")]
+    Storage(#[from] StorageError),
+    #[error("{0}")]
+    Chain(#[from] AnchoredChainError),
+    #[error("{0}")]
+    Invite(#[from] InviteError),
+    #[error("failed to persist the rotated encryption key: {0}")]
+    KeyPersistence(#[from] KeyError),
+    #[error("failed to serialize the rotated encryption key: {0}")]
+    KeyringSerialize(#[from] EncryptionError),
+    #[error("cannot invite yourself")]
+    SelfInvite,
+    /// Inviting into a library whose founder entry is missing (a fresh library
+    /// that never founded, or a wiped `membership/*`). Bootstrapping a founder on
+    /// the spot is the takeover primitive, so the invite is refused (issue #104).
+    #[error(
+        "no membership chain to invite into: the library's founder entry is \
+         missing (it is established at library creation, not on invite)"
+    )]
+    NoFounderChain,
+    #[error("no membership chain exists")]
+    NoMembershipChain,
+    #[error("membership chain has no founder")]
+    ChainHasNoFounder,
+    #[error("sharing requires an encrypted cloud home")]
+    PlaintextHome,
+}
 
 /// `sync_state` key holding the hex Ed25519 pubkey of the library's established
 /// owner — pinned at create (the creator), join (the invite's owner), or restore.
@@ -30,19 +68,14 @@ pub const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
 pub async fn get_members(
     storage: &dyn SyncStorage,
     user_pubkey: Option<&[u8]>,
-) -> Result<Vec<MemberInfo>, String> {
-    let entry_keys = storage
-        .list_membership_entries()
-        .await
-        .map_err(|e| format!("Failed to list membership entries: {e}"))?;
+) -> Result<Vec<MemberInfo>, MembershipOpsError> {
+    let entry_keys = storage.list_membership_entries().await?;
 
     if entry_keys.is_empty() {
         return Ok(Vec::new());
     }
 
-    let chain = load_anchored_chain(storage, &entry_keys, None, None)
-        .await
-        .map_err(|e| e.to_string())?;
+    let chain = load_anchored_chain(storage, &entry_keys, None, None).await?;
     let user_pubkey_hex = user_pubkey.map(hex::encode);
 
     let current = chain.current_members();
@@ -79,18 +112,15 @@ pub async fn invite_member(
     encryption: &EncryptionService,
     library_id: &str,
     library_name: &str,
-) -> Result<crate::join_code::InviteCode, String> {
+) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
     let user_pubkey_hex = hex::encode(user_keypair.public_key());
 
     if public_key_hex == user_pubkey_hex {
-        return Err("Cannot invite yourself".to_string());
+        return Err(MembershipOpsError::SelfInvite);
     }
 
     // Download existing membership entries
-    let entry_keys = storage
-        .list_membership_entries()
-        .await
-        .map_err(|e| format!("Failed to list membership entries: {e}"))?;
+    let entry_keys = storage.list_membership_entries().await?;
 
     // The founder is written once, when a library is created and first connects
     // its cloud (issue #102) — never lazily here. An empty listing at invite time
@@ -98,15 +128,9 @@ pub async fn invite_member(
     // `membership/*`); bootstrapping a new founder on the spot is the takeover
     // primitive #104 describes, so refuse instead.
     if entry_keys.is_empty() {
-        return Err(
-            "no membership chain to invite into: the library's founder entry is \
-             missing (it is established at library creation, not on invite)"
-                .to_string(),
-        );
+        return Err(MembershipOpsError::NoFounderChain);
     }
-    let mut chain = load_anchored_chain(storage, &entry_keys, None, None)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut chain = load_anchored_chain(storage, &entry_keys, None, None).await?;
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
@@ -122,8 +146,7 @@ pub async fn invite_member(
         library_id,
         &invite_ts,
     )
-    .await
-    .map_err(|e| format!("Failed to create invitation: {e}"))?;
+    .await?;
 
     info!(
         "Invited member {}...",
@@ -136,7 +159,7 @@ pub async fn invite_member(
     // owner and reject the (correctly founder-anchored) chain forever (issue #102).
     let owner_pubkey = chain
         .founder_pubkey()
-        .ok_or_else(|| "membership chain has no founder".to_string())?
+        .ok_or(MembershipOpsError::ChainHasNoFounder)?
         .to_string();
 
     // Build the invite code
@@ -162,20 +185,15 @@ pub async fn remove_member(
     public_key_hex: &str,
     library_id: &str,
     current_encryption: &EncryptionService,
-) -> Result<EncryptionService, String> {
+) -> Result<EncryptionService, MembershipOpsError> {
     // Download existing membership entries and build the chain.
-    let entry_keys = storage
-        .list_membership_entries()
-        .await
-        .map_err(|e| format!("Failed to list membership entries: {e}"))?;
+    let entry_keys = storage.list_membership_entries().await?;
 
     if entry_keys.is_empty() {
-        return Err("No membership chain exists".to_string());
+        return Err(MembershipOpsError::NoMembershipChain);
     }
 
-    let mut chain = load_anchored_chain(storage, &entry_keys, None, None)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut chain = load_anchored_chain(storage, &entry_keys, None, None).await?;
 
     // Revoke the member
     let revoke_ts = hlc.now().to_string();
@@ -190,8 +208,7 @@ pub async fn remove_member(
         &revoke_ts,
         current_encryption,
     )
-    .await
-    .map_err(|e| format!("Failed to revoke member: {e}"))?;
+    .await?;
 
     info!(
         "Revoked member {}... and rotated encryption key",
@@ -212,22 +229,18 @@ pub fn apply_key_rotation(
     new_encryption: EncryptionService,
     key_persistence: &dyn KeyPersistence,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
-) -> Result<String, String> {
+) -> Result<String, MembershipOpsError> {
     let new_fingerprint = {
         let mut cipher = cipher_lock.write().unwrap();
         match &mut *cipher {
             CloudCipher::Encrypted(enc) => {
-                let new_key_hex = new_encryption
-                    .to_keyring_string()
-                    .map_err(|e| format!("Failed to serialize encryption keyring: {e}"))?;
-                key_persistence
-                    .set_encryption_key(&new_key_hex)
-                    .map_err(|e| format!("Failed to persist new encryption key: {e}"))?;
+                let new_key_hex = new_encryption.to_keyring_string()?;
+                key_persistence.set_encryption_key(&new_key_hex)?;
                 *enc = new_encryption;
                 enc.fingerprint()
             }
             CloudCipher::Plaintext => {
-                return Err("sharing requires an encrypted cloud home".to_string());
+                return Err(MembershipOpsError::PlaintextHome);
             }
         }
     };
@@ -373,7 +386,7 @@ pub async fn publish_membership_head(
 /// wiped-and-refounded takeover. The pull cycle maps both to its
 /// `MembershipTampered`; the snapshot authorize maps both to `UnauthorizedAuthor`.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum AnchoredChainError {
+pub enum AnchoredChainError {
     /// The entries didn't download, parse, or validate into a well-formed chain.
     #[error("membership chain failed to load/validate: {0}")]
     LoadFailed(String),
@@ -687,6 +700,54 @@ mod tests {
             pubkey_hex(&second_owner),
             "not the inviting owner's pubkey",
         );
+    }
+
+    #[tokio::test]
+    async fn inviting_yourself_is_a_typed_self_invite_error() {
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let hlc = Hlc::new("f".to_string());
+
+        let result = invite_member(
+            &storage,
+            &storage,
+            &owner,
+            &hlc,
+            &pubkey_hex(&owner),
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([7u8; 32]),
+            "lib-1",
+            "Lib One",
+        )
+        .await;
+        assert!(matches!(result, Err(MembershipOpsError::SelfInvite)));
+    }
+
+    #[tokio::test]
+    async fn inviting_into_a_founderless_chain_is_refused_with_a_typed_variant() {
+        // A wiped or never-founded `membership/*` must not let an invite bootstrap
+        // a founder on the spot — that is the takeover primitive. The refusal is a
+        // matchable variant, not a scraped string (issue #104).
+        let owner = UserKeypair::generate();
+        let invitee = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let hlc = Hlc::new("f".to_string());
+
+        let result = invite_member(
+            &storage,
+            &storage,
+            &owner,
+            &hlc,
+            &pubkey_hex(&invitee),
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([7u8; 32]),
+            "lib-1",
+            "Lib One",
+        )
+        .await;
+        assert!(matches!(result, Err(MembershipOpsError::NoFounderChain)));
     }
 
     #[tokio::test]
