@@ -495,6 +495,21 @@ impl CloudHome for S3CloudHome {
                 .into_bytes()
                 .to_vec();
 
+            // A ranged GET is honored only with 206 Partial Content; a 200 means
+            // the provider ignored `Range` and returned the whole object from
+            // byte 0. The aws-sdk `GetObjectOutput` doesn't surface the raw HTTP
+            // status, so verify the equivalent invariant the reqwest transports
+            // check by status: the body must be exactly the requested byte count
+            // (the `CloudHome` contract never reads past the object's end).
+            let expected = end - start;
+            if bytes.len() as u64 != expected {
+                return Err(CloudHomeError::Storage(format!(
+                    "read range {key}: expected {expected} bytes for range {start}..{end}, \
+                     got {} — the provider likely ignored Range and returned the whole object",
+                    bytes.len()
+                )));
+            }
+
             Ok(bytes)
         })
         .await
@@ -768,18 +783,14 @@ mod tests {
             .expect("build fake range response")
     }
 
-    async fn spawn_fake_s3_endpoint(
-        object: FakeRangeObject,
-    ) -> (String, tokio::sync::oneshot::Sender<()>) {
+    /// Bind, serve, and wire graceful shutdown for a fake S3 server — the
+    /// scaffolding every fake endpoint shares; each test supplies its Router.
+    async fn spawn_fake_s3(app: Router) -> (String, tokio::sync::oneshot::Sender<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake S3 endpoint");
         let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let app = Router::new()
-            .fallback(fake_s3_range_endpoint)
-            .with_state(Arc::new(object));
-
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
@@ -788,8 +799,62 @@ mod tests {
                 .await
                 .expect("fake S3 endpoint failed");
         });
-
         (endpoint, shutdown_tx)
+    }
+
+    async fn spawn_fake_s3_endpoint(
+        object: FakeRangeObject,
+    ) -> (String, tokio::sync::oneshot::Sender<()>) {
+        spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_range_endpoint)
+                .with_state(Arc::new(object)),
+        )
+        .await
+    }
+
+    #[derive(Clone)]
+    struct FakeFullBodyObject {
+        bucket: String,
+        key: String,
+        full_body: Vec<u8>,
+    }
+
+    /// A fake S3 that ignores `Range` and answers every GET with 200 and the
+    /// whole object — the provider-ignores-range failure the range verification
+    /// must catch.
+    async fn fake_s3_full_body_endpoint(
+        State(object): State<Arc<FakeFullBodyObject>>,
+        method: Method,
+        uri: Uri,
+    ) -> Response<Body> {
+        let expected_path = format!("/{}/{}", object.bucket, object.key);
+        if method != Method::GET || uri.path() != expected_path {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!(
+                    "unexpected request: method={method}, path={}",
+                    uri.path()
+                )))
+                .expect("build bad-request response");
+        }
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, object.full_body.len().to_string())
+            .body(Body::from(object.full_body.clone()))
+            .expect("build full-body response")
+    }
+
+    async fn spawn_fake_s3_full_body_endpoint(
+        object: FakeFullBodyObject,
+    ) -> (String, tokio::sync::oneshot::Sender<()>) {
+        spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_full_body_endpoint)
+                .with_state(Arc::new(object)),
+        )
+        .await
     }
 
     #[derive(Clone)]
@@ -839,29 +904,17 @@ mod tests {
     async fn spawn_fake_s3_truncated_list_endpoint(
         bucket: String,
     ) -> (String, tokio::sync::oneshot::Sender<()>, Arc<AtomicUsize>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake S3 endpoint");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let request_count = Arc::new(AtomicUsize::new(0));
         let state = FakeListState {
             bucket,
             request_count: request_count.clone(),
         };
-        let app = Router::new()
-            .fallback(fake_s3_truncated_list_endpoint)
-            .with_state(state);
-
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("fake S3 endpoint failed");
-        });
-
+        let (endpoint, shutdown_tx) = spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_truncated_list_endpoint)
+                .with_state(state),
+        )
+        .await;
         (endpoint, shutdown_tx, request_count)
     }
 
@@ -900,6 +953,45 @@ mod tests {
             .expect("read range");
 
         assert_eq!(bytes, range_body);
+        let _ = shutdown.send(());
+    }
+
+    /// A provider that ignores `Range` and answers a ranged GET with 200 and the
+    /// whole object returns offset-0 bytes where a mid-file range was asked for —
+    /// silent corruption on a plaintext home. The range read must reject the
+    /// mismatched body, not return the wrong bytes.
+    #[tokio::test]
+    async fn read_range_rejects_full_object_200_response() {
+        let full_body = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
+        let key = "storage/audio-object".to_string();
+        let bucket = "coven-s3-ignores-range".to_string();
+        let (endpoint, shutdown) = spawn_fake_s3_full_body_endpoint(FakeFullBodyObject {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            full_body,
+        })
+        .await;
+
+        if !loopback_connects(&endpoint).await {
+            return;
+        }
+
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+
+        let err = home
+            .read_range(&key, 8, 16)
+            .await
+            .expect_err("a 200 full-object response to a range request must error");
+        assert!(matches!(err, CloudHomeError::Storage(_)), "got {err:?}");
         let _ = shutdown.send(());
     }
 

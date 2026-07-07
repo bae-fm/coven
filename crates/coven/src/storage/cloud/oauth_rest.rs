@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 
 use super::http::{body_text, ensure_ok, ok_bytes, NotFound};
+use super::s3_common::is_range_success;
 use super::CloudHomeError;
 
 /// One page of a listing: the keys it yielded (already decoded and prefix-filtered)
@@ -73,6 +74,17 @@ pub async fn rest_read_range<T: OAuthRestHome + ?Sized>(
 ) -> Result<Vec<u8>, CloudHomeError> {
     let resp = home.send_read(key, Some((start, end))).await?;
     let resp = ensure_ok(resp, &format!("read range {key}"), home.not_found()).await?;
+    // A ranged GET is honored only with 206 Partial Content. A 200 means the
+    // provider ignored `Range` (or OneDrive's 302-to-download-URL redirect
+    // dropped it) and returned the whole object from byte 0; serving those
+    // offset-0 bytes as the requested range is silent corruption on a plaintext
+    // home, so reject it here rather than downstream.
+    let status = resp.status();
+    if !is_range_success(status.as_u16()) {
+        return Err(CloudHomeError::Storage(format!(
+            "read range {key}: expected 206 Partial Content, got HTTP {status}"
+        )));
+    }
     ok_bytes(resp, &format!("read range body for {key}")).await
 }
 
@@ -210,5 +222,73 @@ mod tests {
             .await
             .expect("a 404 on the first page yields an empty listing");
         assert!(keys.is_empty(), "expected empty, got {keys:?}");
+    }
+
+    /// Answers a ranged read with a caller-chosen status and body, to pin how
+    /// `rest_read_range` treats a full-body 200 versus a real 206.
+    struct MockRangeHome {
+        status: u16,
+        body: &'static str,
+    }
+
+    #[async_trait]
+    impl OAuthRestHome for MockRangeHome {
+        fn not_found(&self) -> NotFound {
+            NotFound::Status
+        }
+
+        async fn send_read(
+            &self,
+            _key: &str,
+            range: Option<(u64, u64)>,
+        ) -> Result<reqwest::Response, CloudHomeError> {
+            assert!(range.is_some(), "a range read must carry a range");
+            Ok(response(self.status, self.body))
+        }
+
+        async fn send_delete(&self, _key: &str) -> Result<reqwest::Response, CloudHomeError> {
+            unimplemented!("delete is not exercised by the range tests")
+        }
+
+        async fn send_list_page(
+            &self,
+            _prefix: &str,
+            _cursor: Option<&str>,
+        ) -> Result<reqwest::Response, CloudHomeError> {
+            unimplemented!("list is not exercised by the range tests")
+        }
+
+        fn parse_list_page(&self, _body: &str, _prefix: &str) -> Result<ListPage, CloudHomeError> {
+            unimplemented!("list is not exercised by the range tests")
+        }
+    }
+
+    /// A provider that ignores `Range` and returns 200 with the whole object
+    /// serves offset-0 bytes where the caller asked for a mid-file range — silent
+    /// corruption on a plaintext home. The range read must reject it, not return
+    /// the wrong bytes.
+    #[tokio::test]
+    async fn read_range_rejects_full_body_200_response() {
+        let home = MockRangeHome {
+            status: 200,
+            body: "WHOLE-OBJECT-FROM-BYTE-0",
+        };
+        let err = rest_read_range(&home, "storage/audio", 8, 16)
+            .await
+            .expect_err("a 200 full-body response to a range request must error");
+        assert!(matches!(err, CloudHomeError::Storage(_)), "got {err:?}");
+    }
+
+    /// A real 206 Partial Content is the honored range and yields its body.
+    #[tokio::test]
+    async fn read_range_accepts_partial_content_206() {
+        let home = MockRangeHome {
+            status: 206,
+            body: "RANGE",
+        };
+        let bytes = rest_read_range(&home, "storage/audio", 8, 13)
+            .await
+            .expect("a 206 Partial Content response is the honored range");
+        assert_eq!(bytes, b"RANGE");
     }
 }

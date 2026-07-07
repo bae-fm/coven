@@ -80,6 +80,14 @@ pub fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeEr
     }
 }
 
+/// Whether a ranged GET response is a real partial read: HTTP 206 Partial
+/// Content, never 200. A 200 to a `Range` request means the server ignored the
+/// range and returned the whole object from byte 0, so serving that body as the
+/// requested range is silent corruption. The reqwest-based transports — the wasm
+/// S3 backend and the OAuth REST backends — gate on the status directly with
+/// this. The native aws-sdk S3 backend can't cheaply see the raw status, so it
+/// verifies the equivalent invariant by asserting the body length equals the
+/// requested byte count.
 pub fn is_range_success(status: u16) -> bool {
     status == 206
 }
