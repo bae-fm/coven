@@ -161,15 +161,15 @@ never the raw key bytes:
   key coven mints with `handle.mint_item_key(...)`, keeps in the synced
   `item_keys` table (so it reaches every member and survives a snapshot), and
   resolves by `item_id` on push and pull. The host names the item; coven holds
-  the key. Unlike `Derived`, an item key is independent of the master, so coven
-  can hand it to a non-member without exposing the library. That export is a
-  [share](/docs/sharing#creating-and-opening-a-share).
+  the key. Unlike `Derived`, an item key is independent of the master, so one
+  item's key never exposes the library (see
+  [item keys](/docs/sharing#item-keys)).
 
 coven resolves the public scope to an internal key (looking up the `item_keys` row
 for `Item`) before it touches storage, at one resolution point shared by all three
 blob paths (inline push, pull, outbox drain). A missing `item_keys` row is a host
-bug, surfaced as an error rather than silently falling back to the master key
-(which no share recipient could read).
+bug, surfaced as an error rather than silently falling back to the master
+key.
 
 Item keys are opt-in. An app that never emits `Item` stays on `Master`/`Derived`
 and the `item_keys` table stays empty.
@@ -361,9 +361,7 @@ not two.
 coven never invents these names. The consumer owns them: it declares a
 `cloud_path_column` and stores a readable key in it on every blob-bearing row. A
 browsable home with a blob whose `cloud_path` is absent is a surfaced error, never a
-silent fall back to the hashed layout. A home cannot be both browsable and shared:
-[sharing](/docs/sharing#creating-and-opening-a-share) recomputes a blob's key from
-its id, which only the content-addressed layout supports.
+silent fall back to the hashed layout.
 
 The two schemes at a glance:
 
