@@ -131,8 +131,11 @@ public keys in the paths are opaque tokens, not user records.
 
 ## Where the library key lives
 
-coven does not persist the library key in any database it controls. The key lives
-in the operating system keyring, behind the system's own access control. There is
+Every copy of a key is a place it can leak from: a database file rides along
+in backups, an environment variable leaks into logs and child processes. So
+coven does not persist the library key in any database it controls. The key
+lives in the operating system keyring, behind the system's own access
+control. There is
 no environment-variable or file fallback: the keyring is the only place coven
 reads it from. [`KeyService`](rustdoc:struct:coven::keys::KeyService) reads and
 writes it, scoped per library so two libraries never share a key.
@@ -218,7 +221,10 @@ The two kinds of home at a glance:
 
 ## Chunked encryption
 
-A blob can be large (a `todo_attachments` image, a snapshot), and a reader often
+Encryption normally destroys random access: flip one byte of ciphertext and
+the whole object refuses to decrypt, so reading the middle means fetching the
+whole. Chunking restores random access without giving up authentication. A
+blob can be large (a `todo_attachments` image, a snapshot), and a reader often
 wants only part of it: the first frames of a video, one page of a document. To
 fetch and decrypt a byte range without downloading and decrypting the whole file,
 [`encrypt`](rustdoc:method:coven::encryption::EncryptionService::encrypt) splits

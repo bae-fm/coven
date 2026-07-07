@@ -49,6 +49,12 @@ keyring").
 
 ## The trait
 
+The trait is deliberately dumb. Everything that has to be *correct* (
+encryption, ordering, retry, the key layout) lives above it, so a provider
+integration cannot get sync wrong; all a backend supplies is bytes by key,
+plus the two provider-shaped concerns no wrapper can hide (uploads and
+sharing).
+
 ```rust
 pub trait CloudHome: Send + Sync {
     async fn probe(&self) -> Result<(), CloudHomeError> { /* default: no-op list */ }
@@ -110,6 +116,10 @@ pub trait CloudHome: Send + Sync {
 
 ## Granting and revoking access
 
+Membership is cryptographic, but a new member still has to *reach* the bytes:
+the storage itself must admit them. That is inherently provider-shaped (a
+folder share, a credential, a share URL), so it lives on the trait.
+
 `grant_access` takes a
 [`CloudAccessGrant`](rustdoc:struct:coven::storage::cloud::CloudAccessGrant)
 (the member's public key, plus the provider account email for backends that
@@ -137,6 +147,10 @@ directly on the `CloudHome`, not through the wrapper described under
 [Where encryption sits](#where-encryption-sits).
 
 ## Errors
+
+The host cannot translate provider error codes, and the user cannot act on
+raw ones, so every failure crosses this boundary as a sentence a UI can show
+verbatim.
 
 ```rust
 pub enum CloudHomeError {
@@ -243,7 +257,9 @@ reconnect message.
 
 ## Where encryption sits
 
-`CloudHome` deals only in raw bytes. The at-rest protection and the key layout
+Keeping encryption out of the providers is what makes five of them cheap to
+maintain and impossible to get differently wrong. `CloudHome` deals only in
+raw bytes. The at-rest protection and the key layout
 live one level up, in
 [`CloudSyncStorage`](rustdoc:struct:coven::sync::cloud_storage::CloudSyncStorage),
 which wraps any `dyn CloudHome`: it seals on the way down, opens on the way up,
@@ -270,8 +286,10 @@ choice set when the home is created:
 
 ## Ranged reads
 
-A host that streams a large blob (audio playback, scrubbing) wants a plaintext
-byte window without downloading and decrypting the whole object. The cache's
+Streaming would be impossible if reading byte 40,000,000 of a track meant
+downloading and decrypting the 39,999,999 bytes before it. A host that
+streams a large blob (audio playback, scrubbing) wants a plaintext byte
+window on its own. The cache's
 [`open_blob_stream`](/docs/cache#reading-a-blob) serves a window from the local
 file on a hit, and on a miss reads it from the cloud through
 [`SyncStorage::read_blob_range`](rustdoc:trait:coven::sync::storage::SyncStorage),
