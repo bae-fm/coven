@@ -7,9 +7,11 @@
 //! implemented in Swift via a UniFFI callback interface. `CloudKitCloudHome`
 //! wraps these ops, adds chunking logic, and implements `CloudHome`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::warn;
 
 use crate::id_provider::{IdRef, UuidProvider};
 
@@ -436,6 +438,51 @@ struct CloudKitPartSink {
     written_len: usize,
 }
 
+impl CloudKitPartSink {
+    /// Best-effort deletion of the part records this upload wrote, called when a
+    /// part write or the manifest write fails — before any manifest is published.
+    /// Without it a failed upload leaves tokened part records with no manifest: an
+    /// orphan `list` would report (as a base key) but `read` cannot assemble. Only
+    /// this upload's own token is deleted, so a prior object at the same key (which
+    /// stays readable until its manifest is replaced) is untouched.
+    async fn abort(&self) {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = self.key.clone();
+        let upload_id = self.upload_id.clone();
+        let written_parts = self.index;
+        let result = blocking(move || {
+            for i in 0..written_parts {
+                delete_single_record(&*ops, &scope, &chunk_part_key(&key, &upload_id, i))?;
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(e) = result {
+            warn!(
+                "Failed to abort CloudKit multipart upload for {}: {e}",
+                self.key
+            );
+        }
+    }
+
+    /// Write one record of this upload, aborting the whole upload on failure —
+    /// the shape both the part writes and the manifest write share.
+    async fn write_record_or_abort(
+        &self,
+        record_key: String,
+        data: Vec<u8>,
+    ) -> Result<(), CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        if let Err(e) = blocking(move || ops.write_record(&scope, &record_key, data)).await {
+            self.abort().await;
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl super::PartSink for CloudKitPartSink {
     fn part_size(&self) -> usize {
@@ -451,27 +498,27 @@ impl super::PartSink for CloudKitPartSink {
         let i = self.index;
         self.index += 1;
         self.written_len += part.len();
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
         let chunk_key = chunk_part_key(&self.key, &self.upload_id, i);
-        let data = part.to_vec();
-        blocking(move || ops.write_record(&scope, &chunk_key, data)).await
+        self.write_record_or_abort(chunk_key, part.to_vec()).await
     }
 
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
         let manifest = ChunkManifest::new(self.total_len, self.upload_id.clone());
         if self.index != manifest.part_count || self.written_len != manifest.total_len {
+            self.abort().await;
             return Err(CloudHomeError::Storage(format!(
                 "CloudKit multipart {} wrote {} parts/{} bytes, expected {} parts/{} bytes",
                 self.key, self.index, self.written_len, manifest.part_count, manifest.total_len
             )));
         }
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let key = chunk_manifest_key(&self.key);
-        let data = encode_chunk_manifest(manifest);
-        blocking(move || ops.write_record(&scope, &key, data)).await?;
+        let manifest_key = chunk_manifest_key(&self.key);
+        let manifest_data = encode_chunk_manifest(manifest);
+        self.write_record_or_abort(manifest_key, manifest_data)
+            .await?;
 
+        // The manifest is published, so the object is now readable. The remaining
+        // steps only clean up records the previous object left; their failure fails
+        // loud but must not touch the parts just published.
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let key = self.key.clone();
@@ -638,10 +685,18 @@ impl CloudHome for CloudKitCloudHome {
         blocking(move || {
             let raw_keys = ops.list_records(&scope, &prefix)?;
 
-            // Strip .partN suffixes and deduplicate
+            // A base key exists only when its single record or its manifest is
+            // present — the manifest is what makes a chunked object readable. Part
+            // records with no manifest are an incomplete or aborted upload, which
+            // `read` cannot assemble, so they are not reported.
+            let present: HashSet<&str> = raw_keys.iter().map(String::as_str).collect();
             let mut base_keys: Vec<String> = raw_keys
                 .iter()
-                .map(|k| strip_part_suffix(k).to_string())
+                .map(|k| strip_part_suffix(k))
+                .filter(|&base| {
+                    present.contains(base) || present.contains(chunk_manifest_key(base).as_str())
+                })
+                .map(str::to_string)
                 .collect();
             base_keys.sort();
             base_keys.dedup();
@@ -721,6 +776,7 @@ mod tests {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
         calls: Mutex<Vec<MockCall>>,
         fail_deletes: Mutex<HashSet<String>>,
+        fail_writes: Mutex<HashSet<String>>,
         record_exists_calls: AtomicUsize,
     }
 
@@ -730,6 +786,7 @@ mod tests {
                 store: Mutex::new(HashMap::new()),
                 calls: Mutex::new(Vec::new()),
                 fail_deletes: Mutex::new(HashSet::new()),
+                fail_writes: Mutex::new(HashSet::new()),
                 record_exists_calls: AtomicUsize::new(0),
             }
         }
@@ -745,6 +802,10 @@ mod tests {
         fn fail_delete(&self, key: &str) {
             self.fail_deletes.lock().unwrap().insert(key.to_string());
         }
+
+        fn fail_write(&self, key: &str) {
+            self.fail_writes.lock().unwrap().insert(key.to_string());
+        }
     }
 
     impl CloudKitOps for MockCloudKitOps {
@@ -758,6 +819,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(MockCall::Write(key.to_string()));
+            if self.fail_writes.lock().unwrap().contains(key) {
+                return Err(CloudHomeError::Storage(format!("write {key} failed")));
+            }
             self.store
                 .lock()
                 .unwrap()
@@ -1019,6 +1083,57 @@ mod tests {
             "unexpected error: {msg}"
         );
         assert!(!ch.exists("chunked.bin").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_omits_base_key_whose_manifest_is_absent() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        // Part records with no manifest — an interrupted upload that never
+        // published. `read` cannot assemble them, so `list` must not report them.
+        write_chunk_part(&ops, "files/orphan.bin", 0, vec![1u8; CHUNK_SIZE]);
+        write_chunk_part(&ops, "files/orphan.bin", 1, b"tail".to_vec());
+        ch.write(
+            "files/ok.bin",
+            BlobBody::from_bytes(b"hi".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        let keys = ch.list("files/").await.unwrap();
+
+        assert_eq!(keys, vec!["files/ok.bin".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn multipart_part_failure_leaves_no_orphan_records_or_visibility() {
+        let (ch, ops) = make_cloud_home_with_ops();
+        // 25 MB spans three parts; fail the second part write mid-upload. The
+        // upload id is the first id the sequential provider hands out.
+        ops.fail_write(&chunk_part_key("orphan.bin", "cloudkit-upload-0", 1));
+        let data: Vec<u8> = vec![0u8; 25 * 1024 * 1024];
+
+        let err = ch
+            .write("orphan.bin", BlobBody::from_bytes(data), &no_progress())
+            .await
+            .expect_err("injected part write failure must fail the upload");
+        assert!(err.to_string().contains("write"), "unexpected error: {err}");
+
+        assert!(!ch.exists("orphan.bin").await.unwrap());
+        assert!(!ch
+            .list("")
+            .await
+            .unwrap()
+            .contains(&"orphan.bin".to_string()));
+        assert!(
+            ops.list_records(&CloudKitScope::Private, "orphan.bin.part")
+                .unwrap()
+                .is_empty(),
+            "aborted upload must leave no part records"
+        );
+        assert!(!ops
+            .record_exists(&CloudKitScope::Private, &chunk_manifest_key("orphan.bin"))
+            .unwrap());
     }
 
     #[tokio::test]
