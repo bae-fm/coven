@@ -4,7 +4,7 @@
 //! test binary so the process-global registry is genuinely unset.
 #![cfg(feature = "oauth-providers")]
 
-use coven::config::CloudProvider;
+use coven::CloudProvider;
 
 #[test]
 fn oauth_flow_without_registered_creds_names_the_setup_step() {

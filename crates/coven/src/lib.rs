@@ -1,44 +1,55 @@
-pub use coven_core::*;
+//! coven — the native host integration for end-to-end encrypted, multi-writer,
+//! bring-your-own-storage SQLite sync. The engine lives in `coven-core`; this
+//! crate wires it to the filesystem, the platform keyring, and native cloud
+//! providers, and re-exports the curated host API.
+//!
+//! The public API is exactly the crate-root re-exports below. The engine's
+//! implementation modules are `pub(crate)`, so a host reaches coven only through
+//! these names — never through `coven::sync::…` or `coven::blob::…`. In
+//! particular the sync driver is private: it starts only through
+//! [`CovenHandle::connect_sync`], which holds the lifecycle lock, so a host
+//! cannot drive the loop out from under the handle.
+//!
+//! ```compile_fail
+//! // `sync` is a private module; the sync driver is unreachable from outside.
+//! let _ = coven::sync::sync_manager::SyncManager::start_sync;
+//! ```
 
-pub mod keys;
-pub mod oauth;
+pub(crate) mod keys;
+pub(crate) mod oauth;
 
-pub mod blob {
+pub(crate) mod blob {
     pub use coven_core::blob::*;
     pub mod transition {
         pub use coven_core::blob::transition::*;
     }
 }
 
-pub mod changeset {
+pub(crate) mod changeset {
     pub use coven_core::changeset::*;
 }
 
-pub mod clock {
+pub(crate) mod clock {
     pub use coven_core::clock::*;
 }
 
-pub mod config {
+pub(crate) mod config {
     pub use coven_core::config::*;
 }
 
-pub mod database {
+pub(crate) mod database {
     pub use coven_core::database::*;
 }
 
-pub mod db {
-    pub use coven_core::db::*;
-}
-
-pub mod encryption {
+pub(crate) mod encryption {
     pub use coven_core::encryption::*;
 }
 
-pub mod id_provider {
+pub(crate) mod id_provider {
     pub use coven_core::id_provider::*;
 }
 
-pub mod join_code {
+pub(crate) mod join_code {
     pub use coven_core::join_code::*;
 
     pub fn generate_join_request(email: Option<String>) -> Result<String, crate::keys::KeyError> {
@@ -77,27 +88,21 @@ pub async fn fetch_account_email(
     result.map_err(|e| oauth::OAuthError::AccountFetch(e.to_string()))
 }
 
-pub mod library_dir {
+pub(crate) mod library_dir {
     pub use coven_core::library_dir::*;
 }
 
 mod local_blob_backend;
 
-pub mod local_blob {
+pub(crate) mod local_blob {
     pub use coven_core::local_blob::*;
 }
 
-pub mod migration {
+pub(crate) mod migration {
     pub use coven_core::migration::*;
 }
 
-/// Experimental and intentionally undocumented; see [`coven_core::share`].
-#[cfg(feature = "share-proxy")]
-pub mod share {
-    pub use coven_core::share::*;
-}
-
-pub mod storage {
+pub(crate) mod storage {
     pub mod cloud {
         pub use coven_core::storage::cloud::*;
 
@@ -155,6 +160,10 @@ pub mod storage {
             })
         }
 
+        /// Build a [`CloudHome`] from `config`, surfacing a missing or malformed
+        /// provider configuration as a non-retryable
+        /// [`CloudHomeError::Configuration`] so a host can tell "fix your settings"
+        /// apart from a transient failure it should keep retrying.
         pub async fn create_cloud_home(
             config: &crate::config::Config,
             key_service: &crate::keys::KeyService,
@@ -314,7 +323,7 @@ pub mod storage {
     pub mod local;
 }
 
-pub mod sync {
+pub(crate) mod sync {
     pub use coven_core::sync::*;
 
     pub mod join;
@@ -337,31 +346,97 @@ pub(crate) fn install_platform() {
     local_blob_backend::install_platform_backend();
 }
 
+// coven's public API is exactly the crate-root re-exports below. The
+// implementation modules are `pub(crate)`; a host reaches coven only through
+// these names, never through `coven::sync::…` or `coven::blob::…`.
+
 pub use coven::{
     Coven, CovenBuilder, CovenConfig, CovenError, CovenResult, SqlContext, WriteBatch,
 };
 pub use handle::CovenHandle;
 
-pub use blob::transition::MakeLocalError;
+// --- coven-core's curated engine surface, re-exported so a host names it as
+//     `coven::…` and never depends on `coven-core` directly. ---
+
+/// The exact `rusqlite` coven owns the connection through; see [`CovenHandle::sql`].
+pub use coven_core::rusqlite;
+
+// Host schema declaration: the synced-table set and the synced-schema migration ladder.
+pub use coven_core::{BlobDecl, Migration, MigrationStep, SyncedTable};
+
+// Config.
+pub use coven_core::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};
+
+// Blob descriptors, cache error, the host-implemented transition observer.
+#[cfg(feature = "share-proxy")]
+pub use coven_core::BlobId;
+pub use coven_core::{
+    BlobCacheError, BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
+    ResolvedScope,
+};
+
+// Applied-sync change notification.
+pub use coven_core::{ChangeOp, RowChange};
+
+// At-rest crypto the host configures, the library directory, the DB error.
+pub use coven_core::{DbError, EncryptionError, EncryptionService, LibraryDir, CHUNK_SIZE};
+
+// The register clock vocabulary carried on every synced row.
+pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
+
+// Membership.
+pub use coven_core::{MemberInfo, MemberRole};
+
+// Clock / id abstractions the host injects, plus the deterministic test fakes.
+pub use coven_core::{Clock, ClockRef, IdProvider, IdRef, SystemClock, UuidProvider};
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_core::{FixedClock, SequentialIdProvider, SteppingClock};
+
+// Bootstrap decoders and the cloud at-rest cipher.
+pub use coven_core::{
+    decode_invite_code_info, decode_join_request, decode_restore_code_info, CloudCipher,
+    JoinCodeError,
+};
+
+// Cloud provider trait surface a provider implementor needs, the thread-safety
+// floor those traits carry, and the pull-result rejection reports.
+pub use coven_core::{
+    BlobBody, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, InvalidSignature, MaybeThreadSafe, PartSink, RejectedUnauthorized,
+    UploadProgress,
+};
+
+// In-memory cloud home and durable upload-queue rows for host integration tests.
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
+
+#[cfg(feature = "share-proxy")]
+pub use coven_core::{open_share, ShareError, ShareManifest, ShareProxy, ShareToken};
+
+// --- Native additions and native-only re-exports. ---
+
+pub use blob::transition::{MakeLocalError, MakeRemoteError};
 pub use join_code::generate_join_request;
 pub use keys::{
-    keyring_service, read_keyring, set_keyring_service, CloudHomeCredentials, KeyError, KeyService,
+    keyring_service, read_keyring, set_keyring_service, CloudHomeCredentials, KeyError,
+    KeyPersistence, KeyService, UserKeypair,
 };
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;
 pub use storage::cloud::{
     cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare},
+    create_cloud_home,
     s3::S3CloudHome,
 };
 pub use storage::local::BlobStore;
 pub use sync::join::join_from_invite_code;
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};
-pub use sync::sync_manager::{MemberInfo, SyncError};
+pub use sync::sync_manager::SyncError;
 
 #[cfg(feature = "oauth-providers")]
 pub use oauth::{
     authorize_provider, build_authorize_request_for_provider, exchange_code_for_provider,
-    OAuthClientCredsError,
+    OAuthClientCredsError, OAuthError,
 };
 
 #[cfg(feature = "oauth-providers")]

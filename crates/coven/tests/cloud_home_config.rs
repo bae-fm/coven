@@ -5,11 +5,9 @@
 
 use std::sync::Arc;
 
-use coven::clock::SystemClock;
-use coven::config::{CloudProvider, Config};
-use coven::keys::KeyService;
-use coven::library_dir::LibraryDir;
-use coven::storage::cloud::{create_cloud_home, CloudHomeError};
+use coven::{
+    create_cloud_home, CloudHomeError, CloudProvider, Config, KeyService, LibraryDir, SystemClock,
+};
 
 #[tokio::test]
 async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {

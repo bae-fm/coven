@@ -407,18 +407,6 @@ pub fn build_cloud_cipher(
 /// `cipher` lets the caller reuse an already-built cipher (so the sync loop and
 /// storage share one instance for in-place key rotation); when `None` it is
 /// built from config via [`build_cloud_cipher`].
-///
-/// Native-only: builds the cloud home via the native-only [`super::create_cloud_home`].
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn create_sync_storage(
-    config: &Config,
-    key_service: &KeyService,
-    cipher: Option<CloudCipher>,
-    clock: crate::clock::ClockRef,
-) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
-    create_sync_storage_with_cloudkit(config, key_service, cipher, clock, None).await
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn create_sync_storage_with_cloudkit(
     config: &Config,

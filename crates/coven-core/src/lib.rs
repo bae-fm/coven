@@ -68,37 +68,60 @@
 //! An *asset* (a cover, an artist image — [`sync::session::SyncedTable::asset`])
 //! rides its subject's gate but never keeps the subject alive.
 
+// coven-core's documented public API is exactly the crate-root re-exports below.
+// The implementation modules are `#[doc(hidden)] pub`: reachable by the sibling
+// platform crates that compose this core — `coven` (native) and `coven-wasm`
+// (browser), which need its internals to build the native and browser engines —
+// but excluded from the documented surface and not part of the host API. A host
+// depends on `coven`, whose own modules are `pub(crate)`, so it reaches the
+// engine only through the curated re-exports, never through `coven_core::sync::…`
+// or `coven::sync::…`.
+//
 // The blob engine: the vocabulary types plus the two lifecycle halves —
 // `blob::cache` (bytes on disk, folder-truth retention) and `blob::upload` (drain
-// the durable upload queue to the cloud). Documented at the module.
+// the durable upload queue to the cloud).
+#[doc(hidden)]
 pub mod blob;
+#[doc(hidden)]
 pub mod changeset;
+#[doc(hidden)]
 pub mod clock;
+#[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
 pub mod database;
+#[doc(hidden)]
 pub mod db;
+#[doc(hidden)]
 pub mod encryption;
+#[doc(hidden)]
 pub mod id_provider;
+#[doc(hidden)]
 pub mod join_code;
+#[doc(hidden)]
 pub mod keys;
+#[doc(hidden)]
 pub mod library_dir;
 // The host's synced-schema ladder: ordered migrations tracked in `PRAGMA
-// user_version`, which doubles as the wire `schema_version`. Documented at the
-// module.
+// user_version`, which doubles as the wire `schema_version`.
+#[doc(hidden)]
 pub mod migration;
 // The device-local plaintext file behind each `BlobRef`: read on push, written on
 // pull. Native uses the filesystem; browser storage assembly lives in
-// `coven-wasm`. Documented at the module.
+// `coven-wasm`.
+#[doc(hidden)]
 pub mod local_blob;
 #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
 mod local_blob_tests;
 #[cfg(feature = "share-proxy")]
+#[doc(hidden)]
 pub mod share;
+#[doc(hidden)]
 pub mod storage;
+#[doc(hidden)]
 pub mod sync;
-// coven's public API is exactly this set of crate-root re-exports. Every
-// implementation module is `pub(crate)`; a host reaches coven only through these
-// names, never through `coven::blob::…` or `coven::sync::…`.
+
+// The curated public API — the only names a host is meant to touch.
 
 pub use database::DbError;
 

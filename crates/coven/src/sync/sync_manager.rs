@@ -28,7 +28,7 @@ use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::cycle::{InitSyncError, SyncComponents};
 use crate::sync::hlc::Hlc;
-/// `MemberInfo` lives next to [`MemberRole`] in the membership module; coven's
+/// `MemberInfo` lives next to `MemberRole` in the membership module; coven's
 /// public path reaches it through here (re-exported from `lib.rs`).
 pub use crate::sync::membership::MemberInfo;
 use crate::sync::membership::MemberRole;
@@ -155,19 +155,6 @@ impl SyncManager {
     /// key, stored in the clear).
     pub fn encryption_service(&self) -> Option<EncryptionService> {
         self.encryption_service.clone()
-    }
-
-    /// The at-rest cipher this home applies to its blob objects, derived from the
-    /// configured storage mode (see [`CloudCipher::for_storage`]): `Encrypted`
-    /// under the library key for an opaque home, `Plaintext` for a browsable one.
-    /// `None` only for an opaque home with no encryption service (a locked
-    /// library). A host streaming a Remote blob builds a
-    /// [`BlobRangeReader`](crate::sync::cloud_storage::BlobRangeReader) with this
-    /// so a read applies the same protection the upload sealed under — the same
-    /// cipher this manager builds the sync loop with in `start_sync`.
-    pub fn blob_cipher(&self) -> Option<CloudCipher> {
-        let config = (self.config_provider)();
-        CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
     }
 
     pub fn sync_loop_handle(&self) -> Option<Arc<SyncLoopHandle>> {

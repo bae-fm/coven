@@ -302,18 +302,18 @@ impl CovenHandle {
     }
 
     /// Test-only: connect a started [`SyncManager`] over an injected [`CloudHome`]
-    /// instead of one built from [`Config`] via `create_cloud_home`, so a host's
-    /// integration tests drive the real make-Remote / make-Local / upload-drain and
-    /// read paths over a mock cloud with no live provider.
+    /// instead of one built from [`Config`], so a host's integration tests drive
+    /// the real make-Remote / make-Local / upload-drain and read paths over a mock
+    /// cloud with no live provider.
     ///
     /// The test counterpart of [`connect_sync`](Self::connect_sync): it stands the
     /// manager over `home`/`cipher` through
     /// [`SyncManager::start_sync_with_home`], starts the loop, and installs it with
     /// the same start-before-install discipline — a failed connect leaves the
     /// handle home-less rather than holding a manager whose loop never started. The
-    /// encryption service the manager reports (for `blob_cipher` / membership) is
-    /// taken from the injected `cipher`, the single source of at-rest protection on
-    /// the test path.
+    /// encryption service the manager reports (for the blob at-rest cipher and the
+    /// membership path) is taken from the injected `cipher`, the single source of
+    /// at-rest protection on the test path.
     ///
     /// The read path needs no separate hook: [`blob_storage`](Self::blob_storage)
     /// serves reads from the connected loop's own [`CloudSyncStorage`], which here
@@ -327,8 +327,8 @@ impl CovenHandle {
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
         // The test supplies encryption through the cipher, not a separate service;
-        // derive the manager's service from it so `blob_cipher` and the membership
-        // path agree with the at-rest protection the loop and storage seal under.
+        // derive the manager's service from it so the blob at-rest cipher and the
+        // membership path agree with the protection the loop and storage seal under.
         let encryption_service = match &cipher {
             CloudCipher::Encrypted(service) => Some(service.clone()),
             CloudCipher::Plaintext => None,

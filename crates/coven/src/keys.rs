@@ -1,10 +1,8 @@
 use tracing::info;
 
 pub use coven_core::keys::{
-    ed25519_to_x25519_public_key, seal_box_decrypt, seal_box_encrypt, verify_signature,
-    verify_signature_hex, CloudHomeCredentials, KeyError, KeyPersistence, UserKeypair,
-    CURVE25519_PUBLICKEYBYTES, CURVE25519_SECRETKEYBYTES, SEALBYTES, SIGN_BYTES,
-    SIGN_PUBLICKEYBYTES, SIGN_SECRETKEYBYTES,
+    CloudHomeCredentials, KeyError, KeyPersistence, UserKeypair, SIGN_PUBLICKEYBYTES,
+    SIGN_SECRETKEYBYTES,
 };
 
 static KEYRING_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();

@@ -71,10 +71,6 @@ pub struct CloudKitCloudHome {
 }
 
 impl CloudKitCloudHome {
-    pub fn new(ops: Arc<dyn CloudKitOps>) -> Self {
-        Self::new_private(ops)
-    }
-
     pub fn new_private(ops: Arc<dyn CloudKitOps>) -> Self {
         Self::new_private_with_ids(ops, Arc::new(UuidProvider))
     }
