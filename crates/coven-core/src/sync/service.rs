@@ -66,31 +66,37 @@ pub async fn complete_host_provided_make_remotes(
     storage: &dyn SyncStorage,
     timestamp: &str,
     library_dir: &LibraryDir,
+    local_seq: u64,
 ) -> Result<bool, SyncCycleError> {
     let roots = ready_host_provided_make_remotes(db, tables).await?;
     let mut completed = false;
     for root in roots {
-        let mut uploaded = Vec::new();
+        // Upload each host-provided blob to the cloud before the gate flips, so the
+        // blob is durable in the cloud the moment the row is shareable. The upload
+        // is idempotent (it skips a blob already present), so the inline push
+        // re-seeing this re-emitted blob does not re-upload it.
+        //
+        // The blob is now Remote, so its local-store copy (its Local home) must not
+        // stay there — a Remote blob's bytes in the local store would read as Local.
+        // What happens to that copy is a `CacheFill`/pin policy: pin keeps it in
+        // `pinned/`, `CacheEager` moves it into the evictable cache, `CacheLazy`
+        // drops it (the cloud has the bytes). That disposition is committed as a
+        // durable intent inside the flip transaction below and applied by the
+        // existing drain after the flip's changeset is published — so a crash
+        // between the flip and the disposition replays it instead of stranding the
+        // copy. A copy already in the cache (crash-recovery fallback) needs neither.
+        let mut drops = Vec::new();
         for blob in &root.host_blobs {
-            uploaded.push((
-                upload_host_provided_blob(db, storage, library_dir, blob).await?,
-                local_blob_disposition(blob, root.intent.retain_pinned),
-            ));
+            let uploaded = upload_host_provided_blob(db, storage, library_dir, blob).await?;
+            if let Some(drop) = uploaded
+                .deferred_local_blob_drop(local_blob_disposition(blob, root.intent.retain_pinned))
+            {
+                drops.push(drop);
+            }
         }
 
-        finish_host_provided_make_remote(db, root.clone(), timestamp.to_string()).await?;
-
-        // A user-provided blob is the user's own file, referenced in place.
-        // make_remote uploads a copy to the cloud and drops the external ref
-        // (`finish_host_provided_make_remote` above), leaving the blob
-        // Remote/CacheLazy — but it NEVER deletes the user's original on disk.
-        // Only host-provided local-store copies, whose bytes coven owns, are
-        // dropped below.
-        for (uploaded, disposition) in uploaded {
-            uploaded
-                .apply_local_store_disposition(db, library_dir, disposition)
-                .await?;
-        }
+        finish_host_provided_make_remote(db, root.clone(), local_seq, drops, timestamp.to_string())
+            .await?;
         completed = true;
     }
     Ok(completed)
@@ -632,9 +638,15 @@ fn has_pending_upload(
 async fn finish_host_provided_make_remote(
     db: &Database,
     root: ReadyHostProvidedMakeRemote,
+    local_seq: u64,
+    drops: Vec<DeferredLocalBlobDrop>,
     stamp: String,
 ) -> Result<(), SyncCycleError> {
     let tables = db.synced_tables().to_vec();
+    // The flip's changeset is published at the next sequence, so the local-store
+    // disposition (keyed by that sequence) is applied only after the row that
+    // shares the blob is durable — matching the inline-push path.
+    let intent_seq = local_seq + 1;
     db.call_with_capture_reset(move |conn| {
         Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
             crate::sync::gate::write_gate(
@@ -648,6 +660,16 @@ async fn finish_host_provided_make_remote(
             .map_err(crate::database::DbError::from)?;
             for id in &root.user_blob_ids {
                 Database::clear_external_blob_on(tx, id)?;
+            }
+            // Commit the local-store disposition as the authoritative record, in the
+            // same transaction as the flip. The flip re-emits the subtree, so the
+            // inline push (`sync`) also scans this host blob — but the make_remote
+            // intent is gone by then (deleted below), so it can't recover
+            // `retain_pinned` and would record the default disposition. The insert's
+            // conflict clause (`DO NOTHING`) keeps this authoritative record, written
+            // first, from being overwritten by that inline re-scan.
+            for drop in &drops {
+                super::cycle::insert_published_blob_drop_intent(tx, intent_seq, drop)?;
             }
             Database::delete_make_remote_intent_on(
                 tx,

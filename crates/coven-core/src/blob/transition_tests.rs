@@ -56,6 +56,13 @@ fn cover_decl() -> BlobDecl {
         .with_cloud_path_column("cloud_path")
 }
 
+/// A host-provided cover declared `CacheLazy`, so a make_remote WITHOUT a pin drops
+/// its local-store copy (rather than moving it into the eager cache like `cover_decl`).
+fn cover_lazy_decl() -> BlobDecl {
+    BlobDecl::new("covers", Provenance::HostProvided, CacheFill::CacheLazy)
+        .with_cloud_path_column("cloud_path")
+}
+
 fn remote_root_db(decl: BlobDecl) -> Database {
     open_test_db_schema(
         vec![
@@ -838,6 +845,129 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     .await
     .expect("read Remote host-provided cover");
     assert_eq!(after, cover);
+}
+
+/// A crash between a host-provided make_remote's gate flip and its local-store
+/// disposition must not strand the blob. The flip commits the disposition as a
+/// durable intent, so a cycle whose push fails (the flip is committed, the drain
+/// that applies the disposition never runs) leaves the disposition pending — the
+/// local copy untouched — and the recovery cycle's staged retry drains it: the
+/// pinned blob reaches `pinned/` and the dropped blob's local copy is gone.
+#[tokio::test]
+async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_lazy_decl());
+    let (_tmp, lib) = temp_library_dir();
+    let pin_bytes = b"PINNED-COVER".to_vec();
+    let drop_bytes = b"DROPPED-COVER".to_vec();
+
+    // Two host-provided-only releases: one made Remote with a pin (Pin disposition),
+    // one without (Drop disposition, because the cover is CacheLazy).
+    for (note, cover, path, bytes) in [
+        ("n-pin", "cover-pin", "cv/pin.jpg", &pin_bytes),
+        ("n-drop", "cover-drop", "cv/drop.jpg", &drop_bytes),
+    ] {
+        exec(
+            &db,
+            &format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('{note}', 'Release', NULL, 0, '0000000001000-0000-A', '2026-01-01')"
+            ),
+        )
+        .await;
+        exec(
+            &db,
+            &format!(
+                "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
+                 VALUES ('{cover}', '{note}', {}, '0000000001000-0000-A', '2026-01-01', '{path}')",
+                bytes.len()
+            ),
+        )
+        .await;
+        local_files::store(&lib, "covers", cover, bytes)
+            .await
+            .expect("store host-provided cover");
+    }
+    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n-pin", true)
+        .await
+        .expect("make_remote pin");
+    make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n-drop", false)
+        .await
+        .expect("make_remote drop");
+
+    // The crash: the changeset push fails, so the gate flip commits (with its
+    // disposition intent) but the drain that applies the disposition never runs.
+    storage.fail_next_changeset_puts(1);
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert_eq!(
+        shared_flag(&db, "n-pin").await,
+        1,
+        "the pin release flipped"
+    );
+    assert_eq!(
+        shared_flag(&db, "n-drop").await,
+        1,
+        "the drop release flipped"
+    );
+    assert!(
+        row_exists(
+            &db,
+            "SELECT 1 FROM published_blob_drop_intents WHERE blob_id = 'cover-pin'",
+        )
+        .await,
+        "the pin disposition is committed durably with the flip, not applied in memory",
+    );
+    assert!(
+        !lib.pinned_blob_path("covers", "cover-pin")
+            .unwrap()
+            .exists(),
+        "the disposition is deferred to the drain, so the pin has not been applied yet",
+    );
+    assert!(
+        lib.local_blob_path("covers", "cover-drop")
+            .unwrap()
+            .exists(),
+        "the dropped cover's local copy is still present until the drain runs",
+    );
+
+    // Recovery: the staged changeset re-pushes and the drain applies both dispositions.
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert!(
+        lib.pinned_blob_path("covers", "cover-pin")
+            .unwrap()
+            .exists(),
+        "recovery pins the retained cover",
+    );
+    assert!(
+        cache::is_pinned(&lib, "covers", "cover-pin").await.unwrap(),
+        "is_pinned reports the recovered pin",
+    );
+    assert!(
+        !lib.local_blob_path("covers", "cover-pin").unwrap().exists(),
+        "the pinned cover no longer sits in the local store",
+    );
+    assert!(
+        !lib.local_blob_path("covers", "cover-drop")
+            .unwrap()
+            .exists(),
+        "recovery drops the un-pinned cover's local copy",
+    );
+    assert!(
+        !cache::is_pinned(&lib, "covers", "cover-drop")
+            .await
+            .unwrap(),
+        "the dropped cover is not pinned",
+    );
+    assert!(
+        storage.exists("covers/cv/pin.jpg").await.unwrap()
+            && storage.exists("covers/cv/drop.jpg").await.unwrap(),
+        "both covers are published to the cloud",
+    );
 }
 
 #[tokio::test]

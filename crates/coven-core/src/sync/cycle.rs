@@ -218,23 +218,8 @@ async fn persist_staged_push_state(
             ],
         )
         .map_err(DbError::from)?;
-        for drop in drops {
-            tx.execute(
-                "INSERT INTO published_blob_drop_intents \
-                 (seq, namespace, blob_id, size, disposition) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) \
-                 ON CONFLICT(seq, namespace, blob_id) DO UPDATE SET \
-                 size = excluded.size, \
-                 disposition = excluded.disposition",
-                rusqlite::params![
-                    seq as i64,
-                    drop.namespace,
-                    drop.id,
-                    drop.size as i64,
-                    disposition_to_db(drop.disposition),
-                ],
-            )
-            .map_err(DbError::from)?;
+        for drop in &drops {
+            insert_published_blob_drop_intent(&tx, seq, drop)?;
         }
         tx.commit().map_err(DbError::from)
     })
@@ -363,6 +348,40 @@ async fn clear_published_blob_drop_intent(
     })
     .await
     .map_err(|e| format!("Failed to clear published blob drop intent: {e}"))
+}
+
+/// Record a published blob's local-store disposition, keyed by the `seq` of the
+/// changeset whose publication makes the blob Remote. The existing drain
+/// (`drain_published_blob_drop_intents`) applies it only once that seq is pushed,
+/// so the local copy is never touched before the row that shares it is durable.
+///
+/// Two commits write here: the host-provided make_remote flip commit records the
+/// authoritative disposition first, and the inline-push staging commit records a
+/// disposition for every host blob in the pushed changeset — which includes the
+/// blob the flip just re-emitted, but with the default disposition, since the flip
+/// consumed the make_remote intent that carried `retain_pinned`. `DO NOTHING` keeps
+/// the first (authoritative) record, so the flip's pin/eager choice wins over the
+/// inline re-scan's default; it also makes a crash-retried stage idempotent.
+pub(super) fn insert_published_blob_drop_intent(
+    tx: &rusqlite::Transaction<'_>,
+    seq: u64,
+    drop: &super::service::DeferredLocalBlobDrop,
+) -> Result<(), DbError> {
+    tx.execute(
+        "INSERT INTO published_blob_drop_intents \
+         (seq, namespace, blob_id, size, disposition) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
+        rusqlite::params![
+            seq as i64,
+            drop.namespace,
+            drop.id,
+            drop.size as i64,
+            disposition_to_db(drop.disposition),
+        ],
+    )
+    .map(|_| ())
+    .map_err(DbError::from)
 }
 
 fn disposition_to_db(disposition: DeferredLocalBlobDisposition) -> &'static str {
@@ -562,6 +581,7 @@ pub async fn run_single_sync_cycle(
         storage,
         &timestamp,
         library_dir,
+        local_seq,
     )
     .await
     .map_err(|e| format!("Host-provided make_remote completion failed: {e}"))?
