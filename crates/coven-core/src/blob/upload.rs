@@ -222,11 +222,8 @@ pub async fn drain_uploads(
     clock: &dyn crate::clock::Clock,
     hlc: &Hlc,
     observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<DrainOutcome, String> {
-    let uploads = db
-        .get_pending_cloud_uploads()
-        .await
-        .map_err(|e| format!("Failed to get pending uploads: {e}"))?;
+) -> Result<DrainOutcome, DbError> {
+    let uploads = db.get_pending_cloud_uploads().await?;
 
     let now = clock.now();
     let now_rfc = now.to_rfc3339();
@@ -498,7 +495,7 @@ enum PostUpload {
 /// one DB call.
 async fn build_transition_models(
     db: &Database,
-) -> Result<(Arc<Gates>, Arc<BlobDecls>, Arc<HashMap<String, String>>), String> {
+) -> Result<(Arc<Gates>, Arc<BlobDecls>, Arc<HashMap<String, String>>), DbError> {
     let tables = db.synced_tables().to_vec();
     let gate_columns = crate::blob::transition::gate_columns(&tables);
     db.call(move |conn| {
@@ -507,7 +504,6 @@ async fn build_transition_models(
         Ok((Arc::new(gates), Arc::new(decls), Arc::new(gate_columns)))
     })
     .await
-    .map_err(|e| format!("build blob-transition models: {e}"))
 }
 
 /// The post-upload bookkeeping for one successful upload, as one DB call so the

@@ -368,19 +368,33 @@ pub fn generate_restore_code(
 ///
 /// A browsable home has no library key, so it never reads the keyring — the
 /// absence of a key there is expected, not an error.
+/// Why building the sync storage from config failed. Each arm preserves the
+/// typed error the layer below produced — notably [`CloudHomeError`], so the
+/// [`CloudHomeError::is_retryable`] verdict survives up to the caller rather than
+/// being flattened into a string here.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageSetupError {
+    #[error("failed to build cloud home: {0}")]
+    CloudHome(#[from] super::CloudHomeError),
+    #[error("key error: {0}")]
+    Key(#[from] crate::keys::KeyError),
+    #[error("no encryption key found for an encrypted cloud home")]
+    NoEncryptionKey,
+    #[error("failed to build the encryption service: {0}")]
+    Encryption(#[from] crate::encryption::EncryptionError),
+}
+
 pub fn build_cloud_cipher(
     config: &Config,
     key_service: &KeyService,
-) -> Result<CloudCipher, String> {
+) -> Result<CloudCipher, StorageSetupError> {
     if config.cloud_home.storage.is_browsable() {
         return Ok(CloudCipher::Plaintext);
     }
     let key = key_service
-        .get_encryption_key()
-        .map_err(|e| format!("Failed to read encryption key: {e}"))?
-        .ok_or("No encryption key found")?;
-    let enc = crate::encryption::EncryptionService::new(&key)
-        .map_err(|e| format!("Failed to create encryption service: {e}"))?;
+        .get_encryption_key()?
+        .ok_or(StorageSetupError::NoEncryptionKey)?;
+    let enc = crate::encryption::EncryptionService::new(&key)?;
     Ok(CloudCipher::Encrypted(enc))
 }
 
@@ -401,7 +415,7 @@ pub async fn create_sync_storage(
     key_service: &KeyService,
     cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
-) -> Result<crate::sync::cloud_storage::CloudSyncStorage, String> {
+) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     create_sync_storage_with_cloudkit(config, key_service, cipher, clock, None).await
 }
 
@@ -412,11 +426,9 @@ pub async fn create_sync_storage_with_cloudkit(
     cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
-) -> Result<crate::sync::cloud_storage::CloudSyncStorage, String> {
+) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     let cloud_home =
-        super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops)
-            .await
-            .map_err(|e| format!("{e}"))?;
+        super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops).await?;
     create_sync_storage_with_home(config, key_service, Arc::from(cloud_home), cipher)
 }
 
@@ -426,7 +438,7 @@ pub fn create_sync_storage_with_home(
     key_service: &KeyService,
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
-) -> Result<crate::sync::cloud_storage::CloudSyncStorage, String> {
+) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     let cipher = match cipher {
         Some(c) => c,
         None => build_cloud_cipher(config, key_service)?,
@@ -435,9 +447,7 @@ pub fn create_sync_storage_with_home(
     // The device's global signing identity, used to sign the control objects the
     // storage writes (its head, the min_schema floor) so a reader can attribute
     // and verify them against the membership chain.
-    let keypair = key_service
-        .get_or_create_user_keypair()
-        .map_err(|e| format!("Failed to load user keypair: {e}"))?;
+    let keypair = key_service.get_or_create_user_keypair()?;
 
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
         home,

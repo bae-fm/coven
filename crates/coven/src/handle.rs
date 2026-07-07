@@ -442,7 +442,8 @@ impl CovenHandle {
                     &self.key_service,
                     home,
                     None,
-                )?;
+                )
+                .map_err(|e| e.to_string())?;
                 return Ok(Some(Arc::new(storage)));
             }
         }
@@ -457,7 +458,8 @@ impl CovenHandle {
             self.clock.clone(),
             self.cloudkit_ops.clone(),
         )
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(Some(Arc::new(storage)))
     }
 

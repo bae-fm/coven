@@ -31,6 +31,21 @@ use super::hlc::Hlc;
 use super::loop_policy::{self, LoopWait, SyncLoopReport};
 use super::storage::SyncStorage;
 
+/// Why starting or stopping the background sync loop failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SyncLoopError {
+    /// `start` was called on a handle whose channels a prior `start` already
+    /// took: a stopped loop's handle is not restartable.
+    #[error("sync loop cannot be restarted after its channels were taken")]
+    NotRestartable,
+    /// The dedicated sync-loop OS thread could not be spawned.
+    #[error("failed to spawn sync loop thread: {0}")]
+    ThreadSpawn(std::io::Error),
+    /// The sync-loop thread panicked; `stop` observed it on join.
+    #[error("sync loop thread panicked")]
+    ThreadPanicked,
+}
+
 /// Status emitted by the sync loop after each cycle.
 #[derive(Debug, Clone)]
 pub struct SyncLoopStatus {
@@ -128,7 +143,7 @@ impl SyncLoopHandle {
     /// Everything the loop holds is `Send`; database access goes through async
     /// calls on the [`Database`] handle, so nothing here is bound to this thread
     /// except by choice of stack size.
-    pub fn start(&self) -> Result<(), String> {
+    pub fn start(&self) -> Result<(), SyncLoopError> {
         if self.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -137,18 +152,14 @@ impl SyncLoopHandle {
             Some(rx) => rx,
             None => {
                 self.running.store(false, Ordering::Release);
-                return Err(
-                    "sync loop cannot be restarted after its receiver was taken".to_string()
-                );
+                return Err(SyncLoopError::NotRestartable);
             }
         };
         let mut stop_rx = match self.stop_rx.lock().unwrap().take() {
             Some(rx) => rx,
             None => {
                 self.running.store(false, Ordering::Release);
-                return Err(
-                    "sync loop cannot be restarted after its stop receiver was taken".to_string(),
-                );
+                return Err(SyncLoopError::NotRestartable);
             }
         };
 
@@ -274,7 +285,7 @@ impl SyncLoopHandle {
             })
             .map_err(|e| {
                 self.running.store(false, Ordering::Release);
-                format!("failed to spawn sync loop thread: {e}")
+                SyncLoopError::ThreadSpawn(e)
             })?;
 
         *self.thread_handle.lock().unwrap() = Some(handle);
@@ -287,7 +298,7 @@ impl SyncLoopHandle {
     }
 
     /// Request loop shutdown and join the sync thread.
-    pub fn stop(&self) -> Result<(), String> {
+    pub fn stop(&self) -> Result<(), SyncLoopError> {
         let handle = {
             let mut guard = self.thread_handle.lock().unwrap();
             if guard.is_none() && !self.running.load(Ordering::Acquire) {
@@ -303,7 +314,7 @@ impl SyncLoopHandle {
         if let Some(handle) = handle {
             if handle.join().is_err() {
                 self.running.store(false, Ordering::Release);
-                return Err("sync loop thread panicked".to_string());
+                return Err(SyncLoopError::ThreadPanicked);
             }
         }
         self.running.store(false, Ordering::Release);

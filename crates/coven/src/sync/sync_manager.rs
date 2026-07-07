@@ -17,11 +17,11 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::LibraryOpenGuard;
-use crate::database::Database;
+use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyError, KeyService};
 use crate::library_dir::LibraryDir;
-use crate::storage::cloud::setup::SetupError;
+use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::{CloudHome, CloudHomeError};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::sync::cloud_storage::CloudSyncStorage;
@@ -33,7 +33,7 @@ use crate::sync::hlc::Hlc;
 pub use crate::sync::membership::MemberInfo;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
-use crate::sync::sync_loop::SyncLoopHandle;
+use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle};
 
 /// Supplies the host's current config on demand. coven reads it fresh each call
 /// — never snapshotting or writing it — so a host with reactive config sees
@@ -55,7 +55,7 @@ pub enum SyncError {
     #[error("failed to build cloud home: {0}")]
     CloudHome(#[from] CloudHomeError),
     #[error("failed to create sync storage: {0}")]
-    StorageSetup(String),
+    StorageSetup(StorageSetupError),
     #[error("key error: {0}")]
     Key(#[from] KeyError),
     #[error("sync initialization error: {0}")]
@@ -64,10 +64,10 @@ pub enum SyncError {
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
     Membership(String),
-    #[error("blob upload error: {0}")]
-    BlobUpload(String),
+    #[error("blob upload drain failed: {0}")]
+    BlobUpload(DbError),
     #[error("sync loop error: {0}")]
-    Loop(String),
+    Loop(SyncLoopError),
 }
 
 /// Refuse a membership operation on a plaintext home. Inviting wraps the library
@@ -685,7 +685,15 @@ mod tests {
             .get_members()
             .await
             .expect_err("malformed stored credentials must fail");
-        assert!(matches!(error, SyncError::StorageSetup(_)));
+        // The typed CloudHomeError survives up through StorageSetup to the public
+        // SyncError surface — not flattened into a string — so its retryability
+        // verdict is still readable: malformed credentials are a configuration
+        // fault the user must fix, not a transient retry.
+        let SyncError::StorageSetup(StorageSetupError::CloudHome(cloud_home_error)) = &error else {
+            panic!("expected StorageSetup(CloudHome(_)), got {error:?}");
+        };
+        assert!(matches!(cloud_home_error, CloudHomeError::Configuration(_)));
+        assert!(!cloud_home_error.is_retryable());
         assert!(error
             .to_string()
             .contains("malformed cloud home credentials JSON"));

@@ -41,7 +41,7 @@ async fn run_drain(
     library_dir: &LibraryDir,
     clock: &dyn Clock,
     observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<DrainOutcome, String> {
+) -> Result<DrainOutcome, crate::database::DbError> {
     let hlc = Hlc::new("test-device".to_string());
     drain_uploads(
         db,
