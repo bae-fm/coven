@@ -1,8 +1,11 @@
 [package]
 name = "coven-wasm"
-version = "0.0.0-dev"
+version = "1.0.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
+description = "Browser (wasm32) package for coven"
+repository = "https://github.com/bae-fm/coven"
+readme = "../../README.md"
 
 [lib]
 name = "coven_wasm"
@@ -10,7 +13,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-coven-core = { path = "../coven-core", version = "0.0.0-dev" }
+coven-core = { path = "../coven-core", version = "1.0.0-rc.1" }
 wasm-bindgen = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -72,7 +75,7 @@ web-sys = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
-coven-core = { path = "../coven-core", version = "0.0.0-dev", features = ["test-utils"] }
+coven-core = { path = "../coven-core", version = "1.0.0-rc.1", features = ["test-utils"] }
 wasm-bindgen-test = "0.3"
 uuid = { version = "1.0", features = ["v4", "js"] }
 

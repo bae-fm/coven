@@ -959,7 +959,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "coven"
-version = "0.0.0-dev"
+version = "1.0.0-rc.1"
 dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "coven-core"
-version = "0.0.0-dev"
+version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "coven-wasm"
-version = "0.0.0-dev"
+version = "1.0.0-rc.1"
 dependencies = [
  "async-trait",
  "bytes",

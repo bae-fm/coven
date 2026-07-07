@@ -1,8 +1,11 @@
 [package]
 name = "coven-core"
-version = "0.0.0-dev"
+version = "1.0.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
+description = "Engine crate for coven: changeset capture, encryption, membership, and sync shared by platform packages"
+repository = "https://github.com/bae-fm/coven"
+readme = "../../README.md"
 
 [lib]
 name = "coven_core"
