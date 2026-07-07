@@ -16,6 +16,7 @@ use crate::blob::transition::{self, MakeLocalError, MakeRemoteError};
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
+use crate::coven::LibraryOpenGuard;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyError, KeyService};
@@ -90,6 +91,12 @@ pub struct SyncManager {
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
+    /// The library-directory lock, cloned into every sync loop this manager
+    /// starts so the loop's thread keeps it alive for the whole of its final
+    /// cycle. The lock releases when the last writer — a running loop, else the
+    /// handle — is gone, never while a detached loop thread is still writing.
+    open_guard: Arc<LibraryOpenGuard>,
+
     /// coven's `_updated_at` register, the same `Arc<Hlc>` the owned [`Database`]
     /// holds. The sync loop advances it past pulled rows and stamps envelopes off
     /// it, so it shares the clock the host stamps rows from.
@@ -109,7 +116,7 @@ impl SyncManager {
     /// Construction is infallible and synchronous: seeding already happened in
     /// the open path. The manager is built lazily, only once a provider is
     /// connected.
-    pub fn new(
+    pub(crate) fn new(
         config_provider: ConfigProvider,
         key_service: KeyService,
         encryption_service: Option<EncryptionService>,
@@ -117,6 +124,7 @@ impl SyncManager {
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
+        open_guard: Arc<LibraryOpenGuard>,
     ) -> Self {
         let hlc = db.hlc();
         Self {
@@ -127,6 +135,7 @@ impl SyncManager {
             clock,
             cloudkit_ops,
             observer,
+            open_guard,
             hlc,
             sync_loop_handle: RwLock::new(None),
             cloud_home: RwLock::new(None),
@@ -256,6 +265,7 @@ impl SyncManager {
             self.clock.clone(),
             library_dir,
             self.observer.clone(),
+            self.open_guard.clone(),
         ));
         handle.start().map_err(SyncError::Loop)?;
 
@@ -617,6 +627,7 @@ mod tests {
 
     use crate::clock::SystemClock;
     use crate::config::CloudProvider;
+    use crate::coven::LibraryOpenGuard;
     use crate::keys::{test_keyring, KeyService};
     use crate::library_dir::LibraryDir;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -627,6 +638,7 @@ mod tests {
     async fn get_members_surfaces_malformed_cloud_credentials() {
         test_keyring::install();
         let tmp = tempfile::tempdir().expect("temp dir");
+        let library_dir = LibraryDir::new(tmp.path());
         let library_id = "sync-enabled-malformed-credentials";
         let key_service = KeyService::new(library_id.to_string());
         key_service
@@ -645,7 +657,7 @@ mod tests {
         let config = crate::sync::join::build_config(
             library_id,
             "device",
-            &LibraryDir::new(tmp.path()),
+            &library_dir,
             "library",
             &join_info,
             &CloudCipher::Plaintext,
@@ -658,6 +670,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
+            LibraryOpenGuard::acquire_for_test(&library_dir),
         );
 
         let error = manager
@@ -677,6 +690,7 @@ mod tests {
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
+        let open_guard = LibraryOpenGuard::acquire_for_test(&library_dir);
         let config = Config::with_defaults(
             "lib-manager-restart".to_string(),
             "test-device".to_string(),
@@ -691,6 +705,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
+            open_guard,
         );
 
         manager
@@ -727,6 +742,7 @@ mod tests {
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
+        let open_guard = LibraryOpenGuard::acquire_for_test(&library_dir);
         let config = Arc::new(RwLock::new(Config::with_defaults(
             "lib-manager-failed-restart".to_string(),
             "test-device".to_string(),
@@ -744,6 +760,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
+            open_guard,
         );
 
         manager

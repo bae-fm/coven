@@ -120,6 +120,14 @@ pub(crate) struct LibraryOpenGuard {
 }
 
 impl LibraryOpenGuard {
+    /// Acquire the guard for a test, panicking on refusal.
+    #[cfg(test)]
+    pub(crate) fn acquire_for_test(
+        library_dir: &crate::library_dir::LibraryDir,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::acquire(library_dir).expect("acquire library open guard"))
+    }
+
     pub(crate) fn acquire(library_dir: &crate::library_dir::LibraryDir) -> CovenResult<Self> {
         let db_path = library_dir.db_path();
         let Some(dir) = db_path.parent() else {
@@ -676,16 +684,27 @@ mod tests {
 
     use crate::blob::{BlobScope, CacheFill, Provenance};
     use crate::config::Config;
+    use crate::keys::test_keyring;
     use crate::library_dir::LibraryDir;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::storage::cloud::{
+        BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+        CloudHomeJoinInfo,
+    };
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::cycle::run_single_sync_cycle;
     use crate::sync::hlc::Hlc;
     use crate::sync::session::BlobDecl;
     use crate::sync::storage::SyncStorage;
     use crate::sync::test_helpers::{pull_into, query_text, row_exists, MockSyncStorage};
+    use async_trait::async_trait;
     use rusqlite::params;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::RwLock;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::sync::Notify;
 
     fn config(dir: LibraryDir) -> Config {
         Config::with_defaults(
@@ -791,11 +810,7 @@ mod tests {
     }
 
     fn open_files_handle_in(dir: LibraryDir) -> CovenHandle {
-        Coven::builder(config(dir))
-            .synced_tables(vec![files_table()])
-            .migrations(vec![files_migration()])
-            .open()
-            .expect("open handle")
+        try_open(&dir).expect("open handle")
     }
 
     async fn run_test_cycle(storage: &MockSyncStorage, handle: &CovenHandle) {
@@ -1724,5 +1739,192 @@ mod tests {
             .await
             .expect("count winner row");
         assert_eq!(rows, 1);
+    }
+
+    /// A [`CloudHome`] that blocks the sync loop inside a cycle on demand. It
+    /// delegates every call to an inner [`InMemoryCloudHome`], but once `armed`,
+    /// the first cloud operation of a cycle signals `entered` and parks on
+    /// `release` until the test wakes it — holding the loop mid-cycle so the test
+    /// can observe the library-directory lock while a cycle is in flight.
+    ///
+    /// Arming happens only after `connect_sync_with_test_home` returns, so the
+    /// connect-time bootstrap runs unblocked and only a loop cycle is gated.
+    struct GateCloudHome {
+        inner: InMemoryCloudHome,
+        armed: Arc<AtomicBool>,
+        gated: AtomicBool,
+        entered: mpsc::UnboundedSender<()>,
+        release: Arc<Notify>,
+    }
+
+    impl GateCloudHome {
+        async fn gate(&self) {
+            if self.armed.load(Ordering::Acquire) && !self.gated.swap(true, Ordering::AcqRel) {
+                self.entered
+                    .send(())
+                    .expect("test observes the loop entering a cycle");
+                self.release.notified().await;
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CloudHome for GateCloudHome {
+        async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+            self.gate().await;
+            self.inner.put_object(key, data).await
+        }
+
+        async fn open_multipart<'a>(
+            &'a self,
+            key: &str,
+            total_len: u64,
+        ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+            self.gate().await;
+            self.inner.open_multipart(key, total_len).await
+        }
+
+        fn multipart_threshold(&self) -> u64 {
+            self.inner.multipart_threshold()
+        }
+
+        async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            self.gate().await;
+            self.inner.read(key).await
+        }
+
+        async fn read_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            self.gate().await;
+            self.inner.read_range(key, start, end).await
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+            self.gate().await;
+            self.inner.list(prefix).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+            self.gate().await;
+            self.inner.delete(key).await
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+            self.gate().await;
+            self.inner.exists(key).await
+        }
+
+        async fn grant_access(
+            &self,
+            grant: CloudAccessGrant,
+        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+            self.gate().await;
+            self.inner.grant_access(grant).await
+        }
+
+        async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+            self.gate().await;
+            self.inner.revoke_access(revoke).await
+        }
+    }
+
+    fn try_open(dir: &LibraryDir) -> CovenResult<CovenHandle> {
+        Coven::builder(config(dir.clone()))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open()
+    }
+
+    /// Reopen `dir`, retrying while a still-running sync loop holds the lock.
+    /// Retries only the lock refusal; any other open error fails immediately.
+    /// Fails the calling test if the lock is not released within the budget.
+    async fn open_when_lock_released(dir: &LibraryDir) -> CovenHandle {
+        for _ in 0..100 {
+            match try_open(dir) {
+                Ok(handle) => return handle,
+                Err(CovenError::AlreadyOpen { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(other) => panic!("reopen failed for a reason other than the lock: {other}"),
+            }
+        }
+        panic!("library lock never released: reopen kept failing");
+    }
+
+    // The user keypair is one process-wide keyring account, so the guard is held
+    // across this test's awaits to serialize it against the other keyring tests
+    // (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so
+    // the blocking `std` lock never deadlocks against another task on this runtime).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
+        test_keyring::install();
+        let _keyring = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = open_files_handle_in(dir.clone());
+
+        let armed = Arc::new(AtomicBool::new(false));
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(Notify::new());
+        let home = Arc::new(GateCloudHome {
+            inner: InMemoryCloudHome::new(),
+            armed: armed.clone(),
+            gated: AtomicBool::new(false),
+            entered: entered_tx,
+            release: release.clone(),
+        });
+        handle
+            .connect_sync_with_test_home(home, CloudCipher::Plaintext)
+            .await
+            .expect("connect over the gating test home");
+
+        // Bootstrap is done; gate the loop's next cycle and wait until it parks
+        // mid-cycle inside the cloud home.
+        armed.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(30), entered_rx.recv())
+            .await
+            .expect("sync loop reached a cycle within the timeout")
+            .expect("gating home signalled the cycle entry");
+
+        // Drop the last handle while the loop is still mid-cycle. The loop owns a
+        // guard clone, so the lock must stay held: a concurrent open is refused.
+        drop(handle);
+        assert!(
+            matches!(
+                try_open(&dir),
+                Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+            ),
+            "a concurrent open must be refused while the sync loop is mid-cycle",
+        );
+
+        // Release the cycle; the loop finishes, sees its channels closed, exits,
+        // and drops the last guard clone — the lock frees and a reopen succeeds.
+        release.notify_one();
+        let _reopened = open_when_lock_released(&dir).await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn normal_shutdown_releases_the_lock_for_reopen() {
+        test_keyring::install();
+        let _keyring = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = open_files_handle_in(dir.clone());
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("connect over the test home");
+
+        drop(handle);
+
+        let _reopened = open_when_lock_released(&dir).await;
     }
 }

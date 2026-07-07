@@ -113,8 +113,11 @@ pub struct CovenHandle {
     /// drain. `None` for a host that doesn't surface transition progress.
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
-    /// Holds the native library-directory lock for this handle and every clone.
-    _open_guard: Arc<LibraryOpenGuard>,
+    /// Holds the native library-directory lock for this handle and every clone,
+    /// and is cloned into each [`SyncManager`] so a running sync loop keeps the
+    /// lock alive until its own thread exits — the lock's lifetime tracks the
+    /// last writer, not the host's drop timing.
+    open_guard: Arc<LibraryOpenGuard>,
 
     /// Built lazily by [`connect_sync`](Self::connect_sync) when a provider is
     /// connected; `None` for a home-less, all-Local library. Shared behind a lock
@@ -156,7 +159,7 @@ impl CovenHandle {
             clock,
             cloudkit_ops,
             observer,
-            _open_guard: open_guard,
+            open_guard,
             sync: Arc::new(RwLock::new(None)),
             sync_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -280,6 +283,7 @@ impl CovenHandle {
             self.clock.clone(),
             cloudkit_ops,
             self.observer.clone(),
+            self.open_guard.clone(),
         ));
         start(manager.clone()).await?;
         *self.sync.write().unwrap() = Some(manager.clone());
@@ -714,10 +718,6 @@ mod tests {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
     }
 
-    fn open_guard(library_dir: &LibraryDir) -> Arc<LibraryOpenGuard> {
-        Arc::new(LibraryOpenGuard::acquire(library_dir).expect("acquire library open guard"))
-    }
-
     fn test_handle(library_id: &str, library_dir: LibraryDir, db: Database) -> CovenHandle {
         let config = Config::with_defaults(
             library_id.to_string(),
@@ -735,7 +735,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
-            open_guard(&library_dir),
+            LibraryOpenGuard::acquire_for_test(&library_dir),
         )
     }
 
@@ -867,7 +867,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
-            open_guard(&library_dir),
+            LibraryOpenGuard::acquire_for_test(&library_dir),
         );
 
         // Inject the mock home; the host hands over only the home + cipher.
@@ -965,7 +965,7 @@ mod tests {
             Arc::new(SystemClock),
             Some(Arc::new(TestCloudKitOps::new())),
             None,
-            open_guard(&library_dir),
+            LibraryOpenGuard::acquire_for_test(&library_dir),
         );
 
         handle
@@ -1049,7 +1049,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
-            open_guard(&library_dir),
+            LibraryOpenGuard::acquire_for_test(&library_dir),
         );
 
         handle
@@ -1110,7 +1110,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
-            open_guard(&library_dir),
+            LibraryOpenGuard::acquire_for_test(&library_dir),
         );
 
         handle
@@ -1165,7 +1165,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
-            open_guard(&library_dir),
+            LibraryOpenGuard::acquire_for_test(&library_dir),
         );
 
         let home = Arc::new(InMemoryCloudHome::new());

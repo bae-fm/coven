@@ -20,6 +20,7 @@ use tracing::{debug, error, info};
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 use crate::clock::ClockRef;
+use crate::coven::LibraryOpenGuard;
 use crate::database::Database;
 use crate::keys::{KeyService, UserKeypair};
 use crate::library_dir::LibraryDir;
@@ -68,16 +69,24 @@ struct SyncLoopInner {
     user_keypair: UserKeypair,
     key_service: KeyService,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
+
+    /// The library-directory lock, held so it releases only when the loop's
+    /// thread exits. The running thread keeps a clone of this `SyncLoopInner`
+    /// alive across its whole cycle, so the last handle dropping never releases
+    /// `.coven-lock` while a mid-cycle pull or upload is still writing — a second
+    /// `open()` of the same library stays refused until this writer is gone.
+    _open_guard: Arc<LibraryOpenGuard>,
 }
 
 impl SyncLoopHandle {
-    pub fn new(
+    pub(crate) fn new(
         components: SyncComponents,
         db: Database,
         key_service: KeyService,
         clock: ClockRef,
         library_dir: LibraryDir,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
+        open_guard: Arc<LibraryOpenGuard>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -94,6 +103,7 @@ impl SyncLoopHandle {
                 user_keypair: components.user_keypair,
                 key_service,
                 observer,
+                _open_guard: open_guard,
             }),
             clock,
             library_dir,
