@@ -10,11 +10,16 @@ on one device even inside a synced table.
 
 ## What a synced table looks like
 
-Two conventions, checked at open:
+For a row to travel, every device needs two things it can rely on: a stable
+way to say *which* row this is, and a value that orders concurrent edits to
+it. Those are the only two conventions a synced table carries, checked at
+open:
 
-- a `TEXT` primary key named `id`, at column position 0
+- a `TEXT` primary key named `id`, at column position 0: how devices address
+  the row
 - an `_updated_at TEXT NOT NULL` column, stamped through
-  [`SqlContext::stamp`](rustdoc:method:coven::SqlContext::stamp)
+  [`SqlContext::stamp`](rustdoc:method:coven::SqlContext::stamp): the register
+  concurrent edits are ordered by
 
 Everything else about the schema is yours. Tables you do *not* pass to
 [`synced_tables`](rustdoc:method:coven::CovenBuilder::synced_tables) never
@@ -44,8 +49,11 @@ don't declare.
 ## Declaring the set
 
 By default, every row of a synced table reaches every device that shares the
-library. To keep some rows on one device, the host *gates* the table: a row
-syncs only while a condition holds. The host declares the gate per table on
+library. Some rows shouldn't: a draft, a private list, a half-imported batch.
+If keeping them back were application logic, every query and every sync path
+would have to remember it; instead the host *gates* the table, and privacy
+becomes a property of the schema that coven enforces everywhere a row can
+travel. The host declares the gate per table on
 the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values
 it passes to `Coven::builder(config).synced_tables(...)`, and coven enforces
 it on both paths a row can take to another device: the per-cycle changeset
@@ -155,7 +163,10 @@ keep-child of `todos`; it does count for `labels`.
 
 ## The keep rule
 
-Both paths share one definition of "kept", built as a SQL predicate. For a
+A private row must not leak through *any* channel, and there are two: the
+per-cycle changeset and the bootstrap snapshot. If each path had its own idea
+of "private", they would eventually disagree, and the disagreement would be a
+leak. So both share one definition of "kept", built as a SQL predicate. For a
 gated root it is the column test:
 
 ```sql
@@ -181,6 +192,10 @@ Every form bottoms out at some root's column test, so "kept" is one expression
 that the changeset filter and the snapshot cleanup evaluate the same way.
 
 ## Flipping the gate
+
+The gate is a live switch, not a create-time choice, and both directions have
+to be whole: sharing must deliver the complete subtree, and unsharing must
+remove it from peers without destroying the owner's copy.
 
 Setting a root's gate from false to true makes a previously-local subtree
 public. Peers never held it, so coven re-emits the whole now-visible connected
