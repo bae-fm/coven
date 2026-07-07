@@ -2,9 +2,10 @@
 //! resolution.
 //!
 //! These drive a real [`crate::database::Database`] (so `mint_item_key`'s INSERT
-//! enters the capture session's changeset and `item_keys` rides the synced set
-//! `Database::open` injects) and a real [`CloudSyncStorage`] over a shared
-//! [`InMemoryCloudHome`] (so a blob actually round-trips through encryption). The
+//! lands in the pending-changeset journal a running cycle pushes from, and
+//! `item_keys` rides the synced set `Database::open` injects) and a real
+//! [`CloudSyncStorage`] over a shared [`InMemoryCloudHome`] (so a blob actually
+//! round-trips through encryption). The
 //! load-bearing property throughout: an `Item`-scoped blob is encrypted under the
 //! per-item key, which a joining device recovers — by changeset replay or by
 //! snapshot bootstrap — while the library master key (which every member holds)
@@ -13,7 +14,7 @@
 use std::collections::HashMap;
 
 use crate::blob::{BlobScope, CacheFill, Provenance, ResolvedScope};
-use crate::database::{Database, DbError};
+use crate::database::{Database, DbError, PendingChangesetBatch};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -27,8 +28,7 @@ use crate::sync::snapshot::{
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    capture_bytes, exec, temp_library_dir, test_migrations, test_synced_tables,
-    test_synced_tables_with_blob,
+    host_exec, temp_library_dir, test_migrations, test_synced_tables, test_synced_tables_with_blob,
 };
 
 /// The synthetic test db opens with a single migration, so its
@@ -191,17 +191,25 @@ fn item_photo_decl() -> BlobDecl {
         .with_scope(BlobScopeSpec::ItemColumn("note_id".to_string()))
 }
 
-/// Capture `db_a`'s pending writes and publish them to `storage` as device A's
-/// changeset seq 1: pack an unsigned envelope (no membership chain in this test,
-/// so unsigned is accepted) and push it, which also advances A's head. This is
-/// what the cycle's push does, minus the gate (the rows here are already
-/// shareable) — enough for a real `pull_changes` to fetch and apply.
+/// Publish device A's journaled writes to `storage` as its changeset seq 1,
+/// sourcing the bytes from the pending-changeset journal — the only place a
+/// running cycle draws an outgoing changeset from (`cycle.rs`), never the
+/// test-gated capture path. A write that never reaches the journal is absent
+/// here, exactly as it is from a real cycle's push. Pack an unsigned envelope (no
+/// membership chain in this test, so unsigned is accepted) and push it, which also
+/// advances A's head. This is what the cycle's push does, minus the gate (the rows
+/// here are already shareable) — enough for a real `pull_changes` to fetch and apply.
 async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
-    let changeset = capture_bytes(db_a, &[]).await;
-    assert!(
-        !changeset.is_empty(),
-        "device A's writes (note rows + the item_keys row) must enter the changeset"
-    );
+    let changeset = match db_a
+        .pending_changeset_batch()
+        .await
+        .expect("load device A's pending journal")
+    {
+        PendingChangesetBatch::Pending { changeset, .. } => changeset,
+        PendingChangesetBatch::Empty => {
+            panic!("device A's journaled writes (note rows + the item_keys row) must enter the pending changeset")
+        }
+    };
     let env = ChangesetEnvelope {
         device_id: "dev-a".to_string(),
         seq: 1,
@@ -227,17 +235,19 @@ async fn publish_changeset(db_a: &Database, storage: &dyn SyncStorage) {
     .expect("publish device A's changeset");
 }
 
-/// Changeset-replay multi-device join, through the REAL pull path: device A mints
-/// an item key, writes a shareable note + its blob-bearing child row, and uploads
-/// the `Item`-scoped blob; then publishes the changeset (carrying the `item_keys`
-/// row). Device B runs the production [`pull_changes`] — which now resolves
-/// `Item(id)` from the `item_keys` row carried IN this changeset and downloads +
-/// fsyncs the blob BEFORE applying the changeset (issue #111: a row is never
-/// applied before its blob is durable). The key comes from the walked changeset,
-/// not a freshly-applied DB row, so the blob lands on B's disk already decrypted
-/// without the apply having to precede the download. This catches a regression
-/// where the pull-side resolution is dropped: B would fail to resolve the key and
-/// the blob would not land. Members that join before any snapshot exists take
+/// Changeset-replay multi-device join, through the REAL push and pull paths:
+/// device A mints an item key, writes a shareable note + its blob-bearing child
+/// row, and uploads the `Item`-scoped blob — all through the journaled write path
+/// — then publishes the changeset drawn from the pending-changeset journal (the
+/// only source a running cycle pushes from), carrying the `item_keys` row. Device
+/// B runs the production [`pull_changes`] — which resolves `Item(id)` from the
+/// `item_keys` row carried IN this changeset and downloads + fsyncs the blob
+/// BEFORE applying the changeset (a row is never applied before its blob is
+/// durable). The key comes from the walked changeset, not a freshly-applied DB
+/// row, so the blob lands on B's disk already decrypted without the apply having
+/// to precede the download. This fails if the mint does not journal — the
+/// `item_keys` row never enters the pushed changeset, so B cannot resolve the key
+/// and the blob does not land. Members that join before any snapshot exists take
 /// this path.
 #[tokio::test]
 async fn changeset_replay_join_resolves_item_and_decrypts() {
@@ -254,13 +264,13 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     let db_a = open_db("dev-a");
     let item_key = db_a.mint_item_key("note-1").await.expect("mint on A");
 
-    exec(
+    host_exec(
         &db_a,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('note-1', 'Shared', NULL, 1, '0000000001000-0000-dev-a', '2026-01-01')",
     )
     .await;
-    exec(
+    host_exec(
         &db_a,
         "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
          VALUES ('blob-1', 'note-1', 'cover', 22, '0000000001000-0000-dev-a', '2026-01-01')",

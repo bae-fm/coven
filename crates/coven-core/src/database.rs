@@ -679,12 +679,13 @@ impl Database {
     /// key (a re-mint must not rotate it out from under blobs already encrypted
     /// under it).
     ///
-    /// The INSERT runs through [`Self::call`], so the attached capture session
-    /// records it into the outgoing changeset and it replays to every member; the
-    /// `_updated_at` HLC stamp satisfies the synced-table contract. Because
-    /// `item_keys` is in the synced set, the row also survives a snapshot
-    /// bootstrap. Returns the item's key (the freshly minted one, or the existing
-    /// one if it was already present).
+    /// The INSERT runs through [`Self::call_with_capture_reset`] inside a
+    /// [`Self::run_pending_journaled_transaction_on`] transaction, so it lands in
+    /// the pending-changeset journal a running cycle pushes from and it replays to
+    /// every member; the `_updated_at` HLC stamp satisfies the synced-table
+    /// contract. Because `item_keys` is in the synced set, the row also survives a
+    /// snapshot bootstrap. Returns the item's key (the freshly minted one, or the
+    /// existing one if it was already present).
     ///
     /// `item_id` must be unique at creation. coven does not coordinate two devices
     /// independently minting the SAME `item_id` while offline: they would generate
@@ -696,8 +697,13 @@ impl Database {
         let item_id = item_id.to_string();
         let new_key = crate::encryption::generate_random_key();
         let updated_at = self.state.hlc.now().to_string();
-        self.call(move |conn| Self::mint_item_key_on(conn, &item_id, new_key, &updated_at))
-            .await
+        let tables = self.synced_tables().to_vec();
+        self.call_with_capture_reset(move |conn| {
+            Self::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                Self::mint_item_key_on(tx, &item_id, new_key, &updated_at)
+            })
+        })
+        .await
     }
 
     /// Transaction-composable form of [`mint_item_key`](Self::mint_item_key):
