@@ -94,9 +94,11 @@ pub fn supported_version(migrations: &[Migration]) -> u32 {
     migrations.len() as u32
 }
 
-/// Why running the synced-schema ladder failed. Wrapped into [`DbError`] at the
-/// `Database::open` boundary; the variants stay typed so the engine's own tests
-/// (and the snapshot bootstrap gate) can match the specific failure.
+/// Why running the synced-schema ladder failed. Carried as its own arm of
+/// [`crate::database::OpenError`] at the `Database::open` boundary — not
+/// flattened into a [`DbError`] string — so the variants stay typed for the
+/// engine's own tests, the snapshot bootstrap gate, and hosts matching
+/// [`MigrationError::SchemaTooNew`] to prompt an app update.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationError {
     /// The registered set is not exactly `1..=N` ascending with no gaps or
@@ -131,12 +133,6 @@ pub enum MigrationError {
     /// failed.
     #[error("migration ledger access failed: {0}")]
     Ledger(DbError),
-}
-
-impl From<MigrationError> for DbError {
-    fn from(e: MigrationError) -> Self {
-        DbError(e.to_string())
-    }
 }
 
 /// Apply every registered migration whose version is above the db's current

@@ -23,7 +23,7 @@ use crate::blob::decl::BlobDecls;
 use crate::db::{
     apply_coven_schema, is_reserved_table_name, ExternalBlob, OutboxEntry, OutboxOperation,
 };
-use crate::migration::{run_migrations, Migration};
+use crate::migration::{run_migrations, Migration, MigrationError};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
@@ -37,6 +37,19 @@ impl From<rusqlite::Error> for DbError {
     fn from(e: rusqlite::Error) -> Self {
         DbError(e.to_string())
     }
+}
+
+/// Why opening the database failed. Splits a migration-ladder failure from every
+/// other open-time database error so the [`MigrationError`] a host acts on —
+/// [`MigrationError::SchemaTooNew`], whose remedy is "update the app" — stays
+/// matchable at the open boundary instead of being flattened into a
+/// [`DbError`] string.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error(transparent)]
+    Migration(#[from] MigrationError),
+    #[error(transparent)]
+    Db(#[from] DbError),
 }
 
 #[derive(Clone)]
@@ -81,7 +94,7 @@ impl DatabaseCore {
         blob_tombstone_grace: chrono::Duration,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
-    ) -> Result<(Self, DatabaseState, UpdatedAtStamper), DbError> {
+    ) -> Result<(Self, DatabaseState, UpdatedAtStamper), OpenError> {
         let conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
@@ -438,7 +451,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         device_id: String,
         migrations: &[Migration],
-    ) -> Result<(Database, UpdatedAtStamper), DbError> {
+    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
         let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
         Self::open_with_hlc(
             path,
@@ -461,7 +474,7 @@ impl Database {
         blob_tombstone_grace: chrono::Duration,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
-    ) -> Result<(Database, UpdatedAtStamper), DbError> {
+    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
         let (core, state, stamper) =
             DatabaseCore::open(path, synced_tables, blob_tombstone_grace, hlc, migrations)?;
 

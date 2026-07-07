@@ -11,11 +11,11 @@ use crate::blob::local_files::LocalBlobError;
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::Config;
-use crate::database::{Database, DbError};
+use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
 use crate::keys::KeyService;
 use crate::library_dir::PathTokenError;
-use crate::migration::Migration;
+use crate::migration::{Migration, MigrationError};
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::sync::session::SyncedTable;
 use crate::sync::sync_manager::ConfigProvider;
@@ -28,6 +28,8 @@ const LOCAL_STAGE_MARKER: &str = ".coven-stage-";
 pub enum CovenError {
     #[error("database error: {0}")]
     Database(#[from] DbError),
+    #[error("migration error: {0}")]
+    Migration(MigrationError),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("blob error: {0}")]
@@ -46,6 +48,15 @@ pub enum CovenError {
     AlreadyOpen { library_dir: PathBuf },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<OpenError> for CovenError {
+    fn from(value: OpenError) -> Self {
+        match value {
+            OpenError::Migration(e) => CovenError::Migration(e),
+            OpenError::Db(e) => CovenError::Database(e),
+        }
+    }
 }
 
 impl From<LocalBlobError> for CovenError {
@@ -1165,6 +1176,38 @@ mod tests {
             .expect("query host table");
         assert_eq!(has_coven_table, 1);
         assert_eq!(has_host_table, 1);
+    }
+
+    #[tokio::test]
+    async fn open_of_a_too_new_db_yields_the_matchable_migration_variant() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+
+        // Open with a two-step ladder so the db lands at synced-schema version 2.
+        let ahead = Coven::builder(config(dir.clone()))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![
+                files_migration(),
+                Migration::sql(2, "add-extra", "CREATE TABLE extra (id TEXT PRIMARY KEY)"),
+            ])
+            .open()
+            .expect("open at version 2");
+        drop(ahead);
+
+        // Reopen with only the first step: an older binary meeting a db a newer one
+        // already migrated. The remedy is "update the app", so the host must be able
+        // to match the specific variant rather than string-scrape a DbError.
+        let reopened = Coven::builder(config(dir))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open();
+        assert!(matches!(
+            reopened,
+            Err(CovenError::Migration(MigrationError::SchemaTooNew {
+                current: 2,
+                supported: 1
+            }))
+        ));
     }
 
     #[tokio::test]
