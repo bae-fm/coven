@@ -94,6 +94,9 @@ pub async fn rest_delete<T: OAuthRestHome + ?Sized>(
 
 /// List every key under `prefix`, following pagination. A not-found on the first
 /// page (Dropbox returns it when the folder doesn't exist yet) is an empty list.
+/// A not-found on a continuation page is a truncated listing — an expired cursor
+/// or a transient 404 mid-pagination — and propagates as an error, since the keys
+/// collected so far are not the complete result the caller would read them as.
 pub async fn rest_list<T: OAuthRestHome + ?Sized>(
     home: &T,
     prefix: &str,
@@ -104,8 +107,10 @@ pub async fn rest_list<T: OAuthRestHome + ?Sized>(
         let resp = home.send_list_page(prefix, cursor.as_deref()).await?;
         let resp = match ensure_ok(resp, &format!("list {prefix}"), home.not_found()).await {
             Ok(resp) => resp,
-            // An absent listing root is an empty result, not an error.
-            Err(CloudHomeError::NotFound(_)) => {
+            // An absent listing root — only decidable on the first page — is an
+            // empty result. On a continuation page the root existed, so a 404 is a
+            // truncated listing and must fail rather than return a partial result.
+            Err(CloudHomeError::NotFound(_)) if cursor.is_none() => {
                 tracing::debug!("list root for {prefix} absent; returning empty listing");
                 return Ok(keys);
             }
@@ -120,4 +125,90 @@ pub async fn rest_list<T: OAuthRestHome + ?Sized>(
         }
     }
     Ok(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Response as HttpResponse;
+
+    /// Drives `rest_list`'s pagination against scripted responses. The first page
+    /// returns one key and a continuation cursor; every continuation page returns
+    /// 404 — the not-found cases are what these tests exercise.
+    struct MockListHome {
+        first_page_status: u16,
+    }
+
+    fn response(status: u16, body: &str) -> reqwest::Response {
+        reqwest::Response::from(
+            HttpResponse::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap(),
+        )
+    }
+
+    #[async_trait]
+    impl OAuthRestHome for MockListHome {
+        fn not_found(&self) -> NotFound {
+            NotFound::Status
+        }
+
+        async fn send_read(
+            &self,
+            _key: &str,
+            _range: Option<(u64, u64)>,
+        ) -> Result<reqwest::Response, CloudHomeError> {
+            unimplemented!("read is not exercised by the list tests")
+        }
+
+        async fn send_delete(&self, _key: &str) -> Result<reqwest::Response, CloudHomeError> {
+            unimplemented!("delete is not exercised by the list tests")
+        }
+
+        async fn send_list_page(
+            &self,
+            _prefix: &str,
+            cursor: Option<&str>,
+        ) -> Result<reqwest::Response, CloudHomeError> {
+            match cursor {
+                None => Ok(response(self.first_page_status, "PAGE1")),
+                Some(_) => Ok(response(404, "")),
+            }
+        }
+
+        fn parse_list_page(&self, body: &str, _prefix: &str) -> Result<ListPage, CloudHomeError> {
+            assert_eq!(body, "PAGE1", "only the first page's body is ever parsed");
+            Ok(ListPage {
+                keys: vec!["heads/dev1.json".to_string()],
+                next: Some("page2".to_string()),
+            })
+        }
+    }
+
+    /// A 404 mid-pagination is a truncated listing, not a complete one: the call
+    /// must error rather than return the keys collected before the failure.
+    #[tokio::test]
+    async fn list_errors_on_not_found_continuation_page() {
+        let home = MockListHome {
+            first_page_status: 200,
+        };
+        let err = rest_list(&home, "heads/")
+            .await
+            .expect_err("a 404 on a continuation page must fail the listing");
+        assert!(matches!(err, CloudHomeError::NotFound(_)), "got {err:?}");
+    }
+
+    /// A 404 on the first page means the listing root doesn't exist yet, which is
+    /// an empty listing, not an error.
+    #[tokio::test]
+    async fn list_returns_empty_on_not_found_first_page() {
+        let home = MockListHome {
+            first_page_status: 404,
+        };
+        let keys = rest_list(&home, "heads/")
+            .await
+            .expect("a 404 on the first page yields an empty listing");
+        assert!(keys.is_empty(), "expected empty, got {keys:?}");
+    }
 }
