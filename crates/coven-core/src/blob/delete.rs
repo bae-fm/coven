@@ -397,6 +397,21 @@ async fn record_delete_failure(
     }
 }
 
+/// GC's live-row check for a tombstoned blob's `cloud_key`: whether a live row
+/// still references it and resolves as remote, the only state that cancels a
+/// past-grace tombstone.
+enum RowReference {
+    /// No live row resolves the blob as remote — either nothing references it, or a
+    /// referencing row resolves as local-only. A past-grace reclaim proceeds.
+    NotLiveRemote,
+    /// A live row references the blob and resolves as remote: cancel the tombstone.
+    LiveRemote,
+    /// A live row references the blob but its locality can't be resolved — the FK
+    /// chain reaches no gated/remote terminus, or a row along it is missing. Neither
+    /// cancel nor reclaim; skip and surface it.
+    Unresolved,
+}
+
 /// Garbage-collect tombstones: delete each blob whose authentic tombstone has aged
 /// past [`BLOB_TOMBSTONE_GRACE`], then delete the tombstone. This is where the
 /// actual blob deletion happens.
@@ -413,13 +428,17 @@ async fn record_delete_failure(
 ///    pinned owner (the same bar the snapshot restore path enforces). A non-member
 ///    tombstone, or one authored by the forged founder of a wiped/refounded chain,
 ///    is skipped, so a bucket writer can't forge a deletion.
-/// 4. Age it by the *authentic* `deleted_at`. Past the grace → re-check the
-///    tombstone still exists (it may have been canceled by a concurrent re-upload),
-///    confirm the blob is actually present (a tombstone whose blob is already gone
-///    is a leftover from a pass that deleted the blob but failed to delete the
-///    tombstone — clean it up without counting a reclaim), then delete the blob and
-///    the tombstone object. Inside the grace → leave it; a peer may still be
-///    converging on the deletion.
+/// 4. Age it by the *authentic* `deleted_at`. Inside the grace → leave it; a peer
+///    may still be converging on the deletion, and a peer whose db still reads the
+///    referencing row live+remote may simply not have pulled the retraction yet, so
+///    a within-grace tombstone is never canceled on that basis. Past the grace → if
+///    a live row still references the blob and resolves as remote, cancel the
+///    tombstone (a re-reference outlived the deletion); if that row's locality can't
+///    be resolved, skip and surface it. Otherwise re-check the tombstone still
+///    exists (it may have been canceled by a concurrent re-upload), confirm the blob
+///    is actually present (a tombstone whose blob is already gone is a leftover from
+///    a pass that deleted the blob but failed to delete the tombstone — clean it up
+///    without counting a reclaim), then delete the blob and the tombstone object.
 ///
 /// Authorization anchors to `pinned_owner` (the chain founder pinned on
 /// join/restore/found), not trust-on-first-use: this GC runs in production and
@@ -528,37 +547,6 @@ pub async fn gc_tombstones(
             }
         }
 
-        let decls = db.blob_decls();
-        let gates = db.gates();
-        let cloud_key = tombstone.cloud_key.clone();
-        let live_remote_row = db
-            .call(move |conn| {
-                let Some((table, pk)) = decls
-                    .row_for_blob_cloud_key(conn, &cloud_key)
-                    .map_err(|e| crate::database::DbError(e.to_string()))?
-                else {
-                    return Ok(false);
-                };
-                let remote = gates
-                    .root_kept_of(conn, &table, &pk)
-                    .map_err(|e| crate::database::DbError(e.to_string()))?
-                    .unwrap_or(true);
-                Ok(remote)
-            })
-            .await
-            .map_err(|e| format!("Failed to check live blob references: {e}"))?;
-        if live_remote_row {
-            if let Err(e) = cloud_home.delete(&key).await {
-                warn!("Failed to cancel stale tombstone {key} for live blob: {e}");
-                continue;
-            }
-            debug!(
-                cloud_key = %tombstone.cloud_key,
-                "canceled tombstone because a live row still references its blob",
-            );
-            continue;
-        }
-
         // Age it by the authenticated deletion time.
         let deleted_at = match chrono::DateTime::parse_from_rfc3339(&tombstone.deleted_at) {
             Ok(dt) => dt.with_timezone(&chrono::Utc),
@@ -573,9 +561,14 @@ pub async fn gc_tombstones(
             }
         };
         if now.signed_duration_since(deleted_at) <= BLOB_TOMBSTONE_GRACE {
-            // Still inside the convergence window: a peer may not have pulled the
-            // row removal yet, so the blob must stay readable. A later pass reclaims
-            // it once the grace has passed. A legitimate skip, surfaced so an
+            // Still inside the convergence window: a peer may not have pulled the row
+            // removal yet, so the blob must stay readable. The live-row cancel below
+            // is deliberately gated behind this check: a peer whose db still reads the
+            // row live+remote here may simply not have pulled the retraction yet, so a
+            // within-grace tombstone is never canceled on that basis — canceling it
+            // would strand the cloud blob once the writer's outbox row is gone. A later
+            // pass reclaims it (or cancels, if a live row genuinely re-references the
+            // blob) once the grace has passed. A legitimate skip, surfaced so an
             // operator can see why a tombstoned blob is still present.
             debug!(
                 tombstone = %key,
@@ -583,6 +576,59 @@ pub async fn gc_tombstones(
                 "skipping tombstone still inside the grace",
             );
             continue;
+        }
+
+        // Past grace. Only now does the live-row check run: cancel the tombstone if a
+        // row still references its blob and resolves as remote. By the time grace has
+        // expired, a peer that reads the row as live+remote has either not yet pulled
+        // the retraction (the row then resolves gone or local and reclaim proceeds) or
+        // genuinely observes a re-referencing row (canceling the deletion is correct).
+        let decls = db.blob_decls();
+        let gates = db.gates();
+        let cloud_key = tombstone.cloud_key.clone();
+        let row_reference = db
+            .call(move |conn| {
+                let Some((table, pk)) = decls
+                    .row_for_blob_cloud_key(conn, &cloud_key)
+                    .map_err(|e| crate::database::DbError(e.to_string()))?
+                else {
+                    return Ok(RowReference::NotLiveRemote);
+                };
+                let reference = match gates
+                    .root_kept_of(conn, &table, &pk)
+                    .map_err(|e| crate::database::DbError(e.to_string()))?
+                {
+                    Some(true) => RowReference::LiveRemote,
+                    Some(false) => RowReference::NotLiveRemote,
+                    None => RowReference::Unresolved,
+                };
+                Ok(reference)
+            })
+            .await
+            .map_err(|e| format!("Failed to check live blob references: {e}"))?;
+        match row_reference {
+            RowReference::LiveRemote => {
+                if let Err(e) = cloud_home.delete(&key).await {
+                    warn!("Failed to cancel stale tombstone {key} for live blob: {e}");
+                    continue;
+                }
+                debug!(
+                    cloud_key = %tombstone.cloud_key,
+                    "canceled tombstone because a live row still references its blob",
+                );
+                continue;
+            }
+            RowReference::Unresolved => {
+                // The FK chain reaches no locality terminus, or a row along it is
+                // missing: neither cancel nor reclaim on locality the pass cannot
+                // resolve. Keep the tombstone and surface it for a later pass.
+                warn!(
+                    "skipping tombstone {key}: a live row references its blob but its \
+                     locality is unresolved",
+                );
+                continue;
+            }
+            RowReference::NotLiveRemote => {}
         }
 
         // Re-check the tombstone still exists before reclaiming. If a re-upload's

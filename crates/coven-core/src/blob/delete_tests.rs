@@ -915,6 +915,183 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
     );
 }
 
+/// A lagging peer's cycle is pull→GC. If it pulled just before the writer pushed the
+/// retraction but ran GC just after the tombstone was written, its db still reads the
+/// blob's row live+remote while the tombstone is fresh. Within the grace the tombstone
+/// must survive that stale row state: the writer's outbox row is already gone, so a
+/// cancel here would strand the cloud blob forever. Once the peer pulls the retraction
+/// and the grace passes, the blob is reclaimed.
+#[tokio::test]
+async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let owner = pubkey_hex(&founder);
+    let cipher = plaintext_cipher();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    let cloud_key = LibraryDir::hashed_path("photos", "bloblive").expect("hashed blob key");
+
+    // The peer's still-stale view: the gated root is shared (remote) and the child row
+    // that carries the blob is present.
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'LiveBlob', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('bloblive', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    storage
+        .write(
+            &cloud_key,
+            crate::storage::cloud::BlobBody::from_bytes(b"live contents".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    let tombstone = BlobTombstoneJson::signed(
+        "test-lib",
+        cloud_key.clone(),
+        deleted_at.to_string(),
+        &member,
+    );
+    plant_tombstone(&storage, &tombstone).await;
+
+    // GC inside the grace, with the row still reading live+remote: the fresh tombstone
+    // must NOT be canceled.
+    let within = FixedClock(at(deleted_at));
+    let n = gc_tombstones(
+        &db,
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &within,
+    )
+    .await
+    .expect("gc within grace");
+    assert_eq!(n, 0, "nothing reclaimed inside the grace");
+    assert!(
+        storage.read(&cloud_key).await.is_ok(),
+        "the blob survives inside the grace",
+    );
+    assert!(
+        storage
+            .read(&format!("blob_tombstones/{cloud_key}"))
+            .await
+            .is_ok(),
+        "the tombstone survives inside the grace despite the stale live row",
+    );
+
+    // The peer pulls the retraction (the row is gone); past grace the blob is reclaimed.
+    exec(
+        &db,
+        "DELETE FROM note_photos WHERE id = 'bloblive'; DELETE FROM notes WHERE id = 'n1'",
+    )
+    .await;
+    let past = FixedClock(at(&past_grace_instant(deleted_at)));
+    let n = gc_tombstones(
+        &db,
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc past grace");
+    assert_eq!(
+        n, 1,
+        "the blob is reclaimed once grace passes and the row is gone"
+    );
+    assert!(
+        storage.read(&cloud_key).await.is_err(),
+        "the blob is deleted past the grace",
+    );
+    assert!(
+        storage
+            .read(&format!("blob_tombstones/{cloud_key}"))
+            .await
+            .is_err(),
+        "the tombstone is deleted after reclaiming its blob",
+    );
+}
+
+/// A blob-bearing row whose FK parent is missing resolves to no locality terminus. GC
+/// must neither cancel the tombstone nor reclaim the blob on that unresolved state — it
+/// skips loudly and leaves both in place for a later pass.
+#[tokio::test]
+async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let owner = pubkey_hex(&founder);
+    let cipher = plaintext_cipher();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    let cloud_key = LibraryDir::hashed_path("photos", "orphan").expect("hashed blob key");
+
+    // An orphaned child: it carries the blob but its parent note is absent, so the FK
+    // up-walk that resolves locality hits a missing row. Insert it with foreign keys
+    // off so the orphan can exist.
+    exec(
+        &db,
+        "PRAGMA foreign_keys=OFF; \
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('orphan', 'missing-note', 'cover', '0000000001000-0000-dev1', '2026-01-01'); \
+         PRAGMA foreign_keys=ON",
+    )
+    .await;
+    storage
+        .write(
+            &cloud_key,
+            crate::storage::cloud::BlobBody::from_bytes(b"orphan contents".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    let tombstone = BlobTombstoneJson::signed(
+        "test-lib",
+        cloud_key.clone(),
+        deleted_at.to_string(),
+        &member,
+    );
+    plant_tombstone(&storage, &tombstone).await;
+
+    let past = FixedClock(at(&past_grace_instant(deleted_at)));
+    let n = gc_tombstones(
+        &db,
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+    )
+    .await
+    .expect("gc");
+
+    assert_eq!(n, 0, "unresolved locality neither reclaims nor cancels");
+    assert!(
+        storage.read(&cloud_key).await.is_ok(),
+        "the blob is untouched when locality is unresolved",
+    );
+    assert!(
+        storage
+            .read(&format!("blob_tombstones/{cloud_key}"))
+            .await
+            .is_ok(),
+        "the tombstone is kept when locality is unresolved",
+    );
+}
+
 /// An instant one minute past `deleted_at + BLOB_TOMBSTONE_GRACE`, as RFC 3339.
 fn past_grace_instant(deleted_at: &str) -> String {
     (at(deleted_at) + BLOB_TOMBSTONE_GRACE + chrono::Duration::minutes(1)).to_rfc3339()
