@@ -1102,7 +1102,13 @@ impl SyncStorage for CloudSyncStorage {
                 continue;
             };
             let author = &rest[..slash_pos];
-            match rest[slash_pos + 1..].parse::<u64>() {
+            let tail = &rest[slash_pos + 1..];
+            // The per-author head shares the author's prefix (`{author}/head`); it
+            // is not an entry, so it is skipped here — heads are read by keyed GET.
+            if tail == "head" {
+                continue;
+            }
+            match tail.parse::<u64>() {
                 Ok(seq) => entries.push((author.to_string(), seq)),
                 Err(e) => warn!("skipping membership key {key} with non-numeric seq: {e}"),
             }
@@ -1111,14 +1117,19 @@ impl SyncStorage for CloudSyncStorage {
         Ok(entries)
     }
 
-    async fn put_membership_head(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        let key = format!("membership_head.json{}", self.suffix());
+    async fn put_membership_head(
+        &self,
+        author_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let key = format!("membership/{author_pubkey}/head{}", self.suffix());
         self.write_sealed(&key, data).await
     }
 
-    async fn get_membership_head(&self) -> Result<Vec<u8>, StorageError> {
-        let key = format!("membership_head.json{}", self.suffix());
-        self.read_sealed(&key, "membership head").await
+    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
+        let key = format!("membership/{author_pubkey}/head{}", self.suffix());
+        self.read_sealed(&key, &format!("membership head {author_pubkey}"))
+            .await
     }
 
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {

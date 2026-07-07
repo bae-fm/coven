@@ -15,7 +15,7 @@
 /// snapshot/{author}/{seq}_meta.json{suffix}      -- a generation's per-device cursors
 /// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, seq}
 /// membership/{author_pubkey}/{seq}{suffix}       -- membership entries
-/// membership_head.json{suffix}                   -- signed membership set head
+/// membership/{author_pubkey}/head{suffix}        -- that author's signed head
 /// keys/{user_pubkey}{suffix}                     -- wrapped library keys per member
 /// ```
 ///
@@ -317,16 +317,21 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// Returns tuples of (author_pubkey, seq).
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError>;
 
-    /// Publish the signed membership set head.
-    /// Writes to `membership_head.json{suffix}`. The head is the commit marker for
-    /// membership changes: entries are written first, then the head names the set a
-    /// reader may trust.
-    async fn put_membership_head(&self, data: Vec<u8>) -> Result<(), StorageError>;
+    /// Publish one author's signed membership head.
+    /// Writes to `membership/{author_pubkey}/head{suffix}`. The head is that
+    /// author's commit marker: its entries are written first, then the head names
+    /// how far a reader may trust that author's prefix. Each owner writes only its
+    /// own head under its own prefix, so concurrent owners never contend.
+    async fn put_membership_head(
+        &self,
+        author_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError>;
 
-    /// Download the signed membership set head.
-    /// Reads from `membership_head.json{suffix}`. Returns NotFound if the library
-    /// has no committed membership head.
-    async fn get_membership_head(&self) -> Result<Vec<u8>, StorageError>;
+    /// Download one author's signed membership head.
+    /// Reads from `membership/{author_pubkey}/head{suffix}`. Returns NotFound if
+    /// that author has not committed a head yet (its entries are uncommitted).
+    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError>;
 
     /// Upload a wrapped library key for a member.
     /// Writes to `keys/{user_pubkey_hex}{suffix}`. The bytes are already a sealed

@@ -683,11 +683,15 @@ impl SyncStorage for HostWriteInjector {
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
         self.inner.list_membership_entries().await
     }
-    async fn put_membership_head(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        self.inner.put_membership_head(data).await
+    async fn put_membership_head(
+        &self,
+        author_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_membership_head(author_pubkey, data).await
     }
-    async fn get_membership_head(&self) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_membership_head().await
+    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
+        self.inner.get_membership_head(author_pubkey).await
     }
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
         self.inner.put_wrapped_key(user_pubkey, data).await

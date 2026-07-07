@@ -1013,9 +1013,14 @@ async fn refresh_authorization_state(
              (wiped membership/*)"
         ));
     }
-    let chain = super::membership_ops::load_anchored_chain(storage, &entries, Some(owner.as_str()))
-        .await
-        .map_err(|e| format!("refresh: load/anchor membership chain: {e}"))?;
+    let chain = super::membership_ops::load_anchored_chain(
+        storage,
+        &entries,
+        Some(owner.as_str()),
+        Some(db),
+    )
+    .await
+    .map_err(|e| format!("refresh: load/anchor membership chain: {e}"))?;
     let current_owners: Vec<String> = chain
         .current_members()
         .into_iter()

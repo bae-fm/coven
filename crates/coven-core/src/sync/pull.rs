@@ -241,6 +241,7 @@ pub async fn pull_changes(
                     storage,
                     &entries,
                     owner_pubkey.as_deref(),
+                    Some(db),
                 )
                 .await
                 {

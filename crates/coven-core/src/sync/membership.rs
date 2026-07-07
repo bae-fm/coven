@@ -5,11 +5,16 @@
 ///
 /// Layout in storage:
 /// ```text
-/// membership/{author_pubkey_hex}/{seq}.enc
+/// membership/{author_pubkey_hex}/{seq}.enc   -- one Add/Remove entry
+/// membership/{author_pubkey_hex}/head.enc    -- that author's signed head
 /// ```
 ///
 /// Each entry records an Add or Remove action, signed by a current owner.
-/// The first entry must be a self-signed Add with role Owner.
+/// The first entry must be a self-signed Add with role Owner. Each owner also
+/// publishes a [`AuthorHead`] certifying how far its own entry prefix is
+/// committed; the committed membership set is the union of every current owner's
+/// committed prefix, so there is no shared last-writer-wins head and concurrent
+/// owners commit without racing each other.
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -83,16 +88,20 @@ pub struct MembershipCoord {
     pub seq: u64,
 }
 
+/// A signed statement by one author certifying how far its own membership prefix
+/// is committed: entries `membership/{author}/1..=seq` exist and the entry at
+/// `seq` hashes to `tip_hash`. Stored at `membership/{author}/head`.
+///
+/// Each owner publishes and signs its own head under its own prefix, so concurrent
+/// owners commit independently and entries can only accumulate — there is no shared
+/// object a later writer can roll back over a peer's. A reader admits an author's
+/// prefix only up to that author's head `seq`, so an entry is uncommitted until its
+/// own author's head covers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MembershipHeadEntry {
-    pub coord: MembershipCoord,
-    pub hash: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MembershipChainHead {
-    pub entries: Vec<MembershipHeadEntry>,
+pub struct AuthorHead {
     pub author_pubkey: String,
+    pub seq: u64,
+    pub tip_hash: String,
     pub signature: String,
 }
 
@@ -134,12 +143,6 @@ pub enum MembershipError {
         expected: Option<String>,
         actual: Option<String>,
     },
-    #[error("membership head signature is invalid")]
-    InvalidHeadSignature,
-    #[error("membership head signer {0} is not authorized by the chain")]
-    UnauthorizedHead(String),
-    #[error("membership head does not match the listed membership entries")]
-    HeadMismatch,
 }
 
 /// Canonical bytes of the signed fields (everything except `signature`).
@@ -278,10 +281,6 @@ impl MembershipChain {
         &self.entries
     }
 
-    pub fn entry_coords(&self) -> impl Iterator<Item = Option<&MembershipCoord>> {
-        self.coords.iter().map(Option::as_ref)
-    }
-
     /// The pubkey of the founder (chain entry #1, the self-signed Owner Add), or
     /// `None` for an empty chain. The library is anchored to this pubkey: a chain
     /// whose founder is not the library's established owner is a takeover attempt
@@ -416,7 +415,10 @@ impl MembershipChain {
         }
     }
 
-    pub fn latest_author_hash(&self, author_pubkey: &str) -> Option<String> {
+    /// The greatest committed seq for `author_pubkey` and the hash of that entry,
+    /// or `None` if the author has no entries in this chain. This pair is exactly
+    /// what the author's [`AuthorHead`] certifies.
+    pub fn author_tip(&self, author_pubkey: &str) -> Option<(u64, String)> {
         let mut latest: Option<(u64, &MembershipEntry)> = None;
         for (_, coord, entry) in self.entries_with_effective_coords() {
             if coord.author_pubkey != author_pubkey {
@@ -429,46 +431,21 @@ impl MembershipChain {
                 latest = Some((coord.seq, entry));
             }
         }
-        latest.map(|(_, entry)| entry_hash(entry))
+        latest.map(|(seq, entry)| (seq, entry_hash(entry)))
     }
 
-    pub fn signed_head(&self, signer: &UserKeypair) -> MembershipChainHead {
-        MembershipChainHead::signed(self.latest_entries_by_author(), signer)
+    /// The hash of `author_pubkey`'s latest entry — the `prev_hash` a fresh entry
+    /// by that author links to. `None` when the author has no entries yet.
+    pub fn latest_author_hash(&self, author_pubkey: &str) -> Option<String> {
+        self.author_tip(author_pubkey).map(|(_, hash)| hash)
     }
 
-    pub fn verify_head(&self, head: &MembershipChainHead) -> Result<(), MembershipError> {
-        if !head.verify() {
-            return Err(MembershipError::InvalidHeadSignature);
-        }
-
-        if self.latest_entries_by_author() != head.entries {
-            return Err(MembershipError::HeadMismatch);
-        }
-
-        if !self.head_author_is_authorized(&head.author_pubkey) {
-            return Err(MembershipError::UnauthorizedHead(
-                head.author_pubkey.clone(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn latest_entries_by_author(&self) -> Vec<MembershipHeadEntry> {
-        let mut latest: BTreeMap<String, (MembershipCoord, String)> = BTreeMap::new();
-        for (_, coord, entry) in self.entries_with_effective_coords() {
-            let candidate = (coord.clone(), entry_hash(entry));
-            match latest.get(&coord.author_pubkey) {
-                Some((existing, _)) if existing.seq >= coord.seq => {}
-                _ => {
-                    latest.insert(coord.author_pubkey, candidate);
-                }
-            }
-        }
-        latest
-            .into_values()
-            .map(|(coord, hash)| MembershipHeadEntry { coord, hash })
-            .collect()
+    /// Build `signer`'s signed head from this chain's current tip for that author,
+    /// or `None` if the author has authored no entries (nothing to certify).
+    pub fn signed_head(&self, signer: &UserKeypair) -> Option<AuthorHead> {
+        let author = keys::public_key_hex(signer);
+        self.author_tip(&author)
+            .map(|(seq, tip_hash)| AuthorHead::signed(author, seq, tip_hash, signer))
     }
 
     fn entries_with_effective_coords(&self) -> Vec<(usize, MembershipCoord, &MembershipEntry)> {
@@ -523,48 +500,23 @@ impl MembershipChain {
         }
         Ok(())
     }
-
-    fn head_author_is_authorized(&self, author_pubkey: &str) -> bool {
-        if self.is_owner_now(author_pubkey) {
-            return true;
-        }
-
-        let Some(latest_author_coord) = self
-            .coords
-            .iter()
-            .flatten()
-            .filter(|coord| coord.author_pubkey == author_pubkey)
-            .max_by_key(|coord| coord.seq)
-        else {
-            return false;
-        };
-
-        let mut active: Vec<(String, MemberRole)> = Vec::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if index == 0 && self.coords[index].as_ref() == Some(latest_author_coord) {
-                return entry.action == MembershipAction::Add
-                    && entry.role == MemberRole::Owner
-                    && entry.author_pubkey == entry.user_pubkey
-                    && entry.author_pubkey == author_pubkey;
-            }
-            if self.coords[index].as_ref() == Some(latest_author_coord) {
-                return members_has_owner(&active, author_pubkey);
-            }
-            apply_active_member_rule(&mut active, entry);
-        }
-
-        false
-    }
 }
 
-impl MembershipChainHead {
-    pub fn signed(entries: Vec<MembershipHeadEntry>, keypair: &UserKeypair) -> Self {
-        let author_pubkey = keys::public_key_hex(keypair);
-        let payload = membership_head_payload(&entries, &author_pubkey);
+impl AuthorHead {
+    /// Sign a head for `author_pubkey` certifying its prefix through `seq` with
+    /// tip hash `tip_hash`. `keypair` must be `author_pubkey`'s.
+    pub fn signed(
+        author_pubkey: String,
+        seq: u64,
+        tip_hash: String,
+        keypair: &UserKeypair,
+    ) -> Self {
+        let payload = author_head_payload(&author_pubkey, seq, &tip_hash);
         let (_, signature) = keys::sign_hex(keypair, &payload);
-        MembershipChainHead {
-            entries,
+        AuthorHead {
             author_pubkey,
+            seq,
+            tip_hash,
             signature,
         }
     }
@@ -573,20 +525,22 @@ impl MembershipChainHead {
         keys::verify_signature_hex(
             &self.author_pubkey,
             &self.signature,
-            &membership_head_payload(&self.entries, &self.author_pubkey),
+            &author_head_payload(&self.author_pubkey, self.seq, &self.tip_hash),
         )
     }
 }
 
-fn membership_head_payload(entries: &[MembershipHeadEntry], author_pubkey: &str) -> Vec<u8> {
+fn author_head_payload(author_pubkey: &str, seq: u64, tip_hash: &str) -> Vec<u8> {
     #[derive(Serialize)]
     struct HeadFields<'a> {
-        entries: &'a [MembershipHeadEntry],
         author_pubkey: &'a str,
+        seq: u64,
+        tip_hash: &'a str,
     }
     serde_json::to_vec(&HeadFields {
-        entries,
         author_pubkey,
+        seq,
+        tip_hash,
     })
     .expect("membership head fields serialization cannot fail")
 }

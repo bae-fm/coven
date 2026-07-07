@@ -678,7 +678,6 @@ async fn member_joins_then_fetches_and_decrypts_per_release_content() {
         &membership,
         &membership,
         &mut chain,
-        membership.list_membership_entries().await.unwrap(),
         &owner,
         &pubkey_hex(&joiner),
         None,

@@ -469,8 +469,10 @@ pub struct MockSyncStorage {
     snapshot_objects: Mutex<HashMap<String, Vec<u8>>>,
     /// Signed `min_schema_version.json` bytes (None = no minimum set).
     min_schema_version: Mutex<Option<Vec<u8>>>,
-    /// Signed `membership_head.json` bytes (None = no committed membership set).
-    membership_head: Mutex<Option<Vec<u8>>>,
+    /// Per-author signed membership heads, keyed by author pubkey -> head bytes.
+    /// An author absent from this map has not committed a head (its entries are
+    /// uncommitted).
+    membership_heads: Mutex<HashMap<String, Vec<u8>>>,
     /// The device identity this mock signs its head/min_schema with. Defaults to a
     /// fresh keypair; a membership test that needs the head/floor attributed to a
     /// specific member constructs the mock with [`Self::with_keypair`].
@@ -495,6 +497,8 @@ pub struct MockSyncStorage {
     fail_changeset_puts: std::sync::atomic::AtomicUsize,
     wrapped_key_put_count: std::sync::atomic::AtomicUsize,
     fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize,
+    membership_head_put_count: std::sync::atomic::AtomicUsize,
+    fail_membership_head_put_on: std::sync::atomic::AtomicUsize,
 }
 
 impl MockSyncStorage {
@@ -511,7 +515,7 @@ impl MockSyncStorage {
             heads: Mutex::new(HashMap::new()),
             snapshot_objects: Mutex::new(HashMap::new()),
             min_schema_version: Mutex::new(None),
-            membership_head: Mutex::new(None),
+            membership_heads: Mutex::new(HashMap::new()),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
             membership_list_count: std::sync::atomic::AtomicUsize::new(0),
@@ -525,6 +529,8 @@ impl MockSyncStorage {
             fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
             wrapped_key_put_count: std::sync::atomic::AtomicUsize::new(0),
             fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize::new(0),
+            membership_head_put_count: std::sync::atomic::AtomicUsize::new(0),
+            fail_membership_head_put_on: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -592,6 +598,19 @@ impl MockSyncStorage {
         self.wrapped_key_put_count
             .store(0, std::sync::atomic::Ordering::SeqCst);
         self.fail_wrapped_key_put_on
+            .store(call_number, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Fail the `call_number`-th membership-head put (1-based) to exercise the
+    /// failed-publish retry path: the entry uploads but its head does not commit.
+    pub fn fail_membership_head_put_on_call(&self, call_number: usize) {
+        assert!(
+            call_number > 0,
+            "membership-head put call numbers are 1-based"
+        );
+        self.membership_head_put_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.fail_membership_head_put_on
             .store(call_number, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -1077,17 +1096,40 @@ impl SyncStorage for MockSyncStorage {
         Ok(entries)
     }
 
-    async fn put_membership_head(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        *self.membership_head.lock().unwrap() = Some(data);
+    async fn put_membership_head(
+        &self,
+        author_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let call = self
+            .membership_head_put_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self
+            .fail_membership_head_put_on
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == call
+        {
+            self.fail_membership_head_put_on
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+            return Err(StorageError::Storage(format!(
+                "forced membership-head upload failure for {author_pubkey}"
+            )));
+        }
+        self.membership_heads
+            .lock()
+            .unwrap()
+            .insert(author_pubkey.to_string(), data);
         Ok(())
     }
 
-    async fn get_membership_head(&self) -> Result<Vec<u8>, StorageError> {
-        self.membership_head
+    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
+        self.membership_heads
             .lock()
             .unwrap()
-            .clone()
-            .ok_or_else(|| StorageError::NotFound("membership_head.json".to_string()))
+            .get(author_pubkey)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(format!("membership/{author_pubkey}/head")))
     }
 
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {

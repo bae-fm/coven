@@ -13,10 +13,12 @@ use crate::storage::cloud::CloudHome;
 use super::cloud_storage::CloudCipher;
 use super::hlc::Hlc;
 use super::membership::{
-    founder_entry, MemberInfo, MemberRole, MembershipChain, MembershipChainHead, MembershipCoord,
+    founder_entry, AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipCoord,
     MembershipEntry,
 };
 use super::storage::{StorageError, SyncStorage};
+use crate::database::Database;
+use std::collections::BTreeSet;
 
 /// `sync_state` key holding the hex Ed25519 pubkey of the library's established
 /// owner — pinned at create (the creator), join (the invite's owner), or restore.
@@ -38,7 +40,7 @@ pub async fn get_members(
         return Ok(Vec::new());
     }
 
-    let chain = load_anchored_chain(storage, &entry_keys, None)
+    let chain = load_anchored_chain(storage, &entry_keys, None, None)
         .await
         .map_err(|e| e.to_string())?;
     let user_pubkey_hex = user_pubkey.map(hex::encode);
@@ -102,7 +104,7 @@ pub async fn invite_member(
                 .to_string(),
         );
     }
-    let mut chain = load_anchored_chain(storage, &entry_keys, None)
+    let mut chain = load_anchored_chain(storage, &entry_keys, None, None)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -112,7 +114,6 @@ pub async fn invite_member(
         storage,
         cloud_home,
         &mut chain,
-        entry_keys,
         user_keypair,
         public_key_hex,
         invitee_email,
@@ -172,7 +173,7 @@ pub async fn remove_member(
         return Err("No membership chain exists".to_string());
     }
 
-    let mut chain = load_anchored_chain(storage, &entry_keys, None)
+    let mut chain = load_anchored_chain(storage, &entry_keys, None, None)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -304,16 +305,49 @@ pub async fn download_chain(
         .map_err(|e| format!("Invalid membership chain: {e}"))
 }
 
+/// The seq of `author`'s committed head in storage, or `0` if it has none. A head
+/// present but unverifiable is treated as absent (`0`), matching how every other
+/// control object refuses an invalid signature rather than trusting the bytes.
+pub(crate) async fn committed_head_seq(
+    storage: &dyn SyncStorage,
+    author: &str,
+) -> Result<u64, String> {
+    match storage.get_membership_head(author).await {
+        Ok(bytes) => {
+            let head: AuthorHead = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("Failed to parse membership head {author}: {e}"))?;
+            Ok(if head.verify() { head.seq } else { 0 })
+        }
+        Err(StorageError::NotFound(_)) => Ok(0),
+        Err(e) => Err(format!("Failed to read membership head {author}: {e}")),
+    }
+}
+
+/// Publish `signer`'s membership head, certifying its own committed prefix in
+/// `chain`. The write is monotonic: it refuses to publish a head whose seq does
+/// not advance the one already stored, so a device working from a stale view fails
+/// loud (and retries on top of the observed head) instead of rolling the head back
+/// over a peer's newer commit.
 pub async fn publish_membership_head(
     storage: &dyn SyncStorage,
     chain: &MembershipChain,
     signer: &UserKeypair,
-) -> Result<MembershipChainHead, String> {
-    let head = chain.signed_head(signer);
+) -> Result<AuthorHead, String> {
+    let head = chain
+        .signed_head(signer)
+        .ok_or_else(|| "cannot publish a head for an author with no entries".to_string())?;
+    let stored_seq = committed_head_seq(storage, &head.author_pubkey).await?;
+    if stored_seq >= head.seq {
+        return Err(format!(
+            "stale membership head: {} already committed through seq {stored_seq}, \
+             refusing to publish seq {}",
+            head.author_pubkey, head.seq
+        ));
+    }
     let bytes = serde_json::to_vec(&head)
         .map_err(|e| format!("Failed to serialize membership head: {e}"))?;
     storage
-        .put_membership_head(bytes)
+        .put_membership_head(&head.author_pubkey, bytes)
         .await
         .map_err(|e| format!("Failed to upload membership head: {e}"))?;
     Ok(head)
@@ -435,7 +469,7 @@ pub(crate) async fn load_membership_chain(
         return Ok(None);
     }
 
-    let chain = load_anchored_chain(storage, &entries, pinned_owner)
+    let chain = load_anchored_chain(storage, &entries, pinned_owner, None)
         .await
         .map_err(|e| MembershipAuthorAuthorizationError::Unauthorized(e.to_string()))?;
     Ok(Some(chain))
@@ -456,32 +490,86 @@ pub(crate) async fn load_membership_chain(
 /// short-circuit: pull falls open, snapshot accepts on signature alone), so an
 /// empty set here surfaces as a `LoadFailed` (the chain won't validate) rather
 /// than a silent success.
+///
+/// The committed set is the union of every author's committed prefix: for each
+/// author that has a signed head, entries `1..=head.seq` are admitted (fetched by
+/// keyed GET, so a listing that lags a fresh write can't hide a committed entry).
+/// `validate` then re-derives owner authorship across the merged, timestamp-ordered
+/// set, so an author who was never an owner has its entries rejected — the same
+/// fold authorization already performs. An author whose head is missing contributes
+/// nothing: its entries stay uncommitted until it publishes a head covering them.
+///
+/// `watermark_db`, when present, makes the read monotonic per author: a head whose
+/// seq regresses the last one this reader accepted (persisted in `sync_state`) is
+/// refused, and each accepted head advances the watermark. This closes the window
+/// where a stale head replica (or a same-author two-device overwrite) would rewind
+/// a reader's committed view.
 pub(crate) async fn load_anchored_chain(
     storage: &dyn SyncStorage,
     entry_keys: &[(String, u64)],
     owner_pubkey: Option<&str>,
+    watermark_db: Option<&Database>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let head = match storage.get_membership_head().await {
-        Ok(bytes) => serde_json::from_slice::<MembershipChainHead>(&bytes)
-            .map_err(|e| AnchoredChainError::LoadFailed(format!("parse membership head: {e}")))?,
-        Err(StorageError::NotFound(e)) => {
+    let authors: BTreeSet<String> = entry_keys
+        .iter()
+        .map(|(author, _)| author.clone())
+        .collect();
+
+    let mut heads: Vec<AuthorHead> = Vec::new();
+    for author in &authors {
+        let bytes = match storage.get_membership_head(author).await {
+            Ok(bytes) => bytes,
+            // An author with entries but no head has committed nothing yet.
+            Err(StorageError::NotFound(_)) => continue,
+            Err(e) => {
+                return Err(AnchoredChainError::LoadFailed(format!(
+                    "Failed to get membership head {author}: {e}"
+                )))
+            }
+        };
+        let head: AuthorHead = serde_json::from_slice(&bytes).map_err(|e| {
+            AnchoredChainError::LoadFailed(format!("parse membership head {author}: {e}"))
+        })?;
+        if !head.verify() {
             return Err(AnchoredChainError::LoadFailed(format!(
-                "membership head is missing: {e}"
-            )))
+                "membership head {author} has an invalid signature"
+            )));
         }
-        Err(e) => {
-            return Err(AnchoredChainError::LoadFailed(format!(
-                "Failed to get membership head: {e}"
-            )))
+        if let Some(db) = watermark_db {
+            let accepted = read_head_watermark(db, author)
+                .await
+                .map_err(AnchoredChainError::LoadFailed)?;
+            if head.seq < accepted {
+                return Err(AnchoredChainError::LoadFailed(format!(
+                    "membership head {author} regressed to seq {} below the accepted {accepted}",
+                    head.seq
+                )));
+            }
         }
-    };
-    let committed_entry_keys = entry_keys_committed_by_head(entry_keys, &head);
+        heads.push(head);
+    }
+
+    let committed_entry_keys: Vec<(String, u64)> = heads
+        .iter()
+        .flat_map(|head| (1..=head.seq).map(|seq| (head.author_pubkey.clone(), seq)))
+        .collect();
     let chain = download_chain(storage, &committed_entry_keys)
         .await
         .map_err(AnchoredChainError::LoadFailed)?;
-    chain
-        .verify_head(&head)
-        .map_err(|e| AnchoredChainError::LoadFailed(e.to_string()))?;
+
+    // Each head must match the prefix it certifies: same tip seq, same tip hash.
+    for head in &heads {
+        match chain.author_tip(&head.author_pubkey) {
+            Some((seq, tip_hash)) if seq == head.seq && tip_hash == head.tip_hash => {}
+            other => {
+                return Err(AnchoredChainError::LoadFailed(format!(
+                    "membership head {} claims seq {}/{} but the chain tip is {other:?}",
+                    head.author_pubkey, head.seq, head.tip_hash
+                )))
+            }
+        }
+    }
+
     if let Some(owner) = owner_pubkey {
         if !chain.is_founded_by(owner) {
             return Err(AnchoredChainError::FounderMismatch {
@@ -490,29 +578,38 @@ pub(crate) async fn load_anchored_chain(
             });
         }
     }
+
+    if let Some(db) = watermark_db {
+        for head in &heads {
+            persist_head_watermark(db, &head.author_pubkey, head.seq)
+                .await
+                .map_err(AnchoredChainError::LoadFailed)?;
+        }
+    }
+
     Ok(chain)
 }
 
-fn entry_keys_committed_by_head(
-    entry_keys: &[(String, u64)],
-    head: &MembershipChainHead,
-) -> Vec<(String, u64)> {
-    let mut keys = Vec::new();
-    for (listed_author, listed_seq) in entry_keys {
-        if head.entries.iter().any(|entry| {
-            entry.coord.author_pubkey == *listed_author && *listed_seq <= entry.coord.seq
-        }) {
-            keys.push((listed_author.clone(), *listed_seq));
-        }
+/// `sync_state` key holding the greatest membership-head seq this reader has
+/// accepted from `author`. The read path refuses any later head that regresses it.
+fn head_watermark_key(author: &str) -> String {
+    format!("membership_head_seq/{author}")
+}
+
+async fn read_head_watermark(db: &Database, author: &str) -> Result<u64, String> {
+    match db.get_sync_state(&head_watermark_key(author)).await {
+        Ok(Some(value)) => value
+            .parse::<u64>()
+            .map_err(|e| format!("membership head watermark for {author} is not a seq: {e}")),
+        Ok(None) => Ok(0),
+        Err(e) => Err(format!("read membership head watermark for {author}: {e}")),
     }
-    for entry in &head.entries {
-        if !keys.iter().any(|(listed_author, seq)| {
-            listed_author == &entry.coord.author_pubkey && *seq == entry.coord.seq
-        }) {
-            keys.push((entry.coord.author_pubkey.clone(), entry.coord.seq));
-        }
-    }
-    keys
+}
+
+async fn persist_head_watermark(db: &Database, author: &str, seq: u64) -> Result<(), String> {
+    db.set_sync_state(&head_watermark_key(author), &seq.to_string())
+        .await
+        .map_err(|e| format!("persist membership head watermark for {author}: {e}"))
 }
 
 #[cfg(test)]
@@ -668,15 +765,19 @@ mod tests {
             .unwrap();
         let visible = storage.list_membership_entries().await.unwrap();
 
-        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk)).await;
+        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk), None).await;
         assert!(
             result.is_err(),
             "a listed chain missing a signed Remove must be rejected, not read {member_pk} as current"
         );
     }
 
+    /// A committed prefix is fetched by keyed GET up to the head's seq, so an entry
+    /// the LIST hasn't caught up to yet (eventual-consistency lag, issue #84) is
+    /// recovered rather than treated as a gap: the head, not the listing, decides
+    /// how far the prefix reaches.
     #[tokio::test]
-    async fn suppressed_middle_entry_breaks_the_link() {
+    async fn list_lagging_middle_entry_is_recovered_by_keyed_get() {
         let owner = UserKeypair::generate();
         let member_a = UserKeypair::generate();
         let member_b = UserKeypair::generate();
@@ -708,14 +809,15 @@ mod tests {
             .await
             .unwrap();
 
+        // The LIST omits seq 2, but the keyed GET still serves it.
         storage.hide_membership_from_listing(&owner_pk, 2);
         let visible = storage.list_membership_entries().await.unwrap();
 
-        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk)).await;
-        assert!(
-            result.is_err(),
-            "a successor that names a hidden predecessor must reject the listed chain"
-        );
+        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk), None)
+            .await
+            .expect("a list-lagging entry within the head is fetched by keyed GET");
+        assert!(loaded.can_write_now(&pubkey_hex(&member_a)));
+        assert!(loaded.can_write_now(&pubkey_hex(&member_b)));
     }
 
     #[tokio::test]
@@ -742,7 +844,7 @@ mod tests {
             .unwrap();
 
         let visible = storage.list_membership_entries().await.unwrap();
-        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk))
+        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk), None)
             .await
             .expect("complete chain validates");
 
@@ -760,7 +862,7 @@ mod tests {
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         let visible = storage.list_membership_entries().await.unwrap();
 
-        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk)).await;
+        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk), None).await;
         assert!(
             result.is_err(),
             "a non-empty membership chain without a signed head is not committed"
@@ -801,12 +903,162 @@ mod tests {
         append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
         let visible = storage.list_membership_entries().await.unwrap();
 
-        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk))
+        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk), None)
             .await
             .expect("unheaded entry is ignored");
         assert!(
             loaded.can_write_now(&pubkey_hex(&member)),
             "membership state follows the signed head, not listed entries past it"
+        );
+    }
+
+    /// Two owners commit concurrently, each under its own head; the reader's
+    /// committed set is the union of both prefixes. A Remove one owner publishes is
+    /// therefore never suppressed by the other owner's concurrent invite — no single
+    /// object carries both, so neither publisher can discard the other's entry.
+    #[tokio::test]
+    async fn concurrent_owner_heads_union_and_never_suppress_a_remove() {
+        let founder = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let invitee = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let founder_pk = pubkey_hex(&founder);
+        let second_pk = pubkey_hex(&second_owner);
+
+        // Founder's prefix: found, promote second_owner to Owner, add member.
+        let mut chain = MembershipChain::new();
+        let f = founder_entry(&founder, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &founder_pk, 1, f).await;
+        let add_owner = make_linked_entry(
+            &chain,
+            &founder,
+            MembershipAction::Add,
+            &second_owner,
+            MemberRole::Owner,
+            "0000000002000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &founder_pk, 2, add_owner).await;
+        let add_member = make_linked_entry(
+            &chain,
+            &founder,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000003000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &founder_pk, 3, add_member).await;
+
+        // Concurrent, independent commits: the founder invites `invitee` at
+        // founder/4 while second_owner removes `member` at second_owner/1, each
+        // publishing only its own head.
+        let add_invitee = make_linked_entry(
+            &chain,
+            &founder,
+            MembershipAction::Add,
+            &invitee,
+            MemberRole::Member,
+            "0000000004000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &founder_pk, 4, add_invitee).await;
+        let remove_member = make_linked_entry(
+            &chain,
+            &second_owner,
+            MembershipAction::Remove,
+            &member,
+            MemberRole::Member,
+            "0000000005000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &second_pk, 1, remove_member).await;
+
+        publish_membership_head(&storage, &chain, &founder)
+            .await
+            .unwrap();
+        publish_membership_head(&storage, &chain, &second_owner)
+            .await
+            .unwrap();
+
+        // A third reader loads the union: invitee added AND member removed.
+        let visible = storage.list_membership_entries().await.unwrap();
+        let loaded = load_anchored_chain(&storage, &visible, Some(&founder_pk), None)
+            .await
+            .unwrap();
+        let members = loaded.current_members();
+        assert!(
+            members.iter().any(|(pk, _)| pk == &pubkey_hex(&invitee)),
+            "the concurrent invite is committed"
+        );
+        assert!(
+            !members.iter().any(|(pk, _)| pk == &pubkey_hex(&member)),
+            "the concurrent Remove is never suppressed"
+        );
+        assert!(members
+            .iter()
+            .any(|(pk, r)| pk == &second_pk && *r == MemberRole::Owner));
+    }
+
+    /// A reader that has accepted a head at some seq refuses a later read whose seq
+    /// regresses below it (a stale replica on an eventually-consistent provider, or
+    /// a rewound head object), so a committed removal can't be undone underneath a
+    /// reader that already saw it. Without the persisted watermark the second load
+    /// would re-admit the removed member.
+    #[tokio::test]
+    async fn reader_refuses_a_head_that_regresses_below_its_watermark() {
+        use crate::sync::membership::{entry_hash, AuthorHead};
+        use crate::sync::test_helpers::open_test_db;
+
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let db = open_test_db();
+        let owner_pk = pubkey_hex(&owner);
+
+        let mut chain = MembershipChain::new();
+        let f = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, f).await;
+        let add = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 2, add.clone()).await;
+        let remove = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Remove,
+            &member,
+            MemberRole::Member,
+            "0000000003000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove).await;
+        publish_membership_head(&storage, &chain, &owner)
+            .await
+            .unwrap();
+
+        // The reader accepts the head at seq 3: member removed, watermark now 3.
+        let visible = storage.list_membership_entries().await.unwrap();
+        let loaded = load_anchored_chain(&storage, &visible, Some(&owner_pk), Some(&db))
+            .await
+            .unwrap();
+        assert!(!loaded
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&member)));
+
+        // A stale read serves the head from before the Remove (seq 2). The reader
+        // refuses to regress rather than re-admit the member.
+        let stale = AuthorHead::signed(owner_pk.clone(), 2, entry_hash(&add), &owner);
+        storage
+            .put_membership_head(&owner_pk, serde_json::to_vec(&stale).unwrap())
+            .await
+            .unwrap();
+        let result = load_anchored_chain(&storage, &visible, Some(&owner_pk), Some(&db)).await;
+        assert!(
+            result.is_err(),
+            "a head regressing below the accepted watermark must be refused"
         );
     }
 }

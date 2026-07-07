@@ -31,6 +31,15 @@ pub enum InviteError {
     Crypto(String),
     #[error("wrapped library key activation is not visible: {activation:?}")]
     InactiveWrappedKey { activation: MembershipCoord },
+    #[error(
+        "stale membership head for {author}: committed through seq {committed}, \
+         cannot write seq {attempted}"
+    )]
+    StaleMembershipHead {
+        author: String,
+        committed: u64,
+        attempted: u64,
+    },
     #[error("{operation} failed: {original}; rollback failed: {rollback}")]
     Rollback {
         operation: &'static str,
@@ -43,29 +52,38 @@ pub enum InviteError {
     LastOwner,
 }
 
-/// Determine the next seq for an author's membership entries from a listed key set.
-fn next_membership_seq(
-    entry_keys: &[(String, u64)],
-    chain: &MembershipChain,
-    author_pubkey_hex: &str,
-) -> u64 {
-    let listed_max = entry_keys
-        .iter()
-        .filter(|(author, _)| author == author_pubkey_hex)
-        .map(|(_, seq)| seq)
-        .max()
-        .copied();
-    let chain_max = chain
-        .entry_coords()
-        .filter_map(|coord| coord.filter(|coord| coord.author_pubkey == author_pubkey_hex))
-        .map(|coord| coord.seq)
-        .max();
+/// The next seq for `author`'s membership entries: one past the tip its own
+/// committed head certifies. Computing it from the committed prefix (not the object
+/// listing) is what lets a retry after a failed head publish reuse the same seq —
+/// the uncommitted object from the prior attempt is overwritten rather than skipped
+/// over, so no orphan is left dangling above the head.
+fn next_membership_seq(chain: &MembershipChain, author_pubkey_hex: &str) -> u64 {
+    chain
+        .author_tip(author_pubkey_hex)
+        .map_or(1, |(seq, _)| seq + 1)
+}
 
-    listed_max
-        .into_iter()
-        .chain(chain_max)
-        .max()
-        .map_or(1, |max| max + 1)
+/// Refuse to write over `author`'s committed prefix. The intended `seq` must sit
+/// exactly one past the head already in storage; if another device (or another of
+/// this owner's devices) advanced the head first, the committed entry at that seq
+/// must not be clobbered, so fail loud and let the caller retry on top of the head
+/// it now observes.
+async fn guard_extends_committed_head(
+    storage: &dyn SyncStorage,
+    author: &str,
+    seq: u64,
+) -> Result<(), InviteError> {
+    let committed = super::membership_ops::committed_head_seq(storage, author)
+        .await
+        .map_err(InviteError::Crypto)?;
+    if committed >= seq {
+        return Err(InviteError::StaleMembershipHead {
+            author: author.to_string(),
+            committed,
+            attempted: seq,
+        });
+    }
+    Ok(())
 }
 
 /// Decode and convert an Ed25519 hex pubkey to X25519 for sealed box encryption.
@@ -199,7 +217,6 @@ pub async fn create_invitation(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
     chain: &mut MembershipChain,
-    entry_keys: Vec<(String, u64)>,
     owner_keypair: &UserKeypair,
     invitee_ed25519_pubkey: &str,
     invitee_email: Option<&str>,
@@ -213,7 +230,6 @@ pub async fn create_invitation(
         storage,
         cloud_home,
         chain,
-        entry_keys,
         owner_keypair,
         invitee_ed25519_pubkey,
         invitee_email,
@@ -229,7 +245,6 @@ pub async fn create_invitation_with_encryption(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
     chain: &mut MembershipChain,
-    entry_keys: Vec<(String, u64)>,
     owner_keypair: &UserKeypair,
     invitee_ed25519_pubkey: &str,
     invitee_email: Option<&str>,
@@ -258,7 +273,7 @@ pub async fn create_invitation_with_encryption(
     let author_pubkey_hex = hex::encode(owner_keypair.public_key());
     let entry_coord = MembershipCoord {
         author_pubkey: author_pubkey_hex.clone(),
-        seq: next_membership_seq(&entry_keys, chain, &author_pubkey_hex),
+        seq: next_membership_seq(chain, &author_pubkey_hex),
     };
     let mut entry = MembershipEntry {
         action: MembershipAction::Add,
@@ -300,6 +315,12 @@ pub async fn create_invitation_with_encryption(
         }
         return Err(original.into());
     }
+
+    // The head governs commitment, so re-check right before writing the entry: if
+    // another owner device advanced this author's head to our seq while we were
+    // preparing, its committed entry must not be overwritten. Fail loud; the retry
+    // recomputes the seq from the now-newer head.
+    guard_extends_committed_head(storage, &author_pubkey_hex, entry_coord.seq).await?;
 
     if let Err(original) = upload_membership_entry(storage, &entry_coord, &entry).await {
         let mut rollback_errors = Vec::new();
@@ -499,7 +520,7 @@ pub async fn revoke_member(
     let author_pubkey_hex = hex::encode(owner_keypair.public_key());
     let remove_coord = MembershipCoord {
         author_pubkey: author_pubkey_hex.clone(),
-        seq: next_membership_seq(&entry_keys, chain, &author_pubkey_hex),
+        seq: next_membership_seq(chain, &author_pubkey_hex),
     };
     // Create and sign a Remove entry.
     let mut entry = MembershipEntry {
@@ -550,6 +571,9 @@ pub async fn revoke_member(
     // Delete the revoked member's wrapped key.
     storage.delete_wrapped_key(revokee_pubkey).await?;
 
+    // Don't overwrite a committed Remove another owner device already published at
+    // this seq; fail loud and let the retry rebuild on top of the observed head.
+    guard_extends_committed_head(storage, &author_pubkey_hex, remove_coord.seq).await?;
     upload_membership_entry(storage, &remove_coord, &entry).await?;
     publish_membership_head(storage, &validated_chain, owner_keypair)
         .await
@@ -742,7 +766,6 @@ mod tests {
             storage,
             &MockCloudHome,
             chain,
-            storage.list_membership_entries().await.unwrap(),
             owner,
             &pubkey_hex(member),
             None,
@@ -769,7 +792,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&invitee),
             None,
@@ -820,7 +842,6 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &invitee_pubkey,
             Some("a@b.com"),
@@ -854,7 +875,6 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &invitee_pubkey,
             None,
@@ -1011,7 +1031,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &second_owner,
             &pubkey_hex(&invitee),
             None,
@@ -1067,7 +1086,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&invitee),
             None,
@@ -1102,7 +1120,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             "not-valid-hex",
             None,
@@ -1128,7 +1145,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             off_curve_pubkey,
             None,
@@ -1157,7 +1173,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             None,
@@ -1174,7 +1189,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &member,
             &pubkey_hex(&invitee),
             None,
@@ -1201,7 +1215,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&invitee),
             None,
@@ -1243,7 +1256,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             None,
@@ -1336,7 +1348,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member1),
             None,
@@ -1352,7 +1363,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member2),
             None,
@@ -1570,11 +1580,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let coord = MembershipCoord {
             author_pubkey: owner_pk.clone(),
-            seq: next_membership_seq(
-                &storage.list_membership_entries().await.unwrap(),
-                &chain,
-                &owner_pk,
-            ),
+            seq: next_membership_seq(&chain, &owner_pk),
         };
         let mut invalid_entry = MembershipEntry {
             action: MembershipAction::Add,
@@ -1809,7 +1815,6 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &member_pubkey,
             Some("first@example.com"),
@@ -1825,7 +1830,6 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &member_pubkey,
             Some("second@example.com"),
@@ -1897,7 +1901,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             None,
@@ -1940,7 +1943,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member1),
             None,
@@ -1956,7 +1958,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member2),
             None,
@@ -1983,5 +1984,196 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(InviteError::Membership(_))));
+    }
+
+    /// A failed head publish leaves the invite entry uploaded but uncommitted; the
+    /// retry recomputes the same seq from the committed head, overwrites the orphan,
+    /// and converges. Every reader loads a well-formed chain throughout — the orphan
+    /// never re-admits itself above the head, so no author link ever breaks.
+    #[tokio::test]
+    async fn invite_converges_after_failed_head_publish() {
+        use crate::sync::membership_ops::{load_anchored_chain, write_founder_entry};
+
+        let owner = gen_keypair();
+        let invitee = gen_keypair();
+        let owner_pk = pubkey_hex(&owner);
+        let key: [u8; 32] = [21u8; 32];
+
+        let storage = MockSyncStorage::new();
+        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
+            .await
+            .unwrap();
+
+        let load = |visible: Vec<(String, u64)>| {
+            let owner_pk = owner_pk.clone();
+            let storage = &storage;
+            async move {
+                load_anchored_chain(storage, &visible, Some(&owner_pk), None)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Attempt 1: the entry uploads, then the head publish fails.
+        let mut chain = load(storage.list_membership_entries().await.unwrap()).await;
+        storage.fail_membership_head_put_on_call(1);
+        let first = create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        assert!(first.is_err(), "the head-publish failure must surface");
+
+        // The orphan entry is uncommitted: the committed head is still the founder's.
+        let committed = load(storage.list_membership_entries().await.unwrap()).await;
+        assert!(
+            !committed
+                .current_members()
+                .iter()
+                .any(|(pk, _)| pk == &pubkey_hex(&invitee)),
+            "the entry stays uncommitted until its author's head covers it"
+        );
+
+        // Retry from the committed chain: same seq, orphan overwritten, head published.
+        let mut retry_chain = committed;
+        create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut retry_chain,
+            &owner,
+            &pubkey_hex(&invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .expect("the retry converges");
+
+        let loaded = load(storage.list_membership_entries().await.unwrap()).await;
+        assert!(loaded
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&invitee)));
+        let unwrapped = unwrap_library_key(&storage as &dyn CloudHome, &invitee, LIB_ID, &owner_pk)
+            .await
+            .unwrap();
+        assert_eq!(unwrapped, key);
+    }
+
+    /// Same author, two devices: the second device works from a stale head and its
+    /// publish would collide with the first device's already-committed entry. The
+    /// monotonic guard fails it loud (rather than clobbering the committed entry and
+    /// breaking every reader's chain); the retry rebuilds on the observed head and
+    /// both invites end committed.
+    #[tokio::test]
+    async fn same_author_two_devices_second_fails_loud_then_retry_converges() {
+        use crate::sync::membership_ops::{load_anchored_chain, write_founder_entry};
+
+        let owner = gen_keypair();
+        let first_invitee = gen_keypair();
+        let second_invitee = gen_keypair();
+        let owner_pk = pubkey_hex(&owner);
+        let key: [u8; 32] = [22u8; 32];
+
+        let storage = MockSyncStorage::new();
+        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
+            .await
+            .unwrap();
+
+        let load = |visible: Vec<(String, u64)>| {
+            let owner_pk = owner_pk.clone();
+            let storage = &storage;
+            async move {
+                load_anchored_chain(storage, &visible, Some(&owner_pk), None)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Both devices observe the founder head; device two keeps that stale view.
+        let mut device_one = load(storage.list_membership_entries().await.unwrap()).await;
+        let mut device_two_stale = device_one.clone();
+
+        // Device one invites and commits at seq 2.
+        create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut device_one,
+            &owner,
+            &pubkey_hex(&first_invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .expect("device one commits");
+
+        // Device two, still at the founder head, computes the same seq 2 — but the
+        // committed head already advanced, so the guard fails it loud.
+        let stale = create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut device_two_stale,
+            &owner,
+            &pubkey_hex(&second_invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+        assert!(
+            matches!(
+                stale,
+                Err(InviteError::StaleMembershipHead { attempted: 2, .. })
+            ),
+            "the stale-seq publish must fail loud, got {stale:?}"
+        );
+
+        // The first device's committed entry was not clobbered.
+        let after_stale = load(storage.list_membership_entries().await.unwrap()).await;
+        assert!(after_stale
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&first_invitee)));
+
+        // Device two retries on top of the observed head at seq 3.
+        let mut device_two_fresh = after_stale;
+        create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut device_two_fresh,
+            &owner,
+            &pubkey_hex(&second_invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000004000-0000-dev1",
+        )
+        .await
+        .expect("the retry converges");
+
+        let loaded = load(storage.list_membership_entries().await.unwrap()).await;
+        let members = loaded.current_members();
+        assert!(members
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&first_invitee)));
+        assert!(members
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&second_invitee)));
     }
 }
