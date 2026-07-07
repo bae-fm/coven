@@ -262,6 +262,11 @@ fn dropbox_revoke_error_is_already_absent(body: &str) -> bool {
 /// each non-final part at its byte offset; the final part is committed to the
 /// destination path via `upload_session/finish` (overwrite mode). The session was
 /// opened by `open_multipart`; `finish` is a no-op (the last part committed).
+///
+/// Parts go through `api_call_no_transient_retry`: a successful `append_v2`
+/// advances the session's expected offset, so a blind re-send after a lost
+/// response would collide with that offset. A failed part instead fails the whole
+/// upload, which the blob engine re-runs from the source.
 struct DropboxSessionSink<'a> {
     home: &'a DropboxCloudHome,
     session_id: String,
@@ -294,7 +299,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
             }));
             self.home
                 .session
-                .api_call(|token| {
+                .api_call_no_transient_retry(|token| {
                     self.home
                         .client()
                         .post(format!("{}/files/upload_session/finish", CONTENT_BASE))
@@ -311,7 +316,7 @@ impl super::PartSink for DropboxSessionSink<'_> {
             }));
             self.home
                 .session
-                .api_call(|token| {
+                .api_call_no_transient_retry(|token| {
                     self.home
                         .client()
                         .post(format!("{}/files/upload_session/append_v2", CONTENT_BASE))
