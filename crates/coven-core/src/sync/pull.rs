@@ -158,8 +158,12 @@ pub struct PullResult {
     /// All device heads fetched during this pull (including our own).
     /// Used by the sync status UI to show other devices' activity.
     pub remote_heads: Vec<DeviceHead>,
-    /// Row changes from all applied changesets, for the host to map to domain
-    /// events. Empty if nothing was applied.
+    /// Row changes from applied changesets, for the host to map to domain events.
+    /// A refresh *hint*, not an exhaustive log: it can overstate what a peer will
+    /// converge to, because a changeset whose apply is later held or hits a
+    /// constraint conflict still contributed its changes here. A host maps these
+    /// to which rows to refresh, then re-reads each by primary key rather than
+    /// trusting the list as the final row state. Empty if nothing was applied.
     pub row_changes: Vec<RowChange>,
 }
 
