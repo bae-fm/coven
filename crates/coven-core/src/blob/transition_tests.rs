@@ -37,7 +37,7 @@ use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    host_exec as exec, open_test_db_schema, open_test_db_with_blob,
+    host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_library_dir,
     test_migrations, MockSyncStorage,
 };
@@ -298,6 +298,43 @@ async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
     db.call(move |conn| Database::make_remote_intent_exists(conn, &rt, &ri))
         .await
         .unwrap()
+}
+
+/// Insert a `published_blob_drop_intents` row directly, to reconstruct the durable
+/// bookkeeping a crash leaves when a drain applies a disposition but dies before
+/// clearing its intent.
+async fn insert_published_drop_intent(
+    db: &Database,
+    seq: i64,
+    namespace: &str,
+    blob_id: &str,
+    size: u64,
+    disposition: &str,
+) {
+    let (ns, id, disp) = (
+        namespace.to_string(),
+        blob_id.to_string(),
+        disposition.to_string(),
+    );
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO published_blob_drop_intents (seq, namespace, blob_id, size, disposition) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![seq, ns, id, size as i64, disp],
+        )
+        .map(|_| ())
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("insert published blob drop intent");
+}
+
+async fn drop_intent_present(db: &Database, blob_id: &str) -> bool {
+    row_exists(
+        db,
+        &format!("SELECT 1 FROM published_blob_drop_intents WHERE blob_id = '{blob_id}'"),
+    )
+    .await
 }
 
 // ===========================================================================
@@ -967,6 +1004,98 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         storage.exists("covers/cv/pin.jpg").await.unwrap()
             && storage.exists("covers/cv/drop.jpg").await.unwrap(),
         "both covers are published to the cloud",
+    );
+}
+
+/// The drain applies a disposition (copy to the destination, drop the local-store
+/// source) and then clears its intent in a separate commit. A crash in that window
+/// leaves the blob correctly placed but the intent uncleared. Re-draining must
+/// recognize the completed work — the blob already in pinned/ — and clear the intent,
+/// not keep failing every cycle because the source it would copy is gone.
+#[tokio::test]
+async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db();
+    let (_tmp, lib) = temp_library_dir();
+    let bytes = b"ALREADY-PINNED".to_vec();
+
+    let pinned = lib.pinned_blob_path("covers", "cov-pin").unwrap();
+    crate::local_blob::create_dir_all(pinned.parent().unwrap())
+        .await
+        .unwrap();
+    crate::local_blob::write_atomic(&pinned, &bytes)
+        .await
+        .unwrap();
+    db.set_sync_state("local_seq", "1").await.unwrap();
+    insert_published_drop_intent(&db, 1, "covers", "cov-pin", bytes.len() as u64, "pin").await;
+
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert!(
+        !drop_intent_present(&db, "cov-pin").await,
+        "the drain recognizes the completed pin and clears its intent",
+    );
+    assert!(pinned.exists(), "the pin stays intact");
+}
+
+/// Sibling of the pin case for the cache disposition: the blob already sits in cache/
+/// with its source dropped, so re-draining recognizes it and clears the intent.
+#[tokio::test]
+async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db();
+    let (_tmp, lib) = temp_library_dir();
+    let bytes = b"ALREADY-CACHED".to_vec();
+
+    let cached = lib.cache_blob_path("covers", "cov-cache").unwrap();
+    crate::local_blob::create_dir_all(cached.parent().unwrap())
+        .await
+        .unwrap();
+    crate::local_blob::write_atomic(&cached, &bytes)
+        .await
+        .unwrap();
+    db.set_sync_state("local_seq", "1").await.unwrap();
+    insert_published_drop_intent(&db, 1, "covers", "cov-cache", bytes.len() as u64, "cache").await;
+
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert!(
+        !drop_intent_present(&db, "cov-cache").await,
+        "the drain recognizes the completed cache write and clears its intent",
+    );
+    assert!(cached.exists(), "the cache copy stays intact");
+}
+
+/// A disposition whose blob is in neither the local store nor its destination is a
+/// genuine loss, not a completed apply: the drain must keep failing loud (the intent
+/// stays pending) rather than clearing it as if the work had been done.
+#[tokio::test]
+async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db();
+    let (_tmp, lib) = temp_library_dir();
+
+    db.set_sync_state("local_seq", "1").await.unwrap();
+    insert_published_drop_intent(&db, 1, "covers", "cov-lost", 7, "pin").await;
+
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert!(
+        drop_intent_present(&db, "cov-lost").await,
+        "a disposition missing from both the local store and its destination stays pending",
+    );
+    assert!(
+        !lib.pinned_blob_path("covers", "cov-lost").unwrap().exists(),
+        "no destination copy was conjured",
     );
 }
 

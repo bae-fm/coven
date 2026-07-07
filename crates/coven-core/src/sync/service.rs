@@ -505,17 +505,54 @@ pub async fn apply_deferred_local_blob_drop(
             .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
         }
         (DeferredLocalBlobDisposition::Drop, _) => {}
-        (DeferredLocalBlobDisposition::Pin | DeferredLocalBlobDisposition::Cache, None) => {
-            return Err(SyncCycleError::AssetUpload(format!(
-                "published blob {}/{} is missing from local store before {:?} cleanup",
-                deferred.namespace, deferred.id, deferred.disposition
-            )));
+        // The source is gone. This disposition (copy to a destination, then drop the
+        // source) is applied in one step but its intent clears in a separate commit,
+        // so a crash in that window leaves the blob correctly placed with the intent
+        // still pending. Recognize that finished work by its destination — Ok clears
+        // the intent — and fail loud only when the destination is ALSO empty.
+        (DeferredLocalBlobDisposition::Pin, None) => {
+            let pinned = library_dir
+                .pinned_blob_path(&deferred.namespace, &deferred.id)
+                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+            return recognize_applied_disposition_or_fail(&pinned, deferred).await;
+        }
+        (DeferredLocalBlobDisposition::Cache, None) => {
+            let cached = library_dir
+                .cache_blob_path(&deferred.namespace, &deferred.id)
+                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+            return recognize_applied_disposition_or_fail(&cached, deferred).await;
         }
     }
     crate::blob::local_files::drop_blob(library_dir, &deferred.namespace, &deferred.id)
         .await
         .map(|_| ())
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))
+}
+
+/// A Pin/Cache disposition whose local-store source is gone is either already applied
+/// — a prior drain copied the blob to `destination` and dropped the source, then
+/// crashed before clearing its intent — or a genuine loss. Ok when the destination
+/// holds the blob at its expected size (the work is done, so the caller clears the
+/// intent); a loud Err when the destination is also empty (the bytes are gone, so the
+/// intent stays pending and retries).
+async fn recognize_applied_disposition_or_fail(
+    destination: &std::path::Path,
+    deferred: &DeferredLocalBlobDrop,
+) -> Result<(), SyncCycleError> {
+    let present = crate::local_blob::exists(destination)
+        .await
+        .map_err(SyncCycleError::AssetUpload)?
+        && crate::local_blob::file_len(destination)
+            .await
+            .map_err(SyncCycleError::AssetUpload)?
+            == deferred.size;
+    if present {
+        return Ok(());
+    }
+    Err(SyncCycleError::AssetUpload(format!(
+        "published blob {}/{} is missing from both the local store and its {:?} destination",
+        deferred.namespace, deferred.id, deferred.disposition
+    )))
 }
 
 fn local_blob_disposition(blob: &BlobRef, retain_pinned: bool) -> DeferredLocalBlobDisposition {
