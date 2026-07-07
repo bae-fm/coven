@@ -143,8 +143,9 @@ In reading order; each page builds on the ones before it:
 
 - [Local data](/docs/local-data): the library on one device: schema
   conventions, which tables sync, which rows share.
-- [Sync](/docs/sync-model): change capture, the cycle, how concurrent edits
-  merge.
+- [Sync](/docs/sync-model): change capture, the cycle, push and pull.
+- [Merge](/docs/merge): the clock, and how concurrent edits land on every
+  device.
 - [Storage](/docs/storage): the `CloudHome` contract and the providers.
 - [Blobs](/docs/blobs): files that rows carry, where their bytes live, and how
   they move.

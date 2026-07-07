@@ -118,7 +118,7 @@ declares both:
   no path needed.
 
 
-<svg class="flow" viewBox="0 0 660 216" role="img" aria-label="A blob is Local (a user file or coven's local store) or Remote (a sealed cloud object with per-device cache copies); make_remote and make_local flip the state">
+<svg class="flow" viewBox="0 0 660 244" role="img" aria-label="A blob is Local (a user file or coven's local store) or Remote (a sealed cloud object with per-device cache copies); offloading uploads the bytes, the cloud copy becomes the source, devices keep cache copies">
 <text class="hdr" x="155" y="30" text-anchor="middle">LOCAL</text>
 <text class="hdr" x="505" y="30" text-anchor="middle">REMOTE</text>
 <rect class="lane" x="20" y="40" width="270" height="150" rx="10"/>
@@ -140,6 +140,13 @@ declares both:
 <text class="sub" x="330" y="64" text-anchor="middle">make_remote</text>
 <line class="arr" x1="366" y1="156" x2="294" y2="156" marker-end="url(#fa)"/>
 <text class="sub" x="330" y="176" text-anchor="middle">make_local</text>
+<circle class="numc" cx="330" cy="88" r="8"/>
+<text class="num" x="330" y="91.5" text-anchor="middle">1</text>
+<circle class="numc" cx="382" cy="69" r="8"/>
+<text class="num" x="382" y="72.5" text-anchor="middle">2</text>
+<circle class="numc" cx="382" cy="125" r="8"/>
+<text class="num" x="382" y="128.5" text-anchor="middle">3</text>
+<text class="sub" x="330" y="232" text-anchor="middle">offloading, in time: 1 the upload runs · 2 the sealed cloud object becomes the source · 3 each device keeps a re-fetchable cache copy</text>
 </svg>
 
 ## Encryption scope

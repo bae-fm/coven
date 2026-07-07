@@ -122,6 +122,7 @@ export default defineConfig({
                         { text: 'Overview', link: '/docs/' },
                         { text: 'Local data', link: '/docs/local-data' },
                         { text: 'Sync', link: '/docs/sync-model' },
+                        { text: 'Merge', link: '/docs/merge' },
                         { text: 'Storage', link: '/docs/storage' },
                         { text: 'Blobs', link: '/docs/blobs' },
                         { text: 'Cache', link: '/docs/cache' },

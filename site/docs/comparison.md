@@ -61,7 +61,7 @@ layer alone: a CRDT extension that lets concurrent SQLite writers converge. It
 brings no transport, encryption, or access control, you would build a coven-like
 system on top of it. coven instead merges concurrent edits column by column
 over a hybrid logical clock, with the later writer winning per collision (see
-[Sync](/docs/sync-model)), and ships the transport, encryption, and membership
+[Merge](/docs/merge)), and ships the transport, encryption, and membership
 with it.
 
 **Server-backed sync engines: Replicache/Zero, ElectricSQL, PowerSync.** Strong,

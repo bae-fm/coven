@@ -52,7 +52,7 @@ are a `rename` within `storage/` (one filesystem, atomic), so a blob is never
 visible in both folders or in neither mid-move.
 
 
-<svg class="flow" viewBox="0 0 660 170" role="img" aria-label="A Remote blob's cache state: absent, evictable in cache/, or protected in pinned/; fills, pins, unpins, and eviction move it between them">
+<svg class="flow" viewBox="0 0 660 188" role="img" aria-label="A Remote blob's cache state: absent, evictable in cache/, or protected in pinned/; fills, pins, unpins, and eviction move it between them">
 <path class="arrd" d="M110 58 C 200 6, 460 6, 550 58" marker-end="url(#fam)"/>
 <text class="sub" x="330" y="20" text-anchor="middle">pin fetches an absent blob straight into pinned/</text>
 <rect class="chipd" x="30" y="64" width="165" height="30" rx="8"/>
@@ -70,6 +70,7 @@ visible in both folders or in neither mid-move.
 <line class="arrd" x1="466" y1="88" x2="419" y2="88" marker-end="url(#fam)"/>
 <text class="sub" x="442" y="112" text-anchor="middle">unpin</text>
 <text class="sub" x="330" y="140" text-anchor="middle">fill = eager pull, first read, or write · every move is one atomic rename or write</text>
+<text class="sub" x="330" y="162" text-anchor="middle">one blob, in time: fetched on first read · pinned for a trip · unpinned · evicted under pressure · fetched again on the next read</text>
 </svg>
 
 Cache files are plaintext. Encryption happens on the way to the cloud, not on

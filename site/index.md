@@ -37,7 +37,7 @@ features:
           height: 28
       title: Everyone writes
       details: 'Any device edits anything, offline included, and concurrent edits merge on their own.'
-      link: /docs/sync-model
+      link: /docs/merge
     - icon:
           light: /icons/image-light.svg
           dark: /icons/image-dark.svg
