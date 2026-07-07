@@ -48,7 +48,7 @@ pub async fn revoke_by_email(
         }
 
         let Some(next_url) = next_page(&json)? else {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "no permission found for {member_id}"
             )));
         };

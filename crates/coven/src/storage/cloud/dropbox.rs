@@ -42,7 +42,8 @@ impl DropboxCloudHome {
         key_service: KeyService,
         clock: ClockRef,
     ) -> Result<Self, CloudHomeError> {
-        let config = Self::oauth_config().map_err(|e| CloudHomeError::Storage(e.to_string()))?;
+        let config =
+            Self::oauth_config().map_err(|e| CloudHomeError::Configuration(e.to_string()))?;
         Ok(Self {
             folder_path,
             session: OAuthSession::new(tokens, key_service, clock, config, "Dropbox"),
@@ -95,7 +96,7 @@ impl DropboxCloudHome {
         let status = resp.status();
         let resp_body = http::body_text(resp).await;
         let json: serde_json::Value = serde_json::from_str(&resp_body).map_err(|e| {
-            CloudHomeError::Storage(format!(
+            CloudHomeError::Transport(format!(
                 "share folder (HTTP {status}): unparseable response: {e}: {resp_body}"
             ))
         })?;
@@ -113,11 +114,11 @@ impl DropboxCloudHome {
             return self.poll_share_job(job_id).await;
         }
         if !status.is_success() {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "share folder (HTTP {status}): {resp_body}"
             )));
         }
-        Err(CloudHomeError::Storage(
+        Err(CloudHomeError::Transport(
             "could not determine shared_folder_id".to_string(),
         ))
     }
@@ -133,7 +134,7 @@ impl DropboxCloudHome {
                     .as_str()
                     .map(String::from)
                     .ok_or_else(|| {
-                        CloudHomeError::Storage(
+                        CloudHomeError::Transport(
                             "share job completed but no shared_folder_id".to_string(),
                         )
                     })
@@ -174,31 +175,31 @@ impl DropboxCloudHome {
             let status = resp.status();
             let resp_body = http::body_text(resp).await;
             if !status.is_success() {
-                return Err(CloudHomeError::Storage(format!(
+                return Err(CloudHomeError::Transport(format!(
                     "{operation} job status (HTTP {status}): {resp_body}"
                 )));
             }
             let json: serde_json::Value = serde_json::from_str(&resp_body).map_err(|e| {
-                CloudHomeError::Storage(format!(
+                CloudHomeError::Transport(format!(
                     "{operation} job status: unparseable response: {e}: {resp_body}"
                 ))
             })?;
             match json[".tag"].as_str() {
                 Some("complete") => return complete(&json),
                 Some("failed") => {
-                    return Err(CloudHomeError::Storage(format!(
+                    return Err(CloudHomeError::Transport(format!(
                         "{operation} job failed: {resp_body}"
                     )));
                 }
                 Some("in_progress") => continue,
                 _ => {
-                    return Err(CloudHomeError::Storage(format!(
+                    return Err(CloudHomeError::Transport(format!(
                         "{operation} job status returned an unexpected tag: {resp_body}"
                     )));
                 }
             }
         }
-        Err(CloudHomeError::Storage(format!(
+        Err(CloudHomeError::Transport(format!(
             "{operation} timed out after 30 seconds"
         )))
     }
@@ -211,7 +212,7 @@ enum DropboxRevokeLaunch {
 
 fn parse_dropbox_revoke_launch(body: &str) -> Result<DropboxRevokeLaunch, CloudHomeError> {
     let json: serde_json::Value = serde_json::from_str(body).map_err(|e| {
-        CloudHomeError::Storage(format!("revoke access: unparseable response: {e}: {body}"))
+        CloudHomeError::Transport(format!("revoke access: unparseable response: {e}: {body}"))
     })?;
     match json[".tag"].as_str() {
         Some("complete") => Ok(DropboxRevokeLaunch::Complete),
@@ -219,11 +220,11 @@ fn parse_dropbox_revoke_launch(body: &str) -> Result<DropboxRevokeLaunch, CloudH
             .as_str()
             .map(|id| DropboxRevokeLaunch::AsyncJob(id.to_string()))
             .ok_or_else(|| {
-                CloudHomeError::Storage(format!(
+                CloudHomeError::Transport(format!(
                     "revoke access: async_job_id response missing async_job_id: {body}"
                 ))
             }),
-        _ => Err(CloudHomeError::Storage(format!(
+        _ => Err(CloudHomeError::Transport(format!(
             "revoke access: unexpected launch response: {body}"
         ))),
     }
@@ -356,13 +357,13 @@ fn parse_dropbox_error_summary(body: &str) -> Option<String> {
 fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> CloudHomeError {
     if let Some(summary) = parse_dropbox_error_summary(body) {
         if summary.starts_with("path/insufficient_space") {
-            return CloudHomeError::Storage(
+            return CloudHomeError::Transport(
                 "Your Dropbox storage is full. Free up space at dropbox.com to keep syncing."
                     .to_string(),
             );
         }
     }
-    CloudHomeError::Storage(format!("write {key} (HTTP {status}): {body}"))
+    CloudHomeError::Transport(format!("write {key} (HTTP {status}): {body}"))
 }
 
 /// Files at or below this size go up in one `files/upload` call; larger files use
@@ -457,7 +458,7 @@ impl OAuthRestHome for DropboxCloudHome {
 
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
-            .map_err(|e| CloudHomeError::Storage(format!("parse list: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("parse list: {e}")))?;
         let mut keys = Vec::new();
         if let Some(entries) = json["entries"].as_array() {
             for entry in entries {
@@ -486,7 +487,7 @@ impl OAuthRestHome for DropboxCloudHome {
                 json["cursor"]
                     .as_str()
                     .ok_or_else(|| {
-                        CloudHomeError::Storage(
+                        CloudHomeError::Transport(
                             "Dropbox list response has_more without cursor".to_string(),
                         )
                     })?
@@ -554,11 +555,11 @@ impl CloudHome for DropboxCloudHome {
             return Err(classify_write_error(status, &start_body, key));
         }
         let start_json: serde_json::Value = serde_json::from_str(&start_body)
-            .map_err(|e| CloudHomeError::Storage(format!("parse upload session {key}: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("parse upload session {key}: {e}")))?;
         let session_id = start_json["session_id"]
             .as_str()
             .ok_or_else(|| {
-                CloudHomeError::Storage(format!("upload session {key}: no session_id returned"))
+                CloudHomeError::Transport(format!("upload session {key}: no session_id returned"))
             })?
             .to_string();
         Ok(Box::new(DropboxSessionSink {
@@ -656,7 +657,7 @@ impl CloudHome for DropboxCloudHome {
             if dropbox_revoke_error_is_already_absent(&body) {
                 return Ok(RevokeOutcome::Revoked);
             }
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "revoke access for {email} (HTTP {status}): {body}"
             )));
         }

@@ -24,7 +24,7 @@ pub enum NotFound {
 
 /// Send-and-check: return the response on 2xx, else a `CloudHomeError`. A response
 /// matching `not_found` becomes [`CloudHomeError::NotFound`]; any other non-2xx
-/// becomes a [`CloudHomeError::Storage`] carrying the status and body. `ctx` names
+/// becomes a [`CloudHomeError::Transport`] carrying the status and body. `ctx` names
 /// the operation (e.g. `"read heads/dev1.json"`). The one definition of the
 /// `let status = resp.status(); if !status.is_success() { … }` block that was
 /// copied ~30× across the OAuth backends.
@@ -46,7 +46,7 @@ pub async fn ensure_ok(
             return if body.contains(needle) {
                 Err(CloudHomeError::NotFound(ctx.to_string()))
             } else {
-                Err(CloudHomeError::Storage(format!(
+                Err(CloudHomeError::Transport(format!(
                     "{ctx} (HTTP {status}): {body}"
                 )))
             };
@@ -54,7 +54,7 @@ pub async fn ensure_ok(
         _ => {}
     }
     let body = body_text(resp).await;
-    Err(CloudHomeError::Storage(format!(
+    Err(CloudHomeError::Transport(format!(
         "{ctx} (HTTP {status}): {body}"
     )))
 }
@@ -64,7 +64,7 @@ pub async fn ok_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, CloudHomeErr
     resp.bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| CloudHomeError::Storage(format!("{ctx}: {e}")))
+        .map_err(|e| CloudHomeError::Transport(format!("{ctx}: {e}")))
 }
 
 /// Read a successful response's body and parse it as JSON. `ctx` names what is
@@ -73,8 +73,8 @@ pub async fn ok_json<T: DeserializeOwned>(resp: Response, ctx: &str) -> Result<T
     let body = resp
         .text()
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("{ctx}: read body: {e}")))?;
-    serde_json::from_str(&body).map_err(|e| CloudHomeError::Storage(format!("{ctx}: parse: {e}")))
+        .map_err(|e| CloudHomeError::Transport(format!("{ctx}: read body: {e}")))?;
+    serde_json::from_str(&body).map_err(|e| CloudHomeError::Transport(format!("{ctx}: parse: {e}")))
 }
 
 /// Parse an error-response body as JSON and pull a provider-specific reason out of

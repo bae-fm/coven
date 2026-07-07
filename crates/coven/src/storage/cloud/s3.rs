@@ -50,7 +50,7 @@ async fn on_s3_rt<T: Send + 'static>(
 ) -> Result<T, CloudHomeError> {
     match s3_runtime().spawn(fut).await {
         Ok(r) => r,
-        Err(e) => Err(CloudHomeError::Storage(format!("S3 task aborted: {e}"))),
+        Err(e) => Err(CloudHomeError::Transport(format!("S3 task aborted: {e}"))),
     }
 }
 
@@ -182,7 +182,7 @@ impl S3PartSink {
                 .upload_id(&upload_id)
                 .send()
                 .await
-                .map_err(|e| CloudHomeError::Storage(format!("{e}")))?;
+                .map_err(|e| CloudHomeError::Transport(format!("{e}")))?;
             Ok(())
         })
         .await;
@@ -221,7 +221,7 @@ impl super::PartSink for S3PartSink {
                 .send()
                 .await
                 .map_err(|e| {
-                    CloudHomeError::Storage(format!("multipart part {part_number} {key}: {e}"))
+                    CloudHomeError::Transport(format!("multipart part {part_number} {key}: {e}"))
                 })
         })
         .await;
@@ -259,7 +259,7 @@ impl super::PartSink for S3PartSink {
                 .multipart_upload(completed_upload)
                 .send()
                 .await
-                .map_err(|e| CloudHomeError::Storage(format!("multipart complete {key}: {e}")))?;
+                .map_err(|e| CloudHomeError::Transport(format!("multipart complete {key}: {e}")))?;
             Ok(())
         })
         .await;
@@ -291,7 +291,7 @@ where
         msg.push_str(&format!("; caused by: {err}"));
         source = err.source();
     }
-    CloudHomeError::Storage(msg)
+    CloudHomeError::Transport(msg)
 }
 
 /// Map a GetObject failure to a `CloudHomeError`, surfacing the S3 error code and
@@ -307,13 +307,13 @@ fn get_object_error<R>(
     use aws_sdk_s3::error::ProvideErrorMetadata;
     match err.code() {
         Some("NoSuchKey") => CloudHomeError::NotFound(key.to_string()),
-        Some(code) => CloudHomeError::Storage(match err.message() {
+        Some(code) => CloudHomeError::Transport(match err.message() {
             Some(msg) => format!("get {key}: S3 {code}: {msg}"),
             None => format!("get {key}: S3 {code} (no message provided)"),
         }),
         // Not a service error (timeout / connection / dispatch) — its own
         // Display carries the detail.
-        None => CloudHomeError::Storage(format!("get {key}: {err}")),
+        None => CloudHomeError::Transport(format!("get {key}: {err}")),
     }
 }
 
@@ -334,21 +334,21 @@ fn put_object_error(
 ) -> CloudHomeError {
     use aws_sdk_s3::error::ProvideErrorMetadata;
     match err.code() {
-        Some("AccessDenied") => CloudHomeError::Storage(
+        Some("AccessDenied") => CloudHomeError::Configuration(
             "Your S3 credentials don't have permission to write to this bucket. Check the access policy in sync settings."
                 .to_string(),
         ),
-        Some("NoSuchBucket") => CloudHomeError::Storage(
+        Some("NoSuchBucket") => CloudHomeError::Configuration(
             "The S3 bucket no longer exists. Check the bucket name in sync settings.".to_string(),
         ),
-        Some("OverQuota" | "QuotaExceeded") => CloudHomeError::Storage(
+        Some("OverQuota" | "QuotaExceeded") => CloudHomeError::Configuration(
             "Your S3 storage quota is exceeded. Free up space or expand the quota.".to_string(),
         ),
-        Some(code) => CloudHomeError::Storage(match err.message() {
+        Some(code) => CloudHomeError::Transport(match err.message() {
             Some(msg) => format!("put {key}: S3 {code}: {msg}"),
             None => format!("put {key}: S3 {code} (no message provided)"),
         }),
-        None => CloudHomeError::Storage(format!("put {key}: {err}")),
+        None => CloudHomeError::Transport(format!("put {key}: {err}")),
     }
 }
 
@@ -370,7 +370,7 @@ impl CloudHome for S3CloudHome {
                     // S3 backends use.
                     Err(probe_error(status, code.as_deref(), &bucket))
                 }
-                Err(e) => Err(CloudHomeError::Storage(format!("S3 probe failed: {e}"))),
+                Err(e) => Err(CloudHomeError::Transport(format!("S3 probe failed: {e}"))),
             }
         })
         .await
@@ -416,11 +416,13 @@ impl CloudHome for S3CloudHome {
                     .key(&full)
                     .send()
                     .await
-                    .map_err(|e| CloudHomeError::Storage(format!("multipart create {key}: {e}")))?;
+                    .map_err(|e| {
+                        CloudHomeError::Transport(format!("multipart create {key}: {e}"))
+                    })?;
                 create
                     .upload_id()
                     .ok_or_else(|| {
-                        CloudHomeError::Storage(format!(
+                        CloudHomeError::Transport(format!(
                             "multipart create {key}: no upload id returned"
                         ))
                     })
@@ -503,7 +505,7 @@ impl CloudHome for S3CloudHome {
             // (the `CloudHome` contract never reads past the object's end).
             let expected = end - start;
             if bytes.len() as u64 != expected {
-                return Err(CloudHomeError::Storage(format!(
+                return Err(CloudHomeError::Transport(format!(
                     "read range {key}: expected {expected} bytes for range {start}..{end}, \
                      got {} — the provider likely ignored Range and returned the whole object",
                     bytes.len()
@@ -540,7 +542,7 @@ impl CloudHome for S3CloudHome {
                 let resp = req
                     .send()
                     .await
-                    .map_err(|e| CloudHomeError::Storage(format!("list {prefix}: {e}")))?;
+                    .map_err(|e| CloudHomeError::Transport(format!("list {prefix}: {e}")))?;
 
                 for obj in resp.contents() {
                     let Some(key) = obj.key() else {
@@ -562,7 +564,7 @@ impl CloudHome for S3CloudHome {
 
                 if resp.is_truncated() == Some(true) {
                     let token = resp.next_continuation_token().ok_or_else(|| {
-                        CloudHomeError::Storage(format!(
+                        CloudHomeError::Transport(format!(
                             "list {prefix}: S3 truncated but returned no continuation token"
                         ))
                     })?;
@@ -598,7 +600,7 @@ impl CloudHome for S3CloudHome {
                 // not-found (the shared rule both S3 backends apply) and surface only
                 // real errors.
                 if !is_not_found_code(e.code()) {
-                    return Err(CloudHomeError::Storage(format!("delete {key}: {e}")));
+                    return Err(CloudHomeError::Transport(format!("delete {key}: {e}")));
                 }
             }
             Ok(())
@@ -625,7 +627,7 @@ impl CloudHome for S3CloudHome {
                     if is_not_found_code(e.code()) || status == Some(404) {
                         Ok(false)
                     } else {
-                        Err(CloudHomeError::Storage(format!("head {key}: {e}")))
+                        Err(CloudHomeError::Transport(format!("head {key}: {e}")))
                     }
                 }
             }
@@ -930,7 +932,7 @@ mod tests {
             .read_range(&key, 8, 16)
             .await
             .expect_err("a 200 full-object response to a range request must error");
-        assert!(matches!(err, CloudHomeError::Storage(_)), "got {err:?}");
+        assert!(matches!(err, CloudHomeError::Transport(_)), "got {err:?}");
         let _ = shutdown.send(());
     }
 

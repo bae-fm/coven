@@ -133,7 +133,8 @@ impl GoogleDriveCloudHome {
         key_service: KeyService,
         clock: ClockRef,
     ) -> Result<Self, CloudHomeError> {
-        let config = Self::oauth_config().map_err(|e| CloudHomeError::Storage(e.to_string()))?;
+        let config =
+            Self::oauth_config().map_err(|e| CloudHomeError::Configuration(e.to_string()))?;
         Ok(Self {
             folder_id,
             session: OAuthSession::new(tokens, key_service, clock, config, "Google Drive"),
@@ -238,7 +239,7 @@ impl GoogleDriveCloudHome {
         }
         let id_result = match resp.text().await {
             Ok(body) => parse_create_file_id(&body, key),
-            Err(e) => Err(CloudHomeError::Storage(format!(
+            Err(e) => Err(CloudHomeError::Transport(format!(
                 "create {key}: read response: {e}"
             ))),
         };
@@ -271,13 +272,13 @@ impl GoogleDriveCloudHome {
         if !files.iter().any(|file| {
             file.id == created.id && file.create_token.as_deref() == Some(&created.create_token)
         }) {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "create {key}: created file {} with token {} was not returned by duplicate check",
                 created.id, created.create_token
             )));
         }
         let Some(winner) = select_drive_file(&files) else {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "create {key}: created file {} was not returned by duplicate check",
                 created.id
             )));
@@ -363,7 +364,7 @@ impl GoogleDriveCloudHome {
         if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }
-        Err(CloudHomeError::Storage(format!(
+        Err(CloudHomeError::Transport(format!(
             "delete created file {key} (HTTP {status}): {}",
             http::body_text(resp).await
         )))
@@ -402,7 +403,7 @@ impl GoogleDriveCloudHome {
             .and_then(|v| v.to_str().ok())
             .map(String::from)
             .ok_or_else(|| {
-                CloudHomeError::Storage(format!(
+                CloudHomeError::Transport(format!(
                     "resumable session {key}: no Location header returned"
                 ))
             })
@@ -436,10 +437,10 @@ fn select_drive_file(files: &[DriveFileIdentity]) -> Option<&DriveFileIdentity> 
 
 fn parse_create_file_id(body: &str, key: &str) -> Result<String, CloudHomeError> {
     let json: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| CloudHomeError::Storage(format!("create {key}: parse response: {e}")))?;
+        .map_err(|e| CloudHomeError::Transport(format!("create {key}: parse response: {e}")))?;
     match json.get("id").and_then(|id| id.as_str()) {
         Some(id) if !id.is_empty() => Ok(id.to_string()),
-        _ => Err(CloudHomeError::Storage(format!(
+        _ => Err(CloudHomeError::Transport(format!(
             "create {key}: response missing id"
         ))),
     }
@@ -478,12 +479,12 @@ where
     match find_created_file().await {
         Ok(Some(file_id)) => match delete_created_file(file_id).await {
             Ok(()) => Err(id_error),
-            Err(delete_error) => Err(CloudHomeError::Storage(format!(
+            Err(delete_error) => Err(CloudHomeError::Transport(format!(
                 "create {key}: metadata response id failure: {id_error}; rollback delete failed: {delete_error}"
             ))),
         },
         Ok(None) => Err(id_error),
-        Err(lookup_error) => Err(CloudHomeError::Storage(format!(
+        Err(lookup_error) => Err(CloudHomeError::Transport(format!(
             "create {key}: metadata response id failure: {id_error}; rollback lookup failed: {lookup_error}"
         ))),
     }
@@ -504,7 +505,7 @@ where
     };
     match delete_created_file().await {
         Ok(()) => Err(upload_error),
-        Err(delete_error) => Err(CloudHomeError::Storage(format!(
+        Err(delete_error) => Err(CloudHomeError::Transport(format!(
             "create {key}: media upload failed after metadata create: {upload_error}; rollback delete failed: {delete_error}"
         ))),
     }
@@ -551,7 +552,7 @@ where
     };
     match delete_created_file(file_id).await {
         Ok(()) => cause,
-        Err(delete_error) => CloudHomeError::Storage(format!(
+        Err(delete_error) => CloudHomeError::Transport(format!(
             "multipart {key}: {cause}; rollback delete failed: {delete_error}"
         )),
     }
@@ -629,12 +630,12 @@ fn classify_write_error(
     if status == reqwest::StatusCode::FORBIDDEN
         && parse_google_api_error_reason(body).as_deref() == Some("storageQuotaExceeded")
     {
-        return CloudHomeError::Storage(
+        return CloudHomeError::Transport(
             "Your Google Drive storage is full. Free up space at drive.google.com to keep syncing."
                 .to_string(),
         );
     }
-    CloudHomeError::Storage(format!("{op} {key} (HTTP {status}): {body}"))
+    CloudHomeError::Transport(format!("{op} {key} (HTTP {status}): {body}"))
 }
 
 /// Files at or below this size go up through simple Drive requests; larger files
@@ -720,7 +721,7 @@ impl OAuthRestHome for GoogleDriveCloudHome {
 
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
-            .map_err(|e| CloudHomeError::Storage(format!("parse list: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("parse list: {e}")))?;
         let mut keys = Vec::new();
         if let Some(files) = json["files"].as_array() {
             for file in files {
@@ -903,7 +904,7 @@ fn drive_permissions_next_page_url(
         return Ok(None);
     };
     let query = serde_urlencoded::to_string([("pageToken", token)])
-        .map_err(|e| CloudHomeError::Storage(format!("encode Drive page token: {e}")))?;
+        .map_err(|e| CloudHomeError::Transport(format!("encode Drive page token: {e}")))?;
     let separator = if list_url.contains('?') { '&' } else { '?' };
     Ok(Some(format!("{list_url}{separator}{query}")))
 }
@@ -1141,7 +1142,7 @@ mod tests {
     #[tokio::test]
     async fn create_metadata_id_error_rolls_back_token_matched_file() {
         let delete_called_with = std::cell::RefCell::new(None);
-        let id_error = CloudHomeError::Storage("response missing id".to_string());
+        let id_error = CloudHomeError::Transport("response missing id".to_string());
         let err = finish_create_metadata_response(
             "objects/a",
             Err(id_error),
@@ -1167,11 +1168,11 @@ mod tests {
 
     #[tokio::test]
     async fn create_metadata_id_error_reports_token_lookup_failure() {
-        let id_error = CloudHomeError::Storage("response missing id".to_string());
+        let id_error = CloudHomeError::Transport("response missing id".to_string());
         let err = finish_create_metadata_response(
             "objects/a",
             Err(id_error),
-            || async { Err(CloudHomeError::Storage("lookup failed".to_string())) },
+            || async { Err(CloudHomeError::Transport("lookup failed".to_string())) },
             |_| async { Ok(()) },
         )
         .await
@@ -1190,12 +1191,12 @@ mod tests {
 
     #[tokio::test]
     async fn create_metadata_id_error_reports_token_delete_failure() {
-        let id_error = CloudHomeError::Storage("response missing id".to_string());
+        let id_error = CloudHomeError::Transport("response missing id".to_string());
         let err = finish_create_metadata_response(
             "objects/a",
             Err(id_error),
             || async { Ok(Some("created-file-id".to_string())) },
-            |_| async { Err(CloudHomeError::Storage("delete failed".to_string())) },
+            |_| async { Err(CloudHomeError::Transport("delete failed".to_string())) },
         )
         .await
         .expect_err("delete failure");
@@ -1216,7 +1217,7 @@ mod tests {
         let delete_called = std::cell::Cell::new(false);
         let err = create_file_with_media(
             "objects/a",
-            || async { Err(CloudHomeError::Storage("metadata failed".to_string())) },
+            || async { Err(CloudHomeError::Transport("metadata failed".to_string())) },
             |_| async { Ok(()) },
             |_| async {
                 delete_called.set(true);
@@ -1242,7 +1243,7 @@ mod tests {
             || async { Ok("created-file-id".to_string()) },
             |file_id| async move {
                 assert_eq!(file_id, "created-file-id");
-                Err(CloudHomeError::Storage("media upload failed".to_string()))
+                Err(CloudHomeError::Transport("media upload failed".to_string()))
             },
             |file_id| async {
                 deleted_id.replace(Some(file_id));
@@ -1263,7 +1264,7 @@ mod tests {
     #[tokio::test]
     async fn create_media_upload_error_rolls_back_created_file() {
         let rollback_called = std::cell::Cell::new(false);
-        let upload_error = CloudHomeError::Storage("media upload failed".to_string());
+        let upload_error = CloudHomeError::Transport("media upload failed".to_string());
         let err = finish_create_media_upload("objects/a", Err(upload_error), || async {
             rollback_called.set(true);
             Ok(())
@@ -1281,9 +1282,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_media_upload_error_reports_upload_and_rollback_failures() {
-        let upload_error = CloudHomeError::Storage("media upload failed".to_string());
+        let upload_error = CloudHomeError::Transport("media upload failed".to_string());
         let err = finish_create_media_upload("objects/a", Err(upload_error), || async {
-            Err(CloudHomeError::Storage("delete failed".to_string()))
+            Err(CloudHomeError::Transport("delete failed".to_string()))
         })
         .await
         .expect_err("upload and rollback error");
@@ -1302,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn multipart_part_failure_deletes_the_created_file() {
         let deleted_id = std::cell::RefCell::new(None);
-        let cause = CloudHomeError::Storage("multipart part 2 failed".to_string());
+        let cause = CloudHomeError::Transport("multipart part 2 failed".to_string());
         let err = rollback_created_multipart(
             "blobs/aa/bb",
             Some("created-file-id".to_string()),
@@ -1324,7 +1325,7 @@ mod tests {
     #[tokio::test]
     async fn multipart_failure_leaves_pre_existing_file_intact() {
         let delete_called = std::cell::Cell::new(false);
-        let cause = CloudHomeError::Storage("multipart part 2 failed".to_string());
+        let cause = CloudHomeError::Transport("multipart part 2 failed".to_string());
         let err = rollback_created_multipart("blobs/aa/bb", None, cause, |_| async {
             delete_called.set(true);
             Ok(())
@@ -1343,12 +1344,12 @@ mod tests {
 
     #[tokio::test]
     async fn multipart_rollback_reports_delete_failure_alongside_cause() {
-        let cause = CloudHomeError::Storage("multipart part 2 failed".to_string());
+        let cause = CloudHomeError::Transport("multipart part 2 failed".to_string());
         let err = rollback_created_multipart(
             "blobs/aa/bb",
             Some("created-file-id".to_string()),
             cause,
-            |_| async { Err(CloudHomeError::Storage("delete failed".to_string())) },
+            |_| async { Err(CloudHomeError::Transport("delete failed".to_string())) },
         )
         .await;
         let msg = err.to_string();

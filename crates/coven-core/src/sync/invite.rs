@@ -768,7 +768,9 @@ mod tests {
             _key: &str,
             _total_len: u64,
         ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
-            Err(CloudHomeError::Storage("mock has no multipart".to_string()))
+            Err(CloudHomeError::Transport(
+                "mock has no multipart".to_string(),
+            ))
         }
         fn multipart_threshold(&self) -> u64 {
             u64::MAX
@@ -846,7 +848,9 @@ mod tests {
             _key: &str,
             _total_len: u64,
         ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
-            Err(CloudHomeError::Storage("mock has no multipart".to_string()))
+            Err(CloudHomeError::Transport(
+                "mock has no multipart".to_string(),
+            ))
         }
         fn multipart_threshold(&self) -> u64 {
             u64::MAX

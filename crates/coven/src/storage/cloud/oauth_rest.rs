@@ -81,7 +81,7 @@ pub async fn rest_read_range<T: OAuthRestHome + ?Sized>(
     // home, so reject it here rather than downstream.
     let status = resp.status();
     if !is_range_success(status.as_u16()) {
-        return Err(CloudHomeError::Storage(format!(
+        return Err(CloudHomeError::Transport(format!(
             "read range {key}: expected 206 Partial Content, got HTTP {status}"
         )));
     }
@@ -276,7 +276,7 @@ mod tests {
         let err = rest_read_range(&home, "storage/audio", 8, 16)
             .await
             .expect_err("a 200 full-body response to a range request must error");
-        assert!(matches!(err, CloudHomeError::Storage(_)), "got {err:?}");
+        assert!(matches!(err, CloudHomeError::Transport(_)), "got {err:?}");
     }
 
     /// A real 206 Partial Content is the honored range and yields its body.

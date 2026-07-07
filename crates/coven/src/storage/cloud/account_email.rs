@@ -39,7 +39,7 @@ struct GraphUser {
 /// an empty string that would later be shared to nobody.
 fn graph_email(user: GraphUser) -> Result<String, CloudHomeError> {
     user.mail.or(user.user_principal_name).ok_or_else(|| {
-        CloudHomeError::Storage(
+        CloudHomeError::Transport(
             "OneDrive /me returned neither mail nor userPrincipalName".to_string(),
         )
     })
@@ -51,7 +51,7 @@ pub async fn fetch_google(tokens: &OAuthTokens) -> Result<String, CloudHomeError
         .bearer_auth(&tokens.access_token)
         .send()
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("fetch Google account email: {e}")))?;
+        .map_err(|e| CloudHomeError::Transport(format!("fetch Google account email: {e}")))?;
     let resp = ensure_ok(resp, "fetch Google account email", NotFound::Status).await?;
     let info: GoogleUserInfo = ok_json(resp, "parse Google userinfo").await?;
     Ok(info.email)
@@ -65,7 +65,7 @@ pub async fn fetch_dropbox(tokens: &OAuthTokens) -> Result<String, CloudHomeErro
         .json(&serde_json::Value::Null)
         .send()
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("fetch Dropbox account email: {e}")))?;
+        .map_err(|e| CloudHomeError::Transport(format!("fetch Dropbox account email: {e}")))?;
     let resp = ensure_ok(resp, "fetch Dropbox account email", NotFound::Status).await?;
     let account: DropboxAccount = ok_json(resp, "parse Dropbox account").await?;
     Ok(account.email)
@@ -77,7 +77,7 @@ pub async fn fetch_onedrive(tokens: &OAuthTokens) -> Result<String, CloudHomeErr
         .bearer_auth(&tokens.access_token)
         .send()
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("fetch OneDrive account email: {e}")))?;
+        .map_err(|e| CloudHomeError::Transport(format!("fetch OneDrive account email: {e}")))?;
     let resp = ensure_ok(resp, "fetch OneDrive account email", NotFound::Status).await?;
     let user: GraphUser = ok_json(resp, "parse OneDrive /me").await?;
     graph_email(user)

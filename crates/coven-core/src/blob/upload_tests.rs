@@ -203,7 +203,7 @@ impl FailingCloudHome {
 impl CloudHome for FailingCloudHome {
     async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.write_calls.fetch_add(1, Ordering::SeqCst);
-        Err(CloudHomeError::Storage("induced write failure".into()))
+        Err(CloudHomeError::Transport("induced write failure".into()))
     }
     async fn open_multipart<'a>(
         &'a self,
@@ -211,7 +211,7 @@ impl CloudHome for FailingCloudHome {
         _total_len: u64,
     ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
         self.write_calls.fetch_add(1, Ordering::SeqCst);
-        Err(CloudHomeError::Storage("induced write failure".into()))
+        Err(CloudHomeError::Transport("induced write failure".into()))
     }
     fn multipart_threshold(&self) -> u64 {
         // Small upload payloads in these tests go via put_object.

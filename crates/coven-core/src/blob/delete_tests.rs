@@ -301,7 +301,7 @@ impl<'a, H: CloudHome + ?Sized> FailCloudOpOnKey<'a, H> {
 impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         if self.should_fail(FailingCloudOp::PutObject, key) {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "injected put_object failure for {key}"
             )));
         }
@@ -322,7 +322,7 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         if self.should_fail(FailingCloudOp::Read, key) {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "injected read failure for {key}"
             )));
         }
@@ -339,7 +339,7 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
         if self.should_fail(FailingCloudOp::Delete, key) {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "injected delete failure for {key}"
             )));
         }
@@ -348,7 +348,7 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
         if self.should_fail(FailingCloudOp::Exists, key) {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "injected exists failure for {key}"
             )));
         }

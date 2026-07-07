@@ -135,10 +135,10 @@ pub mod storage {
             provider_name: &str,
         ) -> Result<String, CloudHomeError> {
             match key_service.get_cloud_home_credentials().map_err(|e| {
-                CloudHomeError::Storage(format!("{provider_name} credentials error: {e}"))
+                CloudHomeError::Configuration(format!("{provider_name} credentials error: {e}"))
             })? {
                 Some(crate::keys::CloudHomeCredentials::OAuth { token_json }) => Ok(token_json),
-                _ => Err(CloudHomeError::Storage(format!(
+                _ => Err(CloudHomeError::Configuration(format!(
                     "{provider_name} OAuth token not in keyring"
                 ))),
             }
@@ -150,8 +150,9 @@ pub mod storage {
             provider_name: &str,
         ) -> Result<crate::oauth::OAuthTokens, CloudHomeError> {
             let token_json = require_oauth_token(key_service, provider_name)?;
-            serde_json::from_str(&token_json)
-                .map_err(|e| CloudHomeError::Storage(format!("invalid OAuth token JSON: {e}")))
+            serde_json::from_str(&token_json).map_err(|e| {
+                CloudHomeError::Configuration(format!("invalid OAuth token JSON: {e}"))
+            })
         }
 
         pub async fn create_cloud_home(
@@ -176,23 +177,23 @@ pub mod storage {
             match config.cloud_home.provider {
                 Some(CloudProvider::S3) | None => {
                     let bucket = config.cloud_home.s3_bucket.clone().ok_or_else(|| {
-                        CloudHomeError::Storage("S3 bucket not configured".to_string())
+                        CloudHomeError::Configuration("S3 bucket not configured".to_string())
                     })?;
                     let region = config.cloud_home.s3_region.clone().ok_or_else(|| {
-                        CloudHomeError::Storage("S3 region not configured".to_string())
+                        CloudHomeError::Configuration("S3 region not configured".to_string())
                     })?;
                     let endpoint = config.cloud_home.s3_endpoint.clone();
 
                     let (access_key, secret_key) =
                         match key_service.get_cloud_home_credentials().map_err(|e| {
-                            CloudHomeError::Storage(format!("S3 credentials error: {e}"))
+                            CloudHomeError::Configuration(format!("S3 credentials error: {e}"))
                         })? {
                             Some(crate::keys::CloudHomeCredentials::S3 {
                                 access_key,
                                 secret_key,
                             }) => (access_key, secret_key),
                             _ => {
-                                return Err(CloudHomeError::Storage(
+                                return Err(CloudHomeError::Configuration(
                                     "S3 credentials not in keyring".to_string(),
                                 ))
                             }
@@ -216,7 +217,7 @@ pub mod storage {
                         .google_drive_folder_id
                         .clone()
                         .ok_or_else(|| {
-                            CloudHomeError::Storage(
+                            CloudHomeError::Configuration(
                                 "Google Drive folder ID not configured".to_string(),
                             )
                         })?;
@@ -236,7 +237,7 @@ pub mod storage {
                             .dropbox_folder_path
                             .clone()
                             .ok_or_else(|| {
-                                CloudHomeError::Storage(
+                                CloudHomeError::Configuration(
                                     "Dropbox folder path not configured".to_string(),
                                 )
                             })?;
@@ -252,7 +253,9 @@ pub mod storage {
                 Some(CloudProvider::OneDrive) => {
                     let drive_id =
                         config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
-                            CloudHomeError::Storage("OneDrive drive ID not configured".to_string())
+                            CloudHomeError::Configuration(
+                                "OneDrive drive ID not configured".to_string(),
+                            )
                         })?;
                     let folder_id =
                         config
@@ -260,7 +263,7 @@ pub mod storage {
                             .onedrive_folder_id
                             .clone()
                             .ok_or_else(|| {
-                                CloudHomeError::Storage(
+                                CloudHomeError::Configuration(
                                     "OneDrive folder ID not configured".to_string(),
                                 )
                             })?;
@@ -276,12 +279,12 @@ pub mod storage {
                 #[cfg(not(feature = "oauth-providers"))]
                 Some(
                     CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive,
-                ) => Err(CloudHomeError::Storage(
+                ) => Err(CloudHomeError::Configuration(
                     "OAuth cloud providers are not supported in this build".to_string(),
                 )),
                 Some(CloudProvider::CloudKit) => {
                     let ops = cloudkit_ops.ok_or_else(|| {
-                        CloudHomeError::Storage("CloudKit driver not provided".to_string())
+                        CloudHomeError::Configuration("CloudKit driver not provided".to_string())
                     })?;
                     match (
                         config.cloud_home.cloudkit_share_url.as_ref(),
@@ -298,7 +301,7 @@ pub mod storage {
                                 zone_name.clone(),
                             )))
                         }
-                        _ => Err(CloudHomeError::Storage(
+                        _ => Err(CloudHomeError::Configuration(
                             "CloudKit share config requires share URL, owner name, and zone name"
                                 .to_string(),
                         )),

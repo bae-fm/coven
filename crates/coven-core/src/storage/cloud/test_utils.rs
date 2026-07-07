@@ -169,7 +169,7 @@ impl CloudHome for InMemoryCloudHome {
         &self,
         _grant: super::CloudAccessGrant,
     ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Err(CloudHomeError::Storage(
+        Err(CloudHomeError::Transport(
             "InMemoryCloudHome does not grant access".into(),
         ))
     }

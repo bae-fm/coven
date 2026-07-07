@@ -121,7 +121,7 @@ impl S3WasmCloudHome {
         self.signer
             .sign(&mut parts, None)
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("sign request: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("sign request: {e}")))?;
         Ok(Request::from_parts(parts, body))
     }
 
@@ -130,11 +130,11 @@ impl S3WasmCloudHome {
     async fn send(&self, request: Request<Bytes>) -> Result<Response, CloudHomeError> {
         let signed = self.signed_request(request).await?;
         let req = reqwest::Request::try_from(signed)
-            .map_err(|e| CloudHomeError::Storage(format!("build request: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("build request: {e}")))?;
         self.client
             .execute(req)
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("send request: {e}")))
+            .map_err(|e| CloudHomeError::Transport(format!("send request: {e}")))
     }
 
     /// Build an unsigned request for an object under the prefixed key.
@@ -149,7 +149,7 @@ impl S3WasmCloudHome {
             .method(method)
             .uri(url)
             .body(body)
-            .map_err(|e| CloudHomeError::Storage(format!("build request for {full_key}: {e}")))
+            .map_err(|e| CloudHomeError::Transport(format!("build request for {full_key}: {e}")))
     }
 }
 
@@ -230,7 +230,7 @@ impl super::PartSink for WasmS3PartSink<'_> {
             .uri(url)
             .body(part)
             .map_err(|e| {
-                CloudHomeError::Storage(format!(
+                CloudHomeError::Transport(format!(
                     "build multipart part {part_number} {}: {e}",
                     self.full_key
                 ))
@@ -255,12 +255,12 @@ impl super::PartSink for WasmS3PartSink<'_> {
             // A non-UTF-8 ETag is a real decode failure, not "no ETag" — surface
             // it distinctly rather than swallowing it into the missing-header path.
             Some(v) => v.to_str().map(str::to_string).map_err(|e| {
-                CloudHomeError::Storage(format!(
+                CloudHomeError::Transport(format!(
                     "multipart part {part_number} {}: ETag header not valid UTF-8: {e}",
                     self.full_key
                 ))
             }),
-            None => Err(CloudHomeError::Storage(format!(
+            None => Err(CloudHomeError::Transport(format!(
                 "multipart part {part_number} {}: no ETag returned",
                 self.full_key
             ))),
@@ -288,7 +288,10 @@ impl super::PartSink for WasmS3PartSink<'_> {
             .uri(url)
             .body(Bytes::from(body))
             .map_err(|e| {
-                CloudHomeError::Storage(format!("build multipart complete {}: {e}", self.full_key))
+                CloudHomeError::Transport(format!(
+                    "build multipart complete {}: {e}",
+                    self.full_key
+                ))
             })?;
         let resp = match self.home.send(request).await {
             Ok(resp) => resp,
@@ -303,7 +306,7 @@ impl super::PartSink for WasmS3PartSink<'_> {
             return Err(err);
         }
         let body_result = resp.text().await.map_err(|e| {
-            CloudHomeError::Storage(format!(
+            CloudHomeError::Transport(format!(
                 "read multipart complete {} response: {e}",
                 self.full_key
             ))
@@ -351,7 +354,7 @@ where
     };
     if let Some(error) = complete_error {
         abort().await;
-        return Err(CloudHomeError::Storage(format!(
+        return Err(CloudHomeError::Transport(format!(
             "multipart complete {full_key}: {error}"
         )));
     }
@@ -393,7 +396,7 @@ fn complete_multipart_response_error(xml: &str) -> Result<Option<String>, CloudH
             Ok(Event::Text(chunk)) if in_error => {
                 let piece = chunk
                     .decode()
-                    .map_err(|e| CloudHomeError::Storage(format!("parse complete XML: {e}")))?;
+                    .map_err(|e| CloudHomeError::Transport(format!("parse complete XML: {e}")))?;
                 match field {
                     Field::Code => code.push_str(&piece),
                     Field::Message => message.push_str(&piece),
@@ -417,14 +420,16 @@ fn complete_multipart_response_error(xml: &str) -> Result<Option<String>, CloudH
                 }
             }
             Ok(Event::Eof) if in_error => {
-                return Err(CloudHomeError::Storage(
+                return Err(CloudHomeError::Transport(
                     "parse complete XML: unterminated Error body".to_string(),
                 ));
             }
             Ok(Event::Eof) => return Ok(None),
             Ok(_) => {}
             Err(e) => {
-                return Err(CloudHomeError::Storage(format!("parse complete XML: {e}")));
+                return Err(CloudHomeError::Transport(format!(
+                    "parse complete XML: {e}"
+                )));
             }
         }
     }
@@ -439,9 +444,9 @@ struct InitiateMultipartUploadResult {
 /// Extract `<UploadId>` from an `InitiateMultipartUploadResult` body.
 fn parse_upload_id(xml: &str) -> Result<String, CloudHomeError> {
     let parsed: InitiateMultipartUploadResult =
-        from_str(xml).map_err(|e| CloudHomeError::Storage(format!("parse upload id: {e}")))?;
+        from_str(xml).map_err(|e| CloudHomeError::Transport(format!("parse upload id: {e}")))?;
     parsed.upload_id.filter(|id| !id.is_empty()).ok_or_else(|| {
-        CloudHomeError::Storage("multipart create: no UploadId in response".to_string())
+        CloudHomeError::Transport("multipart create: no UploadId in response".to_string())
     })
 }
 
@@ -497,7 +502,7 @@ async fn status_error(op: &str, resp: Response) -> CloudHomeError {
             String::new()
         }
     };
-    CloudHomeError::Storage(format!("{op}: status {status} {body}"))
+    CloudHomeError::Transport(format!("{op}: status {status} {body}"))
 }
 
 /// Read a successful response's body into bytes. `ctx` names what is being read
@@ -506,7 +511,7 @@ async fn resp_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, CloudHomeError
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("{ctx}: {e}")))?;
+        .map_err(|e| CloudHomeError::Transport(format!("{ctx}: {e}")))?;
     Ok(bytes.to_vec())
 }
 
@@ -569,10 +574,10 @@ struct ListBucketObject {
 /// remain.
 fn parse_list_objects_v2(xml: &str) -> Result<ListPage, CloudHomeError> {
     let parsed: ListBucketResult =
-        from_str(xml).map_err(|e| CloudHomeError::Storage(format!("parse list XML: {e}")))?;
+        from_str(xml).map_err(|e| CloudHomeError::Transport(format!("parse list XML: {e}")))?;
     let next_continuation_token = if parsed.is_truncated {
         Some(parsed.next_continuation_token.ok_or_else(|| {
-            CloudHomeError::Storage(
+            CloudHomeError::Transport(
                 "S3 list truncated but response had no NextContinuationToken".to_string(),
             )
         })?)
@@ -599,7 +604,7 @@ impl CloudHome for S3WasmCloudHome {
             .method(Method::HEAD)
             .uri(url)
             .body(Bytes::new())
-            .map_err(|e| CloudHomeError::Storage(format!("build probe request: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("build probe request: {e}")))?;
         let resp = self.send(request).await?;
         let status = resp.status();
         if status.is_success() {
@@ -637,7 +642,7 @@ impl CloudHome for S3WasmCloudHome {
             .method(Method::POST)
             .uri(url)
             .body(Bytes::new())
-            .map_err(|e| CloudHomeError::Storage(format!("build multipart create {key}: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("build multipart create {key}: {e}")))?;
         let resp = self.send(request).await?;
         if !resp.status().is_success() {
             return Err(status_error(&format!("multipart create {key}"), resp).await);
@@ -645,7 +650,7 @@ impl CloudHome for S3WasmCloudHome {
         let body = resp
             .text()
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("read multipart create {key}: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("read multipart create {key}: {e}")))?;
         let upload_id = parse_upload_id(&body)?;
         Ok(Box::new(WasmS3PartSink {
             home: self,
@@ -682,7 +687,9 @@ impl CloudHome for S3WasmCloudHome {
             .uri(url)
             .header(http::header::RANGE, range_header(start, end))
             .body(Bytes::new())
-            .map_err(|e| CloudHomeError::Storage(format!("build range request for {key}: {e}")))?;
+            .map_err(|e| {
+                CloudHomeError::Transport(format!("build range request for {key}: {e}"))
+            })?;
         let resp = self.send(request).await?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -713,15 +720,15 @@ impl CloudHome for S3WasmCloudHome {
                 .method(Method::GET)
                 .uri(url)
                 .body(Bytes::new())
-                .map_err(|e| CloudHomeError::Storage(format!("build list request: {e}")))?;
+                .map_err(|e| CloudHomeError::Transport(format!("build list request: {e}")))?;
             let resp = self.send(request).await?;
             let status = resp.status();
             let body = resp
                 .text()
                 .await
-                .map_err(|e| CloudHomeError::Storage(format!("read list body: {e}")))?;
+                .map_err(|e| CloudHomeError::Transport(format!("read list body: {e}")))?;
             if !status.is_success() {
-                return Err(CloudHomeError::Storage(format!(
+                return Err(CloudHomeError::Transport(format!(
                     "list {prefix}: status {} {body}",
                     status.as_u16()
                 )));
@@ -775,7 +782,7 @@ impl CloudHome for S3WasmCloudHome {
         } else if status == reqwest::StatusCode::NOT_FOUND {
             Ok(false)
         } else {
-            Err(CloudHomeError::Storage(format!(
+            Err(CloudHomeError::Transport(format!(
                 "head {key}: status {}",
                 status.as_u16()
             )))
@@ -1043,7 +1050,7 @@ mod tests {
         let aborted = std::cell::Cell::new(false);
         let err = finish_complete_response(
             "objects/a",
-            Err(CloudHomeError::Storage("read failed".to_string())),
+            Err(CloudHomeError::Transport("read failed".to_string())),
             || async {
                 aborted.set(true);
             },

@@ -41,7 +41,8 @@ impl OneDriveCloudHome {
         key_service: KeyService,
         clock: ClockRef,
     ) -> Result<Self, CloudHomeError> {
-        let config = Self::oauth_config().map_err(|e| CloudHomeError::Storage(e.to_string()))?;
+        let config =
+            Self::oauth_config().map_err(|e| CloudHomeError::Configuration(e.to_string()))?;
         Ok(Self {
             drive_id,
             folder_id,
@@ -105,12 +106,12 @@ fn parse_onedrive_error_code(body: &str) -> Option<String> {
 /// keeps the raw HTTP status + body for debugging.
 fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> CloudHomeError {
     if parse_onedrive_error_code(body).as_deref() == Some("quotaLimitReached") {
-        return CloudHomeError::Storage(
+        return CloudHomeError::Transport(
             "Your OneDrive storage is full. Free up space at onedrive.live.com to keep syncing."
                 .to_string(),
         );
     }
-    CloudHomeError::Storage(format!("write {key} (HTTP {status}): {body}"))
+    CloudHomeError::Transport(format!("write {key} (HTTP {status}): {body}"))
 }
 
 /// Files at or below this size go up as a single PUT; larger files use a resumable
@@ -170,7 +171,7 @@ impl OAuthRestHome for OneDriveCloudHome {
 
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
-            .map_err(|e| CloudHomeError::Storage(format!("parse list: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("parse list: {e}")))?;
         let encoded_prefix = encode_key(prefix);
         let mut keys = Vec::new();
         if let Some(items) = json["value"].as_array() {
@@ -242,11 +243,11 @@ impl CloudHome for OneDriveCloudHome {
             return Err(classify_write_error(status, &resp_body, key));
         }
         let json: serde_json::Value = serde_json::from_str(&resp_body)
-            .map_err(|e| CloudHomeError::Storage(format!("parse upload session {key}: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("parse upload session {key}: {e}")))?;
         let upload_url = json["uploadUrl"]
             .as_str()
             .ok_or_else(|| {
-                CloudHomeError::Storage(format!("upload session {key}: no uploadUrl returned"))
+                CloudHomeError::Transport(format!("upload session {key}: no uploadUrl returned"))
             })?
             .to_string();
         let key_owned = key.to_string();

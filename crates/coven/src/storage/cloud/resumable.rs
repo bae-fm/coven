@@ -81,7 +81,7 @@ impl super::PartSink for RangePutSink {
             .body(part)
             .send()
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("upload chunk {}: {e}", self.key)))?;
+            .map_err(|e| CloudHomeError::Transport(format!("upload chunk {}: {e}", self.key)))?;
         let status = resp.status();
         // Intermediate parts return the provider's "incomplete" status; the final
         // part returns 200/201. Anything else is a failure.
@@ -149,7 +149,7 @@ mod tests {
             4,
             4,
             "objects/blob".to_string(),
-            Box::new(|status, body| CloudHomeError::Storage(format!("{status}: {body}"))),
+            Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
         );
 
         let err = sink
@@ -158,7 +158,7 @@ mod tests {
             .expect_err("final incomplete status must fail");
         assert_eq!(
             err.to_string(),
-            "storage error: 308 Permanent Redirect: upload incomplete"
+            "transport error: 308 Permanent Redirect: upload incomplete"
         );
         let _ = shutdown.send(());
     }

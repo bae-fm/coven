@@ -123,7 +123,7 @@ impl OAuthSession {
         }
 
         let refresh_token = tokens.refresh_token.as_deref().ok_or_else(|| {
-            CloudHomeError::Storage(format!(
+            CloudHomeError::Configuration(format!(
                 "Your {} sign-in is missing a refresh token. Reconnect to keep syncing.",
                 self.provider_label,
             ))
@@ -132,16 +132,18 @@ impl OAuthSession {
         let new_tokens = oauth::refresh(&self.config, refresh_token, self.clock.as_ref())
             .await
             .map_err(|e| match e {
-                oauth::OAuthError::Reauthorize(detail) => CloudHomeError::Storage(format!(
+                oauth::OAuthError::Reauthorize(detail) => CloudHomeError::Configuration(format!(
                     "Your {} access was revoked or expired. Reconnect to keep syncing. ({detail})",
                     self.provider_label,
                 )),
-                other => CloudHomeError::Storage(format!("OAuth refresh failed: {other}")),
+                other => CloudHomeError::Transport(format!("OAuth refresh failed: {other}")),
             })?;
 
         self.key_service
             .set_cloud_home_oauth_tokens(&new_tokens)
-            .map_err(|e| CloudHomeError::Storage(format!("persist refreshed OAuth tokens: {e}")))?;
+            .map_err(|e| {
+                CloudHomeError::Transport(format!("persist refreshed OAuth tokens: {e}"))
+            })?;
 
         let access_token = new_tokens.access_token.clone();
         *tokens = new_tokens;
@@ -165,14 +167,14 @@ impl OAuthSession {
         let resp = build_request(&token)
             .send()
             .await
-            .map_err(|e| CloudHomeError::Storage(format!("request failed: {e}")))?;
+            .map_err(|e| CloudHomeError::Transport(format!("request failed: {e}")))?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
             let new_token = self.refresh().await?;
             build_request(&new_token)
                 .send()
                 .await
-                .map_err(|e| CloudHomeError::Storage(format!("retry request failed: {e}")))
+                .map_err(|e| CloudHomeError::Transport(format!("retry request failed: {e}")))
         } else {
             Ok(resp)
         }

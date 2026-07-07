@@ -64,7 +64,7 @@ pub fn is_not_found_code(code: Option<&str>) -> bool {
 /// classify a probe failure identically.
 pub fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeError {
     if status == 404 || code == Some("NoSuchBucket") {
-        return CloudHomeError::Storage(format!("bucket {bucket:?} does not exist"));
+        return CloudHomeError::Configuration(format!("bucket {bucket:?} does not exist"));
     }
     let is_auth = status == 403
         || matches!(
@@ -72,11 +72,11 @@ pub fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeEr
             Some("SignatureDoesNotMatch") | Some("InvalidAccessKeyId")
         );
     if is_auth {
-        CloudHomeError::Storage(format!(
+        CloudHomeError::Configuration(format!(
             "S3 credentials rejected (status {status}, code {code:?})"
         ))
     } else {
-        CloudHomeError::Storage(format!("S3 probe failed (status {status}, code {code:?})"))
+        CloudHomeError::Transport(format!("S3 probe failed (status {status}, code {code:?})"))
     }
 }
 

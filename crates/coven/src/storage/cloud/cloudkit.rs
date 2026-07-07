@@ -126,7 +126,7 @@ where
 {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|e| CloudHomeError::Storage(format!("spawn_blocking failed: {e}")))?
+        .map_err(|e| CloudHomeError::Transport(format!("spawn_blocking failed: {e}")))?
 }
 
 /// If a key ends with CloudKit layout metadata, strip that suffix to get the
@@ -187,47 +187,47 @@ fn chunk_part_key(key: &str, upload_id: &str, index: usize) -> String {
 
 fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
     let body = data.strip_prefix(CHUNK_MANIFEST_MAGIC).ok_or_else(|| {
-        CloudHomeError::Storage("CloudKit chunk manifest missing magic".to_string())
+        CloudHomeError::Transport("CloudKit chunk manifest missing magic".to_string())
     })?;
     let body = std::str::from_utf8(body).map_err(|e| {
-        CloudHomeError::Storage(format!("CloudKit chunk manifest is not UTF-8: {e}"))
+        CloudHomeError::Transport(format!("CloudKit chunk manifest is not UTF-8: {e}"))
     })?;
     let mut lines = body.lines();
     let part_count = lines
         .next()
         .ok_or_else(|| {
-            CloudHomeError::Storage("CloudKit chunk manifest missing part count".to_string())
+            CloudHomeError::Transport("CloudKit chunk manifest missing part count".to_string())
         })?
         .parse::<usize>()
         .map_err(|e| {
-            CloudHomeError::Storage(format!(
+            CloudHomeError::Transport(format!(
                 "CloudKit chunk manifest part count is invalid: {e}"
             ))
         })?;
     let total_len = lines
         .next()
         .ok_or_else(|| {
-            CloudHomeError::Storage("CloudKit chunk manifest missing total length".to_string())
+            CloudHomeError::Transport("CloudKit chunk manifest missing total length".to_string())
         })?
         .parse::<usize>()
         .map_err(|e| {
-            CloudHomeError::Storage(format!(
+            CloudHomeError::Transport(format!(
                 "CloudKit chunk manifest total length is invalid: {e}"
             ))
         })?;
     let upload_id = lines
         .next()
         .ok_or_else(|| {
-            CloudHomeError::Storage("CloudKit chunk manifest missing upload id".to_string())
+            CloudHomeError::Transport("CloudKit chunk manifest missing upload id".to_string())
         })?
         .to_string();
     if lines.next().is_some() {
-        return Err(CloudHomeError::Storage(
+        return Err(CloudHomeError::Transport(
             "CloudKit chunk manifest has extra fields".to_string(),
         ));
     }
     if part_count == 0 || total_len == 0 {
-        return Err(CloudHomeError::Storage(
+        return Err(CloudHomeError::Transport(
             "CloudKit chunk manifest must describe a non-empty object".to_string(),
         ));
     }
@@ -237,12 +237,12 @@ fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
     {
-        return Err(CloudHomeError::Storage(
+        return Err(CloudHomeError::Transport(
             "CloudKit chunk manifest upload id is invalid".to_string(),
         ));
     }
     if ChunkManifest::new(total_len, upload_id.clone()).part_count != part_count {
-        return Err(CloudHomeError::Storage(format!(
+        return Err(CloudHomeError::Transport(format!(
             "CloudKit chunk manifest part count {part_count} does not match total length {total_len}"
         )));
     }
@@ -264,7 +264,7 @@ fn parse_chunk_key(key: &str, upload_id: &str) -> Result<Option<usize>, CloudHom
         .rsplit_once(".part")
         .and_then(|(_, suffix)| suffix.parse::<usize>().ok())
         .ok_or_else(|| {
-            CloudHomeError::Storage(format!("chunk key {key:?} missing .part suffix"))
+            CloudHomeError::Transport(format!("chunk key {key:?} missing .part suffix"))
         })?;
     Ok(Some(index))
 }
@@ -293,7 +293,7 @@ fn verify_chunk_manifest(
     chunks: &[(usize, String)],
 ) -> Result<(), CloudHomeError> {
     if chunks.len() != manifest.part_count {
-        return Err(CloudHomeError::Storage(format!(
+        return Err(CloudHomeError::Transport(format!(
             "CloudKit object {key} is incomplete: manifest expects {} parts, found {}",
             manifest.part_count,
             chunks.len()
@@ -301,7 +301,7 @@ fn verify_chunk_manifest(
     }
     for (expected, (actual, _)) in chunks.iter().enumerate() {
         if *actual != expected {
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "CloudKit object {key} is incomplete: missing part {expected}"
             )));
         }
@@ -332,7 +332,7 @@ fn read_chunk(
         CHUNK_SIZE
     };
     if chunk.len() != expected_len {
-        return Err(CloudHomeError::Storage(format!(
+        return Err(CloudHomeError::Transport(format!(
             "CloudKit object {key} part {index} has {} bytes, expected {expected_len}",
             chunk.len()
         )));
@@ -355,7 +355,7 @@ fn read_chunked_object(
         result.extend_from_slice(&chunk);
     }
     if result.len() != manifest.total_len {
-        return Err(CloudHomeError::Storage(format!(
+        return Err(CloudHomeError::Transport(format!(
             "CloudKit object {key} assembled to {} bytes, expected {}",
             result.len(),
             manifest.total_len
@@ -509,7 +509,7 @@ impl super::PartSink for CloudKitPartSink {
         let manifest = ChunkManifest::new(self.total_len, self.upload_id.clone());
         if self.index != manifest.part_count || self.written_len != manifest.total_len {
             self.abort().await;
-            return Err(CloudHomeError::Storage(format!(
+            return Err(CloudHomeError::Transport(format!(
                 "CloudKit multipart {} wrote {} parts/{} bytes, expected {} parts/{} bytes",
                 self.key, self.index, self.written_len, manifest.part_count, manifest.total_len
             )));
@@ -555,7 +555,7 @@ impl CloudHome for CloudKitCloudHome {
         total_len: u64,
     ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
         let total_len = usize::try_from(total_len).map_err(|_| {
-            CloudHomeError::Storage(format!(
+            CloudHomeError::Transport(format!(
                 "CloudKit object {key} is too large for this platform"
             ))
         })?;
@@ -598,7 +598,7 @@ impl CloudHome for CloudKitCloudHome {
             if chunks.is_empty() {
                 return Err(CloudHomeError::NotFound(key));
             }
-            Err(CloudHomeError::Storage(format!(
+            Err(CloudHomeError::Transport(format!(
                 "CloudKit object {key} has chunk records but no manifest"
             )))
         })
@@ -620,7 +620,7 @@ impl CloudHome for CloudKitCloudHome {
             match ops.read_record(&scope, &key) {
                 Ok(data) => {
                     if end > data.len() {
-                        return Err(CloudHomeError::Storage(format!(
+                        return Err(CloudHomeError::Transport(format!(
                             "range {start}..{end} exceeds file size {}",
                             data.len()
                         )));
@@ -637,7 +637,7 @@ impl CloudHome for CloudKitCloudHome {
                     let chunks = list_numbered_chunks(&*ops, &scope, &key, &manifest)?;
                     verify_chunk_manifest(&key, &manifest, &chunks)?;
                     if end > manifest.total_len {
-                        return Err(CloudHomeError::Storage(format!(
+                        return Err(CloudHomeError::Transport(format!(
                             "range {start}..{end} exceeds file size {}",
                             manifest.total_len
                         )));
@@ -674,7 +674,7 @@ impl CloudHome for CloudKitCloudHome {
             if chunks.is_empty() {
                 return Err(CloudHomeError::NotFound(key));
             }
-            Err(CloudHomeError::Storage(format!(
+            Err(CloudHomeError::Transport(format!(
                 "CloudKit object {key} has chunk records but no manifest"
             )))
         })
@@ -827,7 +827,7 @@ mod tests {
                 .unwrap()
                 .push(MockCall::Write(key.to_string()));
             if self.fail_writes.lock().unwrap().contains(key) {
-                return Err(CloudHomeError::Storage(format!("write {key} failed")));
+                return Err(CloudHomeError::Transport(format!("write {key} failed")));
             }
             self.store
                 .lock()
@@ -874,7 +874,7 @@ mod tests {
                 .unwrap()
                 .push(MockCall::Delete(key.to_string()));
             if self.fail_deletes.lock().unwrap().contains(key) {
-                return Err(CloudHomeError::Storage(format!("delete {key} failed")));
+                return Err(CloudHomeError::Transport(format!("delete {key} failed")));
             }
             self.store
                 .lock()

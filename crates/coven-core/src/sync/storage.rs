@@ -94,7 +94,8 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
     fn from(e: crate::storage::cloud::CloudHomeError) -> Self {
         match e {
             crate::storage::cloud::CloudHomeError::NotFound(key) => StorageError::NotFound(key),
-            crate::storage::cloud::CloudHomeError::Storage(msg) => StorageError::Storage(msg),
+            crate::storage::cloud::CloudHomeError::Configuration(msg)
+            | crate::storage::cloud::CloudHomeError::Transport(msg) => StorageError::Storage(msg),
             crate::storage::cloud::CloudHomeError::Io(io_err) => {
                 StorageError::Storage(format!("I/O error: {io_err}"))
             }

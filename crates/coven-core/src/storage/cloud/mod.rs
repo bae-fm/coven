@@ -23,10 +23,33 @@ use crate::local_blob::PlaintextReader;
 pub enum CloudHomeError {
     #[error("not found: {0}")]
     NotFound(String),
-    #[error("storage error: {0}")]
-    Storage(String),
+    /// The cloud home is misconfigured or its credentials are missing or invalid:
+    /// a bucket/folder/drive that isn't set, credentials absent from the keyring, a
+    /// provider unsupported by this build, OAuth that needs re-authorization. The
+    /// user must fix the configuration; retrying the same operation cannot succeed.
+    #[error("configuration error: {0}")]
+    Configuration(String),
+    /// The cloud backend or the network to it failed: a request error, a non-2xx
+    /// status, a malformed response. Transient — a later attempt may succeed.
+    #[error("transport error: {0}")]
+    Transport(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl CloudHomeError {
+    /// Whether retrying the failed operation unchanged could succeed. A transport
+    /// or local-I/O failure is transient (`true`); a missing object, a
+    /// misconfiguration, or absent/invalid credentials will not resolve without the
+    /// object appearing or the user fixing the config (`false`). Answered here, at
+    /// the layer that mints the error, so the sync loop and hosts read one verdict
+    /// rather than each re-deriving it from a message string.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            CloudHomeError::Transport(_) | CloudHomeError::Io(_) => true,
+            CloudHomeError::NotFound(_) | CloudHomeError::Configuration(_) => false,
+        }
+    }
 }
 
 /// Information needed to join a cloud home from another device.
@@ -118,7 +141,7 @@ fn require_provider_email<'a>(
 ) -> Result<&'a str, CloudHomeError> {
     match email {
         Some(email) if !email.is_empty() => Ok(email),
-        _ => Err(CloudHomeError::Storage(format!(
+        _ => Err(CloudHomeError::Configuration(format!(
             "{provider} sharing requires the invitee's provider account email"
         ))),
     }
@@ -232,7 +255,7 @@ impl BlobSource {
                 let chunk = reader
                     .next_chunk(CHUNK_SIZE)
                     .await
-                    .map_err(CloudHomeError::Storage)?;
+                    .map_err(CloudHomeError::Transport)?;
                 if chunk.is_empty() {
                     *eof = true;
                     // A sealed empty file still emits one tag-only chunk, matching
@@ -496,6 +519,19 @@ pub trait CloudHome: crate::MaybeThreadSafe {
         &self,
         revoke: CloudAccessRevoke,
     ) -> Result<RevokeOutcome, CloudHomeError>;
+}
+
+#[cfg(test)]
+mod retryable_tests {
+    use super::*;
+
+    #[test]
+    fn transport_and_io_are_retryable_config_and_not_found_are_not() {
+        assert!(CloudHomeError::Transport("timeout".to_string()).is_retryable());
+        assert!(CloudHomeError::Io(std::io::Error::other("disk")).is_retryable());
+        assert!(!CloudHomeError::Configuration("bucket not set".to_string()).is_retryable());
+        assert!(!CloudHomeError::NotFound("key".to_string()).is_retryable());
+    }
 }
 
 #[cfg(test)]
