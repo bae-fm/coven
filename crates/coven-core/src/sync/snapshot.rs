@@ -615,12 +615,14 @@ pub(crate) async fn authorize_author(
     storage: &dyn SyncStorage,
     author_pubkey: &str,
     owner_pubkey: Option<&str>,
+    watermark_db: Option<&Database>,
 ) -> Result<(), SnapshotError> {
     authorize_membership_author(
         storage,
         author_pubkey,
         owner_pubkey,
         MembershipAuthorRequirement::Owner,
+        watermark_db,
     )
     .await
     .map_err(snapshot_authorization_error)
@@ -661,8 +663,9 @@ impl SnapshotMembership {
 async fn load_snapshot_membership(
     storage: &dyn SyncStorage,
     owner_pubkey: Option<&str>,
+    watermark_db: Option<&Database>,
 ) -> Result<SnapshotMembership, SnapshotError> {
-    match load_membership_chain(storage, owner_pubkey).await {
+    match load_membership_chain(storage, owner_pubkey, watermark_db).await {
         Ok(Some(chain)) => Ok(SnapshotMembership { chain: Some(chain) }),
         Ok(None) => {
             debug!(
@@ -706,6 +709,7 @@ async fn resolve_current_meta(
     storage: &dyn SyncStorage,
     library_id: &str,
     owner_pubkey: Option<&str>,
+    watermark_db: Option<&Database>,
 ) -> Result<ResolvedSnapshotMeta, SnapshotError> {
     // The pointer is the entry point. Its absence means no snapshot has been
     // published (a brand-new library) or the pointer object is missing — either
@@ -724,7 +728,7 @@ async fn resolve_current_meta(
     if !pointer.verify(library_id) {
         return Err(SnapshotError::PointerSignatureInvalid);
     }
-    let membership = load_snapshot_membership(storage, owner_pubkey).await?;
+    let membership = load_snapshot_membership(storage, owner_pubkey, watermark_db).await?;
     membership.authorize_owner(&pointer.author_pubkey)?;
 
     // Follow the pointer to the named generation's metadata — under the pointer's
@@ -803,11 +807,13 @@ pub async fn reclaim_superseded_changesets(
     storage: &dyn SyncStorage,
     library_id: &str,
     owner_pubkey: Option<&str>,
+    watermark_db: Option<&Database>,
 ) -> Result<GcResult, SnapshotError> {
     // Resolve the live generation's authenticated per-device cursors. No pointer
     // means no snapshot has been published yet -- a joiner replays from 0, so there
     // is nothing to reclaim.
-    let resolved = match resolve_current_meta(storage, library_id, owner_pubkey).await {
+    let resolved = match resolve_current_meta(storage, library_id, owner_pubkey, watermark_db).await
+    {
         Ok(resolved) => resolved,
         Err(SnapshotError::Bucket(StorageError::NotFound(_))) => {
             info!("no snapshot pointer found, skipping changeset reclamation");
@@ -986,12 +992,16 @@ pub async fn bootstrap_from_snapshot(
     // touching disk. The pointer absent means no snapshot has been published (a
     // brand-new library) or its object is missing; either way there is no
     // consistent generation to adopt and we refuse, writing nothing.
+    //
+    // Restore is a one-shot, locally-initiated adoption of the snapshot the pointer
+    // names; there is no per-cycle head monotonicity to enforce, so it passes no
+    // watermark reader.
     let ResolvedSnapshotMeta {
         author_pubkey,
         seq,
         meta,
         membership: _,
-    } = resolve_current_meta(storage, library_id, owner_pubkey).await?;
+    } = resolve_current_meta(storage, library_id, owner_pubkey, None).await?;
 
     // Refuse a generation whose synced-schema version is newer than this binary
     // can apply, before downloading the image: its DB carries columns this binary's
@@ -2819,7 +2829,7 @@ mod tests {
         .await
         .expect("push");
 
-        reclaim_superseded_changesets(&storage, TEST_LIBRARY_ID, None)
+        reclaim_superseded_changesets(&storage, TEST_LIBRARY_ID, None, None)
             .await
             .expect("reclaim");
 
@@ -3536,10 +3546,14 @@ mod authorization_tests {
         .await
         .expect("outsider writes a forged meta");
 
-        let err =
-            reclaim_superseded_changesets(&storage, TEST_LIBRARY_ID, Some(&pubkey_hex(&owner)))
-                .await
-                .expect_err("reclamation must refuse a non-member-signed meta before deleting");
+        let err = reclaim_superseded_changesets(
+            &storage,
+            TEST_LIBRARY_ID,
+            Some(&pubkey_hex(&owner)),
+            None,
+        )
+        .await
+        .expect_err("reclamation must refuse a non-member-signed meta before deleting");
         assert!(
             matches!(err, SnapshotError::UnauthorizedAuthor(_)),
             "expected UnauthorizedAuthor, got {err:?}",
@@ -3787,7 +3801,7 @@ mod reclaim_tests {
     }
 
     async fn reclaim(storage: &MockSyncStorage, owner: &UserKeypair) -> GcResult {
-        reclaim_superseded_changesets(storage, TEST_LIBRARY_ID, Some(&pubkey_hex(owner)))
+        reclaim_superseded_changesets(storage, TEST_LIBRARY_ID, Some(&pubkey_hex(owner)), None)
             .await
             .expect("reclaim")
     }

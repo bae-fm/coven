@@ -536,6 +536,7 @@ pub async fn gc_tombstones(
             &tombstone.author_pubkey,
             pinned_owner,
             MembershipAuthorRequirement::WriteCapable,
+            Some(db),
         )
         .await
         .map_err(|e| e.to_string())

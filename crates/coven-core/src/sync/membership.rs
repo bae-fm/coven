@@ -445,7 +445,7 @@ impl MembershipChain {
     pub fn signed_head(&self, signer: &UserKeypair) -> Option<AuthorHead> {
         let author = keys::public_key_hex(signer);
         self.author_tip(&author)
-            .map(|(seq, tip_hash)| AuthorHead::signed(author, seq, tip_hash, signer))
+            .map(|(seq, tip_hash)| AuthorHead::signed(seq, tip_hash, signer))
     }
 
     fn entries_with_effective_coords(&self) -> Vec<(usize, MembershipCoord, &MembershipEntry)> {
@@ -503,14 +503,10 @@ impl MembershipChain {
 }
 
 impl AuthorHead {
-    /// Sign a head for `author_pubkey` certifying its prefix through `seq` with
-    /// tip hash `tip_hash`. `keypair` must be `author_pubkey`'s.
-    pub fn signed(
-        author_pubkey: String,
-        seq: u64,
-        tip_hash: String,
-        keypair: &UserKeypair,
-    ) -> Self {
+    /// Sign a head under `keypair`'s own pubkey, certifying its prefix through
+    /// `seq` with tip hash `tip_hash`.
+    pub fn signed(seq: u64, tip_hash: String, keypair: &UserKeypair) -> Self {
+        let author_pubkey = keys::public_key_hex(keypair);
         let payload = author_head_payload(&author_pubkey, seq, &tip_hash);
         let (_, signature) = keys::sign_hex(keypair, &payload);
         AuthorHead {

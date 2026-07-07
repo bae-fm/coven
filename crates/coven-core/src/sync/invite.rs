@@ -64,24 +64,32 @@ fn next_membership_seq(chain: &MembershipChain, author_pubkey_hex: &str) -> u64 
 }
 
 /// Refuse to write over `author`'s committed prefix. The intended `seq` must sit
-/// exactly one past the head already in storage; if another device (or another of
-/// this owner's devices) advanced the head first, the committed entry at that seq
-/// must not be clobbered, so fail loud and let the caller retry on top of the head
-/// it now observes.
+/// past the head already in storage; if another device (or another of this owner's
+/// devices) advanced the head first, the committed entry at that seq must not be
+/// clobbered, so fail loud and let the caller retry on top of the head it now
+/// observes.
+///
+/// This is a read-then-write guard, not a conditional put — two devices holding the
+/// same restored keypair that read the head at the same instant can both pass and
+/// race the entry object. The design accepts that residual window (a shared keypair
+/// is one identity, not coordinated writers); the losing device's next load fails
+/// the head's tip-hash check and it republishes on the observed head.
 async fn guard_extends_committed_head(
     storage: &dyn SyncStorage,
     author: &str,
     seq: u64,
 ) -> Result<(), InviteError> {
-    let committed = super::membership_ops::committed_head_seq(storage, author)
+    if let Some(committed) = super::membership_ops::committed_head_seq(storage, author)
         .await
-        .map_err(InviteError::Crypto)?;
-    if committed >= seq {
-        return Err(InviteError::StaleMembershipHead {
-            author: author.to_string(),
-            committed,
-            attempted: seq,
-        });
+        .map_err(InviteError::Crypto)?
+    {
+        if committed >= seq {
+            return Err(InviteError::StaleMembershipHead {
+                author: author.to_string(),
+                committed,
+                attempted: seq,
+            });
+        }
     }
     Ok(())
 }
@@ -2070,11 +2078,13 @@ mod tests {
         assert_eq!(unwrapped, key);
     }
 
-    /// Same author, two devices: the second device works from a stale head and its
-    /// publish would collide with the first device's already-committed entry. The
+    /// Same author, two devices, sequenced (not concurrently interleaved): the
+    /// second device acts from a head that the first has already advanced, so its
+    /// write at that seq would collide with the first's committed entry. The
     /// monotonic guard fails it loud (rather than clobbering the committed entry and
     /// breaking every reader's chain); the retry rebuilds on the observed head and
-    /// both invites end committed.
+    /// both invites end committed. The simultaneous-read race is the residual window
+    /// documented on `guard_extends_committed_head`, not covered here.
     #[tokio::test]
     async fn same_author_two_devices_second_fails_loud_then_retry_converges() {
         use crate::sync::membership_ops::{load_anchored_chain, write_founder_entry};

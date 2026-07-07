@@ -305,20 +305,24 @@ pub async fn download_chain(
         .map_err(|e| format!("Invalid membership chain: {e}"))
 }
 
-/// The seq of `author`'s committed head in storage, or `0` if it has none. A head
-/// present but unverifiable is treated as absent (`0`), matching how every other
-/// control object refuses an invalid signature rather than trusting the bytes.
+/// The seq of `author`'s committed head in storage, or `None` when the author has
+/// never published one (a legitimate absence — membership seqs start at 1). A head
+/// present but whose signature does not verify is tamper, not absence: it fails
+/// loud rather than reading as `None` and being silently overwritten.
 pub(crate) async fn committed_head_seq(
     storage: &dyn SyncStorage,
     author: &str,
-) -> Result<u64, String> {
+) -> Result<Option<u64>, String> {
     match storage.get_membership_head(author).await {
         Ok(bytes) => {
             let head: AuthorHead = serde_json::from_slice(&bytes)
                 .map_err(|e| format!("Failed to parse membership head {author}: {e}"))?;
-            Ok(if head.verify() { head.seq } else { 0 })
+            if !head.verify() {
+                return Err(format!("membership head {author} has an invalid signature"));
+            }
+            Ok(Some(head.seq))
         }
-        Err(StorageError::NotFound(_)) => Ok(0),
+        Err(StorageError::NotFound(_)) => Ok(None),
         Err(e) => Err(format!("Failed to read membership head {author}: {e}")),
     }
 }
@@ -328,6 +332,15 @@ pub(crate) async fn committed_head_seq(
 /// not advance the one already stored, so a device working from a stale view fails
 /// loud (and retries on top of the observed head) instead of rolling the head back
 /// over a peer's newer commit.
+///
+/// This read-then-write leaves one residual window: two devices holding the same
+/// restored keypair that pass the precondition at the same instant can each write
+/// an entry object at the same seq, and the later write wins. The design accepts
+/// this — a shared keypair is one identity, not coordinated writers — and it does
+/// not corrupt readers: whichever entry loses, the surviving head's tip-hash check
+/// fails for the other device on its next load, so it republishes on top of the
+/// observed head. No provider gives a conditional put that would close the window
+/// outright.
 pub async fn publish_membership_head(
     storage: &dyn SyncStorage,
     chain: &MembershipChain,
@@ -336,13 +349,14 @@ pub async fn publish_membership_head(
     let head = chain
         .signed_head(signer)
         .ok_or_else(|| "cannot publish a head for an author with no entries".to_string())?;
-    let stored_seq = committed_head_seq(storage, &head.author_pubkey).await?;
-    if stored_seq >= head.seq {
-        return Err(format!(
-            "stale membership head: {} already committed through seq {stored_seq}, \
-             refusing to publish seq {}",
-            head.author_pubkey, head.seq
-        ));
+    if let Some(stored_seq) = committed_head_seq(storage, &head.author_pubkey).await? {
+        if stored_seq >= head.seq {
+            return Err(format!(
+                "stale membership head: {} already committed through seq {stored_seq}, \
+                 refusing to publish seq {}",
+                head.author_pubkey, head.seq
+            ));
+        }
     }
     let bytes = serde_json::to_vec(&head)
         .map_err(|e| format!("Failed to serialize membership head: {e}"))?;
@@ -436,23 +450,28 @@ pub(crate) enum MembershipAuthorAuthorizationError {
 }
 
 /// Authorize a signed control object's author against the library's membership
-/// chain, anchored to the pinned owner when one is known.
+/// chain, anchored to the pinned owner when one is known. `watermark_db` is
+/// `Some` for recurring authorization decisions (a snapshot publish, a blob
+/// deletion), so a stale or rolled-back head can't re-authorize a revoked owner.
 pub(crate) async fn authorize_membership_author(
     storage: &dyn SyncStorage,
     author_pubkey: &str,
     pinned_owner: Option<&str>,
     requirement: MembershipAuthorRequirement,
+    watermark_db: Option<&Database>,
 ) -> Result<(), MembershipAuthorAuthorizationError> {
-    let chain = load_membership_chain(storage, pinned_owner).await?;
+    let chain = load_membership_chain(storage, pinned_owner, watermark_db).await?;
     authorize_loaded_membership_author(chain.as_ref(), author_pubkey, requirement)
         .map_err(MembershipAuthorAuthorizationError::Unauthorized)
 }
 
 /// Load the library membership chain when one exists, anchored to the pinned owner
-/// when known.
+/// when known. `watermark_db` threads through to [`load_anchored_chain`]'s
+/// monotonic head guard for readers that re-evaluate authorization each cycle.
 pub(crate) async fn load_membership_chain(
     storage: &dyn SyncStorage,
     pinned_owner: Option<&str>,
+    watermark_db: Option<&Database>,
 ) -> Result<Option<MembershipChain>, MembershipAuthorAuthorizationError> {
     let entries = storage
         .list_membership_entries()
@@ -469,7 +488,7 @@ pub(crate) async fn load_membership_chain(
         return Ok(None);
     }
 
-    let chain = load_anchored_chain(storage, &entries, pinned_owner, None)
+    let chain = load_anchored_chain(storage, &entries, pinned_owner, watermark_db)
         .await
         .map_err(|e| MembershipAuthorAuthorizationError::Unauthorized(e.to_string()))?;
     Ok(Some(chain))
@@ -519,8 +538,12 @@ pub(crate) async fn load_anchored_chain(
     for author in &authors {
         let bytes = match storage.get_membership_head(author).await {
             Ok(bytes) => bytes,
-            // An author with entries but no head has committed nothing yet.
-            Err(StorageError::NotFound(_)) => continue,
+            Err(StorageError::NotFound(_)) => {
+                // Entries exist but no head: this author has committed nothing yet,
+                // so its prefix contributes nothing to the committed set.
+                debug!(%author, "membership head absent; author's entries are uncommitted");
+                continue;
+            }
             Err(e) => {
                 return Err(AnchoredChainError::LoadFailed(format!(
                     "Failed to get membership head {author}: {e}"
@@ -536,14 +559,16 @@ pub(crate) async fn load_anchored_chain(
             )));
         }
         if let Some(db) = watermark_db {
-            let accepted = read_head_watermark(db, author)
+            if let Some(accepted) = read_head_watermark(db, author)
                 .await
-                .map_err(AnchoredChainError::LoadFailed)?;
-            if head.seq < accepted {
-                return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {author} regressed to seq {} below the accepted {accepted}",
-                    head.seq
-                )));
+                .map_err(AnchoredChainError::LoadFailed)?
+            {
+                if head.seq < accepted {
+                    return Err(AnchoredChainError::LoadFailed(format!(
+                        "membership head {author} regressed to seq {} below the accepted {accepted}",
+                        head.seq
+                    )));
+                }
             }
         }
         heads.push(head);
@@ -596,12 +621,13 @@ fn head_watermark_key(author: &str) -> String {
     format!("membership_head_seq/{author}")
 }
 
-async fn read_head_watermark(db: &Database, author: &str) -> Result<u64, String> {
+async fn read_head_watermark(db: &Database, author: &str) -> Result<Option<u64>, String> {
     match db.get_sync_state(&head_watermark_key(author)).await {
         Ok(Some(value)) => value
             .parse::<u64>()
+            .map(Some)
             .map_err(|e| format!("membership head watermark for {author} is not a seq: {e}")),
-        Ok(None) => Ok(0),
+        Ok(None) => Ok(None),
         Err(e) => Err(format!("read membership head watermark for {author}: {e}")),
     }
 }
@@ -773,9 +799,9 @@ mod tests {
     }
 
     /// A committed prefix is fetched by keyed GET up to the head's seq, so an entry
-    /// the LIST hasn't caught up to yet (eventual-consistency lag, issue #84) is
-    /// recovered rather than treated as a gap: the head, not the listing, decides
-    /// how far the prefix reaches.
+    /// a lagging (eventually-consistent) LIST hasn't surfaced yet is recovered
+    /// rather than treated as a gap: the head, not the listing, decides how far the
+    /// prefix reaches.
     #[tokio::test]
     async fn list_lagging_middle_entry_is_recovered_by_keyed_get() {
         let owner = UserKeypair::generate();
@@ -1050,7 +1076,7 @@ mod tests {
 
         // A stale read serves the head from before the Remove (seq 2). The reader
         // refuses to regress rather than re-admit the member.
-        let stale = AuthorHead::signed(owner_pk.clone(), 2, entry_hash(&add), &owner);
+        let stale = AuthorHead::signed(2, entry_hash(&add), &owner);
         storage
             .put_membership_head(&owner_pk, serde_json::to_vec(&stale).unwrap())
             .await

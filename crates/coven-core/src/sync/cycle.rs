@@ -809,7 +809,9 @@ pub async fn run_single_sync_cycle(
             .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
             .await
             .map_err(|e| format!("read pinned owner for snapshot authorization: {e}"))?;
-        match super::snapshot::authorize_author(storage, &our_pk, pinned_owner.as_deref()).await {
+        match super::snapshot::authorize_author(storage, &our_pk, pinned_owner.as_deref(), Some(db))
+            .await
+        {
             Ok(()) => true,
             Err(super::snapshot::SnapshotError::UnauthorizedAuthor(reason)) => {
                 info!(
@@ -903,6 +905,7 @@ pub async fn run_single_sync_cycle(
                                     storage,
                                     library_id,
                                     pinned_owner.as_deref(),
+                                    Some(db),
                                 )
                                 .await
                                 {
