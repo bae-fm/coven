@@ -3,8 +3,8 @@ layout: home
 
 hero:
     name: coven
-    text: Private serverless sync
-    tagline: A library for local-first apps that scale to the cloud with nothing to run
+    text: Serverless sync
+    tagline: Build private, local-first apps that scale to the cloud with nothing to run
     image:
         src: /favicon.svg
         alt: coven
@@ -28,7 +28,7 @@ features:
           width: 28
           height: 28
       title: Serverless
-      details: 'Users bring their own storage. Devices sync through S3, Google Drive, Dropbox, OneDrive, or iCloud. Nothing to deploy or operate.'
+      details: 'Devices sync through storage users bring: Google Drive, Dropbox, OneDrive, iCloud, or S3. Nothing to deploy or operate.'
       link: /docs/storage
     - icon:
           light: /icons/database-light.svg
@@ -36,15 +36,15 @@ features:
           width: 28
           height: 28
       title: Pick what syncs
-      details: 'SQLite in a sync harness: ordinary tables, ordinary SQL. Pick which tables and rows sync, relations follow automatically.'
+      details: 'SQLite in a sync harness: choose what tables and rows to sync, relations follow automatically.'
       link: /docs/local-data
     - icon:
           light: /icons/image-light.svg
           dark: /icons/image-dark.svg
           width: 28
           height: 28
-      title: Not just data
-      details: 'Rows carry files: photos, audio, anything. A file commits with its row and syncs alongside it, encrypted.'
+      title: Blobs, too
+      details: 'Rows carry files. A file commits in the row''s transaction and syncs alongside it.'
       link: /docs/blobs
     - icon:
           light: /icons/layers-light.svg
@@ -52,7 +52,7 @@ features:
           width: 28
           height: 28
       title: Beyond the disk
-      details: 'Heavy files can live in the cloud and stream back when read. Caches evict on a budget; pin what should stay offline.'
+      details: 'Files can live in the cloud and stream back when read. Pin what should stay offline.'
       link: /docs/cache
     - icon:
           light: /icons/devices-light.svg
@@ -60,7 +60,7 @@ features:
           width: 28
           height: 28
       title: Everyone writes
-      details: 'No primary, no coordinator. Any device edits anything, offline included, and concurrent edits merge on their own.'
+      details: 'Any device edits anything, offline included, and concurrent edits merge on their own.'
       link: /docs/sync-model
 ---
 
@@ -201,14 +201,65 @@ away. [How storage works →](/docs/storage)
     --vp-home-hero-name-background: linear-gradient(120deg, #8fd9d4 30%, #4a9a95);
 }
 
+/* Smaller eyebrow, bigger jumbo (VitePress sizes both at 32/48/56px
+   across its breakpoints). */
+.VPHero .name {
+    font-size: 26px;
+    line-height: 34px;
+}
+
+.VPHero .text {
+    font-size: 40px;
+    line-height: 48px;
+}
+
+.VPHero .tagline {
+    font-size: 16px;
+    line-height: 24px;
+}
+
+@media (min-width: 640px) {
+    .VPHero .name {
+        font-size: 30px;
+        line-height: 38px;
+    }
+
+    .VPHero .text {
+        font-size: 56px;
+        line-height: 64px;
+    }
+
+    .VPHero .tagline {
+        font-size: 18px;
+        line-height: 26px;
+    }
+}
+
+@media (min-width: 960px) {
+    .VPHero .name {
+        font-size: 34px;
+        line-height: 42px;
+    }
+
+    .VPHero .text {
+        font-size: 64px;
+        line-height: 72px;
+    }
+
+    .VPHero .tagline {
+        font-size: 20px;
+        line-height: 28px;
+    }
+}
+
 /* Wider gap between the feature cards (VitePress default is 16px:
    8px item padding against a -8px items margin). */
 .VPFeatures .items {
-    margin: -14px;
+    margin: -11px;
 }
 
 .VPFeatures .item {
-    padding: 14px;
+    padding: 11px;
 }
 
 .home-body {
