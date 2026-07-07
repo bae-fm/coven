@@ -33,7 +33,7 @@ use crate::sync::hlc::Hlc;
 pub use crate::sync::membership::MemberInfo;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
-use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle};
+use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 
 /// Supplies the host's current config on demand. coven reads it fresh each call
 /// — never snapshotting or writing it — so a host with reactive config sees
@@ -106,6 +106,11 @@ pub struct SyncManager {
     /// it, so it shares the clock the host stamps rows from.
     hlc: Arc<Hlc>,
 
+    /// The status broadcast the [`CovenHandle`](crate::CovenHandle) owns, cloned
+    /// into every sync loop this manager starts so a subscription outlives the
+    /// loop restarts a reconnect performs.
+    status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
+
     // Mutable sync state — updated when providers are connected/disconnected
     sync_loop_handle: RwLock<Option<Arc<SyncLoopHandle>>>,
     cloud_home: RwLock<Option<Arc<dyn CloudHome>>>,
@@ -129,6 +134,7 @@ impl SyncManager {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<LibraryOpenGuard>,
+        status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     ) -> Self {
         let hlc = db.hlc();
         Self {
@@ -141,6 +147,7 @@ impl SyncManager {
             observer,
             open_guard,
             hlc,
+            status_tx,
             sync_loop_handle: RwLock::new(None),
             cloud_home: RwLock::new(None),
         }
@@ -261,6 +268,7 @@ impl SyncManager {
             library_dir,
             self.observer.clone(),
             self.open_guard.clone(),
+            self.status_tx.clone(),
         ));
         handle.start().map_err(SyncError::Loop)?;
 
@@ -689,6 +697,7 @@ mod tests {
             None,
             None,
             LibraryOpenGuard::acquire_for_test(&library_dir),
+            tokio::sync::broadcast::channel(16).0,
         );
 
         let error = manager
@@ -733,6 +742,7 @@ mod tests {
             None,
             None,
             open_guard,
+            tokio::sync::broadcast::channel(16).0,
         );
 
         let error = manager
@@ -768,6 +778,7 @@ mod tests {
             None,
             None,
             open_guard,
+            tokio::sync::broadcast::channel(16).0,
         );
 
         manager
@@ -825,6 +836,7 @@ mod tests {
             None,
             None,
             open_guard,
+            tokio::sync::broadcast::channel(16).0,
         );
 
         manager

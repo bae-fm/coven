@@ -25,10 +25,6 @@ pub(crate) mod blob {
     }
 }
 
-pub(crate) mod changeset {
-    pub use coven_core::changeset::*;
-}
-
 pub(crate) mod clock {
     pub use coven_core::clock::*;
 }
@@ -407,9 +403,12 @@ pub use coven_core::{
 };
 
 // Sync-status surface a host renders from `CovenHandle::subscribe_sync_status`:
-// the per-cycle alert bundle, the per-device activity, and the held-changeset
-// detail the alerts carry.
-pub use coven_core::{DeviceActivity, HeldChangeset, HeldChangesetReason, SyncLoopAlerts};
+// the status enum, its completed-cycle success payload, the per-cycle alert
+// bundle, the per-device activity, and the held-changeset detail the alerts carry.
+pub use coven_core::{
+    DeviceActivity, HeldChangeset, HeldChangesetReason, SyncLoopAlerts, SyncLoopSuccess,
+};
+pub use sync::sync_loop::SyncLoopStatus;
 
 // In-memory cloud home and durable upload-queue rows for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]

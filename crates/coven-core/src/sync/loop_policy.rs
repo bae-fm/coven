@@ -40,19 +40,6 @@ pub struct SyncLoopAlerts {
 }
 
 impl SyncLoopAlerts {
-    /// The empty set of alerts — a cycle that surfaced no warning, or one that
-    /// has not completed yet (a cycle-start status).
-    pub fn none() -> Self {
-        SyncLoopAlerts {
-            skipped_schema: 0,
-            rejected_unauthorized: 0,
-            invalid_signatures: 0,
-            held_changesets: Vec::new(),
-            constraint_conflicts: 0,
-            asset_downloads_failed: false,
-        }
-    }
-
     pub fn primary_message(&self) -> Option<String> {
         if self.skipped_schema > 0 {
             Some(format!(
@@ -100,6 +87,14 @@ pub struct SyncLoopSuccess {
     /// last-sync time — for a host to render which devices synced and when.
     pub device_activity: Vec<DeviceActivity>,
     pub data_changed: bool,
+    /// Row changes from applied changesets, for the host to map to domain events.
+    /// `Some` when `data_changed`. A refresh *hint*, not a complete stream: a
+    /// lagged subscriber can miss it entirely, and it can overstate a
+    /// partially-applied changeset (see [`PullResult::row_changes`]), so a host
+    /// re-reads the affected rows by primary key rather than trusting it as
+    /// exhaustive.
+    ///
+    /// [`PullResult::row_changes`]: crate::sync::pull::PullResult::row_changes
     pub row_changes: Option<Vec<RowChange>>,
     pub alerts: SyncLoopAlerts,
 }
@@ -229,10 +224,15 @@ mod tests {
     }
 
     #[test]
-    fn success_carries_device_activity_and_held_detail() {
+    fn success_carries_device_activity_and_all_alert_categories() {
         let mut result = cycle_result();
         result.device_activity = device_activity(2);
         result.held_changesets = held(3);
+        result.skipped_schema = 1;
+        result.rejected_unauthorized = 2;
+        result.invalid_signatures = 4;
+        result.constraint_conflicts = 5;
+        result.asset_downloads_failed = true;
 
         let decision = after_success(result);
 
@@ -242,13 +242,15 @@ mod tests {
                 assert_eq!(success.device_activity.len(), 2);
                 assert_eq!(success.device_activity[0].author, "author-0");
                 assert_eq!(success.device_count, 3);
+                // Every warning category reaches the report's alerts.
+                assert_eq!(success.alerts.skipped_schema, 1);
+                assert_eq!(success.alerts.rejected_unauthorized, 2);
+                assert_eq!(success.alerts.invalid_signatures, 4);
+                assert_eq!(success.alerts.constraint_conflicts, 5);
+                assert!(success.alerts.asset_downloads_failed);
                 // Held changesets travel with device/seq/reason, not a bare count.
                 assert_eq!(success.alerts.held_changesets.len(), 3);
                 assert_eq!(success.alerts.held_changesets[0].device_id, "dev-0");
-                assert_eq!(
-                    success.alerts.primary_message().as_deref(),
-                    Some("3 invalid changes are stalled."),
-                );
             }
             SyncLoopReport::Failure(error) => panic!("expected success, got {error}"),
         }

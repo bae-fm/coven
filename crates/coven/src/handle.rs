@@ -138,6 +138,15 @@ pub struct CovenHandle {
     /// Serializes async lifecycle replacement so concurrent connects/restarts
     /// cannot each start a loop and race to install the survivor.
     sync_lifecycle: Arc<tokio::sync::Mutex<()>>,
+
+    /// The sync-status broadcast this handle owns. Every [`SyncManager`] it builds
+    /// clones this sender into its sync loop, so a
+    /// [`subscribe_sync_status`](Self::subscribe_sync_status) receiver keeps
+    /// receiving across a reconnect — which drops the old manager and loop and
+    /// builds new ones, but reuses this same channel. A subscription created
+    /// before any provider is connected is valid and starts receiving once a loop
+    /// runs.
+    sync_status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
 }
 
 impl CovenHandle {
@@ -173,6 +182,11 @@ impl CovenHandle {
             open_guard,
             sync: Arc::new(RwLock::new(None)),
             sync_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            // Capacity 16: a subscriber more than 16 statuses behind observes a
+            // lag error and misses the gap. Documented on `SyncLoopStatus` — its
+            // `row_changes` is a refresh hint, so a lagged subscriber re-reads by
+            // primary key rather than relying on a complete stream.
+            sync_status_tx: tokio::sync::broadcast::channel(16).0,
         }
     }
 
@@ -211,14 +225,19 @@ impl CovenHandle {
         self.sync.read().unwrap().clone()
     }
 
-    pub fn subscribe_sync_status(
-        &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<SyncLoopStatus>, SyncError> {
-        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        let loop_handle = manager
-            .sync_loop_handle()
-            .ok_or(SyncError::LoopNotRunning)?;
-        Ok(loop_handle.subscribe())
+    /// Subscribe to the sync loop's [`SyncLoopStatus`] stream. The channel is
+    /// owned by this handle, not the loop, so the receiver keeps working across a
+    /// reconnect and may be created before any provider is connected (it starts
+    /// receiving once a loop runs). Infallible for that reason — there is no loop
+    /// state to check.
+    ///
+    /// Delivery is a bounded broadcast (capacity 16): a receiver that falls more
+    /// than 16 statuses behind observes a lag error and misses the gap. Since a
+    /// `Succeeded` status's `row_changes` is a refresh hint, a lagged subscriber
+    /// re-reads the affected rows by primary key rather than treating the stream as
+    /// complete.
+    pub fn subscribe_sync_status(&self) -> tokio::sync::broadcast::Receiver<SyncLoopStatus> {
+        self.sync_status_tx.subscribe()
     }
 
     /// Build the [`SyncManager`] for a connected cloud provider, start its sync
@@ -295,6 +314,7 @@ impl CovenHandle {
             cloudkit_ops,
             self.observer.clone(),
             self.open_guard.clone(),
+            self.sync_status_tx.clone(),
         ));
         start(manager.clone()).await?;
         *self.sync.write().unwrap() = Some(manager.clone());
@@ -734,6 +754,7 @@ mod tests {
     use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_library_dir};
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     struct TestCloudKitOps {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
@@ -1271,6 +1292,107 @@ mod tests {
             home.get(cloud_key).as_deref(),
             Some(plaintext.as_slice()),
             "the host-driven drain used the mutated loop cipher lock",
+        );
+    }
+
+    fn status_test_handle(library_id: &str) -> (tempfile::TempDir, CovenHandle) {
+        let (tmp, library_dir) = temp_library_dir();
+        let db = read_test_db("images");
+        let config = Config::with_defaults(
+            library_id.to_string(),
+            "test-device".to_string(),
+            library_dir.clone(),
+            "Test Library".to_string(),
+        );
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let handle = CovenHandle::new(
+            db.clone(),
+            db.stamper(),
+            library_dir.clone(),
+            config_provider,
+            KeyService::new(library_id.to_string()),
+            Arc::new(SystemClock),
+            None,
+            None,
+            LibraryOpenGuard::acquire_for_test(&library_dir),
+        );
+        (tmp, handle)
+    }
+
+    /// The loop emits `Started` when a cycle begins and a terminal status when it
+    /// ends, so a host can show a sync in progress and then its outcome.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn subscribed_host_sees_started_then_a_terminal_status() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, handle) = status_test_handle("lib-status-syncing");
+        let mut rx = handle.subscribe_sync_status();
+
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("connect over injected home");
+
+        let start = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("a start status arrives within the timeout")
+            .expect("the status channel is open");
+        assert!(
+            matches!(start, SyncLoopStatus::Started),
+            "the first status of a cycle marks it in progress",
+        );
+
+        let done = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("a completion status arrives within the timeout")
+            .expect("the status channel is open");
+        // The cycle over an empty plaintext home succeeds — a terminal Succeeded,
+        // never a Failed.
+        assert!(
+            matches!(done, SyncLoopStatus::Succeeded(_)),
+            "a successful cycle ends with Succeeded, got {done:?}",
+        );
+    }
+
+    /// A subscription created before any provider is connected keeps receiving
+    /// across a reconnect — the channel is owned by the handle, not the loop that
+    /// a reconnect replaces. Under a per-loop channel the receiver would observe
+    /// `Closed` after the reconnect dropped the first loop's sender.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn subscription_survives_a_reconnect() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, handle) = status_test_handle("lib-status-reconnect");
+
+        // Subscribe before any provider is connected — valid because the channel
+        // is handle-owned.
+        let mut rx = handle.subscribe_sync_status();
+
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("first connect");
+        // Reconnect immediately: this drops the first loop and starts a second one
+        // over a fresh home before the first loop's startup delay elapses.
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("reconnect");
+
+        let status = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("a status arrives from the post-reconnect loop")
+            .expect("a reconnect does not close the handle-owned status channel");
+        assert!(
+            matches!(status, SyncLoopStatus::Started),
+            "the received status is a cycle start marker, got {status:?}",
         );
     }
 }

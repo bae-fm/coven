@@ -198,9 +198,10 @@ pub use storage::cloud::{
 // per-changeset held detail (device, seq, reason) the sync-status alerts carry.
 pub use sync::pull::{HeldChangeset, HeldChangesetReason, InvalidSignature, RejectedUnauthorized};
 
-// Sync-status surface: the per-cycle alert bundle and the per-device activity a
-// host renders "which devices synced, and when" from.
-pub use sync::loop_policy::SyncLoopAlerts;
+// Sync-status surface: the completed-cycle success payload, the per-cycle alert
+// bundle it carries, and the per-device activity a host renders "which devices
+// synced, and when" from.
+pub use sync::loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use sync::status::DeviceActivity;
 
 // In-memory cloud home for host integration tests.

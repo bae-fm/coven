@@ -8,7 +8,9 @@
 //! endpoint/auth resolution recurses deeply enough to overflow the default
 //! secondary-thread stack in debug builds. The thread is given a main-thread-
 //! sized stack so S3 sync doesn't `SIGBUS` in `resolve_endpoint`.
-//! Emits [`SyncLoopStatus`] events through a broadcast channel.
+//! Emits [`SyncLoopStatus`] events through a broadcast channel the
+//! [`CovenHandle`](crate::CovenHandle) owns — so a subscription survives a loop
+//! restart, and the loop only ever sends.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,7 +20,6 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, info};
 
 use crate::blob::BlobTransitionObserver;
-use crate::changeset::RowChange;
 use crate::clock::ClockRef;
 use crate::coven::LibraryOpenGuard;
 use crate::database::Database;
@@ -28,7 +29,7 @@ use crate::library_dir::LibraryDir;
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::cycle::SyncComponents;
 use super::hlc::Hlc;
-use super::loop_policy::{self, LoopWait, SyncLoopReport};
+use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
 use super::storage::SyncStorage;
 
 /// Why starting or stopping the background sync loop failed.
@@ -46,18 +47,31 @@ pub enum SyncLoopError {
     ThreadPanicked,
 }
 
-/// Status emitted by the sync loop after each cycle.
+/// A sync-loop status the host renders. The loop emits [`Started`](Self::Started)
+/// when a cycle begins and one terminal status — [`Succeeded`](Self::Succeeded)
+/// or [`Failed`](Self::Failed) — when it ends. The in-progress marker is the
+/// variant itself, so there is no separate "syncing" flag and no outcome fields
+/// to leave unset on a start.
+///
+/// A completed cycle is [`Succeeded`] or [`Failed`], never both: a whole-cycle
+/// failure is `Failed`; an otherwise-successful cycle that surfaced warnings
+/// (skipped-schema, unauthorized, held changesets, …) is `Succeeded`, and the
+/// warnings ride in its [`SyncLoopSuccess::alerts`]. So a host tells "failed" from
+/// "succeeded with warnings" by which variant it got, not by sniffing a field.
+///
+/// Delivery is a bounded broadcast (capacity 16). A subscriber that falls more
+/// than 16 statuses behind observes a lag error and misses the intervening
+/// statuses — including a `Succeeded`'s [`SyncLoopSuccess::row_changes`], which is
+/// a refresh *hint* (see its own doc), not a complete change stream.
 #[derive(Debug, Clone)]
-pub struct SyncLoopStatus {
-    pub configured: bool,
-    pub syncing: bool,
-    pub last_sync_time: Option<String>,
-    pub error: Option<String>,
-    pub device_count: u32,
-    pub data_changed: bool,
-    /// Row changes from applied changesets, for the host to map to domain
-    /// events. Present when `data_changed` is true.
-    pub row_changes: Option<Vec<RowChange>>,
+pub enum SyncLoopStatus {
+    /// A cycle has begun; the paired terminal status carries its outcome.
+    Started,
+    /// The cycle completed. Warnings, if any, ride in the success's `alerts`;
+    /// the observed device activity and applied row changes are on it too.
+    Succeeded(SyncLoopSuccess),
+    /// The cycle failed as a whole — no outcome to report, only the fault.
+    Failed { error: String },
 }
 
 /// Manages the background sync loop and provides access to sync components.
@@ -69,7 +83,10 @@ pub struct SyncLoopHandle {
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     stop_rx: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
-    event_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
+    /// The status broadcast, owned by the [`CovenHandle`] and cloned into each
+    /// loop it starts, so a subscription survives a loop restart (a reconnect
+    /// builds a fresh loop but keeps this same sender). The loop only sends here.
+    status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     running: Arc<AtomicBool>,
 }
@@ -102,10 +119,10 @@ impl SyncLoopHandle {
         library_dir: LibraryDir,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<LibraryOpenGuard>,
+        status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
         Self {
             inner: Arc::new(SyncLoopInner {
@@ -126,7 +143,7 @@ impl SyncLoopHandle {
             trigger_rx: std::sync::Mutex::new(Some(trigger_rx)),
             stop_tx,
             stop_rx: std::sync::Mutex::new(Some(stop_rx)),
-            event_tx,
+            status_tx,
             thread_handle: std::sync::Mutex::new(None),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -164,7 +181,7 @@ impl SyncLoopHandle {
         };
 
         let inner = Arc::clone(&self.inner);
-        let event_tx = self.event_tx.clone();
+        let status_tx = self.status_tx.clone();
         let clock = self.clock.clone();
         let library_dir = self.library_dir.clone();
         let running = Arc::clone(&self.running);
@@ -188,16 +205,7 @@ impl SyncLoopHandle {
                     Err(e) => {
                         let error = format!("failed to create sync loop runtime: {e}");
                         error!("{error}");
-                        let status = SyncLoopStatus {
-                            configured: true,
-                            syncing: false,
-                            last_sync_time: None,
-                            error: Some(error),
-                            device_count: 0,
-                            data_changed: false,
-                            row_changes: None,
-                        };
-                        if event_tx.send(status).is_err() {
+                        if status_tx.send(SyncLoopStatus::Failed { error }).is_err() {
                             debug!("sync loop runtime failure had no status subscribers");
                         }
                         return;
@@ -218,41 +226,24 @@ impl SyncLoopHandle {
 
                     let mut consecutive_failures: u32 = 0;
                     while running.load(Ordering::Acquire) && !*stop_rx.borrow() {
+                        // A cycle is starting — mark it in progress before the work,
+                        // so a host can show that a sync is running.
+                        if status_tx.send(SyncLoopStatus::Started).is_err() {
+                            debug!("sync loop cycle-start status had no subscribers");
+                        }
+
                         let decision = match run_single_cycle(&inner, clock.as_ref(), &library_dir).await {
                             Ok(result) => loop_policy::after_success(result),
                             Err(error) => loop_policy::after_failure(error, consecutive_failures, 300),
                         };
                         consecutive_failures = decision.consecutive_failures;
 
-                        match decision.report {
-                            SyncLoopReport::Success(success) => {
-                                let status = SyncLoopStatus {
-                                    configured: true,
-                                    syncing: false,
-                                    last_sync_time: Some(success.last_sync_time),
-                                    error: success.alerts.primary_message(),
-                                    device_count: success.device_count,
-                                    data_changed: success.data_changed,
-                                    row_changes: success.row_changes,
-                                };
-                                if event_tx.send(status).is_err() {
-                                    debug!("sync loop success status had no subscribers");
-                                }
-                            }
-                            SyncLoopReport::Failure(error) => {
-                                let status = SyncLoopStatus {
-                                    configured: true,
-                                    syncing: false,
-                                    last_sync_time: None,
-                                    error: Some(error),
-                                    device_count: 0,
-                                    data_changed: false,
-                                    row_changes: None,
-                                };
-                                if event_tx.send(status).is_err() {
-                                    debug!("sync loop failure status had no subscribers");
-                                }
-                            }
+                        let status = match decision.report {
+                            SyncLoopReport::Success(success) => SyncLoopStatus::Succeeded(success),
+                            SyncLoopReport::Failure(error) => SyncLoopStatus::Failed { error },
+                        };
+                        if status_tx.send(status).is_err() {
+                            debug!("sync loop cycle-complete status had no subscribers");
                         }
 
                         let wait = match decision.wait {
@@ -333,11 +324,6 @@ impl SyncLoopHandle {
                 debug!("Sync trigger channel closed, loop is not running");
             }
         }
-    }
-
-    /// Subscribe to sync loop status events.
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SyncLoopStatus> {
-        self.event_tx.subscribe()
     }
 
     // -- Accessors for membership operations --
