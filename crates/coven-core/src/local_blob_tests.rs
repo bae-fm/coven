@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
-use crate::local_blob::{PlatformLocalBlobBackend, PlatformPlaintextReader};
+use crate::local_blob::{PlatformLocalBlobBackend, PlatformPlaintextReader, TEMP_BLOB_PREFIX};
 
 pub(crate) static TEST_LOCAL_BLOB_BACKEND: TestLocalBlobBackend = TestLocalBlobBackend;
 
@@ -65,7 +65,7 @@ impl PlatformLocalBlobBackend for TestLocalBlobBackend {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+        let tmp = parent.join(format!("{TEMP_BLOB_PREFIX}{}", uuid::Uuid::new_v4()));
 
         let write_tmp = async {
             let mut file = tokio::fs::File::create(&tmp)
@@ -151,7 +151,7 @@ impl PlatformLocalBlobBackend for TestLocalBlobBackend {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+        let tmp = parent.join(format!("{TEMP_BLOB_PREFIX}{}", uuid::Uuid::new_v4()));
         tokio::fs::write(&tmp, bytes)
             .await
             .map_err(|e| format!("write local blob {}: {e}", tmp.display()))?;

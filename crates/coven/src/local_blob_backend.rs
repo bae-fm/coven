@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use coven_core::local_blob::{PlatformLocalBlobBackend, PlatformPlaintextReader};
+use coven_core::local_blob::{PlatformLocalBlobBackend, PlatformPlaintextReader, TEMP_BLOB_PREFIX};
 use tokio::io::AsyncReadExt;
 
 static NATIVE_LOCAL_BLOB_BACKEND: NativeLocalBlobBackend = NativeLocalBlobBackend;
@@ -70,7 +70,7 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         // A temp sibling in the destination directory keeps the rename within one
         // filesystem, so readers see either the previous destination or the whole
         // copied file.
-        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+        let tmp = parent.join(format!("{TEMP_BLOB_PREFIX}{}", uuid::Uuid::new_v4()));
 
         let copy = async {
             let mut input = tokio::fs::File::open(src)
@@ -142,7 +142,7 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
-        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+        let tmp = parent.join(format!("{TEMP_BLOB_PREFIX}{}", uuid::Uuid::new_v4()));
 
         let write_tmp = async {
             let mut file = tokio::fs::File::create(&tmp)
@@ -234,7 +234,7 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         // A temp sibling in the same directory keeps the final rename on one
         // filesystem. The destination name does not point at the new bytes until
         // the temp file has been fully written and fsynced.
-        let tmp = parent.join(format!(".tmp.{}", uuid::Uuid::new_v4()));
+        let tmp = parent.join(format!("{TEMP_BLOB_PREFIX}{}", uuid::Uuid::new_v4()));
 
         let write_tmp = async {
             let mut file = tokio::fs::File::create(&tmp)

@@ -2,6 +2,24 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
+/// The filename prefix an atomic blob write gives its in-progress temp sibling
+/// (`.tmp.<uuid>`) before the fsync-then-rename that makes it the committed
+/// destination. Every backend that writes through temp+rename names the temp with
+/// this prefix, and the two readers that must tell a temp apart from a committed blob
+/// — the eviction sweep ([`crate::blob::cache::evict_to_budget`]) and the host's
+/// open-time orphan sweep — match on it. A file carrying this prefix is a write in
+/// flight or a crash leftover, never a blob whose bytes are reclaimable.
+pub const TEMP_BLOB_PREFIX: &str = ".tmp.";
+
+/// Whether `path`'s file name marks it as an atomic-write temp sibling
+/// ([`TEMP_BLOB_PREFIX`]) rather than a committed blob. A non-UTF-8 name is never one
+/// of coven's temp names, so it is not a temp.
+pub fn is_temp_blob_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(TEMP_BLOB_PREFIX))
+}
+
 pub struct PlaintextReader(Box<dyn PlatformPlaintextReader>);
 
 impl PlaintextReader {
@@ -97,8 +115,15 @@ pub async fn sync_parent_dir(path: &Path) -> Result<(), String> {
     backend().sync_parent_dir(path).await
 }
 
+/// Every committed file under `dir` as `(path, mtime_ms, size)`. In-flight
+/// atomic-write temps ([`TEMP_BLOB_PREFIX`]) are excluded here, at the boundary,
+/// so no reader of a blob tree ever counts or deletes a concurrent write's
+/// temp; only the open-time orphan sweep (which reads directories itself)
+/// touches temps.
 pub async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
-    backend().walk_files(dir).await
+    let mut entries = backend().walk_files(dir).await?;
+    entries.retain(|(path, _, _)| !is_temp_blob_path(path));
+    Ok(entries)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

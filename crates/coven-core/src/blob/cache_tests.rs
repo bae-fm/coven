@@ -1967,3 +1967,68 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
         "the cache is left over budget, holding exactly the in-use file",
     );
 }
+
+/// Eviction never deletes a `.tmp.<uuid>` sibling. While a populate is mid-write, its
+/// atomic-write temp lives in the same namespace cache subtree the sweep walks;
+/// treating it as an eviction candidate would let the sweep delete it and fail that
+/// populate's finishing rename. The temp is skipped outright: it survives an
+/// over-budget sweep whose oldest-first order would otherwise take it first, its bytes
+/// never count toward the budget, and the rename that turns it into a committed blob
+/// still succeeds.
+#[tokio::test]
+async fn eviction_skips_a_concurrent_populates_temp_file() {
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+
+    // A committed 100-byte cache file (newer by mtime), already at the budget.
+    stage_with_mtime(&db, &ld, "release_files", "keep0aaa", &[1u8; 100], 2000).await;
+
+    // A concurrent populate's in-flight temp: a `.tmp.<uuid>` sibling in the shard dir
+    // where its committed blob will land, aged OLDER than the committed file so a sweep
+    // that treated it as a candidate would evict it first.
+    let dest = ld.cache_blob_path("release_files", "new0bbbb").unwrap();
+    let shard = dest.parent().unwrap();
+    std::fs::create_dir_all(shard).expect("create shard dir");
+    let temp_path = shard.join(format!(
+        "{}{}",
+        crate::local_blob::TEMP_BLOB_PREFIX,
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&temp_path, [9u8; 100]).expect("write concurrent populate temp");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&temp_path)
+        .expect("open temp to age it")
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000))
+        .expect("age the temp so a candidate sweep would evict it first");
+
+    // Budget of 100 bytes: exactly the committed file fits. A sweep that counted the
+    // temp would see 200 bytes and evict the oldest (the temp) first.
+    db.set_cache_budget("release_files", 100)
+        .await
+        .expect("set budget");
+    evict_to_budget(&db, &ld, "release_files", None)
+        .await
+        .expect("evict to budget");
+
+    assert!(
+        temp_path.exists(),
+        "eviction leaves a concurrent populate's temp in place",
+    );
+    assert!(
+        ld.cache_blob_path("release_files", "keep0aaa")
+            .unwrap()
+            .exists(),
+        "the committed cache file survives — the temp's bytes never counted toward the budget",
+    );
+
+    // The populate's finishing rename still finds its temp and commits the blob intact.
+    crate::local_blob::rename(&temp_path, &dest)
+        .await
+        .expect("the populate's rename succeeds after the sweep");
+    assert_eq!(
+        std::fs::read(&dest).expect("committed blob readable"),
+        [9u8; 100],
+        "the renamed temp became the committed blob intact",
+    );
+}

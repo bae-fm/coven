@@ -207,7 +207,7 @@ impl CovenBuilder {
         let provider = self.config.provider();
         let library_dir = config.library_dir.clone();
         let open_guard = Arc::new(LibraryOpenGuard::acquire(&library_dir)?);
-        remove_orphaned_local_blob_temps(&library_dir)?;
+        remove_orphaned_local_blob_temps(&library_dir, std::time::SystemTime::now())?;
         let (db, stamper) =
             Database::open(&db_path, tables, config.device_id.clone(), &migrations)?;
         Ok(CovenHandle::new(
@@ -409,19 +409,49 @@ fn local_stage_temp_path(final_path: &Path) -> CovenResult<PathBuf> {
     )))
 }
 
+/// Remove temp debris a crashed prior process left in the blob folders, before the
+/// handle serves any read. Two temp conventions:
+///
+/// - Every atomic write (`write_atomic`/`copy_atomic`) in any blob folder — the local
+///   store, `cache/`, `pinned/` — leaves a `.tmp.<uuid>` sibling until its
+///   fsync-then-rename commits it. A crash orphans that temp. Only those older than
+///   this open (`process_start`) are crash leftovers; a temp a concurrent write is
+///   mid-producing is newer and is left in place so the sweep can never delete a live
+///   write's rename target.
+/// - `storage/local/` additionally holds write staging (`.coven-stage-<uuid>`). Open
+///   holds the exclusive library lock, so every staging temp here is a crash leftover
+///   — all are removed, no age check.
 fn remove_orphaned_local_blob_temps(
     library_dir: &crate::library_dir::LibraryDir,
+    process_start: std::time::SystemTime,
 ) -> CovenResult<()> {
-    remove_orphaned_local_blob_temps_in_dir(&library_dir.storage_dir().join("local"))
+    let storage = library_dir.storage_dir();
+    remove_orphaned_temps_in_dir(&storage.join("local"), &is_local_stage_temp, None)?;
+    for folder in ["local", "cache", "pinned"] {
+        remove_orphaned_temps_in_dir(
+            &storage.join(folder),
+            &crate::local_blob::is_temp_blob_path,
+            Some(process_start),
+        )?;
+    }
+    Ok(())
 }
 
-fn remove_orphaned_local_blob_temps_in_dir(dir: &Path) -> CovenResult<()> {
+/// Recursively remove temp files under `dir` that `is_temp` recognizes. With
+/// `older_than = Some(cutoff)` a temp is removed only when its modification time is
+/// before `cutoff` — a temp at or after it is a live write, left untouched; `None`
+/// removes every recognized temp regardless of age.
+fn remove_orphaned_temps_in_dir(
+    dir: &Path,
+    is_temp: &dyn Fn(&Path) -> bool,
+    older_than: Option<std::time::SystemTime>,
+) -> CovenResult<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             debug!(
                 path = %dir.display(),
-                "local blob directory absent during orphaned staging cleanup"
+                "blob directory absent during orphaned temp cleanup"
             );
             return Ok(());
         }
@@ -432,13 +462,23 @@ fn remove_orphaned_local_blob_temps_in_dir(dir: &Path) -> CovenResult<()> {
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            remove_orphaned_local_blob_temps_in_dir(&path)?;
-        } else if file_type.is_file() && is_local_stage_temp(&path) {
+            remove_orphaned_temps_in_dir(&path, is_temp, older_than)?;
+        } else if file_type.is_file() && is_temp(&path) {
+            if let Some(cutoff) = older_than {
+                let modified = entry.metadata()?.modified()?;
+                if modified >= cutoff {
+                    debug!(
+                        path = %path.display(),
+                        "leaving fresh blob temp created at or after process start"
+                    );
+                    continue;
+                }
+            }
             remove_file_if_present(&path)?;
         } else if file_type.is_file() && path.file_name().and_then(|name| name.to_str()).is_none() {
             debug!(
                 path = %path.display(),
-                "skipping local blob path with non-utf8 file name during orphaned staging cleanup"
+                "skipping blob path with non-utf8 file name during orphaned temp cleanup"
             );
         }
     }
@@ -1926,5 +1966,109 @@ mod tests {
         drop(handle);
 
         let _reopened = open_when_lock_released(&dir).await;
+    }
+
+    /// The open-time orphan sweep clears crash-left atomic-write temps (`.tmp.<uuid>`)
+    /// under every blob folder — `cache/`, `pinned/`, and the local store — that
+    /// predate this open, while leaving a temp a concurrent write is mid-producing
+    /// (newer than process start) and every committed blob untouched. Local-store
+    /// staging temps (`.coven-stage-<uuid>`) are still swept regardless of age.
+    #[test]
+    fn open_time_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let ld = LibraryDir::new(tmp.path());
+
+        let process_start = std::time::SystemTime::now();
+        let stale = process_start - Duration::from_secs(3600);
+        let fresh = process_start + Duration::from_secs(3600);
+
+        let write_with_mtime = |path: &Path, mtime: std::time::SystemTime| {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("create dir");
+            std::fs::write(path, b"x").expect("write file");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open to set mtime")
+                .set_modified(mtime)
+                .expect("set mtime");
+        };
+        let temp_name = |marker: &str| format!("{marker}{}", uuid::Uuid::new_v4());
+
+        let cache_shard = ld
+            .storage_dir()
+            .join("cache")
+            .join("release_files")
+            .join("ab")
+            .join("cd");
+        let pinned_shard = ld
+            .storage_dir()
+            .join("pinned")
+            .join("photos")
+            .join("ef")
+            .join("gh");
+        let local_ns = ld.storage_dir().join("local").join("audio");
+
+        let stale_cache_temp = cache_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let fresh_cache_temp = cache_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        // A committed blob with an OLD mtime: not a temp, so age is irrelevant — it must
+        // survive, proving the sweep classifies by the temp prefix, not by age.
+        let committed_cache = cache_shard.join("blob0aaa");
+        let stale_pinned_temp = pinned_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let fresh_pinned_temp = pinned_shard.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        // The local store's own `write_atomic` leaves `.tmp.<uuid>` temps too; a crash
+        // orphans them the same way. A committed local blob (old mtime) must survive.
+        let stale_local_temp = local_ns.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let fresh_local_temp = local_ns.join(temp_name(crate::local_blob::TEMP_BLOB_PREFIX));
+        let committed_local = local_ns.join("blob0bbb");
+        let stale_local_stage = local_ns.join(temp_name(&format!("blob{LOCAL_STAGE_MARKER}")));
+
+        write_with_mtime(&stale_cache_temp, stale);
+        write_with_mtime(&fresh_cache_temp, fresh);
+        write_with_mtime(&committed_cache, stale);
+        write_with_mtime(&stale_pinned_temp, stale);
+        write_with_mtime(&fresh_pinned_temp, fresh);
+        write_with_mtime(&stale_local_temp, stale);
+        write_with_mtime(&fresh_local_temp, fresh);
+        write_with_mtime(&committed_local, stale);
+        write_with_mtime(&stale_local_stage, stale);
+
+        remove_orphaned_local_blob_temps(&ld, process_start).expect("open-time orphan sweep");
+
+        assert!(
+            !stale_cache_temp.exists(),
+            "a cache temp older than process start is a crash leftover, removed",
+        );
+        assert!(
+            !stale_pinned_temp.exists(),
+            "a pinned temp older than process start is a crash leftover, removed",
+        );
+        assert!(
+            !stale_local_temp.exists(),
+            "a local-store atomic-write temp older than process start is a crash leftover, removed",
+        );
+        assert!(
+            fresh_cache_temp.exists(),
+            "a cache temp newer than process start is a live write, left alone",
+        );
+        assert!(
+            fresh_pinned_temp.exists(),
+            "a pinned temp newer than process start is a live write, left alone",
+        );
+        assert!(
+            fresh_local_temp.exists(),
+            "a local-store temp newer than process start is a live write, left alone",
+        );
+        assert!(
+            committed_cache.exists(),
+            "a committed cache blob is never a temp — kept regardless of its mtime",
+        );
+        assert!(
+            committed_local.exists(),
+            "a committed local-store blob is never a temp — kept regardless of its mtime",
+        );
+        assert!(
+            !stale_local_stage.exists(),
+            "local-store staging temps are still swept at open",
+        );
     }
 }
