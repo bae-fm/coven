@@ -86,7 +86,7 @@ author's head, so an entry is uncommitted until its own author's head covers
 it. The committed membership set is the union of every current owner's
 committed prefix.
 
-<svg class="flow" viewBox="0 0 660 208" role="img" aria-label="Each owner commits entries under its own prefix with a signed head; the member set is the union of committed prefixes">
+<svg class="flow" viewBox="0 0 660 234" role="img" aria-label="An owner appends entries under its own prefix, its signed head commits them, and readers union every current owner's committed prefix">
 <text class="hdr" x="150" y="22" text-anchor="middle">OWNER A'S PREFIX</text>
 <text class="hdr" x="150" y="120" text-anchor="middle">OWNER B'S PREFIX</text>
 <text class="hdr" x="555" y="22" text-anchor="middle">MEMBER SET</text>
@@ -112,6 +112,13 @@ committed prefix.
 <rect class="chipa" x="486" y="90" width="140" height="36" rx="8"/>
 <text class="lbl s11" x="556" y="106" text-anchor="middle">A B C D</text>
 <text class="sub" x="556" y="120" text-anchor="middle">union of committed</text>
+<circle class="numc" cx="24" cy="63" r="8"/>
+<text class="num" x="24" y="66.5" text-anchor="middle">1</text>
+<circle class="numc" cx="336" cy="63" r="8"/>
+<text class="num" x="336" y="66.5" text-anchor="middle">2</text>
+<circle class="numc" cx="478" cy="108" r="8"/>
+<text class="num" x="478" y="111.5" text-anchor="middle">3</text>
+<text class="sub" x="330" y="224" text-anchor="middle">1 an owner appends under its own prefix · 2 its signed head commits the prefix · 3 readers union the committed prefixes</text>
 </svg>
 
 Because every owner commits under its own prefix, concurrent owners never race
@@ -252,15 +259,23 @@ right direction, and neither side ever types a key by hand.
 <text class="hdr" x="540" y="22" text-anchor="middle">OWNER</text>
 <rect class="lane" x="10" y="32" width="220" height="172" rx="10"/>
 <rect class="lane" x="430" y="32" width="220" height="172" rx="10"/>
+<circle class="numc" cx="24" cy="59" r="8"/>
+<text class="num" x="24" y="62.5" text-anchor="middle">1</text>
 <rect class="chip" x="30" y="46" width="180" height="26" rx="7"/>
 <text class="lbl s11" x="120" y="63" text-anchor="middle">join request code</text>
 <line class="arr" x1="214" y1="59" x2="426" y2="59" marker-end="url(#fa)"/>
 <text class="sub" x="330" y="49" text-anchor="middle">carries the joiner's public key</text>
+<circle class="numc" cx="444" cy="108" r="8"/>
+<text class="num" x="444" y="111.5" text-anchor="middle">2</text>
 <rect class="chip" x="450" y="88" width="180" height="40" rx="7"/>
 <text class="lbl s11" x="540" y="104" text-anchor="middle">invite_member(...)</text>
 <text class="sub" x="540" y="120" text-anchor="middle">Add entry + wrapped keyring</text>
 <line class="arr" x1="446" y1="150" x2="234" y2="150" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="140" text-anchor="middle">invite code: cloud access + library id</text>
+<circle class="numc" cx="330" cy="150" r="8"/>
+<text class="num" x="330" y="153.5" text-anchor="middle">3</text>
+<text class="sub" x="330" y="136" text-anchor="middle">invite code: cloud access + library id</text>
+<circle class="numc" cx="24" cy="177" r="8"/>
+<text class="num" x="24" y="180.5" text-anchor="middle">4</text>
 <rect class="chip" x="30" y="164" width="180" height="26" rx="7"/>
 <text class="lbl s11" x="120" y="181" text-anchor="middle">join_from_invite_code</text>
 </svg>

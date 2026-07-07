@@ -213,18 +213,32 @@ only to the outgoing changeset, never deletes locally, and fires once on the fli
 cycle. A root that was never shared has nothing on peers to retract, so it emits
 nothing.
 
-<svg class="flow" viewBox="0 0 660 128" role="img" aria-label="Flipping shared off emits deletes to peers while the flipping device keeps its rows">
+<svg class="flow" viewBox="0 0 660 240" role="img" aria-label="While shared is on, peers hold the subtree; the flag flips off; one retract removes it from peers while the owner keeps it">
 <text class="hdr" x="120" y="22" text-anchor="middle">FLIPPING DEVICE</text>
 <text class="hdr" x="540" y="22" text-anchor="middle">PEERS</text>
-<rect class="lane" x="10" y="32" width="220" height="84" rx="10"/>
-<rect class="lane" x="430" y="32" width="220" height="84" rx="10"/>
-<rect class="chip" x="30" y="46" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="63" text-anchor="middle">Journal — shared ✗</text>
-<text class="sub" x="120" y="98" text-anchor="middle">rows stay, local-only</text>
-<line class="arr" x1="238" y1="60" x2="422" y2="60" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="50" text-anchor="middle">retract: deletes in the changeset</text>
-<rect class="chipd ghost" x="450" y="46" width="180" height="26" rx="7"/>
-<text class="sub" x="540" y="98" text-anchor="middle">subtree removed</text>
+<rect class="lane" x="10" y="32" width="220" height="176" rx="10"/>
+<rect class="lane" x="430" y="32" width="220" height="176" rx="10"/>
+<circle class="numc" cx="24" cy="59" r="8"/>
+<text class="num" x="24" y="62.5" text-anchor="middle">1</text>
+<rect class="chipa" x="40" y="46" width="170" height="26" rx="7"/>
+<text class="lbl s11" x="125" y="63" text-anchor="middle">Journal — shared ✓</text>
+<rect class="chip" x="450" y="46" width="180" height="26" rx="7"/>
+<text class="lbl s11" x="540" y="63" text-anchor="middle">Journal + its todos</text>
+<text class="sub" x="330" y="63" text-anchor="middle">in sync</text>
+<line class="arrd" x1="20" y1="100" x2="640" y2="100"/>
+<circle class="numc" cx="330" cy="100" r="8"/>
+<text class="num" x="330" y="103.5" text-anchor="middle">2</text>
+<text class="sub" x="330" y="88" text-anchor="middle">shared flips off</text>
+<rect class="chip" x="40" y="118" width="170" height="26" rx="7"/>
+<text class="lbl s11" x="125" y="135" text-anchor="middle">Journal — shared ✗</text>
+<text class="sub" x="125" y="192" text-anchor="middle">rows stay, local-only</text>
+<circle class="numc" cx="330" cy="132" r="8"/>
+<text class="num" x="330" y="135.5" text-anchor="middle">3</text>
+<line class="arr" x1="238" y1="152" x2="422" y2="152" marker-end="url(#fa)"/>
+<text class="sub" x="330" y="168" text-anchor="middle">retract: deletes in the changeset</text>
+<rect class="chipd ghost" x="450" y="118" width="180" height="26" rx="7"/>
+<text class="sub" x="540" y="192" text-anchor="middle">subtree removed</text>
+<text class="sub" x="330" y="230" text-anchor="middle">1 peers hold the shared subtree · 2 the flag flips off · 3 one retract removes it there; the owner keeps it</text>
 </svg>
 
 ## Where it runs

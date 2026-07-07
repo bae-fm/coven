@@ -89,7 +89,7 @@ let bytes = handle.read_blob(&blob).await?;
 ```
 
 
-<svg class="flow" viewBox="0 0 660 158" role="img" aria-label="read_blob dispatches on the blob's provenance and locality: the user's file, the local store, or the cache with a cloud fetch on miss">
+<svg class="flow" viewBox="0 0 660 206" role="img" aria-label="read_blob dispatches on the blob's provenance and locality: the user's file, the local store, or the cache; a Remote miss fetches into the evictable cache and serves from there">
 <rect class="chipa" x="255" y="14" width="150" height="28" rx="8"/>
 <text class="lbl s11" x="330" y="32" text-anchor="middle">read_blob(blob)</text>
 <line class="arr" x1="290" y1="46" x2="130" y2="76" marker-end="url(#fa)"/>
@@ -103,8 +103,11 @@ let bytes = handle.read_blob(&blob).await?;
 <text class="sub" x="330" y="126" text-anchor="middle">Local · host-provided</text>
 <rect class="chip" x="460" y="82" width="160" height="28" rx="8"/>
 <text class="lbl s11" x="540" y="100" text-anchor="middle">cache, else cloud</text>
-<text class="sub" x="540" y="126" text-anchor="middle">Remote · pinned/, cache/, then fetch</text>
-<text class="sub" x="330" y="150" text-anchor="middle">the blob's declared provenance and its gate decide the branch; nothing is probed</text>
+<text class="sub" x="540" y="124" text-anchor="middle">Remote · pinned/, then cache/</text>
+<line class="arrd" x1="540" y1="132" x2="540" y2="150" marker-end="url(#fam)"/>
+<rect class="chipd" x="450" y="154" width="180" height="24" rx="7"/>
+<text class="lbl s11" x="540" y="170" text-anchor="middle">miss: fetch fills cache/</text>
+<text class="sub" x="330" y="198" text-anchor="middle">the blob's declared provenance and its gate decide the branch; nothing is probed</text>
 </svg>
 
 It resolves by where the bytes are, in order: a **user-provided Local** blob is

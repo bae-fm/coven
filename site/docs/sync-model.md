@@ -10,7 +10,7 @@ per-device sequence number.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
-<svg class="flow" viewBox="0 0 660 196" role="img" aria-label="Each device appends to its own changeset stream in the cloud; a puller keeps one cursor per stream">
+<svg class="flow" viewBox="0 0 660 224" role="img" aria-label="A write is captured and sealed, appends to the device's own stream, and peers pull it, advancing one cursor per stream">
 <text class="hdr" x="120" y="22" text-anchor="middle">ALICE'S DEVICE</text>
 <text class="hdr" x="395" y="22" text-anchor="middle">CLOUD</text>
 <text class="hdr" x="590" y="22" text-anchor="middle">BOB PULLS</text>
@@ -35,6 +35,13 @@ per-device sequence number.
 <line class="arr" x1="512" y1="71" x2="544" y2="71" marker-end="url(#fa)"/>
 <text class="lbl s11" x="600" y="75" text-anchor="middle">cursor a=3</text>
 <text class="lbl s11" x="600" y="144" text-anchor="middle">cursor b=2</text>
+<circle class="numc" cx="24" cy="71" r="8"/>
+<text class="num" x="24" y="74.5" text-anchor="middle">1</text>
+<circle class="numc" cx="268" cy="71" r="8"/>
+<text class="num" x="268" y="74.5" text-anchor="middle">2</text>
+<circle class="numc" cx="600" cy="48" r="8"/>
+<text class="num" x="600" y="51.5" text-anchor="middle">3</text>
+<text class="sub" x="330" y="212" text-anchor="middle">1 a write is captured and sealed · 2 it appends to this device's own stream · 3 peers pull, one cursor per stream</text>
 </svg>
 
 Nothing in storage is ever overwritten: a device only appends to its own
