@@ -1185,6 +1185,132 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     );
 }
 
+/// Every head the cycle wrote for our own device records its `last_sync` as an
+/// RFC 3339 wall-clock string — the format the `put_head` contract specifies —
+/// never the HLC string form the changeset envelope uses. An HLC string
+/// (`0000000001000-0000-M`) fails RFC 3339 parsing, so this distinguishes them.
+fn assert_own_head_timestamps_are_rfc3339(storage: &MockSyncStorage, device_id: &str) {
+    let stamps = storage.head_put_timestamps();
+    let ours: Vec<&String> = stamps
+        .iter()
+        .filter(|(d, _)| d == device_id)
+        .map(|(_, ts)| ts)
+        .collect();
+    assert!(
+        !ours.is_empty(),
+        "the cycle wrote at least one head for {device_id}",
+    );
+    for ts in ours {
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "head last_sync must be RFC 3339, got {ts:?}",
+        );
+    }
+}
+
+/// The main-push and post-pull republish head writers stamp the head with an
+/// RFC 3339 `last_sync`.
+#[tokio::test]
+async fn push_cycle_writes_rfc3339_head_timestamps() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [21u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    // A lagging peer keeps the pushed changeset from being reclaimed by the
+    // snapshot the cycle also creates (local_seq 1, no snapshot yet), so the
+    // main-push head writer's changeset is still present to assert against.
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Shareable', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        storage.get_changeset("M", 1).await.is_ok(),
+        "the cycle pushed a changeset, exercising the main-push head writer",
+    );
+    assert_own_head_timestamps_are_rfc3339(&storage, "M");
+}
+
+/// The snapshot head writer stamps the head with an RFC 3339 `last_sync`.
+#[tokio::test]
+async fn snapshot_cycle_writes_rfc3339_head_timestamp() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [22u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
+    db.set_sync_state("local_seq", "1")
+        .await
+        .expect("seed local_seq");
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        SyncStorage::get_snapshot_pointer(&storage).await.is_ok(),
+        "the cycle published a snapshot, exercising the snapshot head writer",
+    );
+    assert_own_head_timestamps_are_rfc3339(&storage, "M");
+}
+
+/// The staged-retry head writer stamps the head with an RFC 3339 `last_sync`.
+#[tokio::test]
+async fn staged_retry_writes_rfc3339_head_timestamp() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [23u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    // A lagging peer keeps the retried changeset from being reclaimed by the
+    // snapshot the retry cycle also creates, so it is still present to assert on.
+    storage
+        .put_head("peer-lagging", 0, None, T0)
+        .await
+        .expect("seed an un-acked peer head");
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Shareable', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+
+    // The first push fails at the changeset put, so the changeset stages for retry
+    // and no head is written for it yet.
+    storage.fail_next_changeset_puts(1);
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        cycle::read_staged_changeset(&ld).await.is_some(),
+        "the changeset stages after the push write fails",
+    );
+
+    // The next cycle retries the staged push, exercising the staged-retry writer.
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert!(
+        storage.get_changeset("M", 1).await.is_ok(),
+        "the staged retry publishes the changeset",
+    );
+    assert_own_head_timestamps_are_rfc3339(&storage, "M");
+}
+
 #[tokio::test]
 async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     let keypair = UserKeypair::generate();

@@ -486,6 +486,14 @@ pub async fn run_single_sync_cycle(
             .transpose()?;
     drain_published_blob_drop_intents(db, library_dir, local_seq).await?;
 
+    // One wall-clock reading for this whole cycle. Every head this cycle writes
+    // records it as the device's `last_sync` (RFC 3339, per the `put_head`
+    // contract), and the status built at the end reports the same instant — so a
+    // device's published head and its own status agree on when it last synced. The
+    // changeset envelope timestamp is a separate HLC stamp (`timestamp` below); it
+    // orders causally and must not be confused with this display time.
+    let sync_time = clock.now().to_rfc3339();
+
     // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
     // the gate column: a root being made Remote stays gated off until its last
     // user-provided blob lands, and coven flips it on inside the drain (the
@@ -540,7 +548,6 @@ pub async fn run_single_sync_cycle(
     // them next cycle without re-deriving; the span below stages-then-pushes.
     if let Some(seq) = staged_seq {
         if let Some(staged_data) = read_staged_changeset(library_dir).await {
-            let timestamp = hlc.now().to_string();
             info!(seq, "Retrying staged changeset push");
 
             match push_changeset(
@@ -550,7 +557,7 @@ pub async fn run_single_sync_cycle(
                 seq,
                 staged_data,
                 snapshot_seq,
-                &timestamp,
+                &sync_time,
             )
             .await
             {
@@ -657,7 +664,7 @@ pub async fn run_single_sync_cycle(
             seq,
             outgoing.packed.clone(),
             snapshot_seq,
-            &timestamp,
+            &sync_time,
         )
         .await
         {
@@ -721,7 +728,7 @@ pub async fn run_single_sync_cycle(
     // head, and the next cycle republishes unconditionally, so we log rather
     // than abort.
     if let Err(e) = storage
-        .put_head(device_id, local_seq, snapshot_seq, &timestamp)
+        .put_head(device_id, local_seq, snapshot_seq, &sync_time)
         .await
     {
         warn!("Failed to republish head after pull: {e}");
@@ -952,10 +959,13 @@ pub async fn run_single_sync_cycle(
         }
     }
 
-    // Build status from remote heads.
-    let now = clock.now().to_rfc3339();
-    let core_status =
-        super::status::build_sync_status(&sync_result.pull.remote_heads, device_id, Some(&now));
+    // Build status from remote heads. Reuse this cycle's `sync_time` so the
+    // status's `last_sync_time` matches the head this cycle wrote.
+    let core_status = super::status::build_sync_status(
+        &sync_result.pull.remote_heads,
+        device_id,
+        Some(&sync_time),
+    );
     let other_device_count = core_status.other_devices.len();
 
     Ok(SyncCycleResult {
@@ -966,7 +976,7 @@ pub async fn run_single_sync_cycle(
         held_changesets: sync_result.pull.held_changesets.len() as u64,
         constraint_conflicts: sync_result.pull.constraint_conflicts.len() as u64,
         other_device_count,
-        sync_time: now,
+        sync_time,
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,
         row_changes: sync_result.pull.row_changes,
         resume_drain_promptly,

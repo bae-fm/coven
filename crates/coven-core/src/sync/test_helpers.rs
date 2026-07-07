@@ -493,6 +493,10 @@ pub struct MockSyncStorage {
     /// Published device heads, keyed by device_id -> signed `HeadJson` JSON bytes
     /// (exactly what the cloud stores, minus the at-rest cipher).
     heads: Mutex<HashMap<String, Vec<u8>>>,
+    /// Every `(device_id, timestamp)` passed to [`SyncStorage::put_head`], in call
+    /// order. Lets a test assert the timestamp each writer records is RFC 3339, the
+    /// format the trait's `put_head` contract specifies.
+    head_puts: Mutex<Vec<(String, String)>>,
     /// Snapshot generations and their pointer, keyed exactly as the cloud lays
     /// them out (`snapshot/{author}/{seq}.db`, `snapshot/{author}/{seq}_meta.json`,
     /// `snapshot/current.json`). Keying each device's generations under its own
@@ -577,6 +581,7 @@ impl MockSyncStorage {
         MockSyncStorage {
             objects: Mutex::new(HashMap::new()),
             heads: Mutex::new(HashMap::new()),
+            head_puts: Mutex::new(Vec::new()),
             snapshot_objects: Mutex::new(HashMap::new()),
             min_schema_version: Mutex::new(None),
             membership_heads: Mutex::new(HashMap::new()),
@@ -802,6 +807,12 @@ impl MockSyncStorage {
             .insert(device_id.to_string(), bytes);
     }
 
+    /// Every `(device_id, timestamp)` passed to [`SyncStorage::put_head`], in call
+    /// order — for asserting the timestamp each head writer records is RFC 3339.
+    pub fn head_put_timestamps(&self) -> Vec<(String, String)> {
+        self.head_puts.lock().unwrap().clone()
+    }
+
     /// Publish a head for `device_id` signed by `keypair` — so the head's author is
     /// that device's own key rather than the mock's default identity. Lets a
     /// changeset-GC test give each device a head attributed to its own membership
@@ -881,9 +892,27 @@ impl SyncStorage for MockSyncStorage {
         device_id: &str,
         seq: u64,
         snapshot_seq: Option<u64>,
-        _timestamp: &str,
+        timestamp: &str,
     ) -> Result<(), StorageError> {
-        self.publish_head(device_id, seq, snapshot_seq);
+        self.head_puts
+            .lock()
+            .unwrap()
+            .push((device_id.to_string(), timestamp.to_string()));
+        // Record the timestamp on the head the way the cloud does, so `list_heads`
+        // returns it as the device's `last_sync` — the field the sync-status view
+        // reads.
+        let head = HeadJson::signed(
+            device_id,
+            seq,
+            snapshot_seq,
+            Some(timestamp.to_string()),
+            &self.keypair,
+        );
+        let bytes = serde_json::to_vec(&head).expect("serialize head");
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), bytes);
         Ok(())
     }
 
