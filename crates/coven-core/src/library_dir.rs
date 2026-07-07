@@ -141,6 +141,13 @@ impl LibraryDir {
         Self { path: path.into() }
     }
 
+    /// The directory of `library_id` under `app_dir`'s `libraries/` — the one
+    /// layout rule for where a library lives, shared by every flow that
+    /// creates, opens, or refuses one.
+    pub fn for_library(app_dir: &Path, library_id: &str) -> Self {
+        Self::new(app_dir.join("libraries").join(library_id))
+    }
+
     pub fn db_path(&self) -> PathBuf {
         self.path.join("library.db")
     }
@@ -288,7 +295,7 @@ impl LibraryDir {
     ) -> Result<Config, ConfigError> {
         validate_path_token(&library_id)
             .map_err(|e| ConfigError::Config(format!("invalid library id: {e}")))?;
-        let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
+        let library_dir = LibraryDir::for_library(data_dir, &library_id);
         std::fs::create_dir_all(&*library_dir)?;
 
         let device_id = ids.new_id();

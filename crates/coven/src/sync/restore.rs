@@ -72,6 +72,8 @@ pub enum RestoreError {
     Cleanup(String),
     #[error("invalid restore code: {0}")]
     InvalidCode(String),
+    #[error("library already exists locally: {0}")]
+    LibraryExists(String),
     #[error("invalid signing key: {0}")]
     InvalidSigningKey(String),
     #[error("provider: {0}")]
@@ -214,6 +216,18 @@ pub async fn restore_from_cloud(
     crate::library_dir::validate_path_token(library_id)
         .map_err(|e| RestoreError::InvalidCode(format!("invalid library id: {e}")))?;
 
+    // Refuse a library already present locally before any provider side effect. The
+    // decode guaranteed the id is a safe single component, so the directory is a
+    // direct child of `libraries/` and cannot escape it. Re-running a restore for a
+    // library you already have adds nothing — the existing library is the data — and
+    // letting it proceed would, on any bootstrap failure below, delete that library's
+    // database and blobs during cleanup. Refusing here makes the failure-cleanup only
+    // ever remove a directory this invocation created.
+    let library_dir = LibraryDir::for_library(app_dir, library_id);
+    if library_dir.exists() {
+        return Err(RestoreError::LibraryExists(library_id.to_string()));
+    }
+
     // The key's presence is the home's storage mode: a key present ⇒ an opaque
     // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
     // (plaintext, readable blob paths). The cipher and the blob-path scheme both
@@ -243,11 +257,9 @@ pub async fn restore_from_cloud(
         keypair.clone(),
     );
 
-    // Create the library directory under `libraries/`, named by the restore code's
-    // `lid`. The decode guaranteed the id is a safe single component, so the
-    // directory is a direct child of `libraries/` and cannot escape it.
+    // Create the library directory under `libraries/` (its non-existence was checked
+    // up front, so this create and the failure-cleanup below own it entirely).
     let device_id = ids.new_id();
-    let library_dir = LibraryDir::new(app_dir.join("libraries").join(library_id));
     std::fs::create_dir_all(&*library_dir)?;
 
     let key_service = KeyService::new(library_id.to_string());

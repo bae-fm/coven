@@ -165,6 +165,82 @@ async fn join_accepts_a_normal_library_id_past_decode() {
     );
 }
 
+/// A library already present locally is the data — re-joining it adds nothing, and
+/// the old code would delete its database and blobs during the failure-cleanup once
+/// bootstrap failed. The join now refuses up front with a typed error naming the
+/// library and leaves the existing files untouched. The keypair is seeded (and the
+/// endpoint is unreachable) so that, absent the guard, execution would reach the
+/// cloud read and the destructive cleanup — the guard is what stops it first.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn join_refuses_when_library_exists_and_leaves_it_untouched() {
+    let encoded = encode(&invite_code_with_library_id("abc-123"));
+
+    crate::keys::test_keyring::install();
+    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+    crate::keys::KeyService::new("join-test".to_string())
+        .get_or_create_user_keypair()
+        .expect("seed the device user keypair");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+
+    // A library with this id is already present locally, holding a database file
+    // and a blob the join must not touch.
+    let library_dir = app_dir.join("libraries").join("abc-123");
+    std::fs::create_dir_all(library_dir.join("storage")).expect("create existing library dir");
+    let db_path = library_dir.join("library.db");
+    let blob_path = library_dir.join("storage").join("cover.blob");
+    std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
+    std::fs::write(&blob_path, b"existing-blob-bytes").expect("seed existing blob");
+
+    let result = join_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(result, Err(JoinError::LibraryExists(ref id)) if id == "abc-123"),
+        "join must refuse a library already present locally, got {result:?}",
+    );
+    assert_eq!(
+        std::fs::read(&db_path).expect("existing db still present"),
+        b"existing-db-bytes",
+        "the existing database must be left untouched",
+    );
+    assert_eq!(
+        std::fs::read(&blob_path).expect("existing blob still present"),
+        b"existing-blob-bytes",
+        "the existing blob must be left untouched",
+    );
+}
+
+/// A join for a library not present locally that fails at the cloud read still
+/// removes the directory it created — the failure-cleanup keeps working for the
+/// directory this invocation owns.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn fresh_join_failure_cleans_up_its_own_directory() {
+    let encoded = encode(&invite_code_with_library_id("fresh-123"));
+
+    crate::keys::test_keyring::install();
+    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+    crate::keys::KeyService::new("join-test".to_string())
+        .get_or_create_user_keypair()
+        .expect("seed the device user keypair");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+    let library_dir = app_dir.join("libraries").join("fresh-123");
+
+    let result = join_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(result, Err(JoinError::Invite(_))),
+        "the bogus cloud endpoint must fail the join at the cloud read, got {result:?}",
+    );
+    assert!(
+        !library_dir.exists(),
+        "a fresh join that fails must remove the directory it created at {}",
+        library_dir.display(),
+    );
+}
+
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let enc = CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32]));

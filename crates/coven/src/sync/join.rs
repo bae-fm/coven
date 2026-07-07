@@ -43,6 +43,8 @@ pub enum JoinError {
     Io(#[from] std::io::Error),
     #[error("invalid invite code: {0}")]
     InvalidCode(String),
+    #[error("library already exists locally: {0}")]
+    LibraryExists(String),
     #[error("provider: {0}")]
     Provider(String),
     #[error("membership: {0}")]
@@ -232,6 +234,18 @@ pub async fn join_from_invite_code(
     let code = crate::join_code::decode(invite_code_str)
         .map_err(|e| JoinError::InvalidCode(e.to_string()))?;
 
+    // Refuse a library already present locally before any keyring or provider side
+    // effect. Re-joining a library you already have adds nothing — the existing
+    // library is the data — and letting the join proceed would, on any bootstrap
+    // failure below, delete that library's database and blobs during cleanup. The
+    // check runs ahead of `build_cloud_home_for_join` (which saves OAuth tokens to
+    // the keyring and can accept a CloudKit share) so a refused join leaves no
+    // residue, and it makes the failure-cleanup only ever remove a directory this
+    // invocation created.
+    if LibraryDir::for_library(app_dir, &code.library_id).exists() {
+        return Err(JoinError::LibraryExists(code.library_id));
+    }
+
     let global_ks = KeyService::new("global".to_string());
     let lib_ks = KeyService::new(code.library_id.clone());
 
@@ -318,7 +332,7 @@ pub async fn join_library(
     // Create the library directory under `libraries/`, named by the invite's id.
     let library_id = code.library_id;
     let device_id = ids.new_id();
-    let library_dir = LibraryDir::new(data_dir.join("libraries").join(&library_id));
+    let library_dir = LibraryDir::for_library(data_dir, &library_id);
     std::fs::create_dir_all(&*library_dir)?;
 
     // All steps after directory creation are wrapped so we can clean up on failure.

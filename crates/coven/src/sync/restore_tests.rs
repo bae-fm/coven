@@ -118,6 +118,45 @@ async fn restore_rejects_traversal_lid_at_decode() {
     }
 }
 
+/// A library already present locally is the data — re-running a restore for it adds
+/// nothing, and the old code would delete its database and blobs during the
+/// failure-cleanup once the snapshot download failed. The restore now refuses up
+/// front with a typed error naming the library and leaves the existing files
+/// untouched. The endpoint is unreachable so that, absent the guard, execution would
+/// reach the snapshot download and the destructive cleanup — the guard stops it first.
+#[tokio::test]
+async fn restore_refuses_when_library_exists_and_leaves_it_untouched() {
+    let encoded = restore_code_with_lid("abc-123");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+
+    // A library with this id is already present locally, holding a database file
+    // and a blob the restore must not touch.
+    let library_dir = app_dir.join("libraries").join("abc-123");
+    std::fs::create_dir_all(library_dir.join("storage")).expect("create existing library dir");
+    let db_path = library_dir.join("library.db");
+    let blob_path = library_dir.join("storage").join("cover.blob");
+    std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
+    std::fs::write(&blob_path, b"existing-blob-bytes").expect("seed existing blob");
+
+    let result = restore_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(result, Err(RestoreError::LibraryExists(ref id)) if id == "abc-123"),
+        "restore must refuse a library already present locally, got {result:?}",
+    );
+    assert_eq!(
+        std::fs::read(&db_path).expect("existing db still present"),
+        b"existing-db-bytes",
+        "the existing database must be left untouched",
+    );
+    assert_eq!(
+        std::fs::read(&blob_path).expect("existing blob still present"),
+        b"existing-blob-bytes",
+        "the existing blob must be left untouched",
+    );
+}
+
 /// A normal `lid` decodes and the restore reaches the cloud step, where it fails on
 /// the unreachable endpoint (`RestoreError::Snapshot`) rather than on the id —
 /// proving the decoder rejects only unsafe ids and the directory the restore would
