@@ -602,7 +602,15 @@ async fn decrypt_wrapped_library_key_unverified(
     for owner in &owners {
         let wrapped = match fetch_wrapped_key(cloud_home, owner, &recipient_hex).await {
             Ok(wrapped) => wrapped,
-            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => continue,
+            // `owners` came from a listing that just reported this prefix holds a
+            // wrap for the recipient, so a keyed miss now is a listed-then-deleted
+            // race (or an eventually-consistent listing): note it and move on.
+            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => {
+                tracing::debug!(
+                    "candidate wrap {owner}/{recipient_hex} was listed but is now missing; skipping"
+                );
+                continue;
+            }
             Err(e) => return Err(e),
         };
         let Ok(sealed) = hex::decode(&wrapped.sealed) else {
@@ -654,11 +662,19 @@ pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
     // "this device has no wrapped key").
     let mut saw_inactive: Option<MembershipCoord> = None;
     let mut saw_unauthentic = false;
+    let mut owners_tried = 0usize;
 
     for owner in expected_owners {
+        owners_tried += 1;
         let wrapped = match fetch_wrapped_key(cloud_home, owner, &recipient_hex).await {
             Ok(wrapped) => wrapped,
-            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => continue,
+            // This owner has never wrapped for this recipient — the common shape of
+            // a scan across owners, not an anomaly, but noted so a "no wrap found"
+            // outcome is traceable to which prefixes were empty.
+            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => {
+                tracing::debug!("no wrapped key for {recipient_hex} under owner {owner}");
+                continue;
+            }
             Err(e) => return Err(e),
         };
 
@@ -717,7 +733,7 @@ pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
         )));
     }
     Err(InviteError::CloudHome(CloudHomeError::NotFound(format!(
-        "keys/*/{recipient_hex}.enc"
+        "keys/*/{recipient_hex}.enc (no wrap under any of {owners_tried} owner prefixes)"
     ))))
 }
 

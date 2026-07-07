@@ -418,11 +418,21 @@ impl SyncManager {
     /// uploads key under. Ready only once the keypair is loaded, which
     /// `is_sync_ready` has already established at the call sites below.
     fn self_uploader(&self) -> Result<String, MakeRemoteError> {
-        self.key_service
-            .get_user_public_key()
-            .map_err(|_| MakeRemoteError::SyncNotReady)?
-            .map(hex::encode)
-            .ok_or(MakeRemoteError::SyncNotReady)
+        match self.key_service.get_user_public_key() {
+            Ok(Some(pk)) => Ok(hex::encode(pk)),
+            // No keypair loaded yet: sync genuinely isn't ready.
+            Ok(None) => Err(MakeRemoteError::SyncNotReady),
+            // A key-store failure (e.g. the keychain is unavailable) is not "not
+            // configured" — surface the real cause rather than silently reporting
+            // the transition as not-ready.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "reading this device's public key failed; cannot start the transition",
+                );
+                Err(MakeRemoteError::SyncNotReady)
+            }
+        }
     }
 
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent

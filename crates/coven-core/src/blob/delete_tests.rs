@@ -75,25 +75,18 @@ async fn gc_tombstones_anchored(
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
-    if let Some(owner) = pinned_owner {
-        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, owner)
-            .await
-            .expect("pin owner");
-    }
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
-        .await
-        .map_err(|e| e.to_string())?;
     // These tests reclaim blobs under the fixed test uploader's prefix, so the
     // reclaiming device runs as that uploader (own-prefix delete). The dedicated
-    // part-3 tests below drive foreign-prefix and owner-sweep cases explicitly via
-    // `gc_tombstones` with a chosen self.
-    gc_tombstones(
+    // part-3 tests drive foreign-prefix and owner-sweep cases by choosing a
+    // different self via `gc_tombstones_as` directly.
+    gc_tombstones_as(
+        GC_TEST_UPLOADER,
         db,
+        storage,
         cloud_home,
         cipher,
         library_id,
-        GC_TEST_UPLOADER,
-        membership.chain.as_ref(),
+        pinned_owner,
         clock,
         grace,
     )
