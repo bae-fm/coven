@@ -75,6 +75,10 @@ pub enum MakeRemoteError {
     NotGated(String),
     #[error("table {0:?} is a remote root, so its blobs are already Remote")]
     RemoteRoot(String),
+    #[error("root {0:?}/{1:?} is already Remote, so make_remote has nothing to do")]
+    AlreadyRemote(String, String),
+    #[error("root {0:?}/{1:?} has no resolvable Local/Remote state (row absent or gate NULL)")]
+    UnresolvedLocality(String, String),
     #[error("nothing to make Remote: root {0:?}/{1:?} has no blobs")]
     NothingToMakeRemote(String, String),
     #[error("blob {0:?} is not a user-provided (external) file, so it cannot be made Remote")]
@@ -101,6 +105,10 @@ pub enum MakeLocalError {
     NotGated(String),
     #[error("table {0:?} is a remote root, so its blobs have no Local state")]
     RemoteRoot(String),
+    #[error("root {0:?}/{1:?} is already Local, so make_local has nothing to do")]
+    AlreadyLocal(String, String),
+    #[error("root {0:?}/{1:?} has no resolvable Local/Remote state (row absent or gate NULL)")]
+    UnresolvedLocality(String, String),
     #[error("no destination path supplied for user-provided blob {0:?}")]
     MissingDest(String),
     #[error("destination path for user-provided blob {blob_id:?} is not valid UTF-8: {path}")]
@@ -161,6 +169,22 @@ async fn refs_for_root(
     .await
 }
 
+/// Validate that `root_table` is a coven-owned gated root (rejecting a remote root
+/// and a non-gated table) and return its gate column. The gate column names the row
+/// whose truth is the root's Local/Remote state — [`make_remote`] reads it to refuse
+/// a root already Remote.
+fn gated_root_gate_col(
+    tables: &[SyncedTable],
+    root_table: &str,
+) -> Result<String, MakeRemoteError> {
+    if is_remote_root(tables, root_table) {
+        return Err(MakeRemoteError::RemoteRoot(root_table.to_string()));
+    }
+    gate_column(tables, root_table)
+        .map(str::to_string)
+        .ok_or_else(|| MakeRemoteError::NotGated(root_table.to_string()))
+}
+
 /// The blobs of the gated root's subtree. Rejects a non-gated root. Shared by
 /// [`make_remote`] and [`cancel_make_remote`].
 async fn root_refs(
@@ -169,12 +193,7 @@ async fn root_refs(
     root_id: &str,
 ) -> Result<Vec<BlobRef>, MakeRemoteError> {
     let tables = db.synced_tables().to_vec();
-    if is_remote_root(&tables, root_table) {
-        return Err(MakeRemoteError::RemoteRoot(root_table.to_string()));
-    }
-    if gate_column(&tables, root_table).is_none() {
-        return Err(MakeRemoteError::NotGated(root_table.to_string()));
-    }
+    gated_root_gate_col(&tables, root_table)?;
     refs_for_root(db, tables, root_table.to_string(), root_id.to_string())
         .await
         .map_err(MakeRemoteError::from)
@@ -192,11 +211,11 @@ fn cloud_key_for(scheme: BlobPathScheme, blob: &BlobRef) -> Result<String, Strin
     .map_err(|e| e.to_string())
 }
 
-/// Start making `(root_table, root_id)` Remote: verify each user-provided blob's
-/// external source file, then enqueue an upload per blob and record the make_remote
-/// intent in one transaction. Returns once enqueued — the sync cycle uploads all
-/// needed blobs and flips the gate true only after they land. The caller triggers a
-/// sync cycle to start that completion.
+/// Start making `(root_table, root_id)` Remote: refuse a root already Remote, then
+/// verify each user-provided blob's external source file, enqueue an upload per blob,
+/// and record the make_remote intent in one transaction. Returns once enqueued — the
+/// sync cycle uploads all needed blobs and flips the gate true only after they land.
+/// The caller triggers a sync cycle to start that completion.
 ///
 /// Verifying every source up front (exists + length matches the registered size)
 /// means a missing file aborts with nothing enqueued, rather than leaving a
@@ -210,30 +229,27 @@ pub async fn make_remote(
     root_id: &str,
     pin: bool,
 ) -> Result<(), MakeRemoteError> {
-    let refs = root_refs(db, root_table, root_id).await?;
+    let tables = db.synced_tables().to_vec();
+    let gate_col = gated_root_gate_col(&tables, root_table)?;
+    let refs = refs_for_root(db, tables, root_table.to_string(), root_id.to_string())
+        .await
+        .map_err(MakeRemoteError::from)?;
     if refs.is_empty() {
         return Err(MakeRemoteError::NothingToMakeRemote(
             root_table.to_string(),
             root_id.to_string(),
         ));
     }
+    // A host-provided-only root has no user-provided uploads; `uploads` stays empty and
+    // the commit below records just the intent (the sync cycle uploads its host-provided
+    // blobs and flips the gate). Verify each external source and derive its cloud key up
+    // front: any miss aborts before a single upload is enqueued, so a make_remote queues
+    // whole or not at all.
     let user_provided: Vec<BlobRef> = refs
         .iter()
         .filter(|b| b.provenance == Provenance::UserProvided)
         .cloned()
         .collect();
-    if user_provided.is_empty() {
-        let (root_table, root_id) = (root_table.to_string(), root_id.to_string());
-        db.call(move |conn| {
-            Database::insert_make_remote_intent_on(conn, &root_table, &root_id, pin)
-        })
-        .await?;
-        return Ok(());
-    }
-
-    // Verify each external source and derive its cloud key up front: any miss aborts
-    // before a single upload is enqueued, so a make_remote either queues whole or not
-    // at all.
     let mut uploads: Vec<(String, String, String, crate::blob::BlobScope)> = Vec::new();
     for blob in &user_provided {
         let ext = db
@@ -273,25 +289,51 @@ pub async fn make_remote(
     }
 
     let created_at = hlc.now().to_string();
-    let (root_table, root_id) = (root_table.to_string(), root_id.to_string());
-    db.call(move |conn| {
-        let tx = conn.unchecked_transaction()?;
-        Database::insert_make_remote_intent_on(&tx, &root_table, &root_id, pin)?;
-        for (id, cloud_key, source, scope) in &uploads {
-            Database::enqueue_upload_on(
-                &tx,
-                id,
-                cloud_key,
-                Some(source),
-                scope.clone(),
-                pin,
-                &created_at,
-            )?;
-        }
-        tx.commit().map_err(DbError::from)
-    })
-    .await?;
-    Ok(())
+    let (rt, gc, ri) = (
+        root_table.to_string(),
+        gate_col.clone(),
+        root_id.to_string(),
+    );
+    // Read the root's locality and record the intent + uploads only when it is Local,
+    // in one transaction. Reading and inserting atomically means an already-Remote root
+    // never receives an intent whose completion would re-flip the on gate with a fresh
+    // stamp and re-publish the whole subtree. `query_truth` is the same locality reader
+    // the read/delete paths use, so there is one definition of a root's Local/Remote
+    // state.
+    let locality = db
+        .call(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let locality = crate::sync::gate::query_truth(&tx, &rt, &gc, &ri)
+                .map_err(|e| DbError(e.to_string()))?;
+            if locality == Some(false) {
+                Database::insert_make_remote_intent_on(&tx, &rt, &ri, pin)?;
+                for (id, cloud_key, source, scope) in &uploads {
+                    Database::enqueue_upload_on(
+                        &tx,
+                        id,
+                        cloud_key,
+                        Some(source),
+                        scope.clone(),
+                        pin,
+                        &created_at,
+                    )?;
+                }
+                tx.commit().map_err(DbError::from)?;
+            }
+            Ok(locality)
+        })
+        .await?;
+    match locality {
+        Some(false) => Ok(()),
+        Some(true) => Err(MakeRemoteError::AlreadyRemote(
+            root_table.to_string(),
+            root_id.to_string(),
+        )),
+        None => Err(MakeRemoteError::UnresolvedLocality(
+            root_table.to_string(),
+            root_id.to_string(),
+        )),
+    }
 }
 
 /// Cancel an in-flight make_remote of `(root_table, root_id)`: delete the intent and
@@ -457,6 +499,37 @@ pub async fn make_local(
     let gate_col = gate_column(&tables, root_table)
         .ok_or_else(|| MakeLocalError::NotGated(root_table.to_string()))?
         .to_string();
+
+    // Refuse a root already Local before any materialization. Otherwise the
+    // materializer would try to read each blob back from the cloud — a Local blob has
+    // no cloud copy — and fail deep inside with a misleading cloud-read error.
+    // `query_truth` is the same locality reader the read/delete paths use, so there is
+    // one definition of a root's Local/Remote state.
+    let (rt, gc, ri) = (
+        root_table.to_string(),
+        gate_col.clone(),
+        root_id.to_string(),
+    );
+    let locality = db
+        .call(move |conn| {
+            crate::sync::gate::query_truth(conn, &rt, &gc, &ri).map_err(|e| DbError(e.to_string()))
+        })
+        .await?;
+    match locality {
+        Some(true) => {}
+        Some(false) => {
+            return Err(MakeLocalError::AlreadyLocal(
+                root_table.to_string(),
+                root_id.to_string(),
+            ))
+        }
+        None => {
+            return Err(MakeLocalError::UnresolvedLocality(
+                root_table.to_string(),
+                root_id.to_string(),
+            ))
+        }
+    }
 
     let refs = refs_for_root(db, tables, root_table.to_string(), root_id.to_string()).await?;
 

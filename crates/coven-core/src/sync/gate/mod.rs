@@ -72,8 +72,8 @@ pub(crate) use model::write_gate;
 pub use model::Gates;
 #[cfg(test)]
 pub(crate) use model::{from_tables_call_count, reset_from_tables_call_count};
-pub(crate) use outbound::combine_changesets;
 pub use outbound::gate_outbound;
+pub(crate) use outbound::{combine_changesets, query_truth};
 
 /// [`crate::sync::session::table_columns`] with its `rusqlite::Error` adapted
 /// into the gate's error at the boundary.

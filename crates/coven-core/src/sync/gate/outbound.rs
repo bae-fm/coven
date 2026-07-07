@@ -841,8 +841,13 @@ fn query_column_text(
     query_row_optional(conn, &sql, [id], |row| row_value_to_string(row, 0)).map(|row| row.flatten())
 }
 
-/// Query a single boolean gate column for the row with id `id`.
-fn query_truth(
+/// Query a single boolean gate column for the row with id `id`. `Some` is the
+/// column's [`truthy`] reading; `None` when the row is absent or the gate column is
+/// NULL — an unresolvable locality the caller fails loud on rather than guessing.
+/// The single terminal gate-truth reader: [`resolve_root`] uses it for a gated root,
+/// and the coven-owned transitions read a root's Local/Remote state through it so
+/// there is one definition of a root's locality.
+pub(crate) fn query_truth(
     conn: &Connection,
     table: &str,
     column: &str,

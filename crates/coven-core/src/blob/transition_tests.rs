@@ -280,6 +280,16 @@ async fn shared_flag(db: &Database, note_id: &str) -> i64 {
     v.parse().unwrap()
 }
 
+/// The note's gate stamp (`_updated_at`), to prove a refused transition leaves the
+/// gate row — value and causal stamp — untouched.
+async fn gate_stamp(db: &Database, note_id: &str) -> String {
+    query_text(
+        db,
+        &format!("SELECT _updated_at FROM notes WHERE id = '{note_id}'"),
+    )
+    .await
+}
+
 async fn pending_uploads(db: &Database) -> usize {
     db.get_pending_cloud_uploads().await.unwrap().len()
 }
@@ -1269,6 +1279,118 @@ async fn cancel_make_remote_rejects_remote_root() {
         matches!(err, crate::blob::transition::MakeRemoteError::RemoteRoot(_)),
         "cancel_make_remote rejects a remote root specifically: {err:?}"
     );
+}
+
+/// make_remote on a root already Remote is refused at the API: no intent is
+/// recorded and the gate row is untouched. Without the precondition, path 1
+/// (host-provided-only) would insert an intent whose completion re-flips the
+/// already-on gate with a fresh stamp — a spurious full-subtree re-publish.
+#[tokio::test]
+async fn make_remote_rejects_already_remote_root() {
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
+    let (_tmp, _lib) = temp_library_dir();
+
+    // A host-provided-only root already Remote (gate on): a note plus a cover row.
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n-host', 'Host Only', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
+         VALUES ('coverhost', 'n-host', 15, '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
+    )
+    .await;
+
+    let stamp_before = gate_stamp(&db, "n-host").await;
+
+    let err = make_remote(&db, BlobPathScheme::Plain, &hlc, "notes", "n-host", true)
+        .await
+        .expect_err("a root already Remote has no make_remote transition");
+    assert!(
+        matches!(
+            err,
+            crate::blob::transition::MakeRemoteError::AlreadyRemote(_, _)
+        ),
+        "make_remote refuses an already-Remote root specifically: {err:?}"
+    );
+
+    assert!(
+        !has_intent(&db, "notes", "n-host").await,
+        "a refused make_remote records no intent",
+    );
+    assert_eq!(shared_flag(&db, "n-host").await, 1, "the gate stays on");
+    assert_eq!(
+        gate_stamp(&db, "n-host").await,
+        stamp_before,
+        "the gate stamp is untouched — no spurious re-publish",
+    );
+}
+
+/// make_local on a root already Local is refused at the API before any
+/// materialization: nothing is registered, no delete is queued, the gate row is
+/// untouched. Without the precondition, make_local would try to read the blob from
+/// the cloud and fail deep in materialization with a misleading cloud-read error.
+#[tokio::test]
+async fn make_local_rejects_already_local_root() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_library_dir();
+    let bytes = b"already-local".to_vec();
+
+    // A Local release (gate off) with its blob at a registered external file.
+    seed_local_release(
+        &db,
+        &tmp.path().join("user"),
+        "n1",
+        "photoaaa",
+        "cv/photoaaa.jpg",
+        &bytes,
+    )
+    .await;
+
+    let stamp_before = gate_stamp(&db, "n1").await;
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
+    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+
+    let err = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("a root already Local has no make_local transition");
+    assert!(
+        matches!(
+            err,
+            crate::blob::transition::MakeLocalError::AlreadyLocal(_, _)
+        ),
+        "make_local refuses an already-Local root specifically: {err:?}"
+    );
+
+    assert_eq!(shared_flag(&db, "n1").await, 0, "the gate stays off");
+    assert_eq!(
+        gate_stamp(&db, "n1").await,
+        stamp_before,
+        "the gate stamp is untouched",
+    );
+    assert!(
+        pending_deletes(&db).await.is_empty(),
+        "no cloud delete is queued",
+    );
+    assert!(!dest_path.exists(), "no file is materialized");
 }
 
 // ===========================================================================
