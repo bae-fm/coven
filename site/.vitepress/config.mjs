@@ -148,6 +148,11 @@ export default defineConfig({
             { icon: 'github', link: 'https://github.com/bae-fm/coven' },
         ],
 
+        footer: {
+            message: 'Released under the Apache-2.0 License.',
+            copyright: '© 2026 coven',
+        },
+
         search: {
             provider: 'local',
         },

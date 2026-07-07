@@ -20,7 +20,7 @@ features:
           width: 28
           height: 28
       title: Local first
-      details: 'The database lives on the device. Updates never touch the network, sync follows in the background.'
+      details: 'Every device has the full database. Writes commit locally, sync follows in the background.'
       link: /docs/
     - icon:
           light: /icons/cloud-light.svg
@@ -28,16 +28,16 @@ features:
           width: 28
           height: 28
       title: Serverless
-      details: 'Devices sync through storage users bring: Google Drive, Dropbox, OneDrive, iCloud, or S3. Nothing to deploy or operate.'
+      details: 'Devices sync through cloud storage users bring. Nothing to deploy or operate.'
       link: /docs/storage
     - icon:
-          light: /icons/database-light.svg
-          dark: /icons/database-dark.svg
+          light: /icons/devices-light.svg
+          dark: /icons/devices-dark.svg
           width: 28
           height: 28
-      title: Pick what syncs
-      details: 'SQLite in a sync harness: choose what tables and rows to sync, relations follow automatically.'
-      link: /docs/local-data
+      title: Everyone writes
+      details: 'Any device edits anything, offline included, and concurrent edits merge on their own.'
+      link: /docs/sync-model
     - icon:
           light: /icons/image-light.svg
           dark: /icons/image-dark.svg
@@ -55,137 +55,293 @@ features:
       details: 'Files can live in the cloud and stream back when read. Pin what should stay offline.'
       link: /docs/cache
     - icon:
-          light: /icons/devices-light.svg
-          dark: /icons/devices-dark.svg
+          light: /icons/database-light.svg
+          dark: /icons/database-dark.svg
           width: 28
           height: 28
-      title: Everyone writes
-      details: 'Any device edits anything, offline included, and concurrent edits merge on their own.'
-      link: /docs/sync-model
+      title: Pick what syncs
+      details: 'SQLite in a sync harness: specify which rows should sync, relations follow automatically.'
+      link: /docs/local-data
 ---
 
 <div class="home-body">
 
-## What it looks like
+<div class="byos">
 
-Your app opens one handle, declares which tables sync, and runs its own SQL.
-Everything below is the real API.
-
-### Open a library
-
-A synced table is ordinary SQLite with two conventions: a text `id` primary
-key, and an `_updated_at` column that coven stamps. Migrations are a plain
-versioned ladder.
-
-```rust
-use coven::{Coven, Migration, SyncedTable};
-
-const SCHEMA: &str = "
-    CREATE TABLE notes (
-        id          TEXT PRIMARY KEY,
-        body        TEXT NOT NULL,
-        _updated_at TEXT NOT NULL
-    );
-";
-
-let handle = Coven::builder(config)
-    .synced_tables(vec![SyncedTable::new("notes")])
-    .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
-    .open()?;
-```
-
-### Write rows
-
-Run your own SQL in a transaction on the connection coven owns. The change is
-captured and journaled for every other device, online or not.
-
-```rust
-handle.sql(|sql| {
-    sql.tx().execute(
-        "INSERT INTO notes (id, body, _updated_at) VALUES (?1, ?2, ?3)",
-        coven::rusqlite::params!["note-1", "Pick up milk", sql.stamp()],
-    )?;
-    Ok(())
-})
-.await?;
-```
-
-### Attach files
-
-`handle.write` commits file bytes and row changes as one unit; the row never
-exists without its file. The bytes ride the same encrypted pipeline as the
-rows. (The `photos` table declares its blob namespace with
-`SyncedTable::carries_blob`; see [Blobs](/docs/blobs).)
-
-```rust
-handle.write(
-    move |batch| {
-        batch.put_blob("photos", "sunset-01", jpeg_bytes);
-        Ok(())
-    },
-    |sql| {
-        sql.tx().execute(
-            "INSERT INTO photos (id, caption, _updated_at) VALUES (?1, ?2, ?3)",
-            coven::rusqlite::params!["sunset-01", "Golden hour", sql.stamp()],
-        )?;
-        Ok(())
-    },
-)
-.await?;
-```
-
-### Connect storage
-
-Point the library's config at a provider and connect. The library key lives on
-your devices; the provider only ever sees ciphertext. A library with no cloud
-home skips this step entirely; local-first means local works.
-
-```rust
-let encryption = EncryptionService::new(&library_key)?;
-handle.connect_sync(Some(encryption)).await?;
-handle.sync_now();
-```
-
-## How it works
-
-1. **Capture.** Your SQL runs on the connection coven owns; the SQLite session
-   extension records exactly which rows and columns changed.
-2. **Stamp.** Each changeset carries hybrid-logical-clock timestamps, so edits
-   order consistently across devices without a shared clock.
-3. **Seal.** Changesets are signed by their author and encrypted with the
-   library key before they leave the device.
-4. **Exchange.** Every device appends to its own stream of objects in your
-   storage and pulls everyone else's. Streams are append-only and per-author:
-   nothing is overwritten, so there is no write contention to coordinate.
-5. **Merge.** Concurrent edits merge column by column against their common
-   ancestor; deletes win over concurrent edits.
-
-Sharing works the same way: membership is an append-only chain of signed
-entries, and the library key is wrapped to each member's public key. Inviting
-someone adds an entry. Removing someone rotates the key.
-
-## Bring your own storage
+<p class="kicker">Bring your own storage</p>
 
 <p class="providers">
-  <span>Amazon S3</span>
   <span>Google Drive</span>
   <span>Dropbox</span>
   <span>OneDrive</span>
   <span>iCloud (CloudKit)</span>
+  <span>S3-compatible</span>
 </p>
 
-Any S3-compatible endpoint works too; the S3 provider takes a custom endpoint.
-Storage is a single `CloudHome` trait, so a new provider is one implementation
-away. [How storage works →](/docs/storage)
+[Learn more →](/docs/storage)
 
-## Read on
+</div>
 
-- [Sync model](/docs/sync-model): how changes move and merge
-- [Bootstrap](/docs/bootstrap): creating, joining, and restoring a library
-- [Sharing](/docs/sharing): invites, roles, and revocation
-- [Encryption](/docs/encryption): keys, chunking, and signatures
-- [Storage](/docs/storage): the `CloudHome` contract and the providers
-- [Example](/docs/example): a complete host, end to end
+<div class="story-head" id="how-it-works">
+<p class="kicker">How it works</p>
+<p class="story-title">The life of a library</p>
+</div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
+<div class="flowrow">
+<div class="flowtext">
+
+### Local first
+
+The phone inserts a row. It commits on-device; nothing waits on a network.
+
+</div>
+<svg class="flow" viewBox="0 0 660 116" role="img" aria-label="A row exists on the phone only; the cloud and laptop are empty">
+<text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="72" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="72" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="72" rx="10"/>
+<rect class="chip" x="25" y="52" width="150" height="28" rx="7"/>
+<text class="lbl" x="100" y="70" text-anchor="middle">note · “milk run”</text>
+<text class="sub" x="330" y="72" text-anchor="middle">(no cloud configured)</text>
+<text class="sub" x="560" y="72" text-anchor="middle">(nothing yet)</text>
+</svg>
+</div>
+
+<div class="flowlink">
+<svg viewBox="0 0 14 34" width="14" height="34" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="31" marker-end="url(#fa)"/></svg>
+<span>Configure cloud</span>
+</div>
+
+<div class="flowrow">
+<div class="flowtext">
+
+### Serverless sync
+
+The cloud becomes the sync medium. Devices push sealed, signed objects and
+pull each other's; it only ever holds ciphertext.
+
+</div>
+<svg class="flow" viewBox="0 0 660 120" role="img" aria-label="The phone pushes a sealed object to the cloud; the laptop pulls it">
+<text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="76" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="76" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="76" rx="10"/>
+<rect class="chip" x="25" y="52" width="150" height="28" rx="7"/>
+<text class="lbl" x="100" y="70" text-anchor="middle">note · “milk run”</text>
+<line class="arr" x1="182" y1="66" x2="248" y2="66" marker-end="url(#fa)"/>
+<text class="sub" x="215" y="94" text-anchor="middle">push · sealed</text>
+<rect class="chipo" x="255" y="52" width="150" height="28" rx="7"/>
+<path class="glyph" d="M271 63v-3a3 3 0 0 1 6 0v3"/>
+<rect class="glyphf" x="269.5" y="63" width="9" height="7" rx="1.5"/>
+<text class="lbl s11" x="290" y="70">signed object</text>
+<line class="arr" x1="428" y1="66" x2="466" y2="66" marker-end="url(#fa)"/>
+<text class="sub" x="447" y="94" text-anchor="middle">pull</text>
+<rect class="chip" x="485" y="52" width="150" height="28" rx="7"/>
+<text class="lbl" x="560" y="70" text-anchor="middle">note · “milk run”</text>
+</svg>
+</div>
+
+<div class="flowlink">
+<svg viewBox="0 0 14 34" width="14" height="34" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="31" marker-end="url(#fa)"/></svg>
+<span>Go offline</span>
+</div>
+
+<div class="flowrow">
+<div class="flowtext">
+
+### Everyone writes
+
+Apart, both devices edit the same row. The next sync applies both: merge is
+column by column.
+
+</div>
+<svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Phone and laptop edit different columns of the same row; both edits merge on both devices">
+<text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="166" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="166" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="166" rx="10"/>
+<rect class="chip" x="25" y="46" width="150" height="28" rx="7"/>
+<text class="lbl s11" x="100" y="64" text-anchor="middle">title → “Milk run”</text>
+<rect class="chip" x="485" y="46" width="150" height="28" rx="7"/>
+<text class="lbl s11" x="560" y="64" text-anchor="middle">body → “oat, 2%”</text>
+<line class="arr" x1="182" y1="60" x2="248" y2="60" marker-end="url(#fa)"/>
+<line class="arr" x1="478" y1="60" x2="412" y2="60" marker-end="url(#fa)"/>
+<rect class="chipo" x="255" y="38" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="330" y="54" text-anchor="middle">Δ title — phone</text>
+<rect class="chipo" x="255" y="70" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="330" y="86" text-anchor="middle">Δ body — laptop</text>
+<line class="arrd" x1="100" y1="80" x2="100" y2="140" marker-end="url(#fam)"/>
+<line class="arrd" x1="560" y1="80" x2="560" y2="140" marker-end="url(#fam)"/>
+<text class="sub" x="110" y="114">merge on pull</text>
+<rect class="chipa" x="25" y="146" width="150" height="40" rx="8"/>
+<text class="lbl" x="100" y="162" text-anchor="middle">Milk run</text>
+<text class="sub" x="100" y="177" text-anchor="middle">oat milk, 2%</text>
+<rect class="chipa" x="485" y="146" width="150" height="40" rx="8"/>
+<text class="lbl" x="560" y="162" text-anchor="middle">Milk run</text>
+<text class="sub" x="560" y="177" text-anchor="middle">oat milk, 2%</text>
+</svg>
+</div>
+
+<div class="flowlink">
+<svg viewBox="0 0 14 34" width="14" height="34" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="31" marker-end="url(#fa)"/></svg>
+<span>Attach a photo</span>
+</div>
+
+<div class="flowrow">
+<div class="flowtext">
+
+### Blobs, too
+
+A photo commits in the row's transaction. The laptop takes the row now and
+streams the photo on first view.
+
+</div>
+<svg class="flow" viewBox="0 0 660 150" role="img" aria-label="A row and its photo commit as one transaction and sync; the photo streams to the laptop on read">
+<text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="106" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="106" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="106" rx="10"/>
+<rect class="tx" x="20" y="42" width="160" height="74" rx="9"/>
+<rect class="chip" x="30" y="50" width="140" height="24" rx="6"/>
+<text class="lbl s11" x="100" y="66" text-anchor="middle">photos row</text>
+<rect class="chip" x="30" y="84" width="140" height="24" rx="6"/>
+<text class="lbl s11" x="100" y="100" text-anchor="middle">IMG_204.jpg</text>
+<text class="sub" x="100" y="132" text-anchor="middle">one transaction</text>
+<line class="arr" x1="184" y1="80" x2="248" y2="80" marker-end="url(#fa)"/>
+<rect class="chipo" x="255" y="50" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="330" y="66" text-anchor="middle">row object</text>
+<rect class="chipo" x="255" y="84" width="150" height="24" rx="6"/>
+<path class="glyph" d="M271 94v-3a3 3 0 0 1 6 0v3"/>
+<rect class="glyphf" x="269.5" y="94" width="9" height="7" rx="1.5"/>
+<text class="lbl s11" x="290" y="100">blob object</text>
+<line class="arr" x1="428" y1="62" x2="466" y2="62" marker-end="url(#fa)"/>
+<line class="arrd" x1="428" y1="96" x2="466" y2="96" marker-end="url(#fam)"/>
+<rect class="chip" x="485" y="50" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="560" y="66" text-anchor="middle">photos row</text>
+<rect class="chipd" x="485" y="84" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="560" y="100" text-anchor="middle">IMG_204.jpg</text>
+<text class="sub" x="560" y="132" text-anchor="middle">streams on first view</text>
+</svg>
+</div>
+
+<div class="flowlink">
+<svg viewBox="0 0 14 34" width="14" height="34" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="31" marker-end="url(#fa)"/></svg>
+<span>Offload the original</span>
+</div>
+
+<div class="flowrow">
+<div class="flowtext">
+
+### Beyond the disk
+
+The original moves to the cloud. Devices keep cache copies; a pin keeps one
+offline.
+
+</div>
+<svg class="flow" viewBox="0 0 660 150" role="img" aria-label="A large original moves to the cloud; devices keep cache copies and a pin">
+<text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="106" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="106" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="106" rx="10"/>
+<rect class="chip" x="485" y="48" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="560" y="64" text-anchor="middle">RAW original · 48 MB</text>
+<line class="arr" x1="478" y1="60" x2="412" y2="60" marker-end="url(#fa)"/>
+<text class="sub" x="447" y="44" text-anchor="middle">offload</text>
+<rect class="chipo" x="255" y="48" width="150" height="24" rx="6"/>
+<path class="glyph" d="M271 58v-3a3 3 0 0 1 6 0v3"/>
+<rect class="glyphf" x="269.5" y="58" width="9" height="7" rx="1.5"/>
+<text class="lbl s11" x="290" y="64">blob · 48 MB</text>
+<rect class="chipd" x="485" y="96" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="560" y="112" text-anchor="middle">cache · streams on read</text>
+<rect class="chipd" x="25" y="48" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="100" y="64" text-anchor="middle">cache copy</text>
+<rect class="chip" x="25" y="96" width="150" height="24" rx="6"/>
+<circle class="glyphf" cx="40" cy="106" r="3"/>
+<line class="glyph" x1="40" y1="109" x2="40" y2="114"/>
+<text class="lbl s11" x="50" y="112">pinned copy</text>
+</svg>
+</div>
+
+<div class="flowlink">
+<svg viewBox="0 0 14 34" width="14" height="34" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="31" marker-end="url(#fa)"/></svg>
+<span>Flip shared</span>
+</div>
+
+<div class="flowrow">
+<div class="flowtext">
+
+### Pick what syncs
+
+One flag shares a subtree. Flipping it on cascades the project's rows and
+files to peers; flipping it off retracts them from peers and keeps them
+local.
+
+</div>
+<svg class="flow" viewBox="0 0 660 290" role="img" aria-label="Flipping a shared flag cascades a project subtree to peers; flipping it off retracts it from peers while it stays local">
+<text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="246" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="246" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="246" rx="10"/>
+<rect class="chipa" x="25" y="44" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="100" y="61" text-anchor="middle">Zine — shared ✓</text>
+<path class="tree" d="M36 70v22h9M36 92v32h9"/>
+<rect class="chip" x="47" y="80" width="128" height="24" rx="6"/>
+<text class="lbl s11" x="111" y="96" text-anchor="middle">task row</text>
+<rect class="chip" x="47" y="112" width="128" height="24" rx="6"/>
+<text class="lbl s11" x="111" y="128" text-anchor="middle">photo + file</text>
+<line class="arr" x1="182" y1="88" x2="248" y2="88" marker-end="url(#fa)"/>
+<rect class="chipo" x="255" y="44" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="330" y="60" text-anchor="middle">Δ Zine</text>
+<rect class="chipo" x="255" y="76" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="330" y="92" text-anchor="middle">Δ task</text>
+<rect class="chipo" x="255" y="108" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="330" y="124" text-anchor="middle">Δ photo + blob</text>
+<line class="arr" x1="428" y1="88" x2="466" y2="88" marker-end="url(#fa)"/>
+<rect class="chip" x="485" y="44" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="560" y="61" text-anchor="middle">Zine</text>
+<rect class="chip" x="485" y="80" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="560" y="96" text-anchor="middle">task row</text>
+<rect class="chip" x="485" y="112" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="560" y="128" text-anchor="middle">photo + file</text>
+<text class="sub" x="330" y="156" text-anchor="middle">later, shared flips off</text>
+<line class="arrd" x1="20" y1="164" x2="640" y2="164"/>
+<rect class="chip" x="25" y="176" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="100" y="193" text-anchor="middle">Zine — shared ✗</text>
+<rect class="chip" x="47" y="210" width="128" height="24" rx="6"/>
+<text class="lbl s11" x="111" y="226" text-anchor="middle">task row</text>
+<rect class="chip" x="47" y="240" width="128" height="24" rx="6"/>
+<text class="lbl s11" x="111" y="256" text-anchor="middle">photo + file</text>
+<text class="sub" x="330" y="205" text-anchor="middle">deletes emitted</text>
+<rect class="chipd ghost" x="485" y="176" width="150" height="26" rx="7"/>
+<rect class="chipd ghost" x="485" y="206" width="150" height="24" rx="6"/>
+<rect class="chipd ghost" x="485" y="234" width="150" height="24" rx="6"/>
+<text class="sub" x="560" y="271" text-anchor="middle">retracted</text>
+</svg>
+</div>
+
+<div class="code-exit">
+
+[See complete example →](/docs/example)
+
+</div>
+
+<div class="end-cta">
+<a href="/docs/">Read the docs</a>
+</div>
 
 </div>
 
@@ -262,22 +418,310 @@ away. [How storage works →](/docs/storage)
     padding: 11px;
 }
 
+/* VPHomeContent provides the outer container and side padding; the
+   hero/features .container is 1152px of content inside its own. */
 .home-body {
-    max-width: 688px;
+    max-width: 1152px;
     margin: 0 auto;
-    padding: 16px 24px 96px;
+    padding: 16px 0 96px;
+}
+
+/* Flow diagrams */
+:root {
+    --coven-a: #35706c;
+    --coven-lane: #eef3f2;
+    --coven-chipbg: #ffffff;
+    --coven-chipstroke: #c3cfcd;
+}
+
+.dark {
+    --coven-a: #8fd9d4;
+    --coven-lane: #26262f;
+    --coven-chipbg: #32323e;
+    --coven-chipstroke: #4c4c5a;
+}
+
+.home-body .flow {
+    display: block;
+    width: 100%;
+    height: auto;
+    font-family: var(--vp-font-family-base);
+}
+
+.home-body .flowrow {
+    display: flex;
+    align-items: center;
+    gap: 40px;
+    margin: 22px 0;
+    padding: 28px 32px;
+    border: 1px solid var(--vp-c-divider);
+    border-radius: 12px;
+    background: linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--coven-a) 3%, var(--vp-c-bg)),
+        var(--vp-c-bg) 70%
+    );
+}
+
+.home-body .flowlink {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin: -4px 0;
+}
+
+.home-body .flowlink svg {
+    display: block;
+}
+
+.home-body .flowlink line {
+    stroke: var(--coven-a);
+    stroke-width: 1.6;
+    stroke-dasharray: 4 3;
+}
+
+.home-body .flowlink span {
+    color: var(--coven-a);
+    font-family: var(--vp-font-family-mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+.home-body .flowtext {
+    flex: 0 0 280px;
+}
+
+.home-body .flowtext h3 {
+    margin: 0 0 10px;
+    font-size: 18px;
+}
+
+.home-body .flowtext p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--vp-c-text-2);
+}
+
+.home-body .flowrow .flow {
+    flex: 1;
+    min-width: 0;
+}
+
+@media (max-width: 767px) {
+    .home-body .flowrow {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        padding: 20px;
+    }
+
+    .home-body .flowtext {
+        flex: none;
+    }
+}
+
+.flow .lane {
+    fill: var(--coven-lane);
+}
+
+.flow .lanec {
+    fill: none;
+    stroke: var(--vp-c-divider);
+    stroke-dasharray: 5 5;
+}
+
+.flow .hdr {
+    fill: var(--vp-c-text-2);
+    font-size: 8.5px;
+    font-weight: 600;
+    letter-spacing: 1.4px;
+}
+
+.flow .chip {
+    fill: var(--coven-chipbg);
+    stroke: var(--coven-chipstroke);
+}
+
+.flow .chipo {
+    fill: var(--coven-chipbg);
+    stroke: var(--coven-a);
+}
+
+.flow .chipa {
+    fill: var(--coven-chipbg);
+    stroke: var(--coven-a);
+    stroke-width: 1.6;
+}
+
+.flow .chipd {
+    fill: none;
+    stroke: var(--vp-c-text-3);
+    stroke-dasharray: 4 3;
+}
+
+.flow .lbl {
+    fill: var(--vp-c-text-1);
+    font-size: 12px;
+}
+
+.flow .s11 {
+    font-size: 11px;
+}
+
+.flow .sub {
+    fill: var(--vp-c-text-3);
+    font-size: 10.5px;
+}
+
+.flow .arr {
+    stroke: var(--coven-a);
+    stroke-width: 1.6;
+    fill: none;
+}
+
+.flow .arrd {
+    stroke: var(--vp-c-text-3);
+    stroke-dasharray: 4 3;
+    fill: none;
+}
+
+.flow .glyph {
+    stroke: var(--coven-a);
+    stroke-width: 1.4;
+    fill: none;
+}
+
+.flow .glyphf {
+    fill: var(--coven-a);
+    stroke: none;
+}
+
+.flow .tx {
+    fill: none;
+    stroke: var(--coven-a);
+    stroke-dasharray: 5 4;
+    opacity: 0.7;
+}
+
+.flow .tree {
+    stroke: var(--vp-c-text-3);
+    fill: none;
+}
+
+.flow .ghost {
+    opacity: 0.45;
+}
+
+.amf {
+    fill: var(--coven-a);
+}
+
+.ammf {
+    fill: var(--vp-c-text-3);
+}
+
+.home-body .byos {
+    text-align: center;
+    padding: 48px 0 8px;
+    margin-top: 48px;
+    border-top: 1px solid var(--vp-c-divider);
+}
+
+
+.home-body .byos .kicker {
+    margin-bottom: 22px;
+}
+
+.home-body .story-head {
+    margin: 64px 0 12px;
+    text-align: center;
+}
+
+.home-body .kicker {
+    margin: 0 0 10px;
+    text-align: center;
+    color: var(--coven-a);
+    font-family: var(--vp-font-family-mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+
+.home-body .story-title {
+    margin: 0;
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+    color: var(--vp-c-text-1);
+}
+
+.home-body .byos p:last-of-type {
+    margin: 18px 0 0;
+    font-size: 14px;
+}
+
+.home-body .end-cta {
+    margin: 56px 0 16px;
+    text-align: center;
+}
+
+.home-body .end-cta a {
+    display: inline-block;
+    padding: 0 24px;
+    line-height: 40px;
+    border-radius: 22px;
+    background-color: var(--vp-c-brand-3);
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background-color 0.25s;
+}
+
+.home-body .end-cta a:hover {
+    background-color: var(--vp-c-brand-2);
+    color: #ffffff;
+}
+
+.home-body .code-exit {
+    margin: 28px 0 0;
+    text-align: center;
+    font-size: 14px;
+}
+
+.home-body .code-exit p {
+    margin: 0;
+    font-size: 14px;
+    color: var(--vp-c-text-2);
+}
+
+.home-body .code-exit a,
+.home-body .byos a {
+    color: var(--vp-c-text-2);
+    font-weight: 400;
+    text-decoration-color: var(--vp-c-divider);
+}
+
+.home-body .code-exit a:hover,
+.home-body .byos a:hover {
+    color: var(--vp-c-text-1);
 }
 
 .home-body .providers {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    margin: 16px 0;
+    justify-content: center;
+    gap: 10px;
+    margin: 0;
 }
 
 .home-body .providers span {
-    padding: 6px 14px;
-    border-radius: 20px;
+    padding: 8px 18px;
+    border-radius: 24px;
     background-color: var(--vp-c-bg-soft);
     border: 1px solid var(--vp-c-divider);
     color: var(--vp-c-text-1);
