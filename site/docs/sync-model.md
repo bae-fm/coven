@@ -52,22 +52,21 @@ fresh-device bootstrap from a snapshot has its own page,
 
 ## Change capture
 
-coven owns the SQLite connection. The host opens it once through
-`Coven::builder(config).synced_tables(...).migrations(...).open()`, passing
-the synced tables as
-[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values.
-Every synced table must have a text `id` primary key at column 0 and an
-`_updated_at TEXT NOT NULL` column, validated at open. A table not in the set
-is local-only and never leaves the device. From then on the host runs all its
-SQL through `handle.sql(...)`; coven re-exports rusqlite, so the closure works
-against the transaction coven opens and the host never depends on rusqlite
-directly.
+Everything downstream (the merge, the streams, the guarantees) depends on one
+thing: knowing *exactly* what changed, with nothing missed and nothing made
+up. Asking the host to report its own changes would make every host bug a
+sync bug. So coven doesn't ask: it owns the connection and records changes
+itself.
 
-The connection lives on one dedicated thread (an actor). Capture is the SQLite
-session extension, attached over `rusqlite::session` to every declared table
-on that owned connection. Each insert, update, and delete to a synced table is
-recorded into an in-memory changeset. The host writes as usual; capture is
-passive, and there is no host-lent pointer to a connection coven does not own.
+The host opens the library once through
+`Coven::builder(config).synced_tables(...).migrations(...).open()`, declaring
+its [synced tables](/docs/local-data), and from then on runs all its SQL
+through `handle.sql(...)`. The connection lives on one dedicated thread (an
+actor). Capture is the SQLite session extension, attached to every declared
+table on that owned connection: each insert, update, and delete to a synced
+table is recorded into an in-memory changeset. The host writes as usual.
+Capture is passive, and there is no host-lent pointer to a connection coven
+does not own.
 
 The set is not a tuning knob. With no tables declared the session attaches
 nothing and produces empty changesets forever, so
@@ -76,7 +75,9 @@ treats an empty set as a hard error and refuses to start.
 
 ## The sync cycle
 
-A background loop runs one cycle at a time.
+Every guarantee on this page needs a place to live, and that place is one
+deterministic loop: the same steps, in the same order, every cycle. A
+background loop runs one cycle at a time.
 [`run_single_sync_cycle`](rustdoc:fn:coven::sync::cycle::run_single_sync_cycle)
 loads the persisted sync state each cycle (rather than holding it across calls)
 and drives these steps:
@@ -114,7 +115,9 @@ the changeset, and applies it.
 
 ### Push
 
-Push stages the changeset bytes to a file before uploading. If the upload fails,
+A device's stream is only trustworthy if its sequence numbers never skip and
+never change meaning, even across a crash. So push stages the changeset bytes
+to a file before uploading. If the upload fails,
 the bytes survive on disk and `staged_seq` is persisted, so the next cycle
 retries the same sequence number rather than skipping it. After a successful
 push the staged file is cleared and `local_seq` advances. A device's sequence
@@ -191,6 +194,12 @@ its own stream.
 
 ## Hybrid logical clocks
 
+Merging needs an order for edits, and wall clocks cannot provide one: devices
+sit offline for weeks, drift, and occasionally lie. The order has to survive
+all three, and it has to guarantee one thing above all: if you pull my edit
+and then change it, your change wins. A hybrid logical clock provides exactly
+that.
+
 `_updated_at` is a hybrid logical clock stamp, not wall-clock time. The host must
 treat it as opaque: bind the string coven hands it into the row and never parse
 or compare it as a date. Its format, internal to coven, is
@@ -228,12 +237,12 @@ The advance is bounded the same way arbitration is (below): a stamp the
 arbiter refused as grossly future never ratchets the clock either, because
 only applied rows feed the advance.
 
-This is what makes a plain wall clock insufficient. Alice creates a todo at her
-12:00:00, stamped `...-alice`. Bob pulls it; his clock advances past Alice's
-stamp. Bob edits the same todo five seconds later. Even if Bob's wall clock were
-behind Alice's, his stamp is seeded past hers, so it is lexicographically
-greater. His changeset reaches Alice, her pull applies it, and his edit wins.
-Both devices converge on Bob's version.
+Concretely: Alice creates a todo at her 12:00:00, stamped `...-alice`. Bob
+pulls it; his clock advances past Alice's stamp. Bob edits the same todo five
+seconds later. Even if Bob's wall clock were behind Alice's, his stamp is
+seeded past hers, so it is lexicographically greater. His changeset reaches
+Alice, her pull applies it, and his edit wins. Both devices converge on Bob's
+version: pull-then-edit wins, whatever the wall clocks say.
 
 ## How concurrent edits merge
 
@@ -313,7 +322,10 @@ omitted, the affected tables are surfaced in
 
 ## Schema versioning
 
-Every outgoing changeset carries the device's schema version: the top rung of
+Devices upgrade at different times, so two schema versions are routinely live
+against one library; the version stamp is what lets them coexist instead of
+corrupting each other. Every outgoing changeset carries the device's schema
+version: the top rung of
 the host's [migration ladder](/docs/schema-evolution), reported by
 [`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version).
 Pull enforces it two ways:
@@ -378,7 +390,9 @@ to its own domain events.
 
 ## Backoff
 
-One exponential formula (`30s · 2^n`) drives the cycle wait. A successful cycle
+A failing cycle should not hammer a struggling provider, and a healthy one
+should not lag a fresh edit. One exponential formula (`30s · 2^n`) drives the
+cycle wait. A successful cycle
 waits the base 30 seconds before the next run; each consecutive failure doubles
 the wait (60s, 120s, 240s), capped at 300 seconds. A success resets the count,
 and a manual `trigger_sync` preempts the wait.
