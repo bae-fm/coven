@@ -11,12 +11,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use sha2::{Digest, Sha256};
 
-use super::{
-    BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectState,
-    CloudObjectVersion, ConditionalDelete, PartSink,
-};
+use super::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 
 /// In-memory CloudHome backed by a HashMap. `Clone` shares one backing store, so
 /// clones act as separate devices reading and writing the same cloud bucket, and
@@ -169,31 +165,6 @@ impl CloudHome for InMemoryCloudHome {
         Ok(self.writes.lock().unwrap().contains_key(key))
     }
 
-    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
-        let writes = self.writes.lock().unwrap();
-        match writes.get(key) {
-            Some(data) => Ok(CloudObjectState::Present(content_version(data))),
-            None => Ok(CloudObjectState::Absent),
-        }
-    }
-
-    async fn delete_if_version(
-        &self,
-        key: &str,
-        version: &CloudObjectVersion,
-    ) -> Result<ConditionalDelete, CloudHomeError> {
-        let mut writes = self.writes.lock().unwrap();
-        let Some(data) = writes.get(key) else {
-            return Ok(ConditionalDelete::NotFound);
-        };
-        if content_version(data) != *version {
-            return Ok(ConditionalDelete::Changed);
-        }
-        writes.remove(key);
-        self.deletes.lock().unwrap().push(key.to_string());
-        Ok(ConditionalDelete::Deleted)
-    }
-
     async fn grant_access(
         &self,
         _grant: super::CloudAccessGrant,
@@ -209,10 +180,6 @@ impl CloudHome for InMemoryCloudHome {
     ) -> Result<super::RevokeOutcome, CloudHomeError> {
         Ok(super::RevokeOutcome::Unsupported)
     }
-}
-
-fn content_version(data: &[u8]) -> CloudObjectVersion {
-    CloudObjectVersion::new(hex::encode(Sha256::digest(data)))
 }
 
 #[cfg(test)]

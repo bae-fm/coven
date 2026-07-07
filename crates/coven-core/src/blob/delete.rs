@@ -55,18 +55,20 @@ use tracing::{debug, warn};
 
 use crate::database::Database;
 use crate::keys::{self, UserKeypair};
-use crate::storage::cloud::{no_progress, CloudHome, CloudObjectState, ConditionalDelete};
+use crate::storage::cloud::{no_progress, CloudHome};
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::membership::MembershipChain;
 use crate::sync::membership_ops::{
     authorize_loaded_membership_author, MembershipAuthorRequirement,
 };
 
-/// How long a deleted blob is kept after its tombstone is written, before a GC
-/// pass reclaims it: the cross-device convergence window.
+/// The default convergence window a host gets if it configures none: how long a
+/// deleted blob is kept after its tombstone is written, before a GC pass reclaims
+/// it. The host overrides it on the coven builder; [`gc_tombstones`] evaluates
+/// whatever grace it is handed against the tombstone's `deleted_at`.
 ///
-/// A device offline for less than this is never stranded by a deletion — when it
-/// reconnects it pulls the removal of the row that referenced the blob, and the
+/// A device offline for less than the grace is never stranded by a deletion — when
+/// it reconnects it pulls the removal of the row that referenced the blob, and the
 /// blob is still present until then. The window is human-scale (days, not the
 /// sub-second commit window the snapshot sweep's grace covers) because the device
 /// it protects is a person's offline laptop or phone, not a concurrent writer
@@ -415,8 +417,11 @@ enum RowReference {
 }
 
 /// Garbage-collect tombstones: delete each blob whose authentic tombstone has aged
-/// past [`BLOB_TOMBSTONE_GRACE`], then delete the tombstone. This is where the
-/// actual blob deletion happens.
+/// past `grace`, then delete the tombstone. This is where the actual blob deletion
+/// happens. `grace` is the host's convergence window (defaulting to
+/// [`BLOB_TOMBSTONE_GRACE`]); the reader evaluates it against each tombstone's
+/// authentic `deleted_at`, so members with different settings simply GC on their
+/// own schedules and the earliest-configured one erases first.
 ///
 /// For each tombstone under [`TOMBSTONE_PREFIX`], in order:
 /// 1. Open it under the cipher and parse it. An object we can't open or parse is a
@@ -442,6 +447,13 @@ enum RowReference {
 ///    a pass that deleted the blob but failed to delete the tombstone — clean it up
 ///    without counting a reclaim), then delete the blob and the tombstone object.
 ///
+/// The blob delete is a plain, unconditional delete on every provider. A blob
+/// re-uploaded to a key whose tombstone's grace already expired can therefore be
+/// erased by a concurrent GC pass between the re-check and the delete; that loss
+/// surfaces as a loud read error on the next read, never silent corruption, and a
+/// host avoids it by writing new content at new (content-addressed or versioned)
+/// blob keys rather than re-uploading at a deleted key.
+///
 /// Authorization judges against `membership_chain`, the cycle's once-loaded chain
 /// already anchored to the owner pinned on join/restore/found — not
 /// trust-on-first-use: this GC runs in production and deletes user blobs, so it
@@ -459,6 +471,7 @@ pub async fn gc_tombstones(
     library_id: &str,
     membership_chain: Option<&MembershipChain>,
     clock: &dyn crate::clock::Clock,
+    grace: chrono::Duration,
 ) -> Result<usize, String> {
     let suffix = cipher.read().unwrap().suffix();
     let keys = cloud_home
@@ -561,7 +574,7 @@ pub async fn gc_tombstones(
                 continue;
             }
         };
-        if now.signed_duration_since(deleted_at) <= BLOB_TOMBSTONE_GRACE {
+        if now.signed_duration_since(deleted_at) <= grace {
             // Still inside the convergence window: a peer may not have pulled the row
             // removal yet, so the blob must stay readable. The live-row cancel below
             // is deliberately gated behind this check: a peer whose db still reads the
@@ -632,11 +645,11 @@ pub async fn gc_tombstones(
             RowReference::NotLiveRemote => {}
         }
 
-        // Re-check the tombstone still exists before reclaiming. If a re-upload's
-        // cancel has removed the tombstone, the deletion is no longer current. If
-        // the tombstone is still present, the blob delete below is still conditional
-        // on the blob object's observed version, so a re-upload that lands after
-        // this re-check is not deleted.
+        // Re-check the tombstone still exists before reclaiming. A re-upload's
+        // cancel (inline or its durable retry) deletes the tombstone once the blob
+        // is (re-)written, so a tombstone still present here means no re-upload has
+        // completed; a tombstone now gone means one has, and the deletion is no
+        // longer current — skip.
         match cloud_home.exists(&key).await {
             Ok(true) => {}
             Ok(false) => {
@@ -651,75 +664,42 @@ pub async fn gc_tombstones(
             }
         }
 
-        // Capture the blob object's current version, then delete only if that same
-        // version is still current at the storage backend. A plain exists-then-delete
-        // would delete a re-upload that lands between the check and the delete.
-        match cloud_home.object_state(&tombstone.cloud_key).await {
-            Ok(CloudObjectState::Present(version)) => {
-                match cloud_home
-                    .delete_if_version(&tombstone.cloud_key, &version)
-                    .await
-                {
-                    Ok(ConditionalDelete::Deleted) => {
-                        deleted += 1;
-                        debug!(
-                            cloud_key = %tombstone.cloud_key,
-                            "reclaimed blob past the tombstone grace",
-                        );
-                    }
-                    Ok(ConditionalDelete::NotFound) => {
-                        debug!(
-                            cloud_key = %tombstone.cloud_key,
-                            "tombstone's blob already gone; cleaning up the leftover tombstone",
-                        );
-                    }
-                    Ok(ConditionalDelete::Changed) => {
-                        if let Err(e) = cloud_home.delete(&key).await {
-                            warn!("Failed to cancel tombstone {key} after its blob changed: {e}");
-                            continue;
-                        }
-                        debug!(
-                            cloud_key = %tombstone.cloud_key,
-                            "canceled tombstone because its blob changed before reclaim",
-                        );
-                        continue;
-                    }
-                    Ok(ConditionalDelete::VersionUnavailable) => {
-                        warn!(
-                            "Tombstone GC skipped {}: cloud home cannot conditionally delete this blob",
-                            tombstone.cloud_key
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Failed to conditionally delete blob {}: {e}",
-                            tombstone.cloud_key
-                        );
-                        continue;
-                    }
-                }
-            }
-            Ok(CloudObjectState::Absent) => {
-                debug!(
-                    cloud_key = %tombstone.cloud_key,
-                    "tombstone's blob already gone; cleaning up the leftover tombstone",
-                );
-            }
-            Ok(CloudObjectState::VersionUnavailable) => {
-                warn!(
-                    "Tombstone GC skipped {}: cloud home cannot version this blob for conditional delete",
-                    tombstone.cloud_key
-                );
-                continue;
-            }
+        // Confirm the blob is actually present before deleting, so a leftover
+        // tombstone whose blob a prior pass already reclaimed is cleaned up without
+        // counting a phantom second reclaim.
+        let blob_present = match cloud_home.exists(&tombstone.cloud_key).await {
+            Ok(present) => present,
             Err(e) => {
                 warn!(
-                    "Failed to read blob version for {} before reclaim: {e}",
+                    "Failed to check blob presence for {} before reclaim: {e}",
                     tombstone.cloud_key
                 );
                 continue;
             }
+        };
+        if blob_present {
+            // Plain, unconditional delete on every provider. A re-upload that lands
+            // at this key between the tombstone re-check above and this delete is
+            // erased here; that loss surfaces as a loud read error on the next read
+            // (never silent corruption), and a host avoids it by writing new content
+            // at new blob keys rather than re-uploading at a deleted key.
+            if let Err(e) = cloud_home.delete(&tombstone.cloud_key).await {
+                warn!(
+                    "Failed to delete blob {} past the grace: {e}",
+                    tombstone.cloud_key
+                );
+                continue;
+            }
+            deleted += 1;
+            debug!(
+                cloud_key = %tombstone.cloud_key,
+                "reclaimed blob past the tombstone grace",
+            );
+        } else {
+            debug!(
+                cloud_key = %tombstone.cloud_key,
+                "tombstone's blob already gone; cleaning up the leftover tombstone",
+            );
         }
 
         // The blob is gone (deleted just now or already absent); remove the

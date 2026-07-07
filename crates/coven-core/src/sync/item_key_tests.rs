@@ -46,6 +46,7 @@ fn open_db(device_id: &str) -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         device_id.to_string(),
         &test_migrations(),
     )
@@ -295,6 +296,7 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
     let (db_b, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables_with_blob(item_photo_decl()),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         "dev-b".to_string(),
         &test_migrations(),
     )
@@ -429,6 +431,7 @@ async fn snapshot_bootstrap_join_resolves_item_and_decrypts() {
     let (db_b, _stamper) = Database::open(
         &target,
         test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         "dev-b".to_string(),
         &test_migrations(),
     )

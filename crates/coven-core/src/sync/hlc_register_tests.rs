@@ -481,6 +481,7 @@ async fn returned_stamper_shares_seeded_clock() {
     let (db, stamper) = crate::database::Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000_000_000_000)),
         &migrations,
     )
@@ -666,6 +667,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     let (db, _stamper) = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         "dev-self".to_string(),
         &migrations,
     )

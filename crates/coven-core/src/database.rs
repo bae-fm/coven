@@ -46,6 +46,11 @@ struct DatabaseState {
     schema_version: u32,
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
+    /// The host's blob-tombstone convergence window, read by the tombstone GC to
+    /// age each tombstone's `deleted_at`. Host config carried here alongside
+    /// `synced_tables` so the sync layer reads it from the one owner rather than
+    /// threading a separately-passed copy that could diverge.
+    blob_tombstone_grace: chrono::Duration,
 }
 
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
@@ -66,12 +71,14 @@ struct DatabaseCore {
     schema_version: u32,
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
+    blob_tombstone_grace: chrono::Duration,
 }
 
 impl DatabaseCore {
     fn open(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState, UpdatedAtStamper), DbError> {
@@ -140,6 +147,7 @@ impl DatabaseCore {
             schema_version,
             gates,
             blob_decls,
+            blob_tombstone_grace,
         };
         let state = core.state();
 
@@ -153,6 +161,7 @@ impl DatabaseCore {
             schema_version: self.schema_version,
             gates: self.gates.clone(),
             blob_decls: self.blob_decls.clone(),
+            blob_tombstone_grace: self.blob_tombstone_grace,
         }
     }
 
@@ -426,11 +435,18 @@ impl Database {
     pub fn open(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), DbError> {
         let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
-        Self::open_with_hlc(path, synced_tables, Arc::new(hlc), migrations)
+        Self::open_with_hlc(
+            path,
+            synced_tables,
+            blob_tombstone_grace,
+            Arc::new(hlc),
+            migrations,
+        )
     }
 
     /// Open with a caller-supplied register clock instead of a fresh
@@ -442,10 +458,12 @@ impl Database {
     pub(crate) fn open_with_hlc(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), DbError> {
-        let (core, state, stamper) = DatabaseCore::open(path, synced_tables, hlc, migrations)?;
+        let (core, state, stamper) =
+            DatabaseCore::open(path, synced_tables, blob_tombstone_grace, hlc, migrations)?;
 
         #[cfg(not(target_arch = "wasm32"))]
         let database = {
@@ -479,6 +497,13 @@ impl Database {
     /// instead of carrying a separately-passed copy that could silently diverge.
     pub fn synced_tables(&self) -> &[SyncedTable] {
         &self.state.synced_tables
+    }
+
+    /// The host's blob-tombstone convergence window. The tombstone GC ages each
+    /// tombstone's `deleted_at` against this to decide when a deleted blob may be
+    /// erased. Fixed for this handle's life.
+    pub fn blob_tombstone_grace(&self) -> chrono::Duration {
+        self.state.blob_tombstone_grace
     }
 
     /// The gate model resolved from the final synced table set and live schema at
@@ -1518,6 +1543,7 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blob::delete::BLOB_TOMBSTONE_GRACE;
 
     fn notes_migration() -> Migration {
         Migration::sql(
@@ -1545,6 +1571,7 @@ mod tests {
         let (db, _stamper) = Database::open(
             Path::new(":memory:"),
             Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
             "liveness".to_string(),
             &[],
         )
@@ -1590,8 +1617,14 @@ mod tests {
         let db_path = dir.path().join("db.sqlite");
         let marker = dir.path().join("marker");
 
-        let (db, _stamper) =
-            Database::open(&db_path, Vec::new(), "drop-async".to_string(), &[]).expect("open");
+        let (db, _stamper) = Database::open(
+            &db_path,
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            "drop-async".to_string(),
+            &[],
+        )
+        .expect("open");
 
         // Dispatch a slow job to the connection thread, then release the clone
         // tied to it so the job is in flight with no handle awaiting it: spawn the
@@ -1635,7 +1668,13 @@ mod tests {
 
     #[tokio::test]
     async fn database_open_rejects_empty_device_id() {
-        let result = Database::open(Path::new(":memory:"), Vec::new(), String::new(), &[]);
+        let result = Database::open(
+            Path::new(":memory:"),
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            String::new(),
+            &[],
+        );
         let error = match result {
             Ok(_) => panic!("empty device_id must be rejected"),
             Err(error) => error.to_string(),
@@ -1653,6 +1692,7 @@ mod tests {
             let result = Database::open(
                 Path::new(":memory:"),
                 vec![SyncedTable::new(table_name)],
+                BLOB_TOMBSTONE_GRACE,
                 format!("reserved-{table_name}"),
                 &[notes_migration()],
             );
@@ -1673,6 +1713,7 @@ mod tests {
         let result = Database::open(
             Path::new(":memory:"),
             vec![SyncedTable::new("")],
+            BLOB_TOMBSTONE_GRACE,
             "empty-synced-table".to_string(),
             &[notes_migration()],
         );
@@ -1692,6 +1733,7 @@ mod tests {
         Database::open(
             Path::new(":memory:"),
             vec![SyncedTable::new("notes")],
+            BLOB_TOMBSTONE_GRACE,
             "normal-synced-table".to_string(),
             &[notes_migration()],
         )
@@ -1709,6 +1751,7 @@ mod tests {
         let result = Database::open(
             Path::new(":memory:"),
             tables,
+            BLOB_TOMBSTONE_GRACE,
             device_id.to_string(),
             &[Migration::sql(1, "contract", migration_sql)],
         );
@@ -1816,6 +1859,7 @@ mod tests {
         let (db, _stamper) = Database::open(
             Path::new(":memory:"),
             Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
             "test-device".to_string(),
             &[],
         )

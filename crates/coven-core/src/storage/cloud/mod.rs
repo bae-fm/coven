@@ -86,34 +86,6 @@ pub struct CloudAccessRevoke {
     pub provider_account_email: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloudObjectVersion(String);
-
-impl CloudObjectVersion {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CloudObjectState {
-    Present(CloudObjectVersion),
-    Absent,
-    VersionUnavailable,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConditionalDelete {
-    Deleted,
-    NotFound,
-    Changed,
-    VersionUnavailable,
-}
-
 /// Whether a backend actually withdrew a removed member's storage credential.
 ///
 /// Consumer clouds unshare the folder and report [`RevokeOutcome::Revoked`].
@@ -497,25 +469,6 @@ pub trait CloudHome: crate::MaybeThreadSafe {
 
     /// Check whether a key exists.
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
-
-    /// Return the current object version needed for an atomic conditional delete.
-    /// Backends that cannot expose such a version return [`CloudObjectState::VersionUnavailable`].
-    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
-        if self.exists(key).await? {
-            Ok(CloudObjectState::VersionUnavailable)
-        } else {
-            Ok(CloudObjectState::Absent)
-        }
-    }
-
-    /// Delete `key` only if its current version still equals `version`.
-    async fn delete_if_version(
-        &self,
-        _key: &str,
-        _version: &CloudObjectVersion,
-    ) -> Result<ConditionalDelete, CloudHomeError> {
-        Ok(ConditionalDelete::VersionUnavailable)
-    }
 
     /// Grant access to a member and return connection info for the cloud home.
     /// Consumer-cloud backends share the folder with the member's account.

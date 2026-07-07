@@ -49,6 +49,7 @@ fn open_device(device_id: &str) -> Database {
             Provenance::HostProvided,
             CacheFill::CacheEager,
         )),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         device_id.to_string(),
         &test_migrations(),
     )

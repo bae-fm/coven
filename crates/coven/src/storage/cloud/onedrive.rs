@@ -18,7 +18,7 @@ use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
     sharing, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudObjectState, CloudObjectVersion, ConditionalDelete, RevokeOutcome,
+    CloudHomeJoinInfo, RevokeOutcome,
 };
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
@@ -291,62 +291,6 @@ impl CloudHome for OneDriveCloudHome {
             .api_call(|token| self.client().get(&url).bearer_auth(token))
             .await?;
         exists_from_response(resp, &format!("exists {key}"), NotFound::Status).await
-    }
-
-    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
-        let url = format!("{}?$select=eTag", self.item_path_url(key));
-        let resp = self
-            .session
-            .api_call(|token| self.client().get(&url).bearer_auth(token))
-            .await?;
-        let status = resp.status();
-        let body = http::body_text(resp).await;
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(CloudObjectState::Absent);
-        }
-        if !status.is_success() {
-            return Err(CloudHomeError::Storage(format!(
-                "metadata {key} (HTTP {status}): {body}"
-            )));
-        }
-        let json: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| CloudHomeError::Storage(format!("parse metadata {key}: {e}")))?;
-        match json["eTag"].as_str() {
-            Some(etag) => Ok(CloudObjectState::Present(CloudObjectVersion::new(etag))),
-            None => Ok(CloudObjectState::VersionUnavailable),
-        }
-    }
-
-    async fn delete_if_version(
-        &self,
-        key: &str,
-        version: &CloudObjectVersion,
-    ) -> Result<ConditionalDelete, CloudHomeError> {
-        let url = self.item_path_url(key);
-        let etag = version.as_str().to_string();
-        let resp = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .delete(&url)
-                    .bearer_auth(token)
-                    .header("If-Match", &etag)
-            })
-            .await?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(ConditionalDelete::NotFound);
-        }
-        if status == reqwest::StatusCode::PRECONDITION_FAILED {
-            return Ok(ConditionalDelete::Changed);
-        }
-        if !status.is_success() {
-            return Err(CloudHomeError::Storage(format!(
-                "delete {key} (HTTP {status}): {}",
-                http::body_text(resp).await
-            )));
-        }
-        Ok(ConditionalDelete::Deleted)
     }
 
     async fn grant_access(

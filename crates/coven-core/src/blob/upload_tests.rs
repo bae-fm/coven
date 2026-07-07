@@ -65,6 +65,7 @@ fn open_outbox_db() -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         Vec::new(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         "test-device".to_string(),
         &[],
     )

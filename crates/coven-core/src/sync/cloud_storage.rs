@@ -1255,7 +1255,7 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
         BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHomeError, CloudHomeJoinInfo,
-        CloudObjectState, CloudObjectVersion, ConditionalDelete, RevokeOutcome,
+        RevokeOutcome,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1332,18 +1332,6 @@ mod tests {
 
         async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
             self.inner.exists(key).await
-        }
-
-        async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
-            self.inner.object_state(key).await
-        }
-
-        async fn delete_if_version(
-            &self,
-            key: &str,
-            version: &CloudObjectVersion,
-        ) -> Result<ConditionalDelete, CloudHomeError> {
-            self.inner.delete_if_version(key, version).await
         }
 
         async fn grant_access(

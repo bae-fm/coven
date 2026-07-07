@@ -36,6 +36,8 @@ pub enum CovenError {
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven library")]
     MissingMigrations,
+    #[error("blob_tombstone_grace must be a positive duration")]
+    InvalidBlobTombstoneGrace,
     #[error("blob {namespace}/{id} is still referenced by a row after the write")]
     BlobStillReferenced { namespace: String, id: String },
     #[error("blob {namespace}/{id} is already referenced by a row")]
@@ -97,6 +99,7 @@ impl Coven {
             config,
             synced_tables: None,
             migrations: None,
+            blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             clock: Arc::new(SystemClock),
             key_service: KeyService::new(current.library_id),
             cloudkit_ops: None,
@@ -109,6 +112,7 @@ pub struct CovenBuilder {
     config: CovenConfig,
     synced_tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
+    blob_tombstone_grace: chrono::Duration,
     clock: ClockRef,
     key_service: KeyService,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
@@ -159,6 +163,16 @@ impl CovenBuilder {
         self
     }
 
+    /// How long a deleted blob is kept after its tombstone is written before the
+    /// tombstone GC erases it: the cross-device convergence window. Defaults to
+    /// [`crate::blob::delete::BLOB_TOMBSTONE_GRACE`]. Must be positive — a
+    /// zero-or-negative grace is refused at [`open`](Self::open), since it would
+    /// let the GC erase a blob a lagging peer still references.
+    pub fn blob_tombstone_grace(mut self, grace: chrono::Duration) -> Self {
+        self.blob_tombstone_grace = grace;
+        self
+    }
+
     /// The host's synced-schema migration ladder, applied over `PRAGMA
     /// user_version` at open. The top version is the wire `schema_version` every
     /// changeset is stamped with.
@@ -203,13 +217,21 @@ impl CovenBuilder {
         let config = self.config.current();
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
+        if self.blob_tombstone_grace <= chrono::Duration::zero() {
+            return Err(CovenError::InvalidBlobTombstoneGrace);
+        }
         let db_path = config.library_dir.db_path();
         let provider = self.config.provider();
         let library_dir = config.library_dir.clone();
         let open_guard = Arc::new(LibraryOpenGuard::acquire(&library_dir)?);
         remove_orphaned_local_blob_temps(&library_dir, std::time::SystemTime::now())?;
-        let (db, stamper) =
-            Database::open(&db_path, tables, config.device_id.clone(), &migrations)?;
+        let (db, stamper) = Database::open(
+            &db_path,
+            tables,
+            self.blob_tombstone_grace,
+            config.device_id.clone(),
+            &migrations,
+        )?;
         Ok(CovenHandle::new(
             db,
             stamper,
@@ -836,6 +858,35 @@ mod tests {
             .migrations(vec![files_migration()])
             .open()
             .expect("open succeeds after the first handle drops");
+    }
+
+    #[tokio::test]
+    async fn a_zero_or_negative_blob_tombstone_grace_is_refused_at_open() {
+        for grace in [chrono::Duration::zero(), chrono::Duration::seconds(-1)] {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let dir = LibraryDir::new(tmp.path());
+            let result = Coven::builder(config(dir))
+                .synced_tables(vec![files_table()])
+                .migrations(vec![files_migration()])
+                .blob_tombstone_grace(grace)
+                .open();
+            assert!(
+                matches!(result, Err(CovenError::InvalidBlobTombstoneGrace)),
+                "grace {grace:?} must be refused at open",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_positive_blob_tombstone_grace_opens() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        Coven::builder(config(dir))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .blob_tombstone_grace(chrono::Duration::hours(1))
+            .open()
+            .expect("a positive grace opens");
     }
 
     fn open_remote_root_files_handle() -> (tempfile::TempDir, CovenHandle) {

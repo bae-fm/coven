@@ -479,6 +479,9 @@ pub(crate) async fn open_db_and_pull(
     let (db, _stamper) = Database::open(
         db_path,
         synced_tables.to_vec(),
+        // This bootstrap database only applies changesets during join; it never runs
+        // the tombstone GC, so the grace is immaterial and takes the default.
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         device_id.to_string(),
         migrations,
     )

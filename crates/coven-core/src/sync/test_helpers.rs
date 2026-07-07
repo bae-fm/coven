@@ -8,16 +8,12 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 
 use crate::database::{Database, DbError, PendingChangesetBatch};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::migration::Migration;
-use crate::storage::cloud::{
-    BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectState,
-    CloudObjectVersion, ConditionalDelete, PartSink,
-};
+use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 use crate::sync::apply::resolve_and_apply_changeset;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
@@ -218,6 +214,7 @@ pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>)
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         tables,
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         "test-device".to_string(),
         &migrations,
     )
@@ -247,6 +244,7 @@ pub fn open_test_db_with_hlc(
     let (db, _stamper) = Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         hlc,
         &migrations,
     )
@@ -1413,30 +1411,6 @@ impl CloudHome for MockSyncStorage {
         Ok(self.objects.lock().unwrap().contains_key(key))
     }
 
-    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
-        let objects = self.objects.lock().unwrap();
-        match objects.get(key) {
-            Some(data) => Ok(CloudObjectState::Present(mock_object_version(data))),
-            None => Ok(CloudObjectState::Absent),
-        }
-    }
-
-    async fn delete_if_version(
-        &self,
-        key: &str,
-        version: &CloudObjectVersion,
-    ) -> Result<ConditionalDelete, CloudHomeError> {
-        let mut objects = self.objects.lock().unwrap();
-        let Some(data) = objects.get(key) else {
-            return Ok(ConditionalDelete::NotFound);
-        };
-        if mock_object_version(data) != *version {
-            return Ok(ConditionalDelete::Changed);
-        }
-        objects.remove(key);
-        Ok(ConditionalDelete::Deleted)
-    }
-
     async fn grant_access(
         &self,
         _grant: crate::storage::cloud::CloudAccessGrant,
@@ -1457,10 +1431,6 @@ impl CloudHome for MockSyncStorage {
     ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
         Ok(crate::storage::cloud::RevokeOutcome::Unsupported)
     }
-}
-
-fn mock_object_version(data: &[u8]) -> CloudObjectVersion {
-    CloudObjectVersion::new(hex::encode(Sha256::digest(data)))
 }
 
 /// Pull into `db` the way production does: `pull_changes` applies each incoming

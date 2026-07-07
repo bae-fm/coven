@@ -42,6 +42,7 @@ fn open_device(device_id: &str) -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         device_id.to_string(),
         &test_migrations(),
     )

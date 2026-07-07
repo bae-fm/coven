@@ -21,10 +21,7 @@ use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{
-    no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudObjectState,
-    CloudObjectVersion, ConditionalDelete,
-};
+use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
@@ -50,6 +47,7 @@ fn open_outbox_db() -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         Vec::new(),
+        BLOB_TOMBSTONE_GRACE,
         "test-device".to_string(),
         &[],
     )
@@ -70,6 +68,7 @@ async fn gc_tombstones_anchored(
     library_id: &str,
     pinned_owner: Option<&str>,
     clock: &dyn crate::clock::Clock,
+    grace: chrono::Duration,
 ) -> Result<usize, String> {
     if let Some(owner) = pinned_owner {
         db.set_sync_state(OWNER_PUBKEY_STATE_KEY, owner)
@@ -86,6 +85,7 @@ async fn gc_tombstones_anchored(
         library_id,
         membership.chain.as_ref(),
         clock,
+        grace,
     )
     .await
 }
@@ -107,6 +107,7 @@ async fn gc_tombstones_without_live_refs(
         library_id,
         pinned_owner,
         clock,
+        BLOB_TOMBSTONE_GRACE,
     )
     .await
 }
@@ -236,18 +237,6 @@ impl CloudHome for CancelTombstoneOnExists<'_> {
             return Ok(false);
         }
         self.inner.exists(key).await
-    }
-
-    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
-        self.inner.object_state(key).await
-    }
-
-    async fn delete_if_version(
-        &self,
-        key: &str,
-        version: &CloudObjectVersion,
-    ) -> Result<ConditionalDelete, CloudHomeError> {
-        self.inner.delete_if_version(key, version).await
     }
 
     async fn grant_access(
@@ -460,18 +449,6 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
             )));
         }
         self.inner.exists(key).await
-    }
-
-    async fn object_state(&self, key: &str) -> Result<CloudObjectState, CloudHomeError> {
-        self.inner.object_state(key).await
-    }
-
-    async fn delete_if_version(
-        &self,
-        key: &str,
-        version: &CloudObjectVersion,
-    ) -> Result<ConditionalDelete, CloudHomeError> {
-        self.inner.delete_if_version(key, version).await
     }
 
     async fn grant_access(
@@ -931,6 +908,7 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
         "test-lib",
         Some(&owner),
         &past,
+        BLOB_TOMBSTONE_GRACE,
     )
     .await
     .expect("gc");
@@ -1005,6 +983,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         "test-lib",
         Some(&owner),
         &within,
+        BLOB_TOMBSTONE_GRACE,
     )
     .await
     .expect("gc within grace");
@@ -1036,6 +1015,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         "test-lib",
         Some(&owner),
         &past,
+        BLOB_TOMBSTONE_GRACE,
     )
     .await
     .expect("gc past grace");
@@ -1108,6 +1088,7 @@ async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
         "test-lib",
         Some(&owner),
         &past,
+        BLOB_TOMBSTONE_GRACE,
     )
     .await
     .expect("gc");
@@ -1186,15 +1167,19 @@ async fn tombstone_canceled_mid_gc_leaves_the_reuploaded_blob() {
     );
 }
 
+/// Past the grace, with no conditional-delete support on the provider, a blob is
+/// erased with a plain delete; the tombstone is a mock backed only by the
+/// in-memory store's `delete`/`exists` (no `object_state`/`delete_if_version`).
 #[tokio::test]
-async fn blob_reuploaded_after_gc_observes_it_is_not_deleted() {
+async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
     let (storage, founder, member) = storage_with_chain().await;
-    let owner = pubkey_hex(&founder);
     let cipher = plaintext_cipher();
+    let owner = pubkey_hex(&founder);
+
     storage
         .write(
             "blob-key",
-            crate::storage::cloud::BlobBody::from_bytes(b"old contents".to_vec()),
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
             &no_progress(),
         )
         .await
@@ -1208,33 +1193,95 @@ async fn blob_reuploaded_after_gc_observes_it_is_not_deleted() {
     );
     plant_tombstone(&storage, &tombstone).await;
 
-    let racing_home = ReuploadAfterBlobObserved {
-        inner: &storage,
-        blob_key: "blob-key".to_string(),
-        fresh_contents: b"fresh contents".to_vec(),
-        fired: AtomicBool::new(false),
-    };
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = gc_tombstones_without_live_refs(
         &storage,
-        &racing_home,
+        &storage,
         &cipher,
         "test-lib",
         Some(&owner),
         &past,
     )
     .await
-    .expect("gc");
+    .expect("gc past grace");
 
-    assert_eq!(n, 0, "a changed object is not reclaimed");
-    assert_eq!(
-        storage.read("blob-key").await.unwrap(),
-        b"fresh contents",
-        "the re-uploaded blob remains",
+    assert_eq!(n, 1, "the blob is erased past the grace");
+    assert!(
+        storage.read("blob-key").await.is_err(),
+        "the blob is gone after a plain-delete reclaim",
     );
     assert!(
         storage.read("blob_tombstones/blob-key").await.is_err(),
-        "the tombstone is canceled once its target object changed",
+        "the tombstone is removed after reclaiming its blob",
+    );
+}
+
+/// A grace the host configures (here one hour) is what the GC ages against, not
+/// the seven-day default: within the hour the blob survives; past it the blob is
+/// erased. The reader evaluates whatever grace it is handed.
+#[tokio::test]
+async fn a_configured_one_hour_grace_is_honored() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let cipher = plaintext_cipher();
+    let owner = pubkey_hex(&founder);
+    let grace = chrono::Duration::hours(1);
+
+    storage
+        .write(
+            "blob-key",
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    let tombstone = BlobTombstoneJson::signed(
+        "test-lib",
+        "blob-key".to_string(),
+        deleted_at.to_string(),
+        &member,
+    );
+    plant_tombstone(&storage, &tombstone).await;
+
+    // Half an hour in — inside the configured hour — the blob survives.
+    let within = FixedClock(at("2024-06-01T00:30:00Z"));
+    let n = gc_tombstones_anchored(
+        &open_outbox_db(),
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &within,
+        grace,
+    )
+    .await
+    .expect("gc within the configured hour");
+    assert_eq!(n, 0, "nothing reclaimed inside the configured hour");
+    assert!(
+        storage.read("blob-key").await.is_ok(),
+        "the blob survives inside the configured hour (well before the 7-day default)",
+    );
+
+    // Just past the hour — past the configured grace though far inside the default —
+    // the blob is erased.
+    let past = FixedClock(at("2024-06-01T01:00:01Z"));
+    let n = gc_tombstones_anchored(
+        &open_outbox_db(),
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+        grace,
+    )
+    .await
+    .expect("gc past the configured hour");
+    assert_eq!(n, 1, "the blob is erased once the configured hour passes");
+    assert!(
+        storage.read("blob-key").await.is_err(),
+        "the blob is gone past the configured grace",
     );
 }
 

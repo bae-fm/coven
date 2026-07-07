@@ -113,6 +113,7 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
     let (db_b, _stamper_b) = Database::open(
         &lib_b.db_path(),
         tables.clone(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         "B".to_string(),
         &test_migrations(),
     )
@@ -502,6 +503,7 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
     let (db_b, _stamper_b) = Database::open(
         &lib_b.db_path(),
         tables.clone(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         "B".to_string(),
         &test_migrations(),
     )

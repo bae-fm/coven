@@ -325,6 +325,9 @@ impl CovenLibrary {
         let (db, _stamper) = Database::open(
             std::path::Path::new(&path),
             synced_tables,
+            // The browser facade does not yet expose a grace knob; it takes the
+            // default convergence window.
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             device_id.clone(),
             &migrations,
         )

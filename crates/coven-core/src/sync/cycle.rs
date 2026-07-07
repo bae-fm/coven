@@ -782,6 +782,7 @@ pub async fn run_single_sync_cycle(
                 library_id,
                 membership.chain.as_ref(),
                 clock,
+                db.blob_tombstone_grace(),
             )
             .await
             {
