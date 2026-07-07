@@ -96,8 +96,20 @@ pub struct InvalidSignature {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldChangesetReason {
-    SizeMismatch { expected: usize, actual: usize },
-    ApplyFailed { error: String },
+    /// The object decrypted but its bytes are not a valid envelope (no null
+    /// separator, or the JSON metadata did not parse). Present-but-invalid cloud
+    /// data, held like a size mismatch so one bad object stalls only its own
+    /// stream instead of failing the whole pull.
+    MalformedEnvelope {
+        error: String,
+    },
+    SizeMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    ApplyFailed {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,8 +409,28 @@ pub async fn pull_changes(
                 }
             };
 
-            let (env, changeset_bytes) =
-                envelope::unpack(&envelope_bytes).map_err(PullError::InvalidEnvelope)?;
+            // A present but unparseable envelope is bad cloud data, not a reason to
+            // fail the whole pull. Hold this device's cursor and surface it, the same
+            // as a size mismatch or apply failure; other device streams continue.
+            let (env, changeset_bytes) = match envelope::unpack(&envelope_bytes) {
+                Ok(unpacked) => unpacked,
+                Err(e) => {
+                    error!(
+                        device_id = %head.device_id,
+                        seq,
+                        error = %e,
+                        "changeset envelope is malformed; holding cursor for this device"
+                    );
+                    result.held_changesets.push(HeldChangeset {
+                        device_id: head.device_id.clone(),
+                        seq,
+                        reason: HeldChangesetReason::MalformedEnvelope {
+                            error: e.to_string(),
+                        },
+                    });
+                    break;
+                }
+            };
 
             // Schema version check: skip changesets from a newer schema.
             if env.schema_version > db.schema_version() {
@@ -1487,7 +1519,6 @@ async fn cached_in_either_folder(
 #[derive(Debug)]
 pub enum PullError {
     Storage(super::storage::StorageError),
-    InvalidEnvelope(super::envelope::UnpackError),
     Apply(String),
     /// The sync storage requires a schema version newer than ours.
     /// The client must upgrade before syncing.
@@ -1505,7 +1536,6 @@ impl std::fmt::Display for PullError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PullError::Storage(e) => write!(f, "storage error: {e}"),
-            PullError::InvalidEnvelope(e) => write!(f, "invalid changeset envelope: {e}"),
             PullError::Apply(e) => write!(f, "changeset apply failed: {e}"),
             PullError::SchemaVersionTooOld {
                 local_version,

@@ -581,6 +581,95 @@ async fn apply_failure_isolates_to_one_device() {
     assert_eq!(result.changesets_applied, 1);
 }
 
+/// An object at `changes/{device}/{seq}` that decrypts but whose bytes are not a
+/// valid envelope (here: no null separator between the JSON and the changeset)
+/// holds only its own device's cursor. A second device's changesets still apply,
+/// and the malformed object surfaces as a held changeset naming the device and
+/// seq. Before this, an unpack failure propagated out and failed the whole pull
+/// every cycle, permanently stopping sync for every member.
+#[tokio::test]
+async fn malformed_envelope_isolates_to_one_device() {
+    let storage = MockSyncStorage::new();
+
+    let good_source = open_test_db();
+    let good_cs = capture_bytes(
+        &good_source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n-good', 'Good', NULL, '0000000001000-0000-devA', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("devA", 1, &good_cs, SCHEMA_VERSION);
+
+    // devB's seq 1 is bytes with no null separator, so `envelope::unpack` fails.
+    storage.put_changeset_packed("devB", 1, b"not a valid envelope".to_vec());
+
+    let target = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &HashMap::new(), &ld)
+        .await
+        .expect("a malformed envelope must not fail the whole pull");
+
+    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n-good'").await);
+    assert_eq!(updated.get("devA"), Some(&1));
+    assert_eq!(
+        updated.get("devB"),
+        None,
+        "the malformed device's cursor is held",
+    );
+    assert_eq!(result.changesets_applied, 1);
+    assert_eq!(result.held_changesets.len(), 1);
+    assert_eq!(result.held_changesets[0].device_id, "devB");
+    assert_eq!(result.held_changesets[0].seq, 1);
+    assert!(matches!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::MalformedEnvelope { .. }
+    ));
+}
+
+/// The malformed-envelope hold is a bounded stall, not a permanent skip: once a
+/// valid object is re-pushed at the same seq, the next cycle resumes that
+/// device's stream from where the cursor was held.
+#[tokio::test]
+async fn re_pushed_valid_envelope_resumes_the_held_device() {
+    let storage = MockSyncStorage::new();
+
+    storage.put_changeset_packed("dev1", 1, b"not a valid envelope".to_vec());
+
+    let db2 = open_test_db();
+    let (_tmp, ld) = temp_library_dir();
+    let (held_cursors, first) = pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &ld)
+        .await
+        .expect("a malformed envelope must not fail the whole pull");
+    assert_eq!(first.changesets_applied, 0);
+    assert_eq!(held_cursors.get("dev1"), None);
+    assert_eq!(first.held_changesets.len(), 1);
+
+    // The device re-pushes a valid changeset at the held seq.
+    let source = open_test_db();
+    let cs = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'Recovered', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+
+    let (updated, second) = pull_into_result(&db2, &storage, "dev2", &held_cursors, &ld)
+        .await
+        .expect("resume pull");
+    assert_eq!(second.changesets_applied, 1);
+    assert_eq!(updated.get("dev1"), Some(&1));
+    assert!(second.held_changesets.is_empty());
+    assert_eq!(
+        query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "Recovered"
+    );
+}
+
 #[tokio::test]
 async fn blob_round_trips_through_storage_via_blob_plan() {
     let storage = MockSyncStorage::new();
