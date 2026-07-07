@@ -8,6 +8,11 @@ control, and apply remote changes back into SQLite. No coordination server.
 
 ## The round trip
 
+Why no server? Because nothing in the loop below needs one. A write is
+captured, sealed, and parked in storage; every other device picks it up from
+there. The storage never has to understand the data for this to work, which is
+exactly what lets it be storage the user already has.
+
 <div style="margin: 1.5rem 0; padding: 24px 28px; background: var(--vp-code-block-bg); border-radius: 8px;">
 <svg viewBox="11 18 666 232" width="100%" role="img" aria-label="On your device, your app's write is captured, signed, and encrypted by coven, then pushed to storage you own. On a teammate's device, coven pulls it back, verifies, decrypts, and applies it into their app." style="font-family: var(--vp-font-family-mono); overflow: visible;">
   <defs>
@@ -63,10 +68,14 @@ or who is allowed to write.
 
 ## In your code
 
-**Open the library.** coven owns the connection. Declare the tables that sync
-and the migration ladder that builds your schema; `open` runs coven's own
-bookkeeping migration, then your ladder, and returns one handle. Tables you
-don't list stay local to the device.
+The integration is one builder call and a handful of methods on the handle it
+returns. Two beats give the flavor; the whole tour, from open to invite, is
+the [Example](/docs/example).
+
+**Open the library.** Declare the tables that sync and the migration ladder
+that builds your schema; `open` runs coven's own bookkeeping migration, then
+your ladder, and returns one handle. Tables you don't list stay local to the
+device.
 
 ```rust
 use coven::{Coven, Migration, SyncedTable};
@@ -82,7 +91,8 @@ let handle = Coven::builder(config)
 
 **Write normally, through the handle.** Your closure gets a transaction;
 coven captures what changed when it commits. Synced rows carry an
-`_updated_at` you mint with `SqlContext::stamp()`.
+`_updated_at` you mint with `sql.stamp()`; that stamp is how edits order
+across devices.
 
 ```rust
 handle.sql(move |sql| {
@@ -94,52 +104,16 @@ handle.sql(move |sql| {
 }).await?;
 ```
 
-**Store a row plus host-provided blob bytes** as one unit: the first closure
-stages the bytes, the second writes the row, and both commit in the same
-transaction.
-
-```rust
-handle.write(
-    move |batch| {
-        batch.put_blob("attachments", blob_id, bytes);
-        Ok(())
-    },
-    move |sql| {
-        sql.tx().execute(
-            "INSERT INTO todo_attachments (id, todo_id, blob_id, _updated_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            coven::rusqlite::params![attachment_id, todo_id, row_blob_id, sql.stamp()],
-        )?;
-        Ok(())
-    },
-).await?;
-```
-
-**Start sync and react to remote changes.** Once a cloud provider is
-connected, start sync through the handle and subscribe to the status stream.
-
-```rust
-handle.connect_sync(Some(encryption_service)).await?;
-handle.sync_now();
-
-let mut status = handle.subscribe_sync_status()?;
-while let Ok(s) = status.recv().await {
-    if let Some(changes) = s.row_changes {
-        refresh_ui(&changes);
-    }
-}
-```
-
-**Share and revoke.** Invite a member by public key; removing one rotates the
-library key.
-
-```rust
-let code = handle
-    .invite_member(&their_pubkey_hex, None, MemberRole::Member)
-    .await?;
-```
+Everything else is more of the same shape: `handle.write` commits a row and
+its file bytes in one transaction, `handle.connect_sync` starts the background
+loop, `handle.subscribe_sync_status` streams what each cycle applied, and
+`handle.invite_member` adds a teammate.
 
 ## Who owns what
+
+The integration stays small because the boundary is strict: coven owns
+everything that has to be correct for sync, and nothing that makes your app
+yours.
 
 coven owns the sync layer and the database connection:
 
