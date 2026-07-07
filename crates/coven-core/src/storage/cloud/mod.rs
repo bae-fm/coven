@@ -38,12 +38,11 @@ pub enum CloudHomeError {
 }
 
 impl CloudHomeError {
-    /// Whether retrying the failed operation unchanged could succeed. A transport
-    /// or local-I/O failure is transient (`true`); a missing object, a
-    /// misconfiguration, or absent/invalid credentials will not resolve without the
-    /// object appearing or the user fixing the config (`false`). Answered here, at
-    /// the layer that mints the error, so the sync loop and hosts read one verdict
-    /// rather than each re-deriving it from a message string.
+    /// Whether the failure is transient — worth retrying the operation unchanged —
+    /// or a fault that will not resolve until the missing object appears or the user
+    /// fixes the configuration. A transport or local-I/O failure is transient
+    /// (`true`); a missing object, a misconfiguration, or absent/invalid credentials
+    /// are not (`false`).
     pub fn is_retryable(&self) -> bool {
         match self {
             CloudHomeError::Transport(_) | CloudHomeError::Io(_) => true,

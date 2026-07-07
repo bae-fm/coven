@@ -54,8 +54,6 @@ pub enum MembershipOpsError {
     NoMembershipChain,
     #[error("membership chain has no founder")]
     ChainHasNoFounder,
-    #[error("sharing requires an encrypted cloud home")]
-    PlaintextHome,
 }
 
 /// `sync_state` key holding the hex Ed25519 pubkey of the library's established
@@ -239,8 +237,15 @@ pub fn apply_key_rotation(
                 *enc = new_encryption;
                 enc.fingerprint()
             }
+            // Both callers confirm an encrypted home before rotating: the sync
+            // manager's `require_encrypted_home` gate (surfacing NotEncryptedHome)
+            // and the refresh cycle's own plaintext check. A plaintext home here is
+            // a broken invariant, not a user-facing condition.
             CloudCipher::Plaintext => {
-                return Err(MembershipOpsError::PlaintextHome);
+                unreachable!(
+                    "apply_key_rotation runs only after the caller has confirmed an \
+                     encrypted home"
+                )
             }
         }
     };

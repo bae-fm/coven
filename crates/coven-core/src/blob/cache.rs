@@ -113,11 +113,11 @@ pub enum BlobCacheError {
     /// A blob-metadata query failed — resolving the blob's locality, looking up its
     /// external ref, or reading its cache budget or expected size. A database read
     /// the blob path depends on, distinct from a disk I/O failure.
-    Metadata(String),
+    Metadata(DbError),
     /// The blob's encryption scope could not be resolved to a key (a missing
     /// `item_keys` row for an item-scoped blob). Distinct from a disk failure: the
     /// bytes may be present but cannot be opened.
-    ScopeResolution(String),
+    ScopeResolution(DbError),
     /// Building the sync storage from config failed — missing credentials or cloud
     /// configuration — when a Remote blob needed it. A configuration fault, not a
     /// disk I/O error.
@@ -909,9 +909,11 @@ pub async fn evict_to_budget(
     namespace: &str,
     protect: Option<&std::path::Path>,
 ) -> Result<(), BlobCacheError> {
-    let budget = match db.get_cache_budget(namespace).await.map_err(|e| {
-        BlobCacheError::Metadata(format!("read cache budget for {namespace:?}: {e}"))
-    })? {
+    let budget = match db
+        .get_cache_budget(namespace)
+        .await
+        .map_err(BlobCacheError::Metadata)?
+    {
         Some(budget) => budget,
         // This namespace has no budget set — its cache is unlimited, so there is
         // nothing to enforce. Another namespace's budget never reaches here.
@@ -1033,7 +1035,7 @@ async fn resolve_source(db: &Database, blob: &BlobRef) -> Result<BlobSource, Blo
             }
         })
         .await
-        .map_err(|e| BlobCacheError::Metadata(format!("resolve locality for {}: {e}", blob.id)))?;
+        .map_err(BlobCacheError::Metadata)?;
     match kept {
         // Remote: same source for both provenances.
         Some(true) => Ok(BlobSource::Cache),
@@ -1056,9 +1058,7 @@ async fn lookup_external_ref(
     db: &Database,
     id: &str,
 ) -> Result<Option<crate::db::ExternalBlob>, BlobCacheError> {
-    db.external_blob(id)
-        .await
-        .map_err(|e| BlobCacheError::Metadata(format!("look up external blob ref for {id}: {e}")))
+    db.external_blob(id).await.map_err(BlobCacheError::Metadata)
 }
 
 /// The cache folder path that currently holds a Remote blob's plaintext, checking
@@ -1260,9 +1260,7 @@ async fn validate_and_resolve_blob_scope(
 
     db.resolve_blob_scope(blob.scope.clone())
         .await
-        .map_err(|e| {
-            BlobCacheError::ScopeResolution(format!("resolve blob scope for {}: {e}", blob.id))
-        })
+        .map_err(BlobCacheError::ScopeResolution)
 }
 
 pub(crate) async fn expected_blob_size(
@@ -1278,7 +1276,7 @@ pub(crate) async fn expected_blob_size(
             .map_err(|e| DbError(e.to_string()))
     })
     .await
-    .map_err(|e| BlobCacheError::Metadata(format!("read expected size for {}: {e}", blob.id)))?
+    .map_err(BlobCacheError::Metadata)?
     .ok_or_else(|| BlobCacheError::LocalityUnresolved {
         id: blob.id.clone(),
     })

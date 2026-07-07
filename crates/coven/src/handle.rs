@@ -55,6 +55,17 @@ use crate::sync::sync_loop::SyncLoopStatus;
 use crate::sync::sync_manager::MemberInfo;
 use crate::sync::sync_manager::{ConfigProvider, SyncError, SyncManager};
 
+/// A Remote blob read needs sync storage; if building it from config fails
+/// (missing credentials or cloud configuration) the read surfaces that as a
+/// configuration fault, not a disk I/O error. `BlobCacheError` lives in
+/// `coven-core` and cannot name `coven`'s `StorageSetupError`, so the typed error
+/// is rendered to its message at this crate boundary.
+impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
+    fn from(e: crate::storage::cloud::setup::StorageSetupError) -> Self {
+        BlobCacheError::StorageSetup(e.to_string())
+    }
+}
+
 /// The native handle over one coven library.
 ///
 /// Open it once with [`Coven::builder`](crate::Coven::builder), then call methods. Cheap to
@@ -469,10 +480,7 @@ impl CovenHandle {
     /// from the cloud (into the cache) on a Remote miss. The host passes only the
     /// [`BlobRef`]; coven holds the database, the directory, and the storage.
     pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
-        let storage = self
-            .blob_storage()
-            .await
-            .map_err(|e| BlobCacheError::StorageSetup(e.to_string()))?;
+        let storage = self.blob_storage().await?;
         crate::blob::cache::read_blob(&self.db, &self.library_dir, storage.as_deref(), blob).await
     }
 
@@ -487,10 +495,7 @@ impl CovenHandle {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
-        let storage = self
-            .blob_storage()
-            .await
-            .map_err(|e| BlobCacheError::StorageSetup(e.to_string()))?;
+        let storage = self.blob_storage().await?;
         crate::blob::cache::open_blob_stream(
             &self.db,
             &self.library_dir,
@@ -507,10 +512,7 @@ impl CovenHandle {
     /// cache (`storage/pinned/`) — from the evictable cache if already there, else
     /// the cloud — exempt from the size budget. Idempotent.
     pub async fn pin(&self, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
-        let storage = self
-            .blob_storage()
-            .await
-            .map_err(|e| BlobCacheError::StorageSetup(e.to_string()))?;
+        let storage = self.blob_storage().await?;
         crate::blob::cache::pin(&self.db, &self.library_dir, storage.as_deref(), blobs).await
     }
 
