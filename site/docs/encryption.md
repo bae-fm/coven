@@ -8,6 +8,8 @@ cryptographic layers, exactly what the provider can observe, where the library
 key lives, and the chunk format that lets a byte range be fetched and decrypted
 without the whole file.
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
 The examples use a todos app: `workspaces` hold `lists`, a list holds `todos`, a
 todo has `todo_attachments`, and todos carry labels through a `todo_labels` join.
 
@@ -15,19 +17,24 @@ todo has `todo_attachments`, and todos carry labels through a `todo_labels` join
 
 coven uses three separate keys, each for a distinct job.
 
-**A symmetric library key** encrypts the data itself. It is one 32-byte key,
-shared by every member of the library, used with XChaCha20-Poly1305 (an
-authenticated cipher: decryption fails if a byte was changed). Every changeset,
-every snapshot (a full database image), every blob (a file referenced by a row,
-such as a `todo_attachments` image), and every membership record is encrypted
-under this key. [`EncryptionService`](rustdoc:struct:coven::encryption::EncryptionService)
-holds the key and does the work;
+**A symmetric library keyring** encrypts the data itself. Each **generation**
+in the keyring is one 32-byte key, shared by every member, used with
+XChaCha20-Poly1305 (an authenticated cipher: decryption fails if a byte was
+changed). Every changeset, every snapshot (a full database image), every blob
+(a file referenced by a row, such as a `todo_attachments` image), and every
+membership record is sealed under the current generation.
+[Removing a member](/docs/sharing#revocation-is-key-rotation) appends a fresh
+generation that the removed member never receives; older generations stay in
+the keyring so data sealed before the rotation stays readable.
+[`EncryptionService`](rustdoc:struct:coven::encryption::EncryptionService)
+holds the keyring and does the work;
 [`EncryptionService::encrypt`](rustdoc:method:coven::encryption::EncryptionService::encrypt)
 and [`EncryptionService::decrypt`](rustdoc:method:coven::encryption::EncryptionService::decrypt)
 are the round trip. Construct one from a raw key with
-[`from_key`](rustdoc:method:coven::encryption::EncryptionService::from_key) or from a
-hex string with [`new`](rustdoc:method:coven::encryption::EncryptionService::new); a
-fresh key comes from
+[`from_key`](rustdoc:method:coven::encryption::EncryptionService::from_key) (a
+one-generation keyring) or from a stored string with
+[`new`](rustdoc:method:coven::encryption::EncryptionService::new); a fresh key
+comes from
 [`generate_random_key`](rustdoc:fn:coven::encryption::generate_random_key).
 
 **A per-device Ed25519 identity** signs, it does not encrypt. Each device has one
@@ -40,9 +47,9 @@ author's public key. This answers "who wrote this", which the library key alone
 cannot: anyone holding the library key could otherwise forge a changeset as
 anyone else.
 
-**X25519 sealed-box wrapping** hands the library key to a new member. The library
-key is symmetric, so it cannot travel in the clear; it is encrypted to the
-joiner. Each member's X25519 key is derived deterministically from their Ed25519
+**X25519 sealed-box wrapping** hands the library keyring to a new member. The
+keyring is symmetric material, so it cannot travel in the clear; it is
+encrypted to the joiner. Each member's X25519 key is derived deterministically from their Ed25519
 public key
 ([`to_x25519_public_key`](rustdoc:method:coven::keys::UserKeypair::to_x25519_public_key),
 or [`ed25519_to_x25519_public_key`](rustdoc:fn:coven::keys::ed25519_to_x25519_public_key)
@@ -54,11 +61,36 @@ result at `keys/{member_ed25519_pubkey}.enc`; the joiner downloads it and calls
 secret key. A sealed box is anonymous: it carries an ephemeral sender key, so the
 stored file reveals nothing about who created the invitation.
 
-The three are needed together. The library key keeps data secret; the Ed25519
-identity proves who authored each change; the sealed box moves the library key to
-a member without ever exposing it. Losing the Ed25519 secret key also loses
+The three are needed together. The library keyring keeps data secret; the
+Ed25519 identity proves who authored each change; the sealed box moves the
+keyring to a member without ever exposing it. Losing the Ed25519 secret key also loses
 access to every sealed box wrapped to its derived X25519 key, since that X25519
 key cannot be reconstructed without it.
+
+
+<svg class="flow" viewBox="0 0 660 190" role="img" aria-label="The library keyring holds key generations; scoped keys derive from the current one; item keys are independent and synced">
+<text class="hdr" x="130" y="22" text-anchor="middle">LIBRARY KEYRING</text>
+<text class="hdr" x="390" y="22" text-anchor="middle">DERIVED</text>
+<text class="hdr" x="580" y="22" text-anchor="middle">ITEM KEYS</text>
+<rect class="lane" x="10" y="32" width="240" height="118" rx="10"/>
+<rect class="lane" x="290" y="32" width="200" height="118" rx="10"/>
+<rect class="lane" x="510" y="32" width="140" height="118" rx="10"/>
+<rect class="chip" x="30" y="48" width="90" height="26" rx="6"/>
+<text class="lbl s11" x="75" y="65" text-anchor="middle">gen 1</text>
+<rect class="chipa" x="130" y="48" width="100" height="26" rx="6"/>
+<text class="lbl s11" x="180" y="65" text-anchor="middle">gen 2 · current</text>
+<text class="sub" x="130" y="96" text-anchor="middle">rotation appends; old data stays readable</text>
+<text class="sub" x="130" y="134" text-anchor="middle">wrapped to each member (sealed box)</text>
+<line class="arr" x1="234" y1="61" x2="286" y2="61" marker-end="url(#fa)"/>
+<rect class="chipo" x="310" y="48" width="160" height="26" rx="6"/>
+<text class="lbl s11" x="390" y="65" text-anchor="middle">HKDF per scope label</text>
+<text class="sub" x="390" y="96" text-anchor="middle">deterministic · one-way</text>
+<rect class="chipo" x="526" y="48" width="108" height="26" rx="6"/>
+<text class="lbl s11" x="580" y="65" text-anchor="middle">random per item</text>
+<text class="sub" x="580" y="96" text-anchor="middle">independent of the master</text>
+<text class="sub" x="580" y="112" text-anchor="middle">synced in item_keys</text>
+<text class="sub" x="330" y="176" text-anchor="middle">a blob's scope (Master · Derived · Item) picks which of these seals it</text>
+</svg>
 
 ## What the storage provider sees
 
@@ -78,7 +110,8 @@ opaque byte store. It sees:
   snapshot/{author}/{seq}_meta.json.enc  that generation's signed per-device cursors
   snapshot/current.json.enc              signed pointer to the live generation
   membership/{author_pubkey}/{seq}.enc   encrypted membership entries
-  keys/{member_pubkey}.enc               library key wrapped to each member
+  membership/{author_pubkey}/head.enc    that author's signed membership head
+  keys/{member_pubkey}.enc               library keyring wrapped to each member
   ```
 
   (These are the paths of an opaque home. A browsable home, see below, drops
@@ -88,6 +121,9 @@ opaque byte store. It sees:
 - The existence and count of per-member key files under `keys/`, and the hex
   Ed25519 public keys in those paths. A pubkey is a random-looking 32-byte value,
   not a name or an email.
+- On each master- or derived-scoped object, a 12-byte cleartext prefix naming
+  the key **generation** it was sealed under, so a reader picks the right key
+  without trial decryption. The generation number is a counter, not content.
 
 The provider never sees a plaintext row (`todos.title`, `lists.shared`), a
 plaintext file (`todo_attachments` contents), or a real identity. Device IDs and
