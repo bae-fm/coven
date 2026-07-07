@@ -6,6 +6,8 @@ changesets that reference them. The host declares which rows carry a file and wh
 columns locate it; coven derives the blob set itself and owns the encryption, the
 cloud layout, the upload, and the retry.
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
 This page is the cloud lifecycle: how a blob is described, uploaded, pulled, and
 deleted across devices. The one device's copy (where a pulled blob lands, how it
 is kept and read offline) is the [cache](/docs/cache).
@@ -47,10 +49,10 @@ coven resolves the declaration's column *names* against the live schema once per
 cycle into [`BlobDecls`](rustdoc:struct:coven::blob::decl::BlobDecls), then derives
 every blob set it needs itself, reading the declared columns off a row:
 
-- over an outgoing changeset's rows — what to upload;
-- over an incoming changeset's rows — what to download (and, for a deleted row,
+- over an outgoing changeset's rows: what to upload;
+- over an incoming changeset's rows: what to download (and, for a deleted row,
   whose local cache to drop);
-- over the whole database after a [snapshot bootstrap](/docs/bootstrap) — the
+- over the whole database after a [snapshot bootstrap](/docs/bootstrap): the
   backfill. A bootstrapped device receives the catalog rows but not the per-row
   blobs (the snapshot is a whole-database image, and the incremental pull that
   follows starts past the changesets that carried them), so coven re-derives them
@@ -86,7 +88,7 @@ unless the home is browsable.
 how a device gets the bytes once the blob is Remote, declared per blob and read the
 same way on every device:
 
-- `CacheEager`: fetched into the cache on pull, on every device — part of "having
+- `CacheEager`: fetched into the cache on pull, on every device, part of "having
   the library". A todo's photo, an album's cover art.
 - `CacheLazy`: skipped on pull; a device fetches it into the cache on first read
   instead of up front. Large blobs a device may never open, audio being the case it
@@ -94,15 +96,15 @@ same way on every device:
 
 The fill has to be a declared property, not a per-device choice: a device deciding
 during its own pull whether to fetch a blob can only read the blob's declared fill,
-never what another device chose locally. The cache is a Remote-only mechanism — what
+never what another device chose locally. The cache is a Remote-only mechanism, and what
 a device does with a cached blob (keep it, evict it, pin it) is the
-[cache](/docs/cache)'s job — so `CacheEager`/`CacheLazy`/pin/budget describe a blob
+[cache](/docs/cache)'s job, so `CacheEager`/`CacheLazy`/pin/budget describe a blob
 only while it is Remote, never while it is Local.
 
 ### Provenance
 
 [`Provenance`](rustdoc:enum:coven::blob::Provenance) is the blob's **Local story**:
-where the bytes live while the blob is Local. Orthogonal to the cache fill — a blob
+where the bytes live while the blob is Local. Orthogonal to the cache fill; a blob
 declares both:
 
 - `UserProvided`: the user's own file at a path coven references but does not own.
@@ -111,6 +113,31 @@ declares both:
 - `HostProvided`: data the host hands coven, kept in coven's own local store at
   `storage/local/<namespace>/<id>`. Bringing it back from Remote restores it there,
   no path needed.
+
+
+<svg class="flow" viewBox="0 0 660 216" role="img" aria-label="A blob is Local (a user file or coven's local store) or Remote (a sealed cloud object with per-device cache copies); make_remote and make_local flip the state">
+<text class="hdr" x="155" y="30" text-anchor="middle">LOCAL</text>
+<text class="hdr" x="505" y="30" text-anchor="middle">REMOTE</text>
+<rect class="lane" x="20" y="40" width="270" height="150" rx="10"/>
+<rect class="lane" x="370" y="40" width="270" height="150" rx="10"/>
+<rect class="chip" x="40" y="56" width="230" height="26" rx="7"/>
+<text class="lbl s11" x="155" y="73" text-anchor="middle">the user's file at a path</text>
+<text class="sub" x="155" y="96" text-anchor="middle">user-provided</text>
+<rect class="chip" x="40" y="112" width="230" height="26" rx="7"/>
+<text class="lbl s11" x="155" y="129" text-anchor="middle">coven's local store</text>
+<text class="sub" x="155" y="152" text-anchor="middle">host-provided</text>
+<rect class="chipo" x="390" y="56" width="230" height="26" rx="7"/>
+<path class="glyph" d="M404 67v-3a3 3 0 0 1 6 0v3"/>
+<rect class="glyphf" x="402.5" y="67" width="9" height="7" rx="1.5"/>
+<text class="lbl s11" x="512" y="73" text-anchor="middle">cloud object · sealed</text>
+<rect class="chipd" x="390" y="112" width="230" height="26" rx="7"/>
+<text class="lbl s11" x="505" y="129" text-anchor="middle">cache copy on each device</text>
+<text class="sub" x="505" y="152" text-anchor="middle">eager or lazy fill · pin · budget</text>
+<line class="arr" x1="294" y1="74" x2="366" y2="74" marker-end="url(#fa)"/>
+<text class="sub" x="330" y="64" text-anchor="middle">make_remote</text>
+<line class="arr" x1="366" y1="156" x2="294" y2="156" marker-end="url(#fa)"/>
+<text class="sub" x="330" y="176" text-anchor="middle">make_local</text>
+</svg>
 
 ## Encryption scope
 
@@ -151,8 +178,8 @@ and the `item_keys` table stays empty.
 
 A blob reaches the cloud one of two ways, split by [provenance](#provenance).
 
-**With the changeset (host-provided).** coven owns a host-provided blob's bytes —
-in its local store or its cache — so it uploads each one before the row is
+**With the changeset (host-provided).** coven owns a host-provided blob's bytes,
+in its local store or its cache, so it uploads each one before the row is
 published. A host writes the row and bytes together through
 [`CovenHandle::write`](rustdoc:method:coven::CovenHandle::write); a
 `make_remote` transition uploads any host-provided blobs before flipping the
@@ -210,6 +237,25 @@ first failure the wait is 30s, then 60s, 120s, and so on up to an hourly ceiling
 The base equals the sync loop's interval, so the first retry rides the next
 natural cycle.
 
+
+<svg class="flow" viewBox="0 0 660 128" role="img" aria-label="make_remote enqueues an outbox row; the drain seals and writes the blob; success removes the entry, failure retries with backoff">
+<rect class="chip" x="15" y="44" width="140" height="30" rx="7"/>
+<text class="lbl s11" x="85" y="63" text-anchor="middle">make_remote(root)</text>
+<line class="arr" x1="159" y1="59" x2="176" y2="59" marker-end="url(#fa)"/>
+<rect class="chipo" x="180" y="44" width="140" height="30" rx="7"/>
+<text class="lbl s11" x="250" y="63" text-anchor="middle">cloud_outbox row</text>
+<text class="sub" x="250" y="92" text-anchor="middle">upload · delete · cancel</text>
+<line class="arr" x1="324" y1="59" x2="341" y2="59" marker-end="url(#fa)"/>
+<rect class="chip" x="345" y="44" width="140" height="30" rx="7"/>
+<text class="lbl s11" x="415" y="63" text-anchor="middle">drain: seal + write</text>
+<text class="sub" x="415" y="92" text-anchor="middle">retry 30s doubling, cap 1 h</text>
+<line class="arr" x1="489" y1="59" x2="506" y2="59" marker-end="url(#fa)"/>
+<rect class="chipo" x="510" y="44" width="140" height="30" rx="7"/>
+<path class="glyph" d="M524 56v-3a3 3 0 0 1 6 0v3"/>
+<rect class="glyphf" x="522.5" y="56" width="9" height="7" rx="1.5"/>
+<text class="lbl s11" x="588" y="63" text-anchor="middle">blob object</text>
+</svg>
+
 ## The pull side
 
 The pull has no inbox table. It is inline:
@@ -226,7 +272,7 @@ fetched on its first [`read_blob`](/docs/cache#reading-a-blob).
 When the applied changeset **deletes** a blob-bearing row (a
 [gate retract](/docs/local-data) or a genuine delete), coven drops that blob from
 both cache folders on this device. A peer only drops its own local cache here; it
-never writes a cloud tombstone — that belongs to the deleting owner (see
+never writes a cloud tombstone; that belongs to the deleting owner (see
 [Deleting a blob](#deleting-a-blob)).
 
 The cursor is what makes this durable without a queue. A changeset's cursor
@@ -262,6 +308,19 @@ meantime. Once the grace passes,
 verifies the tombstone, authorizes the author against the membership chain, deletes
 the blob, then deletes the tombstone. An unreferenced-but-not-yet-deleted blob is
 *correct* state during the window, not garbage a later pass repairs.
+
+
+<svg class="flow" viewBox="0 0 660 118" role="img" aria-label="A deletion writes a signed tombstone; the blob survives a seven-day grace window; then GC verifies the tombstone and deletes both">
+<line class="arrd" x1="30" y1="66" x2="640" y2="66" marker-end="url(#fam)"/>
+<circle class="glyphf" cx="80" cy="66" r="4"/>
+<text class="lbl s11" x="80" y="44" text-anchor="middle">row deleted</text>
+<circle class="glyphf" cx="210" cy="66" r="4"/>
+<text class="lbl s11" x="210" y="92" text-anchor="middle">signed tombstone written</text>
+<rect class="tx" x="210" y="54" width="290" height="24" rx="6"/>
+<text class="sub" x="355" y="44" text-anchor="middle">7-day grace · blob still readable by laggards</text>
+<circle class="glyphf" cx="540" cy="66" r="4"/>
+<text class="lbl s11" x="540" y="92" text-anchor="middle">GC verifies, deletes both</text>
+</svg>
 
 A re-upload wins over a pending deletion by construction. Enqueuing an upload drops
 a same-device pending delete row; and after a successful (re-)upload the drain
@@ -332,7 +391,7 @@ ready to publish (see [How a blob moves out](#how-a-blob-moves-out)).
 
 The host can pass a
 [`BlobTransitionObserver`](rustdoc:trait:coven::blob::BlobTransitionObserver) to
-watch uploads and the locality transitions. It only *reports* — coven owns flipping
+watch uploads and the locality transitions. It only *reports*; coven owns flipping
 the gate and deciding when a cycle publishes. The whole observer is optional; most
 methods default to a no-op:
 
@@ -356,7 +415,7 @@ pub trait BlobTransitionObserver: Send + Sync {
 
 The upload callbacks track attempts, not blobs. `on_blob_upload_started` fires once
 before each attempt, so a blob that fails twice then succeeds fires it three times.
-`on_blob_uploaded` fires once, when the entry leaves the queue — notification only,
+`on_blob_uploaded` fires once, when the entry leaves the queue. Notification only:
 since coven, not the host, flips the gate and breaks the drain to publish a completed
 `make_remote`. `on_blob_upload_failed` fires on each failed attempt and carries the
 error string; the entry stays queued for retry. A todos app wires these into the
