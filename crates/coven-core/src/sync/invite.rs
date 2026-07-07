@@ -307,6 +307,31 @@ pub async fn create_invitation_with_encryption(
         member_pubkey: grant.member_pubkey.clone(),
         provider_account_email: grant.provider_account_email.clone(),
     };
+
+    // Whether the invitee is already a current member, judged against the chain as
+    // it stands before this invitation's entry is added. This — the authoritative
+    // committed state, not whether a `keys/{pk}` object happens to be present — is
+    // what a rollback dispatches on: a current member keeps the access and the
+    // wrapped-key slot they held before this invite, while an invitee who is not a
+    // member has this invite's grant and slot both undone. A current member can
+    // have an absent slot (an interrupted earlier invite could leave it so); their
+    // access must still be preserved.
+    let invitee_is_current_member = chain
+        .current_members()
+        .iter()
+        .any(|(pubkey, _)| pubkey == invitee_ed25519_pubkey);
+
+    // Retain the invitee's existing wrapped-key object, if any, before overwriting
+    // it. These bytes are only the payload for a restore: if the entry upload below
+    // fails while re-inviting a current member, the rollback writes this exact prior
+    // object back so the member never loses their wrapped key. Read before any
+    // mutation so a read failure aborts before granting access or writing the key.
+    let prior_wrapped_key = match storage.get_wrapped_key(invitee_ed25519_pubkey).await {
+        Ok(bytes) => Some(bytes),
+        Err(StorageError::NotFound(_)) => None,
+        Err(e) => return Err(e.into()),
+    };
+
     let join_info = cloud_home.grant_access(grant).await?;
 
     // Upload wrapped key and membership entry.
@@ -314,12 +339,19 @@ pub async fn create_invitation_with_encryption(
         .put_wrapped_key(invitee_ed25519_pubkey, wrapped_key)
         .await
     {
-        if let Err(rollback) = cloud_home.revoke_access(revoke).await {
-            return Err(InviteError::Rollback {
-                operation: "upload wrapped key",
-                original: original.to_string(),
-                rollback: rollback.to_string(),
-            });
+        // The write failed, so the slot is unchanged and a current member keeps
+        // their existing key. Revoke the grant only for an invitee who is not a
+        // current member, whose access this invitation created; a current member
+        // held their access before this invite, so revoking it would strip access
+        // this invite never granted.
+        if !invitee_is_current_member {
+            if let Err(rollback) = cloud_home.revoke_access(revoke).await {
+                return Err(InviteError::Rollback {
+                    operation: "upload wrapped key",
+                    original: original.to_string(),
+                    rollback: rollback.to_string(),
+                });
+            }
         }
         return Err(original.into());
     }
@@ -332,11 +364,51 @@ pub async fn create_invitation_with_encryption(
 
     if let Err(original) = upload_membership_entry(storage, &entry_coord, &entry).await {
         let mut rollback_errors = Vec::new();
-        if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await {
-            rollback_errors.push(rollback.to_string());
-        }
-        if let Err(rollback) = cloud_home.revoke_access(revoke).await {
-            rollback_errors.push(rollback.to_string());
+        if invitee_is_current_member {
+            // Keep the member's cloud access untouched — they held it before this
+            // invitation — and put their wrapped-key slot back the way it stood.
+            match prior_wrapped_key {
+                // Restore the exact prior signed object. If the restore write itself
+                // fails the slot is left holding this invitation's key — surface it
+                // loud, naming the slot; retrying the whole invitation overwrites the
+                // slot again and is idempotent.
+                Some(prior) => {
+                    if let Err(restore) =
+                        storage.put_wrapped_key(invitee_ed25519_pubkey, prior).await
+                    {
+                        rollback_errors.push(format!(
+                            "restore wrapped key for {invitee_ed25519_pubkey}: {restore}"
+                        ));
+                    }
+                }
+                // The member had no slot before (an interrupted earlier invite could
+                // leave it absent); delete the wrap just written so the slot returns
+                // to absent, which the member's next refresh re-wraps.
+                None => {
+                    if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await
+                    {
+                        rollback_errors.push(rollback.to_string());
+                    }
+                }
+            }
+        } else {
+            // The invitee is not a member: this invitation both granted access and
+            // wrote the slot, so undo both. A slot already present belongs to no
+            // authorized member, so delete rather than restore it — an unauthorized
+            // slot must not be rewritten; note the anomaly.
+            if prior_wrapped_key.is_some() {
+                tracing::warn!(
+                    slot = invitee_ed25519_pubkey,
+                    "invite rollback found a wrapped-key slot for a non-member; \
+                     deleting it rather than restoring an unauthorized slot"
+                );
+            }
+            if let Err(rollback) = storage.delete_wrapped_key(invitee_ed25519_pubkey).await {
+                rollback_errors.push(rollback.to_string());
+            }
+            if let Err(rollback) = cloud_home.revoke_access(revoke).await {
+                rollback_errors.push(rollback.to_string());
+            }
         }
         if !rollback_errors.is_empty() {
             return Err(InviteError::Rollback {
@@ -2185,5 +2257,386 @@ mod tests {
         assert!(members
             .iter()
             .any(|(pk, _)| pk == &pubkey_hex(&second_invitee)));
+    }
+
+    /// Re-inviting a current member overwrites their wrapped-key slot before the
+    /// entry upload. If that upload fails, the rollback must restore the member's
+    /// original wrapped key byte-for-byte — not delete the slot, which would leave
+    /// the member one rotation from losing access — and must leave the member's
+    /// cloud access alone, since they held it before this invitation.
+    #[tokio::test]
+    async fn reinvite_entry_failure_restores_prior_wrapped_key_and_keeps_access() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let old_key: [u8; 32] = [30u8; 32];
+        let new_key: [u8; 32] = [31u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &member,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        let prior_wrapped = storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap();
+
+        // Re-invite the same member with a different key, but the entry upload fails
+        // after the wrapped-key slot has already been overwritten.
+        storage.fail_membership_entry_put_on_call(1);
+        let result = create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &new_key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the injected entry-upload failure must surface"
+        );
+
+        // The slot holds the exact prior object, not the failed invite's key.
+        assert_eq!(
+            storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap(),
+            prior_wrapped,
+            "rollback restores the member's prior wrapped key byte-for-byte",
+        );
+
+        // The member kept their cloud access: the rollback did not revoke it.
+        assert!(
+            cloud.last_revoke().is_none(),
+            "re-inviting a current member must not revoke the access they already held",
+        );
+
+        // The member's refresh still unwraps their original key.
+        let unwrapped = unwrap_library_key(
+            &storage as &dyn CloudHome,
+            &member,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unwrapped, old_key);
+    }
+
+    /// Inviting someone who is not yet a member and whose entry upload fails: the
+    /// rollback deletes the wrapped key it just wrote — leaving no stale object
+    /// behind — and revokes the cloud access this invitation granted.
+    #[tokio::test]
+    async fn non_member_entry_failure_deletes_slot_and_revokes_access() {
+        let owner = gen_keypair();
+        let invitee = gen_keypair();
+        let key: [u8; 32] = [32u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        assert!(
+            storage
+                .get_wrapped_key(&pubkey_hex(&invitee))
+                .await
+                .is_err(),
+            "the invitee has no wrapped key before the invite",
+        );
+
+        storage.fail_membership_entry_put_on_call(1);
+        let result = create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the injected entry-upload failure must surface"
+        );
+
+        assert!(
+            storage
+                .get_wrapped_key(&pubkey_hex(&invitee))
+                .await
+                .is_err(),
+            "an invitee with no prior slot has the one just written deleted on rollback",
+        );
+
+        // The access this invitation created is revoked: the invitee is not a
+        // member, so no dangling cloud grant is left behind.
+        assert_eq!(
+            cloud.last_revoke(),
+            Some(CloudAccessRevoke {
+                member_pubkey: pubkey_hex(&invitee),
+                provider_account_email: None,
+            }),
+            "a failed invite of a non-member must revoke the access it granted",
+        );
+    }
+
+    /// A current member can have an absent wrapped-key slot — an interrupted earlier
+    /// invite could leave it so. Re-inviting them writes a new slot; if the entry
+    /// upload then fails, the rollback dispatches on chain membership, not slot
+    /// presence: it deletes the wrap it just wrote (returning the slot to absent,
+    /// which refresh re-wraps) and must not revoke the member's cloud access.
+    #[tokio::test]
+    async fn member_with_absent_slot_entry_failure_keeps_access() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let old_key: [u8; 32] = [35u8; 32];
+        let new_key: [u8; 32] = [36u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &member,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+
+        // Drop the member's wrapped-key slot, modeling the absent-slot state an
+        // interrupted earlier invite could have left; the member stays current in
+        // the committed chain.
+        storage
+            .delete_wrapped_key(&pubkey_hex(&member))
+            .await
+            .unwrap();
+        assert!(chain
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&member)));
+
+        storage.fail_membership_entry_put_on_call(1);
+        let result = create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &new_key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the injected entry-upload failure must surface"
+        );
+
+        // The slot returns to absent — the wrap this invite wrote is deleted.
+        assert!(
+            storage.get_wrapped_key(&pubkey_hex(&member)).await.is_err(),
+            "the wrap written by the failed invite is deleted, returning the slot to absent",
+        );
+
+        // The member kept their cloud access, dispatched on their chain membership.
+        assert!(
+            cloud.last_revoke().is_none(),
+            "a current member with an absent slot must not have their access revoked",
+        );
+    }
+
+    /// A wrapped-key slot present for someone who is not a member is anomalous — it
+    /// belongs to no authorized member. On rollback of a failed invite of such a
+    /// non-member, the slot is deleted rather than restored (restoring would rewrite
+    /// an unauthorized object) and their access is revoked.
+    #[tokio::test]
+    async fn non_member_with_present_slot_entry_failure_deletes_not_restores() {
+        let owner = gen_keypair();
+        let invitee = gen_keypair();
+        let key: [u8; 32] = [37u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        // Seed a stray slot for a non-member (anomalous leftover state).
+        storage
+            .put_wrapped_key(&pubkey_hex(&invitee), b"stray-slot".to_vec())
+            .await
+            .unwrap();
+        assert!(!chain
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&invitee)));
+
+        storage.fail_membership_entry_put_on_call(1);
+        let result = create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the injected entry-upload failure must surface"
+        );
+
+        // The stray slot is deleted, not restored: an unauthorized slot is never
+        // rewritten.
+        assert!(
+            storage
+                .get_wrapped_key(&pubkey_hex(&invitee))
+                .await
+                .is_err(),
+            "a non-member's slot is deleted on rollback, never restored",
+        );
+        assert_eq!(
+            cloud.last_revoke(),
+            Some(CloudAccessRevoke {
+                member_pubkey: pubkey_hex(&invitee),
+                provider_account_email: None,
+            }),
+            "a failed invite of a non-member must revoke the access it granted",
+        );
+    }
+
+    /// The wrapped-key upload itself can fail on a re-invite. The write never
+    /// landed, so the member keeps their existing key; and since they held their
+    /// cloud access before this invitation, the rollback must not revoke it.
+    #[tokio::test]
+    async fn reinvite_wrapped_key_put_failure_keeps_access_and_key() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let old_key: [u8; 32] = [33u8; 32];
+        let new_key: [u8; 32] = [34u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &member,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        let prior_wrapped = storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap();
+
+        // Re-invite the same member, but the wrapped-key upload fails outright.
+        storage.fail_wrapped_key_put_on_call(1);
+        let result = create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &new_key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the injected wrapped-key upload failure must surface"
+        );
+
+        // The failed write left the member's existing key in place.
+        assert_eq!(
+            storage.get_wrapped_key(&pubkey_hex(&member)).await.unwrap(),
+            prior_wrapped,
+            "a failed overwrite leaves the member's prior wrapped key untouched",
+        );
+
+        // The member kept their cloud access.
+        assert!(
+            cloud.last_revoke().is_none(),
+            "a failed re-invite must not revoke a current member's access",
+        );
+    }
+
+    /// When restoring a re-invited member's prior wrapped key itself fails, the slot
+    /// is left holding this invitation's key. The invite must surface that loudly,
+    /// naming the slot, so the whole (idempotent) invitation is retried.
+    #[tokio::test]
+    async fn reinvite_restore_failure_surfaces_loud_naming_slot() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let old_key: [u8; 32] = [38u8; 32];
+        let new_key: [u8; 32] = [39u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &member,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+
+        // The overwrite (wrapped-key put #1) lands; the entry upload fails; the
+        // restore (wrapped-key put #2) also fails.
+        storage.fail_wrapped_key_put_on_call(2);
+        storage.fail_membership_entry_put_on_call(1);
+        let result = create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &new_key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+
+        match result {
+            Err(InviteError::Rollback {
+                operation,
+                rollback,
+                ..
+            }) => {
+                assert_eq!(operation, "upload membership entry");
+                assert!(
+                    rollback.contains(&pubkey_hex(&member)),
+                    "the rollback failure must name the overwritten slot, got {rollback:?}",
+                );
+            }
+            other => panic!("expected a loud Rollback error naming the slot, got {other:?}"),
+        }
     }
 }

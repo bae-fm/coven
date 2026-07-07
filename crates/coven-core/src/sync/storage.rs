@@ -339,10 +339,10 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError>;
 
     /// Download a wrapped library key for a member.
-    /// Reads from `keys/{user_pubkey_hex}{suffix}`.
-    /// Test-only: production reads a member's wrapped key off the membership/snapshot
-    /// bundle, not through this per-member storage fetch.
-    #[cfg(any(test, feature = "test-utils"))]
+    /// Reads from `keys/{user_pubkey_hex}{suffix}`. `create_invitation` reads the
+    /// invitee's existing slot before overwriting it, so a failed invite can
+    /// restore the exact prior object rather than stripping a re-invited member's
+    /// wrapped key. Returns `NotFound` when the member has no wrapped key yet.
     async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError>;
 
     /// Delete a wrapped library key.

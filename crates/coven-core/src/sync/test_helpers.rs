@@ -500,6 +500,38 @@ pub struct MockSyncStorage {
     fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize,
     membership_head_put_count: std::sync::atomic::AtomicUsize,
     fail_membership_head_put_on: std::sync::atomic::AtomicUsize,
+    membership_entry_put_count: std::sync::atomic::AtomicUsize,
+    fail_membership_entry_put_on: std::sync::atomic::AtomicUsize,
+}
+
+/// Arm the `call_number`-th put (1-based) tracked by the `(count, fail_on)` atomic
+/// pair to fail once: reset the running count and record which call trips. `label`
+/// names the object kind in the 1-based assertion. Paired with
+/// [`armed_put_failure_hits`], which the matching put method calls to test the arm.
+fn arm_put_failure(
+    count: &std::sync::atomic::AtomicUsize,
+    fail_on: &std::sync::atomic::AtomicUsize,
+    call_number: usize,
+    label: &str,
+) {
+    assert!(call_number > 0, "{label} put call numbers are 1-based");
+    count.store(0, std::sync::atomic::Ordering::SeqCst);
+    fail_on.store(call_number, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Count this put and report whether it is the call [`arm_put_failure`] armed,
+/// clearing the arm on a hit so only that one call fails.
+fn armed_put_failure_hits(
+    count: &std::sync::atomic::AtomicUsize,
+    fail_on: &std::sync::atomic::AtomicUsize,
+) -> bool {
+    let call = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    if fail_on.load(std::sync::atomic::Ordering::SeqCst) == call {
+        fail_on.store(0, std::sync::atomic::Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
 }
 
 impl MockSyncStorage {
@@ -532,6 +564,8 @@ impl MockSyncStorage {
             fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize::new(0),
             membership_head_put_count: std::sync::atomic::AtomicUsize::new(0),
             fail_membership_head_put_on: std::sync::atomic::AtomicUsize::new(0),
+            membership_entry_put_count: std::sync::atomic::AtomicUsize::new(0),
+            fail_membership_entry_put_on: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -595,24 +629,35 @@ impl MockSyncStorage {
     }
 
     pub fn fail_wrapped_key_put_on_call(&self, call_number: usize) {
-        assert!(call_number > 0, "wrapped-key put call numbers are 1-based");
-        self.wrapped_key_put_count
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-        self.fail_wrapped_key_put_on
-            .store(call_number, std::sync::atomic::Ordering::SeqCst);
+        arm_put_failure(
+            &self.wrapped_key_put_count,
+            &self.fail_wrapped_key_put_on,
+            call_number,
+            "wrapped-key",
+        );
+    }
+
+    /// Fail the `call_number`-th membership-entry put (1-based) to exercise the
+    /// invite entry-upload rollback: the wrapped key is written first, then the
+    /// entry upload fails and the rollback must restore or delete the slot.
+    pub fn fail_membership_entry_put_on_call(&self, call_number: usize) {
+        arm_put_failure(
+            &self.membership_entry_put_count,
+            &self.fail_membership_entry_put_on,
+            call_number,
+            "membership-entry",
+        );
     }
 
     /// Fail the `call_number`-th membership-head put (1-based) to exercise the
     /// failed-publish retry path: the entry uploads but its head does not commit.
     pub fn fail_membership_head_put_on_call(&self, call_number: usize) {
-        assert!(
-            call_number > 0,
-            "membership-head put call numbers are 1-based"
+        arm_put_failure(
+            &self.membership_head_put_count,
+            &self.fail_membership_head_put_on,
+            call_number,
+            "membership-head",
         );
-        self.membership_head_put_count
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-        self.fail_membership_head_put_on
-            .store(call_number, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Remove a blob object from the mock cloud, keyed the same flat
@@ -1043,6 +1088,14 @@ impl SyncStorage for MockSyncStorage {
         seq: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
+        if armed_put_failure_hits(
+            &self.membership_entry_put_count,
+            &self.fail_membership_entry_put_on,
+        ) {
+            return Err(StorageError::Storage(format!(
+                "forced membership-entry upload failure for {author_pubkey}/{seq}"
+            )));
+        }
         let key = format!("membership/{author_pubkey}/{seq}");
         self.objects.lock().unwrap().insert(key, data);
         Ok(())
@@ -1102,17 +1155,10 @@ impl SyncStorage for MockSyncStorage {
         author_pubkey: &str,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        let call = self
-            .membership_head_put_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        if self
-            .fail_membership_head_put_on
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == call
-        {
-            self.fail_membership_head_put_on
-                .store(0, std::sync::atomic::Ordering::SeqCst);
+        if armed_put_failure_hits(
+            &self.membership_head_put_count,
+            &self.fail_membership_head_put_on,
+        ) {
             return Err(StorageError::Storage(format!(
                 "forced membership-head upload failure for {author_pubkey}"
             )));
@@ -1134,17 +1180,7 @@ impl SyncStorage for MockSyncStorage {
     }
 
     async fn put_wrapped_key(&self, user_pubkey: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        let call = self
-            .wrapped_key_put_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        if self
-            .fail_wrapped_key_put_on
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == call
-        {
-            self.fail_wrapped_key_put_on
-                .store(0, std::sync::atomic::Ordering::SeqCst);
+        if armed_put_failure_hits(&self.wrapped_key_put_count, &self.fail_wrapped_key_put_on) {
             return Err(StorageError::Storage(format!(
                 "forced wrapped-key upload failure for {user_pubkey}"
             )));

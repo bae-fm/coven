@@ -1148,7 +1148,6 @@ impl SyncStorage for CloudSyncStorage {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     async fn get_wrapped_key(&self, user_pubkey: &str) -> Result<Vec<u8>, StorageError> {
         let key = format!("keys/{user_pubkey}{}", self.suffix());
         // Wrapped keys are already sealed boxes; return as-is.
