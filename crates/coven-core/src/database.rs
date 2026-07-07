@@ -85,8 +85,6 @@ impl DatabaseCore {
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState, UpdatedAtStamper), DbError> {
-        validate_host_synced_tables(&synced_tables)?;
-
         let conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
@@ -100,6 +98,15 @@ impl DatabaseCore {
         apply_coven_schema(&conn).map_err(DbError::from)?;
         migrate_bookkeeping_schema(&conn)?;
         let schema_version = run_migrations(&conn, migrations)?;
+
+        // Enforce the synced-table contract against the live host schema, before
+        // `item_keys` is appended below: each host table must present the pk shape
+        // and `_updated_at` the capture/gate/apply paths assume. Validating here —
+        // after the migration ladder built the tables, on the integrator's own
+        // device — turns a wrong shape into an open error naming the table, rather
+        // than a peer's cursor wedging forever at pull time. `item_keys` is coven's
+        // own and keyed by `item_id`, so it is excluded by running before the push.
+        validate_host_synced_tables(&conn, &synced_tables)?;
 
         // `item_keys` is coven-owned but is library-global content every member
         // needs, so coven — not the host — declares it synced. Injecting it here
@@ -259,7 +266,15 @@ fn attach_erased_session(
     Ok(erase_session_lifetime(attach_session(conn, synced_tables)?))
 }
 
-fn validate_host_synced_tables(synced_tables: &[SyncedTable]) -> Result<(), DbError> {
+fn validate_host_synced_tables(
+    conn: &Connection,
+    synced_tables: &[SyncedTable],
+) -> Result<(), DbError> {
+    // Which table owns each declared blob namespace, so a second table claiming an
+    // already-owned namespace is caught here. A blob's namespace is part of its
+    // address; two tables sharing one makes `row_for_blob_in_namespace` resolve to
+    // whichever the hash map iterates first.
+    let mut namespace_owner: HashMap<&str, &str> = HashMap::new();
     for table in synced_tables {
         let name = table.name();
         if name.is_empty() {
@@ -270,8 +285,129 @@ fn validate_host_synced_tables(synced_tables: &[SyncedTable]) -> Result<(), DbEr
                 "synced table {name:?} is reserved by coven"
             )));
         }
+        validate_synced_table_contract(conn, name)?;
+        if let Some(decl) = table.blob() {
+            let namespace = decl.namespace.as_str();
+            if let Some(prior) = namespace_owner.insert(namespace, name) {
+                return Err(DbError(format!(
+                    "synced tables {prior:?} and {name:?} both declare blob namespace \
+                     {namespace:?}; a namespace must be owned by exactly one table"
+                )));
+            }
+        }
     }
     Ok(())
+}
+
+/// One column of a table's `PRAGMA table_info`. `position` is the column ordinal
+/// — the index a session changeset reports for that column, so the pk's position
+/// is what the by-position apply path reads. `pk` is 0 for a non-key column or its
+/// 1-based rank within the primary key.
+struct ColumnInfo {
+    position: i64,
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    pk: i64,
+}
+
+/// Enforce the synced-table contract ([`crate::sync::session::SyncedTable`]) on
+/// `table`'s live schema: a single primary key column, named `id`, declared TEXT,
+/// at column 0; and an `_updated_at` column declared TEXT NOT NULL. A violation is
+/// an open error naming the table and the requirement it broke, so the integrator
+/// learns it on their own device instead of a peer's pull failing on the row.
+fn validate_synced_table_contract(conn: &Connection, table: &str) -> Result<(), DbError> {
+    let sql = format!(
+        "PRAGMA table_info({})",
+        crate::sync::session::quote_ident(table)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
+    let mut columns = Vec::new();
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ColumnInfo {
+                position: row.get::<_, i64>(0)?,
+                name: row.get::<_, String>(1)?,
+                declared_type: row.get::<_, String>(2)?,
+                not_null: row.get::<_, i64>(3)? != 0,
+                pk: row.get::<_, i64>(5)?,
+            })
+        })
+        .map_err(DbError::from)?;
+    for row in rows {
+        columns.push(row.map_err(DbError::from)?);
+    }
+
+    let pk_columns: Vec<&ColumnInfo> = columns.iter().filter(|c| c.pk > 0).collect();
+    let pk = match pk_columns.as_slice() {
+        [single] => *single,
+        [] => {
+            return Err(DbError(format!(
+                "synced table {table:?} has no primary key; the contract requires a single \
+                 `id` TEXT primary key at column 0"
+            )))
+        }
+        _ => {
+            let names: Vec<&str> = pk_columns.iter().map(|c| c.name.as_str()).collect();
+            return Err(DbError(format!(
+                "synced table {table:?} has a composite primary key {names:?}; the contract \
+                 requires a single `id` TEXT primary key at column 0"
+            )));
+        }
+    };
+    if pk.name != "id" {
+        return Err(DbError(format!(
+            "synced table {table:?} primary key is {:?}, not `id`; the contract requires the \
+             primary key to be the `id` column",
+            pk.name
+        )));
+    }
+    if pk.position != 0 {
+        return Err(DbError(format!(
+            "synced table {table:?} primary key `id` is at column {}, not column 0; the \
+             contract requires `id` to be the first column",
+            pk.position
+        )));
+    }
+    if !declared_as_text(&pk.declared_type) {
+        return Err(DbError(format!(
+            "synced table {table:?} primary key `id` is declared {:?}, not TEXT; the contract \
+             requires an `id` TEXT primary key",
+            pk.declared_type
+        )));
+    }
+
+    let updated_at = columns
+        .iter()
+        .find(|c| c.name == "_updated_at")
+        .ok_or_else(|| {
+            DbError(format!(
+                "synced table {table:?} has no `_updated_at` column; the contract requires \
+                 `_updated_at TEXT NOT NULL`"
+            ))
+        })?;
+    if !declared_as_text(&updated_at.declared_type) {
+        return Err(DbError(format!(
+            "synced table {table:?} column `_updated_at` is declared {:?}, not TEXT; the \
+             contract requires `_updated_at TEXT NOT NULL`",
+            updated_at.declared_type
+        )));
+    }
+    if !updated_at.not_null {
+        return Err(DbError(format!(
+            "synced table {table:?} column `_updated_at` is nullable; the contract requires \
+             `_updated_at TEXT NOT NULL`"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Whether a `PRAGMA table_info` declared type is TEXT, case-insensitively. SQL
+/// keywords are case-insensitive, so `text` and `TEXT` both satisfy the contract;
+/// any other declared type (or none) does not.
+fn declared_as_text(declared_type: &str) -> bool {
+    declared_type.eq_ignore_ascii_case("TEXT")
 }
 
 impl Database {
@@ -1492,6 +1628,119 @@ mod tests {
             &[notes_migration()],
         )
         .expect("normal host table opens");
+    }
+
+    /// Open with a single host migration and the given synced-table set, expecting
+    /// the contract validation to refuse the open. Returns the error text so a test
+    /// asserts it names the offending table and the violated requirement.
+    fn open_contract_error(
+        migration_sql: &'static str,
+        tables: Vec<SyncedTable>,
+        device_id: &str,
+    ) -> String {
+        let result = Database::open(
+            Path::new(":memory:"),
+            tables,
+            device_id.to_string(),
+            &[Migration::sql(1, "contract", migration_sql)],
+        );
+        match result {
+            Ok(_) => panic!("open must reject the synced-table contract violation"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_integer_primary_key() {
+        let error = open_contract_error(
+            "CREATE TABLE things (id INTEGER PRIMARY KEY, _updated_at TEXT NOT NULL);",
+            vec![SyncedTable::new("things")],
+            "integer-pk",
+        );
+        assert!(
+            error.contains("things") && error.contains("TEXT"),
+            "error names the table and the TEXT requirement: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_primary_key_not_at_column_zero() {
+        let error = open_contract_error(
+            "CREATE TABLE things (body TEXT NOT NULL, id TEXT PRIMARY KEY, \
+             _updated_at TEXT NOT NULL);",
+            vec![SyncedTable::new("things")],
+            "pk-not-first",
+        );
+        assert!(
+            error.contains("things") && error.contains("column 0"),
+            "error names the table and the column-0 requirement: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_primary_key_named_other_than_id() {
+        let error = open_contract_error(
+            "CREATE TABLE things (thing_id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL);",
+            vec![SyncedTable::new("things")],
+            "pk-misnamed",
+        );
+        assert!(
+            error.contains("things") && error.contains("`id`"),
+            "error names the table and the `id` requirement: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_composite_primary_key() {
+        let error = open_contract_error(
+            "CREATE TABLE things (id TEXT NOT NULL, part TEXT NOT NULL, \
+             _updated_at TEXT NOT NULL, PRIMARY KEY (id, part));",
+            vec![SyncedTable::new("things")],
+            "composite-pk",
+        );
+        assert!(
+            error.contains("things") && error.contains("composite"),
+            "error names the table and the single-primary-key requirement: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_nullable_updated_at() {
+        let error = open_contract_error(
+            "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT);",
+            vec![SyncedTable::new("things")],
+            "nullable-updated-at",
+        );
+        assert!(
+            error.contains("things") && error.contains("_updated_at"),
+            "error names the table and the `_updated_at` requirement: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_duplicate_blob_namespace() {
+        let blob = |namespace| {
+            crate::sync::session::BlobDecl::new(
+                namespace,
+                crate::blob::Provenance::HostProvided,
+                crate::blob::CacheFill::CacheLazy,
+            )
+        };
+        let error = open_contract_error(
+            "CREATE TABLE covers (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
+             _updated_at TEXT NOT NULL);\
+             CREATE TABLE thumbs (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
+             _updated_at TEXT NOT NULL);",
+            vec![
+                SyncedTable::new("covers").carries_blob(blob("images")),
+                SyncedTable::new("thumbs").carries_blob(blob("images")),
+            ],
+            "dup-namespace",
+        );
+        assert!(
+            error.contains("covers") && error.contains("thumbs") && error.contains("images"),
+            "error names both tables and the shared blob namespace: {error}",
+        );
     }
 
     #[tokio::test]
