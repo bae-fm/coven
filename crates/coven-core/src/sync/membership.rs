@@ -281,6 +281,19 @@ impl MembershipChain {
         &self.entries
     }
 
+    /// The coordinate of the entry that grants `pubkey` write access, derived from
+    /// this chain's own entries and their storage coordinates. The chain-scoped form
+    /// of [`write_grant_coord`], used to bind an outgoing changeset to its
+    /// authorizing entry without a second membership download.
+    pub fn write_grant_coord(&self, pubkey: &str) -> Option<MembershipCoord> {
+        let paired: Vec<(MembershipCoord, MembershipEntry)> = self
+            .entries_with_effective_coords()
+            .into_iter()
+            .map(|(_, coord, entry)| (coord, entry.clone()))
+            .collect();
+        write_grant_coord(&paired, pubkey)
+    }
+
     /// The pubkey of the founder (chain entry #1, the self-signed Owner Add), or
     /// `None` for an empty chain. The library is anchored to this pubkey: a chain
     /// whose founder is not the library's established owner is a takeover attempt

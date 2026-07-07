@@ -27,6 +27,43 @@ use crate::sync::session::{BlobDecl, BlobScopeSpec, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
+/// Drive `service::sync` the way the cycle does: load the cycle's membership chain
+/// once and hand it in. Test call sites pass the same positional args they always
+/// did — this is the non-cycle standalone entry that loads the membership itself.
+async fn sync_for_test(
+    device_id: &str,
+    db: &crate::database::Database,
+    tables: &[SyncedTable],
+    outgoing: Vec<u8>,
+    local_seq: u64,
+    cursors: &HashMap<String, u64>,
+    storage: &dyn SyncStorage,
+    timestamp: &str,
+    message: &str,
+    keypair: &UserKeypair,
+    library_dir: &crate::library_dir::LibraryDir,
+) -> Result<service::SyncResult, SyncCycleError> {
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .map_err(SyncCycleError::Pull)?;
+    service::sync(
+        device_id,
+        db,
+        tables,
+        outgoing,
+        local_seq,
+        cursors,
+        storage,
+        timestamp,
+        message,
+        keypair,
+        library_dir,
+        membership.chain.as_ref(),
+        membership.pinned_owner.as_deref(),
+    )
+    .await
+}
+
 /// The common `note_photos` blob declaration: namespace `"photos"`, master scope,
 /// host-provided · `CacheEager` (a cover — fetched into the cache on pull), hashed
 /// scheme.
@@ -308,7 +345,7 @@ async fn push_stamps_the_dbs_schema_version() {
     let outgoing = db1.take_changeset().await.expect("capture insert");
 
     let keypair = UserKeypair::generate();
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db1,
         &tables,
@@ -353,7 +390,7 @@ async fn sync_reuses_opened_schema_models() {
 
     let keypair = UserKeypair::generate();
     let (_tmp, library_dir) = temp_library_dir();
-    service::sync(
+    sync_for_test(
         "dev1",
         &db,
         db.synced_tables(),
@@ -746,7 +783,7 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     let outgoing = db1.take_changeset().await.expect("capture update");
 
     let keypair = UserKeypair::generate();
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db1,
         &tables,
@@ -938,7 +975,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     // the make_remote flow, not this changeset-blob upload.
     let keypair = UserKeypair::generate();
     let (_t1, ld1) = temp_library_dir();
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db1,
         &audio_tables(),
@@ -1032,7 +1069,7 @@ async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() 
     .await;
     let outgoing = db.take_changeset().await.expect("capture outgoing");
 
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db,
         &test_synced_tables_with_blob(BlobDecl::new(
@@ -1088,7 +1125,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
     let outgoing = db.take_changeset().await.expect("capture outgoing");
     let (_tmp, ld) = temp_library_dir();
 
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db,
         &test_synced_tables_with_blob(BlobDecl::new(
@@ -1154,7 +1191,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     let outgoing = db.take_changeset().await.expect("capture outgoing");
     let (_tmp, ld) = temp_library_dir();
 
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db,
         &test_synced_tables_with_blob(BlobDecl::new(
@@ -1214,7 +1251,7 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
     let outgoing = db.take_changeset().await.expect("capture delete");
     let (_tmp, ld) = temp_library_dir();
 
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db,
         &test_synced_tables_with_blob(BlobDecl::new(
@@ -1282,7 +1319,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
 
     let keypair = UserKeypair::generate();
     let (_t1, ld1) = temp_library_dir();
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db1,
         &test_synced_tables_with_blob(photo_decl()),
@@ -1351,7 +1388,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let keypair = UserKeypair::generate();
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db1,
         &test_synced_tables_with_blob(readable_photo_decl()),
@@ -1458,7 +1495,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let outgoing = db1.take_changeset().await.expect("capture outgoing");
 
     let keypair = UserKeypair::generate();
-    let result = service::sync(
+    let result = sync_for_test(
         "dev1",
         &db1,
         &test_synced_tables_with_blob(decl()),

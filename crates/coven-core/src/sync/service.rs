@@ -26,7 +26,7 @@ use crate::sync::session::SyncedTable;
 
 use super::envelope;
 use super::gate;
-use super::membership::{self, MembershipCoord};
+use super::membership::{MembershipChain, MembershipCoord};
 use super::publish_blobs::{
     ensure_publishable_blobs, publish_blobs_from_changes, PublishBlobError,
 };
@@ -136,6 +136,8 @@ pub async fn sync(
     message: &str,
     keypair: &UserKeypair,
     library_dir: &LibraryDir,
+    membership_chain: Option<&MembershipChain>,
+    owner_pubkey: Option<&str>,
 ) -> Result<SyncResult, SyncCycleError> {
     // Step 2: apply row-level sync gating. Cut gated-false rows (and their
     // FK-descendants) so they stay local; re-emit a root's full subtree when
@@ -226,7 +228,7 @@ pub async fn sync(
     // this coordinate to resolve the gap, instead of judging us non-member and
     // skipping the changeset forever. Only needed when we actually publish.
     let membership_grant = match &outgoing_cs {
-        Some(_) => resolve_write_grant(storage, keypair).await?,
+        Some(_) => resolve_write_grant(membership_chain, keypair),
         None => None,
     };
 
@@ -251,10 +253,18 @@ pub async fn sync(
 
     // Step 4 + 5: pull incoming changesets and apply them (the pull disables
     // capture around only each apply, so applied rows are not echoed).
-    let (updated_cursors, pull_result) =
-        pull::pull_changes(db, tables, storage, device_id, cursors, library_dir)
-            .await
-            .map_err(SyncCycleError::Pull)?;
+    let (updated_cursors, pull_result) = pull::pull_changes(
+        db,
+        tables,
+        storage,
+        device_id,
+        cursors,
+        library_dir,
+        membership_chain.cloned(),
+        owner_pubkey.map(str::to_string),
+    )
+    .await
+    .map_err(SyncCycleError::Pull)?;
 
     if pull_result.changesets_applied > 0 {
         info!(
@@ -272,28 +282,18 @@ pub async fn sync(
 }
 
 /// The storage coordinate of the membership entry that authorizes this device
-/// to write, or `None` for a solo library (no membership chain). Embedded in
-/// the outgoing changeset so a puller can resolve a membership-propagation gap.
-///
-/// A storage failure aborts the cycle rather than publishing a changeset with
-/// no grant: a puller hitting the gap window would otherwise skip it as
-/// non-member — the very loss this binding exists to prevent.
-async fn resolve_write_grant(
-    storage: &dyn SyncStorage,
+/// to write, or `None` for a solo/browsable library (no membership chain).
+/// Embedded in the outgoing changeset so a puller can resolve a
+/// membership-propagation gap. Read off the cycle's once-loaded chain, so it
+/// judges the same membership state as the rest of the cycle rather than
+/// re-listing (the very disagreement that once had a puller skip the write it was
+/// meant to accept).
+fn resolve_write_grant(
+    membership_chain: Option<&MembershipChain>,
     keypair: &UserKeypair,
-) -> Result<Option<MembershipCoord>, SyncCycleError> {
-    let entry_keys = storage
-        .list_membership_entries()
-        .await
-        .map_err(|e| SyncCycleError::Membership(format!("list membership entries: {e}")))?;
-    if entry_keys.is_empty() {
-        return Ok(None);
-    }
-    let entries = super::membership_ops::download_entries(storage, &entry_keys)
-        .await
-        .map_err(SyncCycleError::Membership)?;
+) -> Option<MembershipCoord> {
     let our_pubkey = hex::encode(keypair.public_key());
-    Ok(membership::write_grant_coord(&entries, &our_pubkey))
+    membership_chain.and_then(|chain| chain.write_grant_coord(&our_pubkey))
 }
 
 #[derive(Clone)]
@@ -788,10 +788,6 @@ pub enum SyncCycleError {
     /// An outgoing changeset references a blob whose local file is missing, so the
     /// changeset cannot be published without stranding pullers on a 404.
     BlobMissing(String),
-    /// The membership chain could not be loaded to bind the outgoing changeset to
-    /// the entry that authorizes this device — publishing without it risks pullers
-    /// skipping the changeset as non-member.
-    Membership(String),
 }
 
 impl std::fmt::Display for SyncCycleError {
@@ -802,7 +798,6 @@ impl std::fmt::Display for SyncCycleError {
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
             SyncCycleError::AssetUpload(e) => write!(f, "asset upload error: {e}"),
             SyncCycleError::BlobMissing(e) => write!(f, "blob missing: {e}"),
-            SyncCycleError::Membership(e) => write!(f, "membership error: {e}"),
         }
     }
 }

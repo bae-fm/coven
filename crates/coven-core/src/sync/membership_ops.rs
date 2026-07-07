@@ -449,22 +449,6 @@ pub(crate) enum MembershipAuthorAuthorizationError {
     Unauthorized(String),
 }
 
-/// Authorize a signed control object's author against the library's membership
-/// chain, anchored to the pinned owner when one is known. `watermark_db` is
-/// `Some` for recurring authorization decisions (a snapshot publish, a blob
-/// deletion), so a stale or rolled-back head can't re-authorize a revoked owner.
-pub(crate) async fn authorize_membership_author(
-    storage: &dyn SyncStorage,
-    author_pubkey: &str,
-    pinned_owner: Option<&str>,
-    requirement: MembershipAuthorRequirement,
-    watermark_db: Option<&Database>,
-) -> Result<(), MembershipAuthorAuthorizationError> {
-    let chain = load_membership_chain(storage, pinned_owner, watermark_db).await?;
-    authorize_loaded_membership_author(chain.as_ref(), author_pubkey, requirement)
-        .map_err(MembershipAuthorAuthorizationError::Unauthorized)
-}
-
 /// Load the library membership chain when one exists, anchored to the pinned owner
 /// when known. `watermark_db` threads through to [`load_anchored_chain`]'s
 /// monotonic head guard for readers that re-evaluate authorization each cycle.

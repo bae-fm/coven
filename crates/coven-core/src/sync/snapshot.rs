@@ -34,8 +34,8 @@ use tracing::{debug, info, warn};
 
 use super::membership::MembershipChain;
 use super::membership_ops::{
-    authorize_loaded_membership_author, authorize_membership_author, load_membership_chain,
-    MembershipAuthorAuthorizationError, MembershipAuthorRequirement,
+    authorize_loaded_membership_author, load_membership_chain, MembershipAuthorAuthorizationError,
+    MembershipAuthorRequirement,
 };
 use super::publish_blobs::ensure_publishable_blobs;
 use super::session::SyncedTable;
@@ -582,50 +582,6 @@ pub fn should_create_snapshot(
     }
 
     false
-}
-
-/// Authorize a snapshot control object's `author_pubkey` against the library's
-/// membership chain.
-///
-/// The bucket is untrusted: the at-rest cipher proves only confidentiality, so a
-/// signed object that decrypts could still have been written by anyone with the
-/// credential. The signature (checked by the caller) proves *who* authored the
-/// object; this proves whether that author *may* publish a catalog image — the
-/// same split the changeset path enforces. The author must be a current Owner — a
-/// snapshot restates the whole catalog, so a Member may push changesets but may not
-/// author a catalog image (and a read-only Follower may not either) — and, when an
-/// owner is pinned, the chain must be anchored to that owner.
-///
-/// A chain-less (browsable/open) library has no membership to authorize against,
-/// so the object is accepted on its (already verified) signature alone — open by
-/// design, exactly as the pull keeps every head when no chain exists. An empty
-/// chain *under a pinned owner* is instead a wiped `membership/*` (a takeover
-/// attempt) and is refused.
-///
-/// `owner_pubkey` is the library's established owner (the chain founder the invite
-/// pins) when known — `Some` on the join path. `None` on the restore path (the
-/// owner is adopted trust-on-first-use from the chain's own founder after the
-/// pull), so the chain is anchored to whatever founder it self-validates to.
-///
-/// This is the one owner-authorization check, shared by the read paths (resolving
-/// a snapshot to bootstrap or GC from) and the sync cycle's pre-publish decision
-/// (whether this device may author a snapshot at all), so the producer and the
-/// readers can never disagree on who may write a catalog image.
-pub(crate) async fn authorize_author(
-    storage: &dyn SyncStorage,
-    author_pubkey: &str,
-    owner_pubkey: Option<&str>,
-    watermark_db: Option<&Database>,
-) -> Result<(), SnapshotError> {
-    authorize_membership_author(
-        storage,
-        author_pubkey,
-        owner_pubkey,
-        MembershipAuthorRequirement::Owner,
-        watermark_db,
-    )
-    .await
-    .map_err(snapshot_authorization_error)
 }
 
 fn snapshot_authorization_error(e: MembershipAuthorAuthorizationError) -> SnapshotError {

@@ -1442,6 +1442,9 @@ pub async fn pull_into(
     cursors: &HashMap<String, u64>,
     library_dir: &crate::library_dir::LibraryDir,
 ) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .expect("load cycle membership");
     pull_changes(
         db,
         db.synced_tables(),
@@ -1449,6 +1452,8 @@ pub async fn pull_into(
         device_id,
         cursors,
         library_dir,
+        membership.chain,
+        membership.pinned_owner,
     )
     .await
     .expect("pull")
@@ -1464,6 +1469,7 @@ pub async fn pull_into_result(
     cursors: &HashMap<String, u64>,
     library_dir: &crate::library_dir::LibraryDir,
 ) -> Result<(HashMap<String, u64>, crate::sync::pull::PullResult), crate::sync::pull::PullError> {
+    let membership = crate::sync::pull::load_cycle_membership(storage, db).await?;
     pull_changes(
         db,
         db.synced_tables(),
@@ -1471,6 +1477,8 @@ pub async fn pull_into_result(
         device_id,
         cursors,
         library_dir,
+        membership.chain,
+        membership.pinned_owner,
     )
     .await
 }

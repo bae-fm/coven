@@ -27,6 +27,7 @@ use crate::storage::cloud::{
 };
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
     append_membership_entry, exec, founder_entry, make_linked_entry, open_test_db_with_blob,
@@ -56,6 +57,39 @@ fn open_outbox_db() -> Database {
     db
 }
 
+/// Load the cycle's membership chain (pinning `pinned_owner` first so the load
+/// anchors to it) and run the GC — the two steps the sync cycle does, so a test
+/// drives the same once-loaded-chain authorization production does. For a
+/// wiped/refounded chain under a pinned owner the load itself refuses (returns
+/// `Err`), mirroring the cycle aborting before the GC ever runs.
+async fn gc_tombstones_anchored(
+    db: &Database,
+    storage: &dyn crate::sync::storage::SyncStorage,
+    cloud_home: &dyn CloudHome,
+    cipher: &RwLock<CloudCipher>,
+    library_id: &str,
+    pinned_owner: Option<&str>,
+    clock: &dyn crate::clock::Clock,
+) -> Result<usize, String> {
+    if let Some(owner) = pinned_owner {
+        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, owner)
+            .await
+            .expect("pin owner");
+    }
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .map_err(|e| e.to_string())?;
+    gc_tombstones(
+        db,
+        cloud_home,
+        cipher,
+        library_id,
+        membership.chain.as_ref(),
+        clock,
+    )
+    .await
+}
+
 async fn gc_tombstones_without_live_refs(
     storage: &dyn crate::sync::storage::SyncStorage,
     cloud_home: &dyn CloudHome,
@@ -65,7 +99,7 @@ async fn gc_tombstones_without_live_refs(
     clock: &dyn crate::clock::Clock,
 ) -> Result<usize, String> {
     let db = open_outbox_db();
-    gc_tombstones(
+    gc_tombstones_anchored(
         &db,
         storage,
         cloud_home,
@@ -889,7 +923,7 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
     plant_tombstone(&storage, &tombstone).await;
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(
+    let n = gc_tombstones_anchored(
         &db,
         &storage,
         &storage,
@@ -963,7 +997,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
     // GC inside the grace, with the row still reading live+remote: the fresh tombstone
     // must NOT be canceled.
     let within = FixedClock(at(deleted_at));
-    let n = gc_tombstones(
+    let n = gc_tombstones_anchored(
         &db,
         &storage,
         &storage,
@@ -994,7 +1028,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
     )
     .await;
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(
+    let n = gc_tombstones_anchored(
         &db,
         &storage,
         &storage,
@@ -1066,7 +1100,7 @@ async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
     plant_tombstone(&storage, &tombstone).await;
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let n = gc_tombstones(
+    let n = gc_tombstones_anchored(
         &db,
         &storage,
         &storage,
@@ -1318,7 +1352,7 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // attacker, not the pin, so authorization fails and the blob survives.
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let cipher = plaintext_cipher();
-    let n = gc_tombstones_without_live_refs(
+    let result = gc_tombstones_without_live_refs(
         &storage,
         &storage,
         &cipher,
@@ -1326,11 +1360,11 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
         Some(&pinned_owner),
         &past,
     )
-    .await
-    .expect("gc");
-    assert_eq!(
-        n, 0,
-        "a tombstone by the forged founder of a refounded chain reclaims nothing",
+    .await;
+    assert!(
+        result.is_err(),
+        "loading a chain refounded under a non-owner key refuses the cycle before \
+         any tombstone is judged, got {result:?}",
     );
     assert!(
         storage.read("blob-key").await.is_ok(),
@@ -1340,8 +1374,8 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
 
 /// The empty-chain half of the same defense: an *entirely wiped* `membership/*`
 /// (no founder at all) under a pinned owner is a takeover, not an open library, so
-/// a tombstone authored over it is refused and the blob survives. This mirrors
-/// snapshot `authorize_author`: empty + pinned owner = wiped = refuse; empty + no
+/// a tombstone authored over it is refused and the blob survives. The rule is the
+/// cycle's membership load's: empty + pinned owner = wiped = refuse; empty + no
 /// pin = genuinely open = accept on signature.
 #[tokio::test]
 async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
@@ -1373,7 +1407,7 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let cipher = plaintext_cipher();
-    let n = gc_tombstones_without_live_refs(
+    let result = gc_tombstones_without_live_refs(
         &storage,
         &storage,
         &cipher,
@@ -1381,11 +1415,11 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
         Some(&pinned_owner),
         &past,
     )
-    .await
-    .expect("gc");
-    assert_eq!(
-        n, 0,
-        "an empty (wiped) chain under a pinned owner authorizes no deletion",
+    .await;
+    assert!(
+        result.is_err(),
+        "an empty (wiped) chain under a pinned owner refuses the cycle at load, \
+         before any tombstone is judged, got {result:?}",
     );
     assert!(
         storage.read("blob-key").await.is_ok(),

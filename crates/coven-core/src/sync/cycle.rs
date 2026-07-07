@@ -430,6 +430,21 @@ pub async fn run_single_sync_cycle(
     // The synced-table set is owned by the Database; read it once here.
     let tables = db.synced_tables();
 
+    // Load + anchor the membership chain ONCE for the whole cycle, before anything
+    // this cycle pushes, judges, or decrypts. Every authorization decision below —
+    // the refresh's key-rotation authorization, the pull's changeset/head checks,
+    // the outgoing write-grant binding, the snapshot-author check, and the tombstone
+    // GC — judges this one chain state, instead of each re-listing and re-downloading
+    // it (which also let two reads disagree mid-cycle). Fail-closed: for an
+    // owner-pinned library a chain that can't be listed, is wiped, or won't anchor
+    // is a tamper/takeover, so this aborts the cycle and retries next time — never
+    // falling open to "no rules apply". A membership change a peer publishes
+    // mid-cycle is picked up next cycle, the same convergence model as everything
+    // else the cycle reads.
+    let membership = super::pull::load_cycle_membership(storage, db)
+        .await
+        .map_err(|e| format!("load membership chain: {e}"))?;
+
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
     // judges, or decrypts. Membership and the rotatable library key are
     // per-cycle preconditions, not init-time bootstraps:
@@ -437,17 +452,15 @@ pub async fn run_single_sync_cycle(
     // is adopted on a running device without a restart. Runs before the blob drain
     // so the drain (and every push/pull below) uses the current key. A failure here
     // aborts the cycle and retries next time — a refresh that can't complete must
-    // not also corrupt state, and a chain reload that can't verify must fail closed,
-    // never fall open to "no rules apply".
+    // not also corrupt state.
     if let Some(ch) = cloud_home {
         refresh_authorization_state(
-            storage,
             ch,
-            db,
             cipher,
             user_keypair,
             key_persistence,
             library_id,
+            &membership,
         )
         .await?;
     }
@@ -611,6 +624,8 @@ pub async fn run_single_sync_cycle(
         "background sync",
         user_keypair,
         library_dir,
+        membership.chain.as_ref(),
+        membership.pinned_owner.as_deref(),
     )
     .await
     .map_err(|e| format!("Sync cycle error: {e}"))?;
@@ -757,35 +772,26 @@ pub async fn run_single_sync_cycle(
         if cancels_pending {
             debug!("tombstone cancels still pending; skipping reclaim this cycle");
         } else {
-            // Anchor the tombstone GC's authorization to the device's pinned owner
-            // (set on join/restore/found), the same pin `ensure_owner_anchored_chain`
-            // reads. A read failure aborts the GC for this cycle rather than falling
-            // back to trust-on-first-use: deleting user blobs on an unverifiable
-            // owner is the exact attack the pin closes. The next cycle retries.
-            match db
-                .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-                .await
+            // Authorize every reclaim against the cycle's once-loaded chain, already
+            // anchored to the device's pinned owner (set on join/restore/found). A
+            // per-tombstone re-load would both repeat the cycle's listing and risk
+            // judging a different chain state; the load's own fail-closed anchor is
+            // what keeps deleting user blobs on an unverifiable owner impossible.
+            match crate::blob::delete::gc_tombstones(
+                db,
+                ch,
+                cipher,
+                library_id,
+                membership.chain.as_ref(),
+                clock,
+            )
+            .await
             {
-                Ok(pinned_owner) => {
-                    match crate::blob::delete::gc_tombstones(
-                        db,
-                        storage,
-                        ch,
-                        cipher,
-                        library_id,
-                        pinned_owner.as_deref(),
-                        clock,
-                    )
-                    .await
-                    {
-                        Ok(n) if n > 0 => {
-                            info!(count = n, "Reclaimed blobs past the tombstone grace")
-                        }
-                        Err(e) => warn!("Tombstone GC error: {e}"),
-                        _ => {}
-                    }
+                Ok(n) if n > 0 => {
+                    info!(count = n, "Reclaimed blobs past the tombstone grace")
                 }
-                Err(e) => warn!("Tombstone GC skipped: failed to read pinned owner: {e}"),
+                Err(e) => warn!("Tombstone GC error: {e}"),
+                _ => {}
             }
         }
     }
@@ -817,32 +823,28 @@ pub async fn run_single_sync_cycle(
     let snapshot_due = is_initial_sync
         || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since);
     let may_snapshot = if snapshot_due {
-        // Reuse the acceptance-side authorization rather than re-deriving it, so the
-        // producer and the readers apply the same rule: the author must be a current
-        // Owner, and an open/browsable library with no pinned owner is accepted (it
-        // has no owner to gate against). A `UnauthorizedAuthor` result means this
-        // device may not snapshot — skip it. A genuine failure to read the chain is
-        // fatal to the cycle, the same fail-closed stance `refresh_authorization_state`
-        // takes on the membership load.
+        // Judge against the cycle's once-loaded chain, the same acceptance-side rule
+        // the readers apply: the author must be a current Owner, and an open/browsable
+        // library with no chain is accepted (it has no owner to gate against). The
+        // chain was already listed, anchored, and (for an owner-pinned library)
+        // fail-closed at the top of the cycle, so the only outcome here is
+        // authorized-or-not: an unauthorized result skips the snapshot.
         let our_pk = hex::encode(user_keypair.public_key());
-        let pinned_owner = db
-            .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-            .await
-            .map_err(|e| format!("read pinned owner for snapshot authorization: {e}"))?;
-        match super::snapshot::authorize_author(storage, &our_pk, pinned_owner.as_deref(), Some(db))
-            .await
-        {
+        match super::membership_ops::authorize_loaded_membership_author(
+            membership.chain.as_ref(),
+            &our_pk,
+            super::membership_ops::MembershipAuthorRequirement::Owner,
+        ) {
             Ok(()) => true,
-            Err(super::snapshot::SnapshotError::UnauthorizedAuthor(reason)) => {
+            Err(reason) => {
                 info!(
                     device = %our_pk,
-                    owner = pinned_owner.as_deref().unwrap_or("<none>"),
+                    owner = membership.pinned_owner.as_deref().unwrap_or("<none>"),
                     %reason,
                     "Snapshot skipped: this device may not author a snapshot"
                 );
                 false
             }
-            Err(e) => return Err(format!("verify snapshot authorization: {e}")),
         }
     } else {
         false
@@ -982,19 +984,18 @@ pub async fn run_single_sync_cycle(
 /// key — it is open by design — so the whole refresh is a no-op there, mirroring
 /// how `init_sync` skips the chain for a plaintext home.
 ///
-/// Fail-closed: for an owner-pinned (opaque) library a chain that can't be listed,
-/// loaded, or anchored aborts the cycle (it retries next cycle) rather than
-/// proceeding with no chain. The wrapped-key read likewise surfaces its failure as an
-/// aborted cycle: a refresh that can't complete must not leave durable state
-/// half-updated.
+/// Fail-closed: for an owner-pinned (opaque) library the cycle's shared membership
+/// load has already aborted the cycle if the chain can't be listed, is wiped, or
+/// won't anchor — so `membership.chain` is present whenever an owner is pinned. The
+/// wrapped-key read below surfaces its own failure as an aborted cycle: a refresh
+/// that can't complete must not leave durable state half-updated.
 async fn refresh_authorization_state(
-    storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
-    db: &Database,
     cipher: &std::sync::RwLock<CloudCipher>,
     user_keypair: &UserKeypair,
     key_persistence: Option<&dyn KeyPersistence>,
     library_id: &str,
+    membership: &super::pull::CycleMembership,
 ) -> Result<(), String> {
     // A plaintext home is open by design — no chain and no library key to rotate.
     // Nothing to refresh.
@@ -1003,47 +1004,32 @@ async fn refresh_authorization_state(
         return Ok(());
     }
 
-    // The library's founder, pinned at create/join/restore, anchors chain
-    // identity. Wrapped-key adoption is authorized later against the current
-    // Owner set from that anchored chain. Without a pinned founder there is
-    // nothing to anchor against — and a production library always has one, since
-    // founding precedes any sync cycle — so a missing pin means there is no shared
-    // state to refresh this cycle; skip it. Critically we do NOT fall back to
-    // loading the chain unanchored: that would act on a forged member set.
-    let Some(owner) = db
-        .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-        .await
-        .map_err(|e| format!("refresh: read pinned owner: {e}"))?
-    else {
-        debug!("refresh: no owner pinned yet (library not founded); nothing to anchor against");
-        return Ok(());
+    // The library's founder, pinned at create/join/restore, anchors chain identity;
+    // wrapped-key adoption is authorized against the current Owner set from that
+    // anchored chain. Without a pinned owner there is nothing to anchor against — a
+    // production library always has one, since founding precedes any sync cycle — so
+    // its absence means there is no shared state to refresh this cycle; skip it. The
+    // cycle load couples the pinned owner with its anchored chain (an owner-pinned
+    // library that can't produce a valid chain aborted the load), so an owner here
+    // always travels with a chain; a pinned owner WITHOUT a chain contradicts that
+    // invariant and fails loud rather than reading as "not founded".
+    let chain = match (
+        membership.pinned_owner.as_deref(),
+        membership.chain.as_ref(),
+    ) {
+        (Some(_), Some(chain)) => chain,
+        (None, _) => {
+            debug!("refresh: no owner pinned yet (library not founded); nothing to anchor against");
+            return Ok(());
+        }
+        (Some(owner), None) => {
+            return Err(format!(
+                "refresh: owner {owner} is pinned but the cycle's membership load \
+                 produced no chain — the load's invariant is broken"
+            ));
+        }
     };
 
-    // 1. Reload + anchor the membership chain, the same load+anchor the pull and
-    //    snapshot-authorize paths run. Fail closed: a chain that can't be listed, is
-    //    wiped, won't validate, or is founded by a different key is a tamper/takeover,
-    //    so abort rather than act on a stale or forged member set. Never set
-    //    `chain = None` and continue.
-    let entries = storage
-        .list_membership_entries()
-        .await
-        .map_err(|e| format!("refresh: list membership entries: {e}"))?;
-    if entries.is_empty() {
-        // The founder write precedes the pin, so an owner-pinned library with no
-        // chain is a wiped chain, not a fresh library — refuse.
-        return Err(format!(
-            "refresh: membership chain is empty but owner {owner} is pinned \
-             (wiped membership/*)"
-        ));
-    }
-    let chain = super::membership_ops::load_anchored_chain(
-        storage,
-        &entries,
-        Some(owner.as_str()),
-        Some(db),
-    )
-    .await
-    .map_err(|e| format!("refresh: load/anchor membership chain: {e}"))?;
     let current_owners: Vec<String> = chain
         .current_members()
         .into_iter()
@@ -1051,7 +1037,11 @@ async fn refresh_authorization_state(
             (role == super::membership::MemberRole::Owner).then_some(pubkey)
         })
         .collect();
-    let visible_membership_coords = entries
+    // The visible activation coordinates are the cycle's raw membership LIST — an
+    // entry is "visible" as soon as it is listed, which is the view the wrapped-key
+    // activation gate checks against (distinct from the committed chain above).
+    let visible_membership_coords = membership
+        .listed_entries
         .iter()
         .map(|(author_pubkey, seq)| super::membership::MembershipCoord {
             author_pubkey: author_pubkey.clone(),

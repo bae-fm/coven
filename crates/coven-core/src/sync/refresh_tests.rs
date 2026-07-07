@@ -815,6 +815,68 @@ fn membership_coords(entry_keys: &[(String, u64)]) -> Vec<MembershipCoord> {
         .collect()
 }
 
+/// One sync cycle lists the membership chain exactly once. The chain is loaded and
+/// anchored a single time at the top of the cycle and threaded to every
+/// authorization site — the refresh, the pull, the outgoing write-grant, the
+/// snapshot-author check, and the tombstone GC — so the whole cycle judges one
+/// chain state and pays a single listing round-trip. `MockSyncStorage` counts the
+/// `list_membership_entries` calls.
+///
+/// Mutation proof: route any of those sites through its own membership load and
+/// the delta rises above one.
+#[tokio::test]
+async fn one_cycle_lists_membership_once() {
+    let owner = UserKeypair::generate();
+    let device_b = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let key: [u8; 32] = [7u8; 32];
+
+    let storage = MockSyncStorage::new();
+
+    // Chain: owner founds and adds B as a Member.
+    let mut chain = bootstrap_chain(&owner);
+    add_linked_entry(
+        &mut chain,
+        &owner,
+        MembershipAction::Add,
+        &device_b,
+        MemberRole::Member,
+        "0000000002000-0000-A",
+    );
+    upload_chain(&storage, &chain, &owner).await;
+
+    // B's steady state: owner pinned + an encrypted cipher on the shared key, so the
+    // cycle's refresh and pull both run against the anchored chain rather than
+    // short-circuiting as a plaintext no-op. B is a Member, so it authors no
+    // snapshot — whose reclaim would be a separate, out-of-scope membership read.
+    let db_b = open_test_db();
+    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let ks_b = TestKeyPersistence::default();
+    ks_b.set_initial_key(key);
+    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
+    let (_tmp_b, ld_b) = temp_library_dir();
+
+    let before = storage.membership_list_count();
+    run_cycle(
+        &storage,
+        &db_b,
+        &cipher_b,
+        &device_b,
+        "B",
+        &ld_b,
+        Some(&ks_b),
+    )
+    .await
+    .expect("B's cycle");
+    assert_eq!(
+        storage.membership_list_count() - before,
+        1,
+        "one cycle loads and anchors the membership chain exactly once",
+    );
+}
+
 fn cipher_key(cipher: &RwLock<CloudCipher>) -> [u8; 32] {
     match &*cipher.read().unwrap() {
         CloudCipher::Encrypted(enc) => enc.key_bytes(),

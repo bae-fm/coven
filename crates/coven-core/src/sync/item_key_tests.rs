@@ -307,6 +307,9 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
 
     let (_tmp_lib, ld) = temp_library_dir();
 
+    let membership = crate::sync::pull::load_cycle_membership(&storage, &db_b)
+        .await
+        .expect("load cycle membership");
     let (cursors, result) = pull_changes(
         &db_b,
         db_b.synced_tables(),
@@ -314,6 +317,8 @@ async fn changeset_replay_join_resolves_item_and_decrypts() {
         "dev-b",
         &HashMap::new(),
         &ld,
+        membership.chain,
+        membership.pinned_owner,
     )
     .await
     .expect("device B pulls A's changeset");

@@ -179,6 +179,104 @@ struct CompletedChangeset<'a> {
     changes: &'a [RowChange],
 }
 
+/// The membership state one sync cycle judges every authorization against, loaded
+/// and anchored once at the top of the cycle and threaded to the pull, the
+/// write-grant binding, the snapshot-authorization decision, and the tombstone GC.
+/// Loading it once (instead of each of those sites re-listing and re-downloading
+/// the chain) both saves the round-trips and — more importantly — makes every
+/// authorization decision in the cycle judge the *same* chain state, so two reads
+/// can't disagree mid-cycle. Because [`load_anchored_chain`] writes the reader's
+/// per-author head watermark, loading once also writes that watermark once.
+///
+/// [`load_anchored_chain`]: super::membership_ops::load_anchored_chain
+pub struct CycleMembership {
+    /// The owner-anchored, committed chain. `None` for a browsable library, which
+    /// has no chain and is open by design.
+    pub chain: Option<MembershipChain>,
+    /// The library's pinned owner (issue #102). `None` for a browsable library.
+    /// An owner-pinned library that fails to produce a valid chain aborts the load,
+    /// so `Some(owner)` here always travels with `Some(chain)`.
+    pub pinned_owner: Option<String>,
+    /// The raw membership listing this cycle read (one `list_membership_entries`).
+    /// The key refresh reads the visible activation coordinates from it, which is
+    /// the LIST view (an entry is visible as soon as it is listed), distinct from
+    /// the committed chain (an entry is committed only once a head certifies it).
+    pub listed_entries: Vec<(String, u64)>,
+}
+
+/// Load and anchor the cycle's membership chain once. Mirrors the fail-closed
+/// stance every authorization site shares: for an owner-pinned (opaque) library a
+/// chain that can't be listed, is wiped, or won't anchor to the pinned owner is a
+/// takeover attempt (#95/#104) and aborts the cycle; a browsable library has no
+/// pinned owner, legitimately has no chain, and stays open on any load problem.
+pub async fn load_cycle_membership(
+    storage: &dyn SyncStorage,
+    db: &Database,
+) -> Result<CycleMembership, PullError> {
+    // The library's established owner, pinned at create/join/restore (issue #102).
+    // `Some` for an opaque (encrypted) library — its membership chain is anchored
+    // to this pubkey; `None` for a browsable library, which has no chain and is
+    // open by design.
+    let pinned_owner = db
+        .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .await
+        .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
+
+    let (listed_entries, chain) = match storage.list_membership_entries().await {
+        Ok(entries) if !entries.is_empty() => {
+            // Load + validate the chain and anchor it to the pinned owner. For an
+            // owner-pinned library a chain that won't validate, or one founded by a
+            // different key, is a refound/tamper: fail closed (refuse the cycle)
+            // rather than fall open to "no chain, accept everything". Browsable (no
+            // owner) has nothing to anchor, so a load failure there just leaves it
+            // open. The `Some(db)` makes the read monotonic per author (the head
+            // watermark) and writes that watermark — once, for the whole cycle.
+            let chain = match super::membership_ops::load_anchored_chain(
+                storage,
+                &entries,
+                pinned_owner.as_deref(),
+                Some(db),
+            )
+            .await
+            {
+                Ok(chain) => Some(chain),
+                Err(e) => {
+                    if pinned_owner.is_some() {
+                        return Err(PullError::MembershipTampered(e.to_string()));
+                    }
+                    warn!("failed to load membership chain for validation: {e}");
+                    None
+                }
+            };
+            (entries, chain)
+        }
+        Ok(entries) => {
+            if let Some(owner) = &pinned_owner {
+                return Err(PullError::MembershipTampered(format!(
+                    "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
+                )));
+            }
+            (entries, None)
+        }
+        Err(e) => {
+            // Can't even list membership. For an owner-pinned library we cannot
+            // verify authorship, so fail closed (abort, retry next cycle) rather
+            // than apply changesets unvalidated. Browsable stays open.
+            if pinned_owner.is_some() {
+                return Err(PullError::Storage(e));
+            }
+            warn!("failed to list membership entries for validation: {e}");
+            (Vec::new(), None)
+        }
+    };
+
+    Ok(CycleMembership {
+        chain,
+        pinned_owner,
+        listed_entries,
+    })
+}
+
 /// Pull and apply all new changesets from the sync storage.
 ///
 /// `db` is the owned connection handle; all apply and schema reads run through
@@ -192,7 +290,8 @@ struct CompletedChangeset<'a> {
 /// `tables` is the synced set coven owns — the host's declared tables plus
 /// coven's injected `item_keys` (for the `_updated_at` index map and apply
 /// conflict resolution); call sites pass `db.synced_tables()`. `cursors` maps
-/// device_id -> last_seq we've applied from that device.
+/// device_id -> last_seq we've applied from that device. `membership_chain` and
+/// `owner_pubkey` are the cycle's once-loaded membership (see [`CycleMembership`]).
 ///
 /// Returns the updated cursors map and a summary of what was applied.
 pub async fn pull_changes(
@@ -202,6 +301,8 @@ pub async fn pull_changes(
     our_device_id: &str,
     cursors: &HashMap<String, u64>,
     library_dir: &LibraryDir,
+    mut membership_chain: Option<MembershipChain>,
+    owner_pubkey: Option<String>,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
     // The opened database handle already resolved blob declarations from the final
     // synced set + live schema. Pull reuses that model for download-before-apply of
@@ -215,66 +316,11 @@ pub async fn pull_changes(
     // skips it). Read once here, not sampled per row, so the bound is stable across
     // the whole pull.
     let receiver_wall_ms = db.receive_wall_ms();
-    // The library's established owner, pinned at create/join/restore (issue #102).
-    // `Some` for an opaque (encrypted) library — its membership chain is anchored
-    // to this pubkey; `None` for a browsable library, which has no chain and is
-    // open by design.
-    let owner_pubkey = db
-        .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-        .await
-        .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
-
-    // Load the current membership chain to validate changeset authorship, anchored
-    // to the pinned owner. For an owner-pinned (opaque) library a chain whose
-    // founder isn't that owner — or a chain that has been wiped entirely — is a
-    // takeover attempt (#95/#104), so we refuse the cycle rather than trust it. A
-    // browsable library has no owner pinned and legitimately has no chain.
-    let mut membership_chain: Option<MembershipChain> =
-        match storage.list_membership_entries().await {
-            Ok(entries) if !entries.is_empty() => {
-                // Load + validate the chain and anchor it to the pinned owner (the
-                // same load+anchor the snapshot authorize runs). For an owner-pinned
-                // library a chain that won't validate, or one founded by a different
-                // key, is a refound/tamper: fail closed (refuse the cycle) rather than
-                // fall open to "no chain, accept everything". Browsable (no owner) has
-                // nothing to anchor, so a load failure there just leaves it open.
-                match super::membership_ops::load_anchored_chain(
-                    storage,
-                    &entries,
-                    owner_pubkey.as_deref(),
-                    Some(db),
-                )
-                .await
-                {
-                    Ok(chain) => Some(chain),
-                    Err(e) => {
-                        if owner_pubkey.is_some() {
-                            return Err(PullError::MembershipTampered(e.to_string()));
-                        }
-                        warn!("failed to load membership chain for validation: {e}");
-                        None
-                    }
-                }
-            }
-            Ok(_) => {
-                if let Some(owner) = &owner_pubkey {
-                    return Err(PullError::MembershipTampered(format!(
-                    "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
-                )));
-                }
-                None
-            }
-            Err(e) => {
-                // Can't even list membership. For an owner-pinned library we cannot
-                // verify authorship, so fail closed (abort, retry next cycle) rather
-                // than apply changesets unvalidated. Browsable stays open.
-                if owner_pubkey.is_some() {
-                    return Err(PullError::Storage(e));
-                }
-                warn!("failed to list membership entries for validation: {e}");
-                None
-            }
-        };
+    // The membership chain to validate changeset authorship against, loaded and
+    // anchored once for the whole cycle by `load_cycle_membership` and handed in
+    // here (with the library's pinned owner). `resolve_membership_authorization`
+    // may still refresh it mid-pull to catch an authorizing entry the cycle-start
+    // listing lagged, so it stays mutable.
     let mut membership_members = membership_chain
         .as_ref()
         .map(MembershipChain::current_members);

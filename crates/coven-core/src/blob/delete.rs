@@ -57,8 +57,10 @@ use crate::database::Database;
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{no_progress, CloudHome, CloudObjectState, ConditionalDelete};
 use crate::sync::cloud_storage::CloudCipher;
-use crate::sync::membership_ops::{authorize_membership_author, MembershipAuthorRequirement};
-use crate::sync::storage::SyncStorage;
+use crate::sync::membership::MembershipChain;
+use crate::sync::membership_ops::{
+    authorize_loaded_membership_author, MembershipAuthorRequirement,
+};
 
 /// How long a deleted blob is kept after its tombstone is written, before a GC
 /// pass reclaims it: the cross-device convergence window.
@@ -440,21 +442,22 @@ enum RowReference {
 ///    a pass that deleted the blob but failed to delete the tombstone — clean it up
 ///    without counting a reclaim), then delete the blob and the tombstone object.
 ///
-/// Authorization anchors to `pinned_owner` (the chain founder pinned on
-/// join/restore/found), not trust-on-first-use: this GC runs in production and
-/// deletes user blobs, so it must refuse a wiped-and-refounded chain exactly like
-/// the snapshot restore path. The signature has already proven *who* authored the
-/// tombstone; the owner-anchored chain proves they *may* delete.
+/// Authorization judges against `membership_chain`, the cycle's once-loaded chain
+/// already anchored to the owner pinned on join/restore/found — not
+/// trust-on-first-use: this GC runs in production and deletes user blobs, so it
+/// must refuse a wiped-and-refounded chain exactly like the snapshot restore path.
+/// The signature has already proven *who* authored the tombstone; the owner-anchored
+/// chain proves they *may* delete. `None` is the chain-less (browsable) library,
+/// which has no membership to gate against.
 ///
 /// Returns the number of blobs deleted this pass. A per-tombstone error is logged
 /// and skipped so one bad object doesn't block reclaiming the rest.
 pub async fn gc_tombstones(
     db: &Database,
-    storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
     library_id: &str,
-    pinned_owner: Option<&str>,
+    membership_chain: Option<&MembershipChain>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<usize, String> {
     let suffix = cipher.read().unwrap().suffix();
@@ -526,21 +529,18 @@ pub async fn gc_tombstones(
             continue;
         }
 
-        // Authorize the author against the membership chain, anchored to the pinned
-        // owner: only a current write-capable member of the pinned-owner-founded
-        // chain may delete a blob. A non-member tombstone (a bucket writer forging a
-        // deletion), or one authored by the forged founder of a wiped/refounded
-        // chain, fails here and is skipped.
-        match authorize_membership_author(
-            storage,
+        // Authorize the author against the cycle's once-loaded membership chain,
+        // already anchored to the pinned owner: only a current write-capable member
+        // of the pinned-owner-founded chain may delete a blob. A non-member tombstone
+        // (a bucket writer forging a deletion), or one authored by the forged founder
+        // of a wiped/refounded chain, fails here and is skipped. A chain-less
+        // (browsable) library has nothing to gate against, so the object stands on
+        // its verified signature alone.
+        match authorize_loaded_membership_author(
+            membership_chain,
             &tombstone.author_pubkey,
-            pinned_owner,
             MembershipAuthorRequirement::WriteCapable,
-            Some(db),
-        )
-        .await
-        .map_err(|e| e.to_string())
-        {
+        ) {
             Ok(()) => {}
             Err(e) => {
                 warn!("skipping tombstone {key}: {e}");

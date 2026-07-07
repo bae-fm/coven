@@ -144,6 +144,9 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         "dev-a",
         &HashMap::new(),
         &temp_library_dir().1,
+        // No membership: this test's storage holds no chain (a browsable pull).
+        None,
+        None,
     )
     .await
     .expect("pull into A");
@@ -196,6 +199,9 @@ async fn pull_advances_register_as_each_changeset_applies() {
         "dev-b",
         &HashMap::new(),
         &temp_library_dir().1,
+        // No membership: this test's storage holds no chain (a browsable pull).
+        None,
+        None,
     )
     .await
     .expect("pull into B");
@@ -305,6 +311,9 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     );
 
     let db2 = open_test_db();
+    let membership = crate::sync::pull::load_cycle_membership(&storage, &db2)
+        .await
+        .expect("load cycle membership");
     let (updated, result) = pull_changes(
         &db2,
         &test_synced_tables(),
@@ -312,6 +321,8 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         "dev2",
         &HashMap::new(),
         &temp_library_dir().1,
+        membership.chain,
+        membership.pinned_owner,
     )
     .await
     .expect("pull");
