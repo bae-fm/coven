@@ -762,14 +762,16 @@ impl SyncStorage for CloudSyncStorage {
             };
 
             let stored = self.home.read(key).await?;
-            // A head we can't open is not ours: a head a *different* library
-            // wrote when it reused this bucket, under its own encryption key.
-            // Skip it rather than abort — otherwise one foreign head wedges every
-            // sync cycle for this library, so it never pulls, pushes its catalog
-            // or snapshot, or publishes its own head. A transient read error
-            // above still propagates (it retries next cycle); a parse failure of
-            // a head we *can* open is our own corrupt data and still surfaces. In
-            // a plaintext home `open` never fails, so this branch never trips.
+            // A head we can't open, can't parse, or can't verify is skipped, not
+            // fatal. The bucket is untrusted: any member with the credential can
+            // seal garbage into their own head slot under the library key, and a
+            // different library reusing this bucket writes heads under its own
+            // key. Aborting on any one of them would wedge every sync cycle for
+            // this library — it would never pull, push its catalog or snapshot,
+            // or publish its own head. Skipping excludes the bad head and lets
+            // the rest drive the pull; the slot's owner republishes a good head
+            // on its next successful cycle. A transient read error above still
+            // propagates (it retries next cycle).
             let decoded = match self.open_stored(key, stored, &format!("head {device_id}")) {
                 Ok(d) => d,
                 Err(e) => {
@@ -778,8 +780,13 @@ impl SyncStorage for CloudSyncStorage {
                 }
             };
 
-            let head_json: HeadJson = serde_json::from_slice(&decoded)
-                .map_err(|e| StorageError::Parse(format!("parse head {device_id}: {e}")))?;
+            let head_json: HeadJson = match serde_json::from_slice(&decoded) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("skipping head {device_id} that does not parse: {e}");
+                    continue;
+                }
+            };
 
             // A head whose signature doesn't verify against its embedded author
             // is forged (the bucket is untrusted) -- skip it like one we can't
@@ -1790,6 +1797,56 @@ mod tests {
             heads[0].author_pubkey,
             hex::encode(keypair.public_key()),
             "the verified author is surfaced to the caller",
+        );
+    }
+
+    /// A head sealed under the valid library key but carrying a non-JSON payload
+    /// is skipped, not fatal. Parseability of a bucket-writable object is as
+    /// externally controlled as its signature, so an unparseable head must not
+    /// wedge `list_heads` — and thus every pull — for every member. The other
+    /// members' heads are still returned; the owner republishes its own head on
+    /// its next successful cycle.
+    #[tokio::test]
+    async fn list_heads_skips_an_unparseable_head() {
+        let cipher = CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32]));
+        let storage = CloudSyncStorage::new(
+            Arc::new(InMemoryCloudHome::new()),
+            cipher.clone(),
+            BlobPathScheme::Hashed,
+            "test-lib",
+            UserKeypair::generate(),
+        );
+
+        storage
+            .put_head("ours", 7, None, "2026-01-01T00:00:00Z")
+            .await
+            .expect("put our head");
+
+        // A head that decrypts fine (sealed under the library key) but whose
+        // plaintext is not a `HeadJson`.
+        let sealed = cipher.seal(
+            b"this is not json".to_vec(),
+            &cloud_aad_context("test-lib", "heads/garbled-device.json.enc"),
+        );
+        storage
+            .cloud_home()
+            .write(
+                "heads/garbled-device.json.enc",
+                BlobBody::from_bytes(sealed),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("write unparseable head");
+
+        let heads = storage
+            .list_heads()
+            .await
+            .expect("list_heads must not abort on an unparseable head");
+        let ids: Vec<&str> = heads.iter().map(|h| h.device_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["ours"],
+            "the parseable head is returned; the unparseable one is skipped",
         );
     }
 
