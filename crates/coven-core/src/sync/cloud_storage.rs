@@ -1255,7 +1255,7 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
         BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHomeError, CloudHomeJoinInfo,
-        CloudObjectState, CloudObjectVersion, ConditionalDelete,
+        CloudObjectState, CloudObjectVersion, ConditionalDelete, RevokeOutcome,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1353,7 +1353,10 @@ mod tests {
             self.inner.grant_access(grant).await
         }
 
-        async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+        async fn revoke_access(
+            &self,
+            revoke: CloudAccessRevoke,
+        ) -> Result<RevokeOutcome, CloudHomeError> {
             self.inner.revoke_access(revoke).await
         }
     }

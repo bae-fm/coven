@@ -729,7 +729,7 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
         BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-        CloudHomeJoinInfo,
+        CloudHomeJoinInfo, RevokeOutcome,
     };
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::cycle::run_single_sync_cycle;
@@ -1866,7 +1866,10 @@ mod tests {
             self.inner.grant_access(grant).await
         }
 
-        async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+        async fn revoke_access(
+            &self,
+            revoke: CloudAccessRevoke,
+        ) -> Result<RevokeOutcome, CloudHomeError> {
             self.gate().await;
             self.inner.revoke_access(revoke).await
         }

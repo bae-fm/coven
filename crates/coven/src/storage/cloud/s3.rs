@@ -16,7 +16,7 @@ use super::s3_common::{
 };
 use super::{
     range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudObjectState, CloudObjectVersion, ConditionalDelete,
+    CloudHomeJoinInfo, CloudObjectState, CloudObjectVersion, ConditionalDelete, RevokeOutcome,
 };
 
 /// A coven-owned tokio runtime whose worker threads have a large stack, used to
@@ -708,11 +708,11 @@ impl CloudHome for S3CloudHome {
         })
     }
 
-    async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
-        Err(CloudHomeError::Storage(
-            "S3 member removal requires rotating the shared bucket credentials; this backend cannot revoke one member from a shared access key"
-                .to_string(),
-        ))
+    async fn revoke_access(
+        &self,
+        _revoke: CloudAccessRevoke,
+    ) -> Result<RevokeOutcome, CloudHomeError> {
+        Ok(RevokeOutcome::Unsupported)
     }
 }
 
@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s3_revoke_reports_unsupported_not_success() {
+    async fn s3_revoke_access_reports_unsupported() {
         let home = S3CloudHome::new(
             "bucket".to_string(),
             "us-east-1".to_string(),
@@ -1047,16 +1047,18 @@ mod tests {
         .await
         .expect("construct S3CloudHome");
 
-        let result = home
+        let outcome = home
             .revoke_access(CloudAccessRevoke {
                 member_pubkey: "member-pubkey".to_string(),
                 provider_account_email: None,
             })
-            .await;
+            .await
+            .expect("S3 revoke_access must not error so member removal completes");
 
-        assert!(
-            result.is_err(),
-            "S3 removal must not report success without rotating bucket credentials",
+        assert_eq!(
+            outcome,
+            RevokeOutcome::Unsupported,
+            "S3 hands out one static bucket credential that cannot be withdrawn per member, so it reports Unsupported rather than claiming a revocation it did not perform",
         );
     }
 

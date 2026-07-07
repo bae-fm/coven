@@ -203,8 +203,11 @@ impl CloudHome for InMemoryCloudHome {
         ))
     }
 
-    async fn revoke_access(&self, _revoke: super::CloudAccessRevoke) -> Result<(), CloudHomeError> {
-        Ok(())
+    async fn revoke_access(
+        &self,
+        _revoke: super::CloudAccessRevoke,
+    ) -> Result<super::RevokeOutcome, CloudHomeError> {
+        Ok(super::RevokeOutcome::Unsupported)
     }
 }
 

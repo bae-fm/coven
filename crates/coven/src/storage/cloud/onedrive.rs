@@ -18,7 +18,7 @@ use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
     sharing, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudObjectState, CloudObjectVersion, ConditionalDelete,
+    CloudHomeJoinInfo, CloudObjectState, CloudObjectVersion, ConditionalDelete, RevokeOutcome,
 };
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
@@ -374,7 +374,10 @@ impl CloudHome for OneDriveCloudHome {
         })
     }
 
-    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+    async fn revoke_access(
+        &self,
+        revoke: CloudAccessRevoke,
+    ) -> Result<RevokeOutcome, CloudHomeError> {
         let email = revoke.require_provider_email("OneDrive")?;
         let perms_url = format!(
             "{}/drives/{}/items/{}/permissions",
@@ -399,7 +402,8 @@ impl CloudHome for OneDriveCloudHome {
                     .map(std::string::ToString::to_string))
             },
         )
-        .await
+        .await?;
+        Ok(RevokeOutcome::Revoked)
     }
 }
 

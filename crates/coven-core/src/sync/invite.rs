@@ -10,6 +10,7 @@ use crate::keys::{self, KeyError, UserKeypair};
 /// `revoke_member()` is called by the library owner to remove a member and rotate the key.
 use crate::storage::cloud::{
     CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    RevokeOutcome,
 };
 
 use super::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -627,16 +628,28 @@ pub async fn revoke_member(
         return Err(InviteError::LastOwner);
     }
 
-    // Revoke access on the cloud home (no-op for S3, removes share for consumer clouds).
+    // Withdraw the removed member's storage credential where the provider
+    // supports it. Removal does not depend on it: the chain Remove and key
+    // rotation below are the protection, so a backend that cannot revoke reports
+    // Unsupported and removal proceeds.
     let provider_account_email = chain
         .current_member_provider_email(revokee_pubkey)
         .map(str::to_string);
-    cloud_home
+    match cloud_home
         .revoke_access(CloudAccessRevoke {
             member_pubkey: revokee_pubkey.to_string(),
             provider_account_email,
         })
-        .await?;
+        .await?
+    {
+        RevokeOutcome::Revoked => {}
+        RevokeOutcome::Unsupported => {
+            tracing::info!(
+                member = %revokee_pubkey,
+                "cloud provider offers no per-member credential revocation; removal proceeds — chain revocation and library key rotation are the protection",
+            );
+        }
+    }
 
     if !revokee_is_current {
         let visible_coords = membership_coords(&entry_keys);
@@ -793,8 +806,11 @@ mod tests {
                 key_prefix: None,
             })
         }
-        async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
-            Ok(())
+        async fn revoke_access(
+            &self,
+            _revoke: CloudAccessRevoke,
+        ) -> Result<RevokeOutcome, CloudHomeError> {
+            Ok(RevokeOutcome::Unsupported)
         }
     }
 
@@ -869,9 +885,12 @@ mod tests {
                 key_prefix: None,
             })
         }
-        async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+        async fn revoke_access(
+            &self,
+            revoke: CloudAccessRevoke,
+        ) -> Result<RevokeOutcome, CloudHomeError> {
             self.revokes.lock().unwrap().push(revoke);
-            Ok(())
+            Ok(RevokeOutcome::Unsupported)
         }
     }
 

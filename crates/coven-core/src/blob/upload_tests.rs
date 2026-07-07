@@ -245,7 +245,7 @@ impl CloudHome for FailingCloudHome {
     async fn revoke_access(
         &self,
         _revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
 }
@@ -337,7 +337,7 @@ impl CloudHome for SlowChunkedCloudHome {
     async fn revoke_access(
         &self,
         _revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
 }

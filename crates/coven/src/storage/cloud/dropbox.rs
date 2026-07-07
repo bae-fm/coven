@@ -18,6 +18,7 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::{
     BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    RevokeOutcome,
 };
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
@@ -628,7 +629,10 @@ impl CloudHome for DropboxCloudHome {
         Ok(CloudHomeJoinInfo::Dropbox { shared_folder_id })
     }
 
-    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+    async fn revoke_access(
+        &self,
+        revoke: CloudAccessRevoke,
+    ) -> Result<RevokeOutcome, CloudHomeError> {
         let email = revoke.require_provider_email("Dropbox")?;
         let shared_folder_id = self.get_or_create_shared_folder_id().await?;
         let remove_body = serde_json::json!({
@@ -650,15 +654,18 @@ impl CloudHome for DropboxCloudHome {
         if !status.is_success() {
             // A member who isn't there is already revoked.
             if dropbox_revoke_error_is_already_absent(&body) {
-                return Ok(());
+                return Ok(RevokeOutcome::Revoked);
             }
             return Err(CloudHomeError::Storage(format!(
                 "revoke access for {email} (HTTP {status}): {body}"
             )));
         }
         match parse_dropbox_revoke_launch(&body)? {
-            DropboxRevokeLaunch::Complete => Ok(()),
-            DropboxRevokeLaunch::AsyncJob(job_id) => self.poll_remove_member_job(&job_id).await,
+            DropboxRevokeLaunch::Complete => Ok(RevokeOutcome::Revoked),
+            DropboxRevokeLaunch::AsyncJob(job_id) => {
+                self.poll_remove_member_job(&job_id).await?;
+                Ok(RevokeOutcome::Revoked)
+            }
         }
     }
 }

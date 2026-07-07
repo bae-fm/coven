@@ -18,7 +18,7 @@ use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
     sharing, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo,
+    CloudHomeJoinInfo, RevokeOutcome,
 };
 use crate::clock::ClockRef;
 use crate::keys::KeyService;
@@ -870,7 +870,10 @@ impl CloudHome for GoogleDriveCloudHome {
         })
     }
 
-    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+    async fn revoke_access(
+        &self,
+        revoke: CloudAccessRevoke,
+    ) -> Result<RevokeOutcome, CloudHomeError> {
         let email = revoke.require_provider_email("Google Drive")?;
         let list_url = format!(
             "{}/files/{}/permissions?fields=permissions(id,emailAddress),nextPageToken",
@@ -887,7 +890,8 @@ impl CloudHome for GoogleDriveCloudHome {
             |perm_id| format!("{}/files/{}/permissions/{}", DRIVE_API, folder_id, perm_id),
             move |page| drive_permissions_next_page_url(&list_url_for_next, page),
         )
-        .await
+        .await?;
+        Ok(RevokeOutcome::Revoked)
     }
 }
 

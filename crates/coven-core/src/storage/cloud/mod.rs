@@ -114,6 +114,20 @@ pub enum ConditionalDelete {
     VersionUnavailable,
 }
 
+/// Whether a backend actually withdrew a removed member's storage credential.
+///
+/// Consumer clouds unshare the folder and report [`RevokeOutcome::Revoked`].
+/// Shared-credential backends (S3) hand out one static bucket key that cannot be
+/// withdrawn from a single member and report [`RevokeOutcome::Unsupported`].
+/// Removal proceeds either way: revoking chain membership and rotating the
+/// library key — not withdrawing the credential — is what protects post-removal
+/// content, so `Unsupported` is a truthful outcome, not a failure to paper over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    Revoked,
+    Unsupported,
+}
+
 impl CloudAccessGrant {
     pub fn require_provider_email(&self, provider: &str) -> Result<&str, CloudHomeError> {
         require_provider_email(provider, self.provider_account_email.as_deref())
@@ -504,17 +518,31 @@ pub trait CloudHome: crate::MaybeThreadSafe {
     }
 
     /// Grant access to a member and return connection info for the cloud home.
-    /// Consumer-cloud backends share the folder with the member's account. A
-    /// backend with shared credentials may return those credentials only if its
-    /// revocation path can later make the removed member's copy unusable.
+    /// Consumer-cloud backends share the folder with the member's account.
+    /// Shared-credential backends (S3) return the bucket credentials directly.
+    /// Those credentials cannot be withdrawn from one member later, so the
+    /// confidentiality of content written after a removal rests on the library
+    /// key rotation the caller performs when revoking membership, not on making
+    /// the removed member's credential stop working.
     async fn grant_access(
         &self,
         grant: CloudAccessGrant,
     ) -> Result<CloudHomeJoinInfo, CloudHomeError>;
 
-    /// Revoke a previously granted access. Backends that cannot make the
-    /// removed member's credential stop working must return an error.
-    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError>;
+    /// Revoke a member's provider-level access to the cloud home. Member removal
+    /// always revokes chain membership and rotates the library key; this call is
+    /// the additional, provider-dependent step of withdrawing the storage
+    /// credential. Consumer clouds unshare the folder and return
+    /// [`RevokeOutcome::Revoked`]. Shared-credential backends (S3) cannot
+    /// withdraw one member's copy of a static bucket key and return
+    /// [`RevokeOutcome::Unsupported`]; removal still completes because the key
+    /// rotation, not this call, protects post-removal content. An `Err` aborts
+    /// the removal, so a backend that offers no per-member revocation reports
+    /// `Unsupported` rather than erroring.
+    async fn revoke_access(
+        &self,
+        revoke: CloudAccessRevoke,
+    ) -> Result<RevokeOutcome, CloudHomeError>;
 }
 
 #[cfg(test)]
@@ -741,7 +769,10 @@ mod streaming_tests {
         ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
             unimplemented!()
         }
-        async fn revoke_access(&self, _revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+        async fn revoke_access(
+            &self,
+            _revoke: CloudAccessRevoke,
+        ) -> Result<RevokeOutcome, CloudHomeError> {
             unimplemented!()
         }
     }

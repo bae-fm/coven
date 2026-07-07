@@ -15,7 +15,10 @@ use tracing::warn;
 
 use crate::id_provider::{IdRef, UuidProvider};
 
-use super::{CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use super::{
+    CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    RevokeOutcome,
+};
 
 const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const CHUNK_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-chunk-manifest-v1\0";
@@ -747,10 +750,14 @@ impl CloudHome for CloudKitCloudHome {
         })
     }
 
-    async fn revoke_access(&self, revoke: CloudAccessRevoke) -> Result<(), CloudHomeError> {
+    async fn revoke_access(
+        &self,
+        revoke: CloudAccessRevoke,
+    ) -> Result<RevokeOutcome, CloudHomeError> {
         let ops = self.ops.clone();
         let member_pubkey = revoke.member_pubkey;
-        blocking(move || ops.revoke_share(&member_pubkey)).await
+        blocking(move || ops.revoke_share(&member_pubkey)).await?;
+        Ok(RevokeOutcome::Revoked)
     }
 }
 
@@ -1551,6 +1558,21 @@ mod tests {
                 zone_name: "bae-library".to_string(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn revoke_access_unshares_and_reports_revoked() {
+        let ch = make_cloud_home();
+        let outcome = ch
+            .revoke_access(CloudAccessRevoke {
+                member_pubkey: "member-pubkey".to_string(),
+                provider_account_email: None,
+            })
+            .await
+            .unwrap();
+        // CloudKit removes the member's share participation, so it reports the
+        // credential actually withdrawn rather than Unsupported.
+        assert_eq!(outcome, RevokeOutcome::Revoked);
     }
 
     #[test]

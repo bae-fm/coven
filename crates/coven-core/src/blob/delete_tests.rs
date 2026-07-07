@@ -260,7 +260,7 @@ impl CloudHome for CancelTombstoneOnExists<'_> {
     async fn revoke_access(
         &self,
         revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
         self.inner.revoke_access(revoke).await
     }
 }
@@ -356,7 +356,7 @@ impl CloudHome for ReuploadAfterBlobObserved<'_> {
     async fn revoke_access(
         &self,
         revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
         self.inner.revoke_access(revoke).await
     }
 }
@@ -484,7 +484,7 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
     async fn revoke_access(
         &self,
         revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
         self.inner.revoke_access(revoke).await
     }
 }

@@ -1454,8 +1454,8 @@ impl CloudHome for MockSyncStorage {
     async fn revoke_access(
         &self,
         _revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<(), CloudHomeError> {
-        Ok(())
+    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
+        Ok(crate::storage::cloud::RevokeOutcome::Unsupported)
     }
 }
 
