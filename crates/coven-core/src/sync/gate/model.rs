@@ -11,7 +11,7 @@ use tracing::warn;
 
 use super::outbound::resolve_root;
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
-use crate::sync::session::{quote_ident, table_columns, SyncedTable};
+use crate::sync::session::{quote_ident, SyncedTable};
 
 /// How a synced table relates to the gate.
 pub(super) enum TableGate {
@@ -100,8 +100,7 @@ impl Gates {
                 continue;
             }
 
-            let cols = table_columns(conn, t.name())
-                .map_err(|e| GateError::Sql(format!("read columns of {}", t.name()), e))?;
+            let cols = super::gate_table_columns(conn, t.name())?;
 
             if t.is_remote_root() {
                 gate_map.insert(t.name().to_string(), TableGate::RemoteRoot);
@@ -156,8 +155,7 @@ impl Gates {
                 // Otherwise, if this table has an FK referencing the ancestor, it
                 // is a keep-child: record the FK column in that child.
                 if let Some(fk_name) = fk_col_referencing(conn, t.name(), ancestor)? {
-                    let cols = table_columns(conn, t.name())
-                        .map_err(|e| GateError::Sql(format!("read columns of {}", t.name()), e))?;
+                    let cols = super::gate_table_columns(conn, t.name())?;
                     let fk_col = fk_column(&cols, t.name(), &fk_name)?;
                     children.push((t.name().to_string(), fk_col));
                 }

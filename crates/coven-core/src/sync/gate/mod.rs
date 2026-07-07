@@ -75,6 +75,13 @@ pub(crate) use model::{from_tables_call_count, reset_from_tables_call_count};
 pub(crate) use outbound::combine_changesets;
 pub use outbound::gate_outbound;
 
+/// [`crate::sync::session::table_columns`] with its `rusqlite::Error` adapted
+/// into the gate's error at the boundary.
+fn gate_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, GateError> {
+    crate::sync::session::table_columns(conn, table)
+        .map_err(|e| GateError::Sql(format!("read columns of {table}"), e))
+}
+
 fn execute_batch(conn: &Connection, sql: &str) -> Result<(), GateError> {
     conn.execute_batch(sql)
         .map_err(|e| GateError::Sql(format!("execute batch: {sql}"), e))
