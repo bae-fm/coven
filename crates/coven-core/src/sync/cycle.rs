@@ -780,6 +780,7 @@ pub async fn run_single_sync_cycle(
                 ch,
                 cipher,
                 library_id,
+                &hex::encode(user_keypair.public_key()),
                 membership.chain.as_ref(),
                 clock,
                 db.blob_tombstone_grace(),

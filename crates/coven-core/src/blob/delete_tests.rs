@@ -83,11 +83,52 @@ async fn gc_tombstones_anchored(
     let membership = crate::sync::pull::load_cycle_membership(storage, db)
         .await
         .map_err(|e| e.to_string())?;
+    // These tests reclaim blobs under the fixed test uploader's prefix, so the
+    // reclaiming device runs as that uploader (own-prefix delete). The dedicated
+    // part-3 tests below drive foreign-prefix and owner-sweep cases explicitly via
+    // `gc_tombstones` with a chosen self.
     gc_tombstones(
         db,
         cloud_home,
         cipher,
         library_id,
+        GC_TEST_UPLOADER,
+        membership.chain.as_ref(),
+        clock,
+        grace,
+    )
+    .await
+}
+
+/// Load the pinned-owner-anchored chain and run `gc_tombstones` as `self_pubkey`,
+/// so a test can place the reclaiming device inside or outside a blob's prefix and
+/// as an owner or not.
+#[allow(clippy::too_many_arguments)]
+async fn gc_tombstones_as(
+    self_pubkey: &str,
+    db: &Database,
+    storage: &dyn crate::sync::storage::SyncStorage,
+    cloud_home: &dyn CloudHome,
+    cipher: &RwLock<CloudCipher>,
+    library_id: &str,
+    pinned_owner: Option<&str>,
+    clock: &dyn crate::clock::Clock,
+    grace: chrono::Duration,
+) -> Result<usize, String> {
+    if let Some(owner) = pinned_owner {
+        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, owner)
+            .await
+            .expect("pin owner");
+    }
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .map_err(|e| e.to_string())?;
+    gc_tombstones(
+        db,
+        cloud_home,
+        cipher,
+        library_id,
+        self_pubkey,
         membership.chain.as_ref(),
         clock,
         grace,
@@ -1016,6 +1057,132 @@ async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
             .await
             .is_ok(),
         "the tombstone is kept when locality is unresolved",
+    );
+}
+
+/// A member's GC physically deletes only blobs under its own `{namespace}/{self}/`
+/// prefix. A past-grace, authorized tombstone for a blob under *another* member's
+/// prefix is left standing — that member's own GC, or an owner sweep, reclaims it.
+/// Here a plain member reclaims its own blob and leaves a peer's untouched.
+#[tokio::test]
+async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let owner = pubkey_hex(&founder);
+    let cipher = plaintext_cipher();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+
+    // One blob under the member's own prefix, one under the founder's. No live rows
+    // reference either (the DB is empty), so both are ripe for reclaim — only the
+    // prefix gate decides which the member may delete.
+    let mine = LibraryDir::uploader_hashed_key("photos", &pubkey_hex(&member), "mineblob")
+        .expect("own hashed key");
+    let foreign = LibraryDir::uploader_hashed_key("photos", &owner, "foreignblob")
+        .expect("foreign hashed key");
+    for key in [&mine, &foreign] {
+        storage
+            .write(
+                key,
+                crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+                &no_progress(),
+            )
+            .await
+            .unwrap();
+    }
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    for key in [&mine, &foreign] {
+        let tombstone =
+            BlobTombstoneJson::signed("test-lib", key.clone(), deleted_at.to_string(), &member);
+        plant_tombstone(&storage, &tombstone).await;
+    }
+
+    let past = FixedClock(at(&past_grace_instant(deleted_at)));
+    let n = gc_tombstones_as(
+        &pubkey_hex(&member),
+        &db,
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+        BLOB_TOMBSTONE_GRACE,
+    )
+    .await
+    .expect("gc");
+
+    assert_eq!(n, 1, "the member reclaims exactly its own-prefix blob");
+    assert!(
+        storage.read(&mine).await.is_err(),
+        "the member's own-prefix blob is reclaimed",
+    );
+    assert!(
+        storage.read(&foreign).await.is_ok(),
+        "a blob under another member's prefix is left for its owner or an owner sweep",
+    );
+    assert!(
+        storage
+            .read(&format!("blob_tombstones/{foreign}"))
+            .await
+            .is_ok(),
+        "the foreign blob's tombstone is kept so its uploader or an owner can still act",
+    );
+}
+
+/// An owner sweeps other members' prefixes: it retains bucket-wide delete, so a
+/// past-grace tombstone for an absent member's blob is reclaimed by the owner even
+/// though the object sits under that member's prefix.
+#[tokio::test]
+async fn owner_sweep_reclaims_an_absent_members_blob() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let owner = pubkey_hex(&founder);
+    let cipher = plaintext_cipher();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+
+    let foreign = LibraryDir::uploader_hashed_key("photos", &pubkey_hex(&member), "absentblob")
+        .expect("member hashed key");
+    storage
+        .write(
+            &foreign,
+            crate::storage::cloud::BlobBody::from_bytes(b"contents".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    let tombstone =
+        BlobTombstoneJson::signed("test-lib", foreign.clone(), deleted_at.to_string(), &member);
+    plant_tombstone(&storage, &tombstone).await;
+
+    let past = FixedClock(at(&past_grace_instant(deleted_at)));
+    let n = gc_tombstones_as(
+        &owner,
+        &db,
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+        BLOB_TOMBSTONE_GRACE,
+    )
+    .await
+    .expect("gc");
+
+    assert_eq!(
+        n, 1,
+        "the owner reclaims the absent member's condemned blob"
+    );
+    assert!(
+        storage.read(&foreign).await.is_err(),
+        "an owner sweep deletes a blob under another member's prefix",
     );
 }
 

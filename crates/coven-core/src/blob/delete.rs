@@ -88,6 +88,27 @@ fn tombstone_key(cloud_key: &str, suffix: &str) -> String {
     format!("{TOMBSTONE_PREFIX}{cloud_key}{suffix}")
 }
 
+/// The uploader segment of a hashed blob cloud key
+/// `{namespace}/{uploader}/{ab}/{cd}/{id}`, used to scope reclaim to a prefix, or
+/// `None` for a plain-scheme key (`{namespace}/{cloud_path}`), which carries no
+/// uploader and no per-member prefix. The rebuild guard confirms the key really is
+/// a hashed key rather than a plain path that happens to have five segments.
+fn blob_key_uploader(cloud_key: &str) -> Option<String> {
+    let mut parts = cloud_key.split('/');
+    let namespace = parts.next()?;
+    let uploader = parts.next()?;
+    let _first = parts.next()?;
+    let _second = parts.next()?;
+    let id = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    match crate::library_dir::LibraryDir::uploader_hashed_key(namespace, uploader, id) {
+        Ok(rebuilt) if rebuilt == cloud_key => Some(uploader.to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ExistingTombstone {
     Valid,
@@ -469,6 +490,7 @@ pub async fn gc_tombstones(
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
     library_id: &str,
+    self_pubkey: &str,
     membership_chain: Option<&MembershipChain>,
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
@@ -478,6 +500,12 @@ pub async fn gc_tombstones(
         .list(TOMBSTONE_PREFIX)
         .await
         .map_err(|e| format!("Failed to list tombstones: {e}"))?;
+
+    // A member physically deletes only blobs under its own `{namespace}/{self}/`
+    // prefix; an owner additionally sweeps every other member's prefix (owners
+    // retain bucket-wide delete, which a provider ACL can grant). This is what lets
+    // the ACL express "members write/delete their own prefix, owners anywhere".
+    let is_owner = membership_chain.is_some_and(|chain| chain.is_owner_now(self_pubkey));
 
     let now = clock.now();
     let mut deleted = 0;
@@ -643,6 +671,24 @@ pub async fn gc_tombstones(
                 continue;
             }
             RowReference::NotLiveRemote => {}
+        }
+
+        // Per-prefix reclaim. The blob may be deleted only from this device's own
+        // prefix, unless this device is a current owner (which sweeps absent
+        // members' orphans). A blob under another member's prefix is left standing
+        // — its own GC, or an owner sweep, reclaims it — so the tombstone stays too,
+        // for whichever party can act. A plain-scheme key carries no uploader
+        // segment (a browsable home has no membership ACL), so it is never gated.
+        if let Some(uploader) = blob_key_uploader(&tombstone.cloud_key) {
+            if uploader != self_pubkey && !is_owner {
+                debug!(
+                    tombstone = %key,
+                    %uploader,
+                    "skipping reclaim of a blob under another member's prefix; \
+                     awaits its uploader or an owner sweep",
+                );
+                continue;
+            }
         }
 
         // Re-check the tombstone still exists before reclaiming. A re-upload's
