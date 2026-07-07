@@ -1,0 +1,174 @@
+/* Shared diagram vocabulary: lane-and-chip flow diagrams, connector
+   arrows, and section kickers. Used by the homepage and the docs. */
+
+:root {
+    --coven-a: #35706c;
+    --coven-lane: #eef3f2;
+    --coven-chipbg: #ffffff;
+    --coven-chipstroke: #c3cfcd;
+}
+
+.dark {
+    --coven-a: #8fd9d4;
+    --coven-lane: #26262f;
+    --coven-chipbg: #32323e;
+    --coven-chipstroke: #4c4c5a;
+}
+
+.flow {
+    display: block;
+    width: 100%;
+    height: auto;
+    font-family: var(--vp-font-family-base);
+}
+
+/* Diagrams inside doc prose: cap the drawing at a readable width. */
+.vp-doc .flow {
+    max-width: 660px;
+    margin: 28px auto;
+}
+
+.flow .lane {
+    fill: var(--coven-lane);
+}
+
+.flow .lanec {
+    fill: none;
+    stroke: var(--vp-c-divider);
+    stroke-dasharray: 5 5;
+}
+
+.flow .hdr {
+    fill: var(--vp-c-text-2);
+    font-size: 8.5px;
+    font-weight: 600;
+    letter-spacing: 1.4px;
+}
+
+.flow .chip {
+    fill: var(--coven-chipbg);
+    stroke: var(--coven-chipstroke);
+}
+
+.flow .chipo {
+    fill: var(--coven-chipbg);
+    stroke: var(--coven-a);
+}
+
+.flow .chipa {
+    fill: var(--coven-chipbg);
+    stroke: var(--coven-a);
+    stroke-width: 1.6;
+}
+
+.flow .chipd {
+    fill: none;
+    stroke: var(--vp-c-text-3);
+    stroke-dasharray: 4 3;
+}
+
+.flow .lbl {
+    fill: var(--vp-c-text-1);
+    font-size: 12px;
+}
+
+.flow .s11 {
+    font-size: 11px;
+}
+
+.flow .sub {
+    fill: var(--vp-c-text-3);
+    font-size: 10.5px;
+}
+
+.flow .mono {
+    fill: var(--vp-c-text-2);
+    font-family: var(--vp-font-family-mono);
+    font-size: 10px;
+}
+
+.flow .arr {
+    stroke: var(--coven-a);
+    stroke-width: 1.6;
+    fill: none;
+}
+
+.flow .arrd {
+    stroke: var(--vp-c-text-3);
+    stroke-dasharray: 4 3;
+    fill: none;
+}
+
+.flow .glyph {
+    stroke: var(--coven-a);
+    stroke-width: 1.4;
+    fill: none;
+}
+
+.flow .glyphf {
+    fill: var(--coven-a);
+    stroke: none;
+}
+
+.flow .tx {
+    fill: none;
+    stroke: var(--coven-a);
+    stroke-dasharray: 5 4;
+    opacity: 0.7;
+}
+
+.flow .tree {
+    stroke: var(--vp-c-text-3);
+    fill: none;
+}
+
+.flow .ghost {
+    opacity: 0.45;
+}
+
+/* Arrowhead fills for the shared marker defs. */
+.amf {
+    fill: var(--coven-a);
+}
+
+.ammf {
+    fill: var(--vp-c-text-3);
+}
+
+/* Vertical connector between diagrams: an arrow with an action label. */
+.flowlink {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin: -4px 0;
+}
+
+.flowlink svg {
+    display: block;
+}
+
+.flowlink line {
+    stroke: var(--coven-a);
+    stroke-width: 1.6;
+    stroke-dasharray: 4 3;
+}
+
+.flowlink span {
+    color: var(--coven-a);
+    font-family: var(--vp-font-family-mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+/* Small teal caps label above a section or diagram. */
+.kicker {
+    margin: 0 0 10px;
+    text-align: center;
+    color: var(--coven-a);
+    font-family: var(--vp-font-family-mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}

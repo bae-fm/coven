@@ -96,6 +96,13 @@ features:
 
 The phone inserts a row. It commits on-device; nothing waits on a network.
 
+```rust
+handle.sql(|sql| {
+    sql.tx().execute("INSERT …", params)?;
+    Ok(())
+}).await?;
+```
+
 </div>
 <svg class="flow" viewBox="0 0 660 116" role="img" aria-label="A row exists on the phone only; the cloud and laptop are empty">
 <text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
@@ -123,6 +130,10 @@ The phone inserts a row. It commits on-device; nothing waits on a network.
 
 The cloud becomes the sync medium. Devices push sealed, signed objects and
 pull each other's; it only ever holds ciphertext.
+
+```rust
+handle.connect_sync(Some(key)).await?;
+```
 
 </div>
 <svg class="flow" viewBox="0 0 660 120" role="img" aria-label="The phone pushes a sealed object to the cloud; the laptop pulls it">
@@ -159,6 +170,10 @@ pull each other's; it only ever holds ciphertext.
 
 Apart, both devices edit the same row. The next sync applies both: merge is
 column by column.
+
+```sql
+UPDATE notes SET body = 'oat, 2%' …
+```
 
 </div>
 <svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Phone and laptop edit different columns of the same row; both edits merge on both devices">
@@ -202,6 +217,13 @@ column by column.
 
 A photo commits in the row's transaction. The laptop takes the row now and
 streams the photo on first view.
+
+```rust
+handle.write(
+    |b| { b.put_blob(ns, id, bytes); Ok(()) },
+    |sql| { /* INSERT the row */ Ok(()) },
+).await?;
+```
 
 </div>
 <svg class="flow" viewBox="0 0 660 150" role="img" aria-label="A row and its photo commit as one transaction and sync; the photo streams to the laptop on read">
@@ -247,6 +269,10 @@ streams the photo on first view.
 The original moves to the cloud. Devices keep cache copies; a pin keeps one
 offline.
 
+```rust
+handle.make_remote("photos", id, false).await?;
+```
+
 </div>
 <svg class="flow" viewBox="0 0 660 150" role="img" aria-label="A large original moves to the cloud; devices keep cache copies and a pin">
 <text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
@@ -287,6 +313,10 @@ offline.
 One flag shares a subtree. Flipping it on cascades the project's rows and
 files to peers; flipping it off retracts them from peers and keeps them
 local.
+
+```sql
+UPDATE projects SET shared = 1 …
+```
 
 </div>
 <svg class="flow" viewBox="0 0 660 290" role="img" aria-label="Flipping a shared flag cascades a project subtree to peers; flipping it off retracts it from peers while it stays local">
@@ -426,26 +456,10 @@ local.
     padding: 16px 0 96px;
 }
 
-/* Flow diagrams */
-:root {
-    --coven-a: #35706c;
-    --coven-lane: #eef3f2;
-    --coven-chipbg: #ffffff;
-    --coven-chipstroke: #c3cfcd;
-}
-
-.dark {
-    --coven-a: #8fd9d4;
-    --coven-lane: #26262f;
-    --coven-chipbg: #32323e;
-    --coven-chipstroke: #4c4c5a;
-}
-
+/* The homepage lays diagrams out full-bleed inside flow cards. */
 .home-body .flow {
-    display: block;
-    width: 100%;
-    height: auto;
-    font-family: var(--vp-font-family-base);
+    max-width: none;
+    margin: 0;
 }
 
 .home-body .flowrow {
@@ -463,29 +477,29 @@ local.
     );
 }
 
-.home-body .flowlink {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    margin: -4px 0;
+.home-body .byos {
+    text-align: center;
+    padding: 48px 0 8px;
+    margin-top: 48px;
+    border-top: 1px solid var(--vp-c-divider);
 }
 
-.home-body .flowlink svg {
-    display: block;
+.home-body .byos .kicker {
+    margin-bottom: 22px;
 }
 
-.home-body .flowlink line {
-    stroke: var(--coven-a);
-    stroke-width: 1.6;
-    stroke-dasharray: 4 3;
+.home-body .story-head {
+    margin: 64px 0 12px;
+    text-align: center;
 }
 
-.home-body .flowlink span {
-    color: var(--coven-a);
-    font-family: var(--vp-font-family-mono);
-    font-size: 11px;
-    letter-spacing: 1px;
+.home-body .story-title {
+    margin: 0;
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+    color: var(--vp-c-text-1);
 }
 
 .home-body .flowtext {
@@ -495,6 +509,18 @@ local.
 .home-body .flowtext h3 {
     margin: 0 0 10px;
     font-size: 18px;
+}
+
+.home-body .flowtext div[class*='language-'] {
+    margin: 14px 0 0;
+}
+
+.home-body .flowtext div[class*='language-'] pre {
+    padding: 12px 14px;
+}
+
+.home-body .flowtext div[class*='language-'] code {
+    font-size: 11.5px;
 }
 
 .home-body .flowtext p {
@@ -520,148 +546,6 @@ local.
     .home-body .flowtext {
         flex: none;
     }
-}
-
-.flow .lane {
-    fill: var(--coven-lane);
-}
-
-.flow .lanec {
-    fill: none;
-    stroke: var(--vp-c-divider);
-    stroke-dasharray: 5 5;
-}
-
-.flow .hdr {
-    fill: var(--vp-c-text-2);
-    font-size: 8.5px;
-    font-weight: 600;
-    letter-spacing: 1.4px;
-}
-
-.flow .chip {
-    fill: var(--coven-chipbg);
-    stroke: var(--coven-chipstroke);
-}
-
-.flow .chipo {
-    fill: var(--coven-chipbg);
-    stroke: var(--coven-a);
-}
-
-.flow .chipa {
-    fill: var(--coven-chipbg);
-    stroke: var(--coven-a);
-    stroke-width: 1.6;
-}
-
-.flow .chipd {
-    fill: none;
-    stroke: var(--vp-c-text-3);
-    stroke-dasharray: 4 3;
-}
-
-.flow .lbl {
-    fill: var(--vp-c-text-1);
-    font-size: 12px;
-}
-
-.flow .s11 {
-    font-size: 11px;
-}
-
-.flow .sub {
-    fill: var(--vp-c-text-3);
-    font-size: 10.5px;
-}
-
-.flow .arr {
-    stroke: var(--coven-a);
-    stroke-width: 1.6;
-    fill: none;
-}
-
-.flow .arrd {
-    stroke: var(--vp-c-text-3);
-    stroke-dasharray: 4 3;
-    fill: none;
-}
-
-.flow .glyph {
-    stroke: var(--coven-a);
-    stroke-width: 1.4;
-    fill: none;
-}
-
-.flow .glyphf {
-    fill: var(--coven-a);
-    stroke: none;
-}
-
-.flow .tx {
-    fill: none;
-    stroke: var(--coven-a);
-    stroke-dasharray: 5 4;
-    opacity: 0.7;
-}
-
-.flow .tree {
-    stroke: var(--vp-c-text-3);
-    fill: none;
-}
-
-.flow .ghost {
-    opacity: 0.45;
-}
-
-.amf {
-    fill: var(--coven-a);
-}
-
-.ammf {
-    fill: var(--vp-c-text-3);
-}
-
-.home-body .byos {
-    text-align: center;
-    padding: 48px 0 8px;
-    margin-top: 48px;
-    border-top: 1px solid var(--vp-c-divider);
-}
-
-
-.home-body .byos .kicker {
-    margin-bottom: 22px;
-}
-
-.home-body .story-head {
-    margin: 64px 0 12px;
-    text-align: center;
-}
-
-.home-body .kicker {
-    margin: 0 0 10px;
-    text-align: center;
-    color: var(--coven-a);
-    font-family: var(--vp-font-family-mono);
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-}
-
-.home-body .story-title {
-    margin: 0;
-    font-size: 30px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    line-height: 1.25;
-    color: var(--vp-c-text-1);
-}
-
-.home-body .byos p:last-of-type {
-    margin: 18px 0 0;
-    font-size: 14px;
 }
 
 .home-body .end-cta {
@@ -727,5 +611,10 @@ local.
     color: var(--vp-c-text-1);
     font-size: 14px;
     font-weight: 500;
+}
+
+.home-body .byos p:last-of-type {
+    margin: 18px 0 0;
+    font-size: 14px;
 }
 </style>
