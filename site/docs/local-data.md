@@ -1,21 +1,62 @@
 # Local data
 
+A coven library is one SQLite database on the device, plus the files its rows
+carry. The host opens it through one handle, declares which tables participate
+in sync, and runs ordinary SQL. This page is about that declaration: what a
+synced table looks like, what stays local, and how a *gate* keeps chosen rows
+on one device even inside a synced table.
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
+## What a synced table looks like
+
+Two conventions, checked at open:
+
+- a `TEXT` primary key named `id`, at column position 0
+- an `_updated_at TEXT NOT NULL` column, stamped through
+  [`SqlContext::stamp`](rustdoc:method:coven::SqlContext::stamp)
+
+Everything else about the schema is yours. Tables you do *not* pass to
+[`synced_tables`](rustdoc:method:coven::CovenBuilder::synced_tables) never
+leave the device: that is also the mechanism for per-device state (window
+positions, per-device pin bookkeeping, local paths). Put it in a table you
+don't declare.
+
+<svg class="flow" viewBox="0 0 660 168" role="img" aria-label="Declared tables sync to the cloud; undeclared tables never leave the device">
+<text class="hdr" x="155" y="22" text-anchor="middle">THIS DEVICE</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">CLOUD</text>
+<rect class="lane" x="10" y="32" width="290" height="124" rx="10"/>
+<rect class="lanec" x="470" y="32" width="180" height="124" rx="10"/>
+<rect class="chipo" x="30" y="44" width="250" height="26" rx="7"/>
+<text class="lbl s11" x="155" y="61" text-anchor="middle">todos · synced</text>
+<rect class="chipo" x="30" y="78" width="250" height="26" rx="7"/>
+<text class="lbl s11" x="155" y="95" text-anchor="middle">lists · synced</text>
+<rect class="chipd" x="30" y="112" width="250" height="26" rx="7"/>
+<text class="lbl s11" x="155" y="129" text-anchor="middle">ui_state · not declared</text>
+<line class="arr" x1="305" y1="70" x2="462" y2="70" marker-end="url(#fa)"/>
+<text class="sub" x="384" y="60" text-anchor="middle">declared tables sync</text>
+<line class="arrd" x1="305" y1="125" x2="380" y2="125"/>
+<line class="arrd" x1="392" y1="118" x2="380" y2="132"/>
+<text class="sub" x="384" y="148" text-anchor="middle">never leaves</text>
+<text class="sub" x="560" y="98" text-anchor="middle">changesets · snapshot</text>
+</svg>
+
+## Declaring the set
+
 By default, every row of a synced table reaches every device that shares the
-library. To keep some rows on one device, never synced, the host *gates* the
-table: a row syncs only while a condition holds. The host declares the gate per
-table on the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable)
-values it passes to
-`Coven::builder(config).synced_tables(...)`, and coven
-enforces it on both paths a row can take to another device: the per-cycle
-changeset and the bootstrap snapshot.
+library. To keep some rows on one device, the host *gates* the table: a row
+syncs only while a condition holds. The host declares the gate per table on
+the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values
+it passes to `Coven::builder(config).synced_tables(...)`, and coven enforces
+it on both paths a row can take to another device: the per-cycle changeset
+and the bootstrap snapshot.
 
 The examples use a todos app: a `workspace` holds `lists`, and a `list` holds
 `todos`. A list has a boolean `shared` column. A private list, and the todos
 under it, should stay on the device that made it.
 
-## Declaring a gate
-
-[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has four forms:
+[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) has four
+gate forms:
 
 ```rust
 SyncedTable::new("todos")                              // no gate of its own
@@ -34,7 +75,37 @@ SyncedTable::new("workspaces").gated_by_descendants()  // ancestor
 - `gated_by_descendants()` marks an *ancestor* that should sync only while a
   gated descendant of it survives.
 
-A table is one of the four, never two at once.
+A table is one of the four, never two at once. Two further properties are
+orthogonal to the gate and covered in [Blobs](/docs/blobs): a table may *carry
+a blob* (`carries_blob`), and it may be an *asset*, a decoration like a cover
+image that rides its subject's gate but never keeps that subject alive.
+
+## One tree, both directions
+
+The gate flows *down* foreign keys; the keep flows *up* them.
+
+<svg class="flow" viewBox="0 0 660 212" role="img" aria-label="A workspace keeps syncing because one shared list survives; a private list and its todos stay local">
+<rect class="chip" x="16" y="88" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="91" y="105" text-anchor="middle">workspace · Acme</text>
+<text class="sub" x="91" y="130" text-anchor="middle">gated_by_descendants</text>
+<path class="tree" d="M166 101h24v-48h34M166 101h24v62h34"/>
+<rect class="chipa" x="224" y="40" width="186" height="26" rx="7"/>
+<text class="lbl s11" x="317" y="57" text-anchor="middle">list · Groceries — shared ✓</text>
+<rect class="chipd" x="224" y="150" width="186" height="26" rx="7"/>
+<text class="lbl s11" x="317" y="167" text-anchor="middle">list · Journal — shared ✗</text>
+<path class="tree" d="M410 53h24v-25h34M410 53h24v25h34"/>
+<path class="tree" d="M410 163h24v-25h34M410 163h24v25h34"/>
+<rect class="chip" x="468" y="16" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="543" y="32" text-anchor="middle">todo · milk</text>
+<rect class="chip" x="468" y="66" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="543" y="82" text-anchor="middle">todo · bread</text>
+<rect class="chipd ghost" x="468" y="126" width="150" height="24" rx="6"/>
+<text class="lbl s11 ghost" x="543" y="142" text-anchor="middle">todo · therapy</text>
+<rect class="chipd ghost" x="468" y="176" width="150" height="24" rx="6"/>
+<text class="lbl s11 ghost" x="543" y="192" text-anchor="middle">todo · gym</text>
+<text class="sub" x="317" y="22" text-anchor="middle">keep flows up: one shared list keeps the workspace</text>
+<text class="sub" x="317" y="205" text-anchor="middle">gate flows down: a private list takes its todos with it</text>
+</svg>
 
 ## Gated roots
 
@@ -118,7 +189,7 @@ alive) as full inserts in that cycle. The subtree lands complete, not as an
 update to rows the peer is missing.
 
 The reverse, true to false, is a retract: coven emits deletes for the rows that
-leave the shared set so peers remove them — the mirror of the false-to-true
+leave the shared set so peers remove them, the mirror of the false-to-true
 re-emit. The candidate rows are the structural connected component of the roots
 that flipped this cycle, minus any row still kept by another root (a sibling that
 shares an ancestor is spared; a now-childless ancestor is deleted too). The
@@ -126,6 +197,20 @@ flipping device keeps its own rows (now gated-false, local-only): retract writes
 only to the outgoing changeset, never deletes locally, and fires once on the flip
 cycle. A root that was never shared has nothing on peers to retract, so it emits
 nothing.
+
+<svg class="flow" viewBox="0 0 660 128" role="img" aria-label="Flipping shared off emits deletes to peers while the flipping device keeps its rows">
+<text class="hdr" x="120" y="22" text-anchor="middle">FLIPPING DEVICE</text>
+<text class="hdr" x="540" y="22" text-anchor="middle">PEERS</text>
+<rect class="lane" x="10" y="32" width="220" height="84" rx="10"/>
+<rect class="lane" x="430" y="32" width="220" height="84" rx="10"/>
+<rect class="chip" x="30" y="46" width="180" height="26" rx="7"/>
+<text class="lbl s11" x="120" y="63" text-anchor="middle">Journal — shared ✗</text>
+<text class="sub" x="120" y="98" text-anchor="middle">rows stay, local-only</text>
+<line class="arr" x1="238" y1="60" x2="422" y2="60" marker-end="url(#fa)"/>
+<text class="sub" x="330" y="50" text-anchor="middle">retract: deletes in the changeset</text>
+<rect class="chipd ghost" x="450" y="46" width="180" height="26" rx="7"/>
+<text class="sub" x="540" y="98" text-anchor="middle">subtree removed</text>
+</svg>
 
 ## Where it runs
 
