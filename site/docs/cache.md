@@ -5,6 +5,8 @@ device needs the plaintext bytes on local disk. The cache is where those bytes
 live: a device-local store of blob files, keyed by blob id, that serves a read
 from disk on a hit and fetches from the cloud on a miss.
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
 It is a separate layer from the [cloud blob lifecycle](/docs/blobs). That page
 covers how a blob is uploaded, downloaded, and deleted across devices. This page
 covers the one device's copy: where it sits, when it is fetched, how long it is
@@ -14,7 +16,7 @@ The cache is coven's, under the library directory. The examples use a todos app
 whose `todo_attachments` rows each point at a photo; a music app would point at
 audio instead, which is the case the lazy half of the cache exists for.
 
-The cache holds **Remote** blobs only — bytes that also live in the cloud, so a
+The cache holds **Remote** blobs only: bytes that also live in the cloud, so a
 cache copy is always re-fetchable. A **Local** blob is never in the cache: it is
 the user's own file at a path (user-provided) or coven's own copy in the local
 store (host-provided). See [Blobs](/docs/blobs) for that distinction.
@@ -46,6 +48,27 @@ leave a torn file that a later read would trust as whole. Pinning and unpinning
 are a `rename` within `storage/` (one filesystem, atomic), so a blob is never
 visible in both folders or in neither mid-move.
 
+
+<svg class="flow" viewBox="0 0 660 170" role="img" aria-label="A Remote blob's cache state: absent, evictable in cache/, or protected in pinned/; fills, pins, unpins, and eviction move it between them">
+<path class="arrd" d="M110 58 C 200 6, 460 6, 550 58" marker-end="url(#fam)"/>
+<text class="sub" x="330" y="20" text-anchor="middle">pin fetches an absent blob straight into pinned/</text>
+<rect class="chipd" x="30" y="64" width="165" height="30" rx="8"/>
+<text class="lbl s11" x="112" y="83" text-anchor="middle">neither · remote-only</text>
+<rect class="chip" x="250" y="64" width="165" height="30" rx="8"/>
+<text class="lbl s11" x="332" y="83" text-anchor="middle">cache/ · evictable</text>
+<rect class="chipa" x="470" y="64" width="165" height="30" rx="8"/>
+<text class="lbl s11" x="552" y="83" text-anchor="middle">pinned/ · protected</text>
+<line class="arr" x1="199" y1="72" x2="246" y2="72" marker-end="url(#fa)"/>
+<text class="sub" x="222" y="60" text-anchor="middle">fill</text>
+<line class="arrd" x1="246" y1="88" x2="199" y2="88" marker-end="url(#fam)"/>
+<text class="sub" x="222" y="112" text-anchor="middle">eviction</text>
+<line class="arr" x1="419" y1="72" x2="466" y2="72" marker-end="url(#fa)"/>
+<text class="sub" x="442" y="60" text-anchor="middle">pin</text>
+<line class="arrd" x1="466" y1="88" x2="419" y2="88" marker-end="url(#fam)"/>
+<text class="sub" x="442" y="112" text-anchor="middle">unpin</text>
+<text class="sub" x="330" y="140" text-anchor="middle">fill = eager pull, first read, or write · every move is one atomic rename or write</text>
+</svg>
+
 Cache files are plaintext. Encryption happens on the way to the cloud, not on
 local disk; a blob comes back from the cloud decrypted and lands in the cache as
 the bytes the host reads.
@@ -59,9 +82,28 @@ blob's whole contents.
 let bytes = handle.read_blob(&blob).await?;
 ```
 
+
+<svg class="flow" viewBox="0 0 660 158" role="img" aria-label="read_blob dispatches on the blob's provenance and locality: the user's file, the local store, or the cache with a cloud fetch on miss">
+<rect class="chipa" x="255" y="14" width="150" height="28" rx="8"/>
+<text class="lbl s11" x="330" y="32" text-anchor="middle">read_blob(blob)</text>
+<line class="arr" x1="290" y1="46" x2="130" y2="76" marker-end="url(#fa)"/>
+<line class="arr" x1="330" y1="46" x2="330" y2="76" marker-end="url(#fa)"/>
+<line class="arr" x1="370" y1="46" x2="530" y2="76" marker-end="url(#fa)"/>
+<rect class="chip" x="40" y="82" width="160" height="28" rx="8"/>
+<text class="lbl s11" x="120" y="100" text-anchor="middle">the user's file</text>
+<text class="sub" x="120" y="126" text-anchor="middle">Local · user-provided</text>
+<rect class="chip" x="250" y="82" width="160" height="28" rx="8"/>
+<text class="lbl s11" x="330" y="100" text-anchor="middle">the local store</text>
+<text class="sub" x="330" y="126" text-anchor="middle">Local · host-provided</text>
+<rect class="chip" x="460" y="82" width="160" height="28" rx="8"/>
+<text class="lbl s11" x="540" y="100" text-anchor="middle">cache, else cloud</text>
+<text class="sub" x="540" y="126" text-anchor="middle">Remote · pinned/, cache/, then fetch</text>
+<text class="sub" x="330" y="150" text-anchor="middle">the blob's declared provenance and its gate decide the branch; nothing is probed</text>
+</svg>
+
 It resolves by where the bytes are, in order: a **user-provided Local** blob is
 read from the user's own file (an external ref), a **host-provided Local** blob
-from the local store — both with no cloud fallback. Otherwise the **cache** —
+from the local store, both with no cloud fallback. Otherwise the **cache**:
 `pinned/<namespace>/<id>` then `cache/<namespace>/<id>`, a file in either folder a
 hit read straight off disk. On a cache miss it resolves the blob's
 [scope](/docs/blobs#encryption-scope) to a key, downloads and decrypts the object
@@ -104,7 +146,7 @@ fill**, declared per blob in the table's
 
 - `CacheEager`: fetched into the cache on every device's pull. Part of "having the
   library", e.g. an album's cover art, so a grid renders from local bytes without a
-  fetch. It lands in the **evictable** `storage/cache/<namespace>/<id>` — it is not
+  fetch. It lands in the **evictable** `storage/cache/<namespace>/<id>`; it is not
   pinned, so if it later falls out of its namespace's budget it shows a placeholder
   until the next read re-fetches it.
 - `CacheLazy`: skipped on pull. A pulling device does not fetch it up front; the
@@ -112,7 +154,7 @@ fill**, declared per blob in the table's
   blobs a device may never open, audio being the motivating case.
 
 Both fills cache evictably; the difference is only *when* the bytes arrive (on pull
-vs. on first read). Neither is pinned automatically — pinning is a separate, manual
+vs. on first read). Neither is pinned automatically; pinning is a separate, manual
 gesture below.
 
 ## Pinning
