@@ -1,42 +1,78 @@
 # Sync
 
-coven syncs SQLite row changes between devices that share a library. There is no
-coordinator: each device pushes the changesets it produces and pulls the ones
-other devices produced, applying them with row-level last-writer-wins. The unit
+coven syncs SQLite row changes between devices that share a library. There is
+no coordinator: each device appends the changesets it produces to its own
+stream in storage and pulls the streams other devices produced. Concurrent
+edits merge column by column, and deletes win over concurrent edits. The unit
 of exchange is a changeset (a binary diff from SQLite's session extension)
-wrapped in a metadata envelope, encrypted, and written to cloud storage under a
+wrapped in a metadata envelope, signed, encrypted, and written under a
 per-device sequence number.
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+
+<svg class="flow" viewBox="0 0 660 196" role="img" aria-label="Each device appends to its own changeset stream in the cloud; a puller keeps one cursor per stream">
+<text class="hdr" x="120" y="22" text-anchor="middle">ALICE'S DEVICE</text>
+<text class="hdr" x="395" y="22" text-anchor="middle">CLOUD</text>
+<text class="hdr" x="590" y="22" text-anchor="middle">BOB PULLS</text>
+<rect class="lane" x="10" y="32" width="220" height="152" rx="10"/>
+<rect class="lanec" x="260" y="32" width="270" height="152" rx="10"/>
+<rect class="lane" x="550" y="32" width="100" height="152" rx="10"/>
+<rect class="chip" x="30" y="58" width="180" height="26" rx="7"/>
+<text class="lbl s11" x="120" y="75" text-anchor="middle">write → changeset</text>
+<line class="arr" x1="234" y1="71" x2="272" y2="71" marker-end="url(#fa)"/>
+<text class="sub" x="330" y="52" text-anchor="middle">append-only</text>
+<rect class="chipo" x="280" y="58" width="70" height="24" rx="6"/>
+<text class="lbl s11" x="315" y="74" text-anchor="middle">a/1</text>
+<rect class="chipo" x="358" y="58" width="70" height="24" rx="6"/>
+<text class="lbl s11" x="393" y="74" text-anchor="middle">a/2</text>
+<rect class="chipo" x="436" y="58" width="70" height="24" rx="6"/>
+<text class="lbl s11" x="471" y="74" text-anchor="middle">a/3</text>
+<rect class="chipo" x="280" y="128" width="70" height="24" rx="6"/>
+<text class="lbl s11" x="315" y="144" text-anchor="middle">b/1</text>
+<rect class="chipo" x="358" y="128" width="70" height="24" rx="6"/>
+<text class="lbl s11" x="393" y="144" text-anchor="middle">b/2</text>
+<text class="sub" x="330" y="110" text-anchor="middle">one stream per device</text>
+<line class="arr" x1="512" y1="71" x2="544" y2="71" marker-end="url(#fa)"/>
+<text class="lbl s11" x="600" y="75" text-anchor="middle">cursor a=3</text>
+<text class="lbl s11" x="600" y="144" text-anchor="middle">cursor b=2</text>
+</svg>
+
+Nothing in storage is ever overwritten: a device only appends to its own
+stream, so there is no write contention to coordinate. A puller tracks one
+cursor per stream, the highest sequence it has applied from that device.
 
 The examples use a todos app. A `workspace` holds `lists`, a `list` holds
 `todos`, a todo can have `todo_attachments`, and labels attach via a
 `todo_labels` join. Two people, Alice and Bob, share the library.
 
-This page covers how a local write reaches every device. Row-level gating (which
-rows stay local) has its own page, [Local data](/docs/local-data); fresh-device
-bootstrap from a snapshot has its own page, [Bootstrap](/docs/bootstrap).
+This page covers how a local write reaches every device. Row-level gating
+(which rows stay local) has its own page, [Local data](/docs/local-data);
+fresh-device bootstrap from a snapshot has its own page,
+[Bootstrap](/docs/bootstrap).
 
 ## Change capture
 
 coven owns the SQLite connection. The host opens it once through
-`Coven::builder(config).synced_tables(...).open(...)`, passing the synced tables
-as [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values.
+`Coven::builder(config).synced_tables(...).migrations(...).open()`, passing
+the synced tables as
+[`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values.
 Every synced table must have a text `id` primary key at column 0 and an
-`_updated_at TEXT NOT NULL` column. A table not in the set is local-only and
-never leaves the device. From then on the host runs all its SQL through
-`handle.sql(...)`; coven re-exports rusqlite, so the closure works against
-`&coven::rusqlite::Connection` and the host never depends on rusqlite directly.
+`_updated_at TEXT NOT NULL` column, validated at open. A table not in the set
+is local-only and never leaves the device. From then on the host runs all its
+SQL through `handle.sql(...)`; coven re-exports rusqlite, so the closure works
+against the transaction coven opens and the host never depends on rusqlite
+directly.
 
-The connection lives on one dedicated thread (an actor) natively, or on the one
-Worker in the browser. Capture is the SQLite session extension, attached over
-`rusqlite::session` to every declared table on that owned connection. Each
-insert, update, and delete to a synced table is recorded into an in-memory
-changeset. The host writes as usual; capture is passive, and there is no
-host-lent pointer to a connection coven does not own.
+The connection lives on one dedicated thread (an actor). Capture is the SQLite
+session extension, attached over `rusqlite::session` to every declared table
+on that owned connection. Each insert, update, and delete to a synced table is
+recorded into an in-memory changeset. The host writes as usual; capture is
+passive, and there is no host-lent pointer to a connection coven does not own.
 
 The set is not a tuning knob. With no tables declared the session attaches
 nothing and produces empty changesets forever, so
-[`init_sync`](rustdoc:fn:coven::sync::cycle::init_sync) treats an empty set as a
-hard error and refuses to start.
+[`init_sync_over_storage`](rustdoc:fn:coven::sync::cycle::init_sync_over_storage)
+treats an empty set as a hard error and refuses to start.
 
 ## The sync cycle
 
@@ -55,31 +91,26 @@ and drives these steps:
 4. Sign the envelope, stage the packed bytes to disk, and push them to storage
    under the device's next sequence number; on success advance `local_seq`.
 5. Pull every remote changeset past the device's cursor, validate it, and apply
-   it with last-writer-wins.
-6. Advance the clock past every applied row's `_updated_at`.
-7. Persist the updated cursors and flush the clock's high-water mark.
-8. Check snapshot policy.
+   it (a column-level premerge, then row arbitration). The clock advances past
+   each applied changeset's stamps as it lands.
+6. Persist the updated cursors and flush the clock's high-water mark.
+7. Check snapshot policy.
 
 Capture is never suspended across the cycle. The only window it is off is around
 each individual apply in step 5: the pull disables the session, applies one
 incoming changeset synchronously, and re-enables it at once, so the applied rows
 are not re-recorded as this device's own writes while a host write landing
 anywhere else in the cycle still is. This is the one thing the session is ever
-blind to; every other read and write goes through the handle SQL path on the normal
-enabled path. (An earlier design suspended capture across the whole network span;
-that left a window in which a host write could be dropped, so it was removed.)
+blind to; every other read and write goes through the handle SQL path on the
+normal enabled path. (An earlier design suspended capture across the whole
+network span; that left a window in which a host write could be dropped, so it
+was removed.)
 
 When Alice edits a todo title, her next cycle captures the update to `todos`,
 signs and encrypts it, and writes it to storage at
 `changes/<alice-device>/<seq>`. Bob's device, on its own cycle, lists the device
 heads, sees Alice's sequence number is past his cursor for her device, fetches
 the changeset, and applies it.
-
-[`SyncService`](rustdoc:struct:coven::sync::service::SyncService) runs steps 2
-through 5 (gate, upload blobs, sign the envelope, pull) over the changeset the
-caller already captured. The surrounding cycle function captures the changeset
-before it, then stages and pushes the returned envelope, advances `local_seq`,
-persists cursors, advances the clock, and checks snapshot policy.
 
 ### Push
 
@@ -94,12 +125,12 @@ Blob-before-row ordering rides the gate, owned by coven, not a global push gate.
 The cycle publishes whatever the gate emits; it does not hold the whole changeset
 back while the outbox drains. A gated root stays gated-off (local-only) while its
 blobs upload; coven's `make_remote` flips the gate on the instant the last upload
-lands — within the upload drain — and breaks the drain so the cycle publishes that
-root. While the gate is off the gate cuts the root's rows; when it flips on the gate
-re-emits the root's full subtree, so a peer never learns of a row whose blob is not
-yet in the cloud. The host's
-[`BlobTransitionObserver`](/docs/blobs#observing-transitions-and-uploads) only reports
-progress and completion — coven, not the host, decides when to publish.
+lands, within the upload drain, and breaks the drain so the cycle publishes that
+root. While the gate is off the gate cuts the root's rows; when it flips on the
+gate re-emits the root's full subtree, so a peer never learns of a row whose blob
+is not yet in the cloud. The host's
+[`BlobTransitionObserver`](/docs/blobs#observing-transitions-and-uploads) only
+reports progress and completion; coven, not the host, decides when to publish.
 
 ### Pull
 
@@ -107,22 +138,56 @@ Pull lists the device heads (one storage call), then for each device whose head
 sequence is past the local cursor, fetches the changesets in `(cursor+1..=head)`
 order. For each one it:
 
-- unpacks the envelope and checks `schema_version` against the local
-  [`SCHEMA_VERSION`](rustdoc:const:coven::sync::push::SCHEMA_VERSION);
+- unpacks the envelope and checks its `schema_version` against the local
+  [`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version);
 - verifies the Ed25519 signature
   ([`verify_changeset_signature`](rustdoc:fn:coven::sync::envelope::verify_changeset_signature));
-- if the library has a membership chain, checks the author can write *now* (a
-  removed member or a read-only Follower is rejected);
-- applies the changeset with last-writer-wins (capture disabled only around this
-  one apply, then re-enabled);
+- if the library has a membership chain, checks the author could write under
+  the exact membership entry the changeset is signed against;
+- applies the changeset (premerge, then row arbitration, with capture disabled
+  only around this one apply), advancing the clock past its stamps;
 - downloads any `CacheEager` blobs it references into the [cache](/docs/cache).
 
-The cursor for that device advances to a sequence number only after the changeset
-is accepted (or deliberately skipped) and its blobs downloaded. A failed blob
-download leaves the cursor where it is, so the changeset re-pulls next cycle; the
-pull reports this through `PullResult::asset_downloads_failed`. A cursor is the
-highest sequence applied from a device, and pull only fetches beyond it, so
-applies are not repeated.
+The cursor for that device advances to a sequence number only after the
+changeset is accepted (or deliberately skipped) and its blobs downloaded. A
+failed blob download leaves the cursor where it is, so the changeset re-pulls
+next cycle; the pull reports this through
+`PullResult::asset_downloads_failed`.
+
+### One bad object stops one stream
+
+The failure rule throughout pull: no single cloud object may stop more than
+its own stream.
+
+<svg class="flow" viewBox="0 0 660 176" role="img" aria-label="A malformed changeset holds only its own device's cursor; other streams keep flowing">
+<text class="hdr" x="330" y="22" text-anchor="middle">ONE PULL, TWO STREAMS</text>
+<rect class="lanec" x="10" y="32" width="640" height="132" rx="10"/>
+<rect class="chipo" x="40" y="52" width="120" height="26" rx="6"/>
+<text class="lbl s11" x="100" y="69" text-anchor="middle">a/4 · applied</text>
+<rect class="chipo" x="180" y="52" width="120" height="26" rx="6"/>
+<text class="lbl s11" x="240" y="69" text-anchor="middle">a/5 · applied</text>
+<rect class="chipo" x="320" y="52" width="120" height="26" rx="6"/>
+<text class="lbl s11" x="380" y="69" text-anchor="middle">a/6 · applied</text>
+<text class="sub" x="540" y="69">cursor a=6 ✓</text>
+<rect class="chipo" x="40" y="112" width="120" height="26" rx="6"/>
+<text class="lbl s11" x="100" y="129" text-anchor="middle">b/7 · applied</text>
+<rect class="chipd" x="180" y="112" width="120" height="26" rx="6"/>
+<text class="lbl s11" x="240" y="129" text-anchor="middle">b/8 · malformed</text>
+<rect class="chipd ghost" x="320" y="112" width="120" height="26" rx="6"/>
+<text class="lbl s11 ghost" x="380" y="129" text-anchor="middle">b/9 · not fetched</text>
+<text class="sub" x="540" y="129">cursor b=7 · held</text>
+</svg>
+
+- A **malformed envelope** holds that device's cursor and stops pulling that
+  device for the cycle; every other stream proceeds.
+- An **invalid signature** (forged or corrupt) does the same, and is surfaced
+  in `PullResult::invalid_signatures` so the host can warn.
+- A changeset whose verified author is **not a write-capable member** under the
+  entry it is signed against (revoked, or a read-only Follower) is skipped and
+  the cursor advances past it, surfaced in `PullResult::rejected_unauthorized`:
+  the client must not stay stuck behind an author who will never become valid.
+- An **unparseable head object** is skipped like a bad-signature head; it never
+  wedges the listing.
 
 ## Hybrid logical clocks
 
@@ -152,17 +217,16 @@ cycle end and lags any local row stamp minted between cycles.
 
 ### Advancing past pulled rows
 
-After applying changesets, the cycle takes the greatest `_updated_at` among all
-applied rows (`PullResult::max_applied_updated_at`) and calls
-[`advance_past`](rustdoc:method:coven::sync::hlc::Hlc::advance_past). The next
-local stamp then sorts strictly after everything just pulled.
+As each changeset applies, the cycle takes the greatest `_updated_at` among its
+applied rows and calls
+[`advance_past`](rustdoc:method:coven::sync::hlc::Hlc::advance_past), so an
+edit made between two applies already sorts after the rows the first apply
+landed. The next local stamp then sorts strictly after everything pulled so
+far: pull, then edit, and the edit wins.
 
-This advance is unconditional: there is no cap to wall-clock time. An applied
-row's `_updated_at` is an authoritative register value the last-writer-wins layer
-already accepted and wrote to disk, not an untrusted peer's clock. Capping it
-would let the next local edit mint a stamp below an already-stored row and lose
-to it. The cost is that one device's far-future clock pulls every peer's clock
-forward, which is correct: a value on disk outranks wall time.
+The advance is bounded the same way arbitration is (below): a stamp the
+arbiter refused as grossly future never ratchets the clock either, because
+only applied rows feed the advance.
 
 This is what makes a plain wall clock insufficient. Alice creates a todo at her
 12:00:00, stamped `...-alice`. Bob pulls it; his clock advances past Alice's
@@ -171,33 +235,69 @@ behind Alice's, his stamp is seeded past hers, so it is lexicographically
 greater. His changeset reaches Alice, her pull applies it, and his edit wins.
 Both devices converge on Bob's version.
 
-## Last-writer-wins conflict resolution
+## How concurrent edits merge
 
-Conflict resolution is row-level last-writer-wins on `_updated_at`. Applying a
-changeset can collide with local state; SQLite reports each collision to a
-conflict handler, and
-[`lww_conflict_handler`](rustdoc:fn:coven::sync::conflict::lww_conflict_handler)
-decides what to do by comparing the two `_updated_at` strings. The column index
-is read from `PRAGMA table_info` at apply time
-([`TableSchema`](rustdoc:struct:coven::sync::conflict::TableSchema)), so adding
-columns to the end of a table stays safe. The five conflict types:
+Two devices edit while apart; both changesets eventually apply everywhere.
+Merge runs in two stages inside apply.
 
-- **Data** (the row exists on both sides and both edited it): compare
-  `_updated_at`; the incoming row replaces the local one only if its stamp is
-  greater, otherwise the local row stays.
-- **Conflict** (an incoming insert hits an existing primary key): same
-  comparison, newer stamp wins.
-- **NotFound** (an incoming update targets a row deleted locally): the incoming
-  change is dropped. Delete wins.
-- **Constraint** (a foreign-key or uniqueness constraint is violated): the row is
-  dropped and the changeset is marked for retry.
-- **ForeignKey** (a deferred foreign-key check fails at the end of the
-  changeset): same as Constraint, dropped and retried.
+**Stage one: column-level three-way premerge.** An UPDATE changeset carries,
+per column it changed, the value it moved *from* (the base) and the value it
+moved *to*. When an incoming update loses row arbitration, the premerge folds
+into the local row every column the incoming update moved away from a base the
+local row still holds: the local device never touched that column, so the
+incoming edit to it survives. When the incoming update *wins*, it only writes
+the columns it changed in the first place. Either way, concurrent edits to
+different columns of one row both land.
 
-When `_updated_at` is missing on a Data or Conflict collision, the handler keeps
-the local row and logs it, rather than guessing.
+<svg class="flow" viewBox="0 0 660 190" role="img" aria-label="Base row; phone edits title, laptop edits body; the merged row holds both edits">
+<text class="sub" x="330" y="20" text-anchor="middle">base row</text>
+<rect class="chip" x="205" y="28" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="267" y="46" text-anchor="middle">title: “Milk”</text>
+<rect class="chip" x="330" y="28" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="392" y="46" text-anchor="middle">body: “2%”</text>
+<line class="arrd" x1="240" y1="62" x2="140" y2="92" marker-end="url(#fam)"/>
+<line class="arrd" x1="420" y1="62" x2="520" y2="92" marker-end="url(#fam)"/>
+<text class="sub" x="120" y="84" text-anchor="middle">phone edits title</text>
+<text class="sub" x="540" y="84" text-anchor="middle">laptop edits body</text>
+<rect class="chipa" x="35" y="98" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="97" y="116" text-anchor="middle">title: “Milk run”</text>
+<rect class="chip" x="160" y="98" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="222" y="116" text-anchor="middle">body: “2%”</text>
+<rect class="chip" x="375" y="98" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="437" y="116" text-anchor="middle">title: “Milk”</text>
+<rect class="chipa" x="500" y="98" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="562" y="116" text-anchor="middle">body: “oat, 2%”</text>
+<line class="arr" x1="160" y1="132" x2="270" y2="158" marker-end="url(#fa)"/>
+<line class="arr" x1="500" y1="132" x2="390" y2="158" marker-end="url(#fa)"/>
+<text class="sub" x="330" y="148" text-anchor="middle">merge</text>
+<rect class="chipa" x="205" y="160" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="267" y="178" text-anchor="middle">title: “Milk run”</text>
+<rect class="chipa" x="330" y="160" width="125" height="28" rx="7"/>
+<text class="lbl s11" x="392" y="178" text-anchor="middle">body: “oat, 2%”</text>
+</svg>
 
-### Foreign-key retry
+**Stage two: row arbitration.** For every collision the premerge did not fold
+in, [`arbitrate_row_conflict`](rustdoc:fn:coven::sync::conflict::arbitrate_row_conflict)
+compares the two `_updated_at` stamps and the later writer wins. Concurrent
+edits to the *same* column therefore resolve to the later stamp. The
+`_updated_at` column index is read from `PRAGMA table_info` at apply time, so
+adding columns to the end of a table stays safe.
+
+Two special cases:
+
+- **Deletes are remove-wins.** A hard delete carries only the row's pre-delete
+  stamp and cannot be reconstructed from a later partial update, so an
+  incoming delete always wins, and an incoming update targeting a locally
+  deleted row is dropped. The row stays gone.
+- **Grossly-future stamps are refused.** A member is trusted, so arbitration is
+  robustness, not a security boundary; still, a buggy client or broken clock
+  could stamp a row far in the future and win every conflict forever. The
+  receiver bounds an incoming stamp to its own wall clock plus an offline
+  allowance
+  ([`MAX_FUTURE_SKEW_MS`](rustdoc:const:coven::sync::hlc::MAX_FUTURE_SKEW_MS),
+  30 days) and refuses to let a grossly-future stamp win or ratchet its clock.
+
+### Constraints and foreign keys
 
 A child row can arrive in a changeset whose parent is in a different device's
 changeset, not yet applied. The child's insert violates a foreign key and is
@@ -206,18 +306,26 @@ once after the first pass over all devices completes, by which point the parent
 rows exist. If a changeset still violates a foreign key after the retry, it is
 logged and skipped.
 
+Non-foreign-key constraint conflicts (a uniqueness violation, a CHECK failure)
+are different: retrying cannot make them valid, so the conflicting rows are
+omitted, the affected tables are surfaced in
+`ApplyResult::constraint_conflict_tables`, and the changeset is not retried.
+
 ## Schema versioning
 
-Every outgoing changeset carries the local
-[`SCHEMA_VERSION`](rustdoc:const:coven::sync::push::SCHEMA_VERSION), a constant
-bumped whenever the on-disk shape of synced tables changes. Pull enforces it two
-ways:
+Every outgoing changeset carries the device's schema version: the top rung of
+the host's [migration ladder](/docs/schema-evolution), reported by
+[`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version).
+Pull enforces it two ways:
 
-- **Hard floor.** If the local `SCHEMA_VERSION` is below storage's
+- **Hard floor.** If the local version is below storage's
   `min_schema_version`, pull returns
   [`PullError::SchemaVersionTooOld`](rustdoc:enum:coven::sync::pull::PullError)
   and syncs nothing. Its `Display` is the message shown to the user: update the
-  app to keep syncing. This is permanent until the user upgrades.
+  app to keep syncing. This is permanent until the user upgrades. The floor
+  object is untrusted input, so with a membership chain present it is honored
+  only when signed by a current Owner; anything else is a freeze or downgrade
+  attempt and is ignored.
 - **Per-changeset skip.** A single changeset whose `schema_version` is above the
   local one is skipped (counted in `PullResult::skipped_schema`); the device
   leaves its cursor where it is and stops pulling that device for the cycle. The
