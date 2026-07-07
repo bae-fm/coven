@@ -462,29 +462,36 @@ pub async fn unwrap_library_keyring(
     library_id: &str,
     expected_owner: &str,
 ) -> Result<EncryptionService, InviteError> {
-    unwrap_library_keyring_for_owners(
-        cloud_home,
-        keypair,
-        library_id,
-        std::iter::once(expected_owner),
-    )
-    .await
-}
-
-pub(crate) async fn unwrap_library_keyring_for_owners<'a>(
-    cloud_home: &dyn CloudHome,
-    keypair: &UserKeypair,
-    library_id: &str,
-    expected_owners: impl IntoIterator<Item = &'a str>,
-) -> Result<EncryptionService, InviteError> {
+    // A slot re-wrapped by a revoke that landed between invite and join carries an
+    // activation naming the Remove entry. Resolve it the way the refresh path does
+    // for an existing member: list the membership entries currently visible on the
+    // home and let the activation check confirm the referenced Remove is among
+    // them. Without this the join sees no visible entries and refuses the slot
+    // unconditionally, wedging the invitee forever.
+    let visible = visible_membership_coords(cloud_home).await?;
     unwrap_library_keyring_for_owners_with_activation(
         cloud_home,
         keypair,
         library_id,
-        expected_owners,
-        None,
+        std::iter::once(expected_owner),
+        Some(&visible),
     )
     .await
+}
+
+/// The membership entry coordinates visible on the home, listed straight off it
+/// (not through `CloudSyncStorage`, which the joiner has not built yet). Joining
+/// a shared library is an encrypted-home-only path, so the entries carry the
+/// `.enc` suffix — the same reason [`unwrap_library_keyring_for_owners_with_activation`]
+/// hardcodes it for the wrapped key. This mirrors the refresh path, which derives
+/// its visible coordinates from the raw `list_membership_entries` listing.
+async fn visible_membership_coords(
+    cloud_home: &dyn CloudHome,
+) -> Result<Vec<MembershipCoord>, InviteError> {
+    let keys = cloud_home.list("membership/").await?;
+    Ok(membership_coords(
+        &super::cloud_storage::parse_membership_entry_keys(&keys, ".enc"),
+    ))
 }
 
 pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
@@ -676,11 +683,15 @@ fn membership_coords(entry_keys: &[(String, u64)]) -> Vec<MembershipCoord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::HomeStorage;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::MemberRole;
     use crate::sync::membership_ops::download_entries;
     use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
     use async_trait::async_trait;
+    use std::sync::Arc;
 
     /// Minimal CloudHome mock that returns a dummy S3 JoinInfo.
     struct MockCloudHome;
@@ -1556,6 +1567,177 @@ mod tests {
             result,
             Err(InviteError::InactiveWrappedKey { activation: seen }) if seen == activation
         ));
+    }
+
+    /// A realistic opaque-home storage: membership entries and wrapped keys are
+    /// keyed under the `.enc` suffix a joining device reads them by, which the
+    /// suffixless [`MockSyncStorage`] does not reproduce. The join path lists
+    /// these keys straight off the home, so the suffix has to match production.
+    fn opaque_storage(
+        home: Arc<InMemoryCloudHome>,
+        key: [u8; 32],
+        signer: &UserKeypair,
+    ) -> CloudSyncStorage {
+        CloudSyncStorage::new(
+            home,
+            CloudCipher::Encrypted(EncryptionService::from_key(key)),
+            BlobPathScheme::for_storage(HomeStorage::Opaque),
+            LIB_ID,
+            signer.clone(),
+        )
+    }
+
+    /// A member invited but not yet joined is a current member, so revoking a
+    /// third member re-wraps the pending invitee's slot with an activation naming
+    /// the Remove entry. When the invitee finally joins, `unwrap_library_keyring`
+    /// lists the now-visible membership entries and the activation resolves, so
+    /// the join succeeds and the invitee adopts the post-rotation key generation.
+    #[tokio::test]
+    async fn pending_invitee_joins_after_a_third_member_is_revoked() {
+        let owner = gen_keypair();
+        let pending = gen_keypair();
+        let third = gen_keypair();
+        let old_key: [u8; 32] = [20u8; 32];
+
+        let home = Arc::new(InMemoryCloudHome::new());
+        let storage = opaque_storage(home.clone(), old_key, &owner);
+        let mut chain = bootstrap_chain(&owner);
+
+        create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&pending),
+            None,
+            MemberRole::Member,
+            &old_key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .unwrap();
+        create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&third),
+            None,
+            MemberRole::Member,
+            &old_key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await
+        .unwrap();
+
+        // Revoke the third member. `pending` is still a current member, so its
+        // slot is re-wrapped with the new key and an activation for the Remove.
+        let new_keyring = revoke_member(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&third),
+            LIB_ID,
+            "0000000004000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await
+        .unwrap();
+
+        // The pending invitee joins now, resolving the activation against the
+        // listed Remove entry rather than being refused for lack of one.
+        let joined = unwrap_library_keyring(
+            home.as_ref() as &dyn CloudHome,
+            &pending,
+            LIB_ID,
+            &pubkey_hex(&owner),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            joined.key_bytes(),
+            new_keyring.key_bytes(),
+            "the joiner adopts the post-rotation library key"
+        );
+        assert_eq!(
+            joined.current_generation(),
+            new_keyring.current_generation(),
+            "the joiner is at the rotated generation"
+        );
+        assert_eq!(
+            joined.current_generation(),
+            2,
+            "the rotation advanced the generation past the pre-revoke one"
+        );
+    }
+
+    /// Resolving the activation by listing the home preserves the security
+    /// property: an activation naming an entry the joiner cannot list is still
+    /// refused, so a slot cannot be adopted before its Remove is durably visible.
+    #[tokio::test]
+    async fn join_refuses_wrapped_key_whose_activation_is_not_visible() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let old_key: [u8; 32] = [21u8; 32];
+        let new_key: [u8; 32] = [22u8; 32];
+
+        let home = Arc::new(InMemoryCloudHome::new());
+        let storage = opaque_storage(home.clone(), old_key, &owner);
+        let mut chain = bootstrap_chain(&owner);
+        create_invitation(
+            &storage,
+            &MockCloudHome,
+            &mut chain,
+            &owner,
+            &pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            &old_key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .unwrap();
+
+        // Overwrite the member's slot with a key whose activation names a Remove
+        // entry that was never published — nothing sits at membership/{owner}/99.
+        let owner_pk = pubkey_hex(&owner);
+        let activation = MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 99,
+        };
+        let keyring = EncryptionService::from_key(old_key)
+            .with_appended_generation(2, new_key)
+            .unwrap();
+        let member_x25519 = member.to_x25519_public_key();
+        let wrapped = signed_wrapped_keyring_for_test(
+            LIB_ID,
+            &pubkey_hex(&member),
+            &member_x25519,
+            &keyring,
+            &owner,
+            Some(activation.clone()),
+        );
+        storage
+            .put_wrapped_key(&pubkey_hex(&member), wrapped)
+            .await
+            .unwrap();
+
+        let result =
+            unwrap_library_keyring(home.as_ref() as &dyn CloudHome, &member, LIB_ID, &owner_pk)
+                .await;
+        assert!(
+            matches!(
+                &result,
+                Err(InviteError::InactiveWrappedKey { activation: seen }) if *seen == activation
+            ),
+            "an activation with no visible entry must be refused, got {result:?}"
+        );
     }
 
     #[tokio::test]

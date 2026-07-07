@@ -742,6 +742,40 @@ impl BlobRangeReader {
     }
 }
 
+/// Parse `membership/{author_pubkey}/{seq}{suffix}` object keys into
+/// `(author_pubkey, seq)` coordinates. Shared by `list_membership_entries` and
+/// the join path, which lists the same keys straight off the cloud home (with
+/// the encrypted-home suffix) to resolve a wrapped key's activation. The
+/// per-author head (`{author}/head{suffix}`) is not an entry and is skipped.
+pub(crate) fn parse_membership_entry_keys(keys: &[String], suffix: &str) -> Vec<(String, u64)> {
+    let mut entries = Vec::new();
+    for key in keys {
+        let Some(rest) = key.strip_prefix("membership/") else {
+            warn!("skipping membership key without the expected prefix: {key}");
+            continue;
+        };
+        let Some(rest) = rest.strip_suffix(suffix) else {
+            warn!("skipping membership key without the expected suffix: {key}");
+            continue;
+        };
+        // The pubkey is hex (no slashes), so the last '/' separates it from seq.
+        let Some(slash_pos) = rest.rfind('/') else {
+            warn!("skipping membership key with no pubkey/seq separator: {key}");
+            continue;
+        };
+        let author = &rest[..slash_pos];
+        let tail = &rest[slash_pos + 1..];
+        if tail == "head" {
+            continue;
+        }
+        match tail.parse::<u64>() {
+            Ok(seq) => entries.push((author.to_string(), seq)),
+            Err(e) => warn!("skipping membership key {key} with non-numeric seq: {e}"),
+        }
+    }
+    entries
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for CloudSyncStorage {
@@ -1080,41 +1114,8 @@ impl SyncStorage for CloudSyncStorage {
     }
 
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
-        let suffix = self.suffix();
         let keys = self.home.list("membership/").await?;
-        let mut entries = Vec::new();
-
-        for key in &keys {
-            // key = "membership/{author_pubkey}/{seq}{suffix}"
-            let Some(rest) = key.strip_prefix("membership/") else {
-                warn!("skipping membership key without the expected prefix: {key}");
-                continue;
-            };
-            let Some(rest) = rest.strip_suffix(suffix) else {
-                warn!("skipping membership key without the expected suffix: {key}");
-                continue;
-            };
-
-            // Split into author_pubkey and seq. The pubkey is hex (no slashes),
-            // so the last '/' separates pubkey from seq.
-            let Some(slash_pos) = rest.rfind('/') else {
-                warn!("skipping membership key with no pubkey/seq separator: {key}");
-                continue;
-            };
-            let author = &rest[..slash_pos];
-            let tail = &rest[slash_pos + 1..];
-            // The per-author head shares the author's prefix (`{author}/head`); it
-            // is not an entry, so it is skipped here — heads are read by keyed GET.
-            if tail == "head" {
-                continue;
-            }
-            match tail.parse::<u64>() {
-                Ok(seq) => entries.push((author.to_string(), seq)),
-                Err(e) => warn!("skipping membership key {key} with non-numeric seq: {e}"),
-            }
-        }
-
-        Ok(entries)
+        Ok(parse_membership_entry_keys(&keys, self.suffix()))
     }
 
     async fn put_membership_head(
