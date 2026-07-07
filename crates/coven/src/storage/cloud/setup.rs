@@ -39,7 +39,8 @@ pub async fn sign_in_google_drive(
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
-    let oauth_config = super::google_drive::GoogleDriveCloudHome::oauth_config();
+    let oauth_config = super::google_drive::GoogleDriveCloudHome::oauth_config()
+        .map_err(|e| SetupError(e.to_string()))?;
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("Google Drive authorization failed: {e}")))?;
@@ -127,7 +128,8 @@ pub async fn sign_in_dropbox(
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
-    let oauth_config = super::dropbox::DropboxCloudHome::oauth_config();
+    let oauth_config =
+        super::dropbox::DropboxCloudHome::oauth_config().map_err(|e| SetupError(e.to_string()))?;
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("Dropbox authorization failed: {e}")))?;
@@ -177,7 +179,8 @@ pub async fn sign_in_onedrive(
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(String, String), SetupError> {
-    let oauth_config = super::onedrive::OneDriveCloudHome::oauth_config();
+    let oauth_config = super::onedrive::OneDriveCloudHome::oauth_config()
+        .map_err(|e| SetupError(e.to_string()))?;
     let tokens = crate::oauth::authorize(&oauth_config, oauth_cancel, clock)
         .await
         .map_err(|e| SetupError(format!("OneDrive authorization failed: {e}")))?;

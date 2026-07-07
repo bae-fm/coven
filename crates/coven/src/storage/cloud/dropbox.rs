@@ -40,16 +40,17 @@ impl DropboxCloudHome {
         tokens: OAuthTokens,
         key_service: KeyService,
         clock: ClockRef,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CloudHomeError> {
+        let config = Self::oauth_config().map_err(|e| CloudHomeError::Storage(e.to_string()))?;
+        Ok(Self {
             folder_path,
-            session: OAuthSession::new(tokens, key_service, clock, Self::oauth_config(), "Dropbox"),
-        }
+            session: OAuthSession::new(tokens, key_service, clock, config, "Dropbox"),
+        })
     }
 
-    pub fn oauth_config() -> OAuthConfig {
-        let creds = crate::oauth::oauth_client_creds("dropbox");
-        OAuthConfig {
+    pub fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
+        let creds = crate::oauth::oauth_client_creds("dropbox")?;
+        Ok(OAuthConfig {
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             auth_url: "https://www.dropbox.com/oauth2/authorize".to_string(),
@@ -63,7 +64,7 @@ impl DropboxCloudHome {
             scopes: vec![],
             redirect_port: 19284,
             extra_auth_params: vec![("token_access_type".to_string(), "offline".to_string())],
-        }
+        })
     }
 
     fn client(&self) -> &reqwest::Client {
@@ -667,6 +668,7 @@ mod tests {
     }
 
     fn home_with_folder(folder_path: &str) -> DropboxCloudHome {
+        crate::oauth::install_test_client_creds();
         DropboxCloudHome::new(
             folder_path.to_string(),
             OAuthTokens {
@@ -677,6 +679,7 @@ mod tests {
             KeyService::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
+        .expect("build test Dropbox home")
     }
 
     #[test]
@@ -706,7 +709,8 @@ mod tests {
 
     #[test]
     fn oauth_config_uses_dropbox_urls() {
-        let config = DropboxCloudHome::oauth_config();
+        crate::oauth::install_test_client_creds();
+        let config = DropboxCloudHome::oauth_config().expect("build Dropbox oauth config");
         assert_eq!(config.auth_url, "https://www.dropbox.com/oauth2/authorize");
         assert_eq!(config.token_url, "https://api.dropboxapi.com/oauth2/token");
         assert!(config.client_secret.is_none());

@@ -226,7 +226,7 @@ pub mod storage {
                         tokens,
                         key_service.clone(),
                         clock,
-                    )))
+                    )?))
                 }
                 #[cfg(feature = "oauth-providers")]
                 Some(CloudProvider::Dropbox) => {
@@ -246,7 +246,7 @@ pub mod storage {
                         tokens,
                         key_service.clone(),
                         clock,
-                    )))
+                    )?))
                 }
                 #[cfg(feature = "oauth-providers")]
                 Some(CloudProvider::OneDrive) => {
@@ -271,7 +271,7 @@ pub mod storage {
                         tokens,
                         key_service.clone(),
                         clock,
-                    )))
+                    )?))
                 }
                 #[cfg(not(feature = "oauth-providers"))]
                 Some(
@@ -344,7 +344,7 @@ pub use join_code::generate_join_request;
 pub use keys::{
     keyring_service, read_keyring, set_keyring_service, CloudHomeCredentials, KeyError, KeyService,
 };
-pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthTokens};
+pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;
 pub use storage::cloud::{
     cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare},
@@ -358,6 +358,7 @@ pub use sync::sync_manager::{MemberInfo, SyncError};
 #[cfg(feature = "oauth-providers")]
 pub use oauth::{
     authorize_provider, build_authorize_request_for_provider, exchange_code_for_provider,
+    OAuthClientCredsError,
 };
 
 #[cfg(feature = "oauth-providers")]

@@ -23,7 +23,7 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
         let registered = KEYRING_SERVICE
             .get()
             .map(String::as_str)
-            .unwrap_or_default();
+            .expect("a keyring service is registered when set() fails");
         if registered != name {
             return Err(KeyError::Persistence(format!(
                 "keyring service is already registered as {registered:?}; cannot re-register as {name:?}"
@@ -33,11 +33,14 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
     Ok(())
 }
 
-pub fn keyring_service() -> &'static str {
+/// The registered keyring service name. `Err` when the host never ran the
+/// startup [`set_keyring_service`] call — surfaced so a mis-ordered host gets a
+/// typed error, not a panic deep inside a key operation.
+pub fn keyring_service() -> Result<&'static str, KeyError> {
     KEYRING_SERVICE
         .get()
         .map(String::as_str)
-        .expect("set_keyring_service(host_app_identity) must be called once at startup")
+        .ok_or(KeyError::ServiceNotRegistered)
 }
 
 fn map_keyring_error(e: keyring_core::Error) -> KeyError {
@@ -48,7 +51,7 @@ fn map_keyring_error(e: keyring_core::Error) -> KeyError {
 }
 
 pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
-    let entry = keyring_core::Entry::new(keyring_service(), account).map_err(map_keyring_error)?;
+    let entry = keyring_core::Entry::new(keyring_service()?, account).map_err(map_keyring_error)?;
     match entry.get_password() {
         Ok(p) if p.is_empty() => Err(KeyError::Persistence(format!(
             "keyring entry {account} is present but empty (corrupt)"
@@ -60,14 +63,14 @@ pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
 }
 
 fn write_keyring(account: &str, value: &str) -> Result<(), KeyError> {
-    keyring_core::Entry::new(keyring_service(), account)
+    keyring_core::Entry::new(keyring_service()?, account)
         .map_err(map_keyring_error)?
         .set_password(value)
         .map_err(map_keyring_error)
 }
 
 fn delete_keyring(account: &str) -> Result<bool, KeyError> {
-    match keyring_core::Entry::new(keyring_service(), account)
+    match keyring_core::Entry::new(keyring_service()?, account)
         .map_err(map_keyring_error)?
         .delete_credential()
     {
@@ -154,7 +157,10 @@ impl KeyService {
     pub(crate) fn cloud_home_credentials_entry_for_test(
         &self,
     ) -> keyring_core::Result<keyring_core::Entry> {
-        keyring_core::Entry::new(keyring_service(), &self.account("cloud_home_credentials"))
+        keyring_core::Entry::new(
+            keyring_service().expect("keyring service registered in tests"),
+            &self.account("cloud_home_credentials"),
+        )
     }
 
     pub fn delete_cloud_home_credentials(&self) -> Result<(), KeyError> {
@@ -255,7 +261,7 @@ mod tests {
     fn empty_keyring_entry_is_an_error_not_absence() {
         test_keyring::install();
         let account = "empty-keyring-entry";
-        keyring_core::Entry::new(keyring_service(), account)
+        keyring_core::Entry::new(keyring_service().expect("service registered"), account)
             .expect("create keyring entry")
             .set_password("")
             .expect("write empty keyring entry");
@@ -271,8 +277,9 @@ mod tests {
         test_keyring::install();
         let service = KeyService::new("empty-encryption-key-library".to_string());
         let account = service.account("encryption_master_key");
-        let entry = keyring_core::Entry::new(keyring_service(), &account)
-            .expect("create encryption key entry");
+        let entry =
+            keyring_core::Entry::new(keyring_service().expect("service registered"), &account)
+                .expect("create encryption key entry");
         entry
             .set_password("")
             .expect("write empty encryption key entry");

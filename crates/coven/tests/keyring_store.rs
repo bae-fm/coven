@@ -10,6 +10,18 @@ fn keyring_registration_contract() {
     keyring_core::set_default_store(
         keyring_core::mock::Store::new().expect("create mock keyring store"),
     );
+    // Before the service is registered, a key operation names the missing
+    // startup call rather than panicking.
+    let err = coven::read_keyring("account").expect_err("service not registered yet");
+    assert!(
+        matches!(err, coven::KeyError::ServiceNotRegistered),
+        "expected ServiceNotRegistered, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("set_keyring_service"),
+        "error names the missing startup call: {err}"
+    );
+
     coven::set_keyring_service("coven-store-test").expect("register keyring service");
 
     // Re-registration: same name is a no-op, a different name is a startup

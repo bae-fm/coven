@@ -140,7 +140,7 @@ async fn build_cloud_home(
         RestoreSource::GoogleDrive { folder_id, tokens } => {
             let ks = KeyService::new(library_id.to_string());
             let home =
-                google_drive::GoogleDriveCloudHome::new(folder_id.clone(), tokens, ks, clock);
+                google_drive::GoogleDriveCloudHome::new(folder_id.clone(), tokens, ks, clock)?;
             let info = CloudHomeJoinInfo::GoogleDrive { folder_id };
             Ok((info, Box::new(home) as Box<dyn CloudHome>))
         }
@@ -151,7 +151,7 @@ async fn build_cloud_home(
             tokens,
         } => {
             let ks = KeyService::new(library_id.to_string());
-            let home = dropbox::DropboxCloudHome::new(folder_path.clone(), tokens, ks, clock);
+            let home = dropbox::DropboxCloudHome::new(folder_path.clone(), tokens, ks, clock)?;
             let info = CloudHomeJoinInfo::Dropbox {
                 shared_folder_id: folder_path,
             };
@@ -171,7 +171,7 @@ async fn build_cloud_home(
                 tokens,
                 ks,
                 clock,
-            );
+            )?;
             let info = CloudHomeJoinInfo::OneDrive {
                 drive_id,
                 folder_id,

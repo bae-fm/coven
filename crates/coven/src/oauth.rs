@@ -40,29 +40,104 @@ pub struct OAuthConfig {
 /// OAuth client credentials for one provider — the consuming app's registered
 /// OAuth application. coven ships no app credentials of its own; the host
 /// registers them at startup via [`set_oauth_client_creds`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OAuthClientCreds {
     pub client_id: String,
     /// None for public (PKCE-only) clients.
     pub client_secret: Option<String>,
 }
 
+/// Registering OAuth client credentials a second time with values that differ
+/// from the first registration — a startup contradiction the host must resolve,
+/// not a value coven may silently pick between.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "OAuth client credentials are already registered; cannot re-register with different values"
+)]
+pub struct OAuthClientCredsConflict;
+
 static OAUTH_CLIENT_CREDS: OnceLock<HashMap<String, OAuthClientCreds>> = OnceLock::new();
 
 /// Register the host's OAuth client credentials, keyed by provider name
 /// (`"google_drive"`, `"dropbox"`, `"onedrive"`). Call once at startup, before
 /// any OAuth flow. Providers absent from the map get empty credentials.
-pub fn set_oauth_client_creds(creds: HashMap<String, OAuthClientCreds>) {
-    let _ = OAUTH_CLIENT_CREDS.set(creds);
+/// Re-registering the same map is a no-op; a differing map is a startup
+/// contradiction and returns [`OAuthClientCredsConflict`].
+pub fn set_oauth_client_creds(
+    creds: HashMap<String, OAuthClientCreds>,
+) -> Result<(), OAuthClientCredsConflict> {
+    if let Err(attempted) = OAUTH_CLIENT_CREDS.set(creds) {
+        let registered = OAUTH_CLIENT_CREDS
+            .get()
+            .expect("OnceLock::set failed only when a value is already stored");
+        if *registered != attempted {
+            return Err(OAuthClientCredsConflict);
+        }
+    }
+    Ok(())
 }
 
-/// The credentials registered for a provider, or empty if none were registered.
+/// A provider's OAuth client credentials were requested before the host
+/// registered them via [`set_oauth_client_creds`]: either no registration ran at
+/// all, or the registered map has no entry for this provider. Surfaced at the
+/// OAuth-flow boundary so a mis-configured host gets a typed error naming the
+/// startup step, not an empty `client_id` that fails deep inside a provider flow.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-pub fn oauth_client_creds(provider: &str) -> OAuthClientCreds {
-    OAUTH_CLIENT_CREDS
+#[derive(Debug, thiserror::Error)]
+pub enum OAuthClientCredsError {
+    #[error(
+        "no OAuth client credentials are registered; the host must call set_oauth_client_creds at startup before any OAuth flow"
+    )]
+    NotRegistered,
+    #[error(
+        "no OAuth client credentials registered for provider {0:?}; the host must include it in the set_oauth_client_creds map at startup"
+    )]
+    MissingProvider(String),
+}
+
+/// The credentials registered for a provider. `Err` when the host never ran
+/// [`set_oauth_client_creds`], or ran it without an entry for this provider.
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+pub fn oauth_client_creds(provider: &str) -> Result<OAuthClientCreds, OAuthClientCredsError> {
+    let registered = OAUTH_CLIENT_CREDS
         .get()
-        .and_then(|m| m.get(provider).cloned())
-        .unwrap_or_default()
+        .ok_or(OAuthClientCredsError::NotRegistered)?;
+    registered
+        .get(provider)
+        .cloned()
+        .ok_or_else(|| OAuthClientCredsError::MissingProvider(provider.to_string()))
+}
+
+/// Register a consistent set of client credentials for the OAuth provider
+/// backends' tests, which construct provider homes and so read creds. Idempotent
+/// — every caller registers the same map, so the process-global `OnceLock` is set
+/// once and later calls are no-ops.
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+pub(crate) fn install_test_client_creds() {
+    let creds = HashMap::from([
+        (
+            "google_drive".to_string(),
+            OAuthClientCreds {
+                client_id: "test-client".to_string(),
+                client_secret: None,
+            },
+        ),
+        (
+            "dropbox".to_string(),
+            OAuthClientCreds {
+                client_id: "test-client".to_string(),
+                client_secret: None,
+            },
+        ),
+        (
+            "onedrive".to_string(),
+            OAuthClientCreds {
+                client_id: "test-client".to_string(),
+                client_secret: None,
+            },
+        ),
+    ]);
+    set_oauth_client_creds(creds).expect("register consistent test client credentials");
 }
 
 /// Tokens returned from an OAuth authorization or refresh.
@@ -98,6 +173,9 @@ pub enum OAuthError {
     /// is no point retrying the refresh.
     #[error("re-authorization required: {0}")]
     Reauthorize(String),
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[error(transparent)]
+    ClientCreds(#[from] OAuthClientCredsError),
 }
 
 /// Guards the localhost OAuth-callback server task — native-only, like
@@ -554,9 +632,9 @@ fn oauth_config_for_provider(
     use crate::storage::cloud::{dropbox, google_drive, onedrive};
 
     match provider {
-        CloudProvider::GoogleDrive => Ok(google_drive::GoogleDriveCloudHome::oauth_config()),
-        CloudProvider::Dropbox => Ok(dropbox::DropboxCloudHome::oauth_config()),
-        CloudProvider::OneDrive => Ok(onedrive::OneDriveCloudHome::oauth_config()),
+        CloudProvider::GoogleDrive => Ok(google_drive::GoogleDriveCloudHome::oauth_config()?),
+        CloudProvider::Dropbox => Ok(dropbox::DropboxCloudHome::oauth_config()?),
+        CloudProvider::OneDrive => Ok(onedrive::OneDriveCloudHome::oauth_config()?),
         other => Err(OAuthError::Denied(format!("{other:?} does not use OAuth"))),
     }
 }

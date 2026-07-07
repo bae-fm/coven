@@ -147,7 +147,7 @@ async fn build_cloud_home_for_join(
                 tokens,
                 lib_ks.clone(),
                 clock,
-            )))
+            )?))
         }
 
         #[cfg(feature = "oauth-providers")]
@@ -159,7 +159,7 @@ async fn build_cloud_home_for_join(
                 tokens,
                 lib_ks.clone(),
                 clock,
-            )))
+            )?))
         }
 
         #[cfg(feature = "oauth-providers")]
@@ -175,7 +175,7 @@ async fn build_cloud_home_for_join(
                 tokens,
                 lib_ks.clone(),
                 clock,
-            )))
+            )?))
         }
 
         #[cfg(not(feature = "oauth-providers"))]

@@ -48,6 +48,10 @@ pub enum SyncError {
     LoopNotRunning,
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
+    #[error(
+        "opaque cloud home configured without an encryption service (a locked library, or a browsable/opaque storage mismatch)"
+    )]
+    OpaqueHomeWithoutEncryption,
     #[error("failed to build cloud home: {0}")]
     CloudHome(#[from] CloudHomeError),
     #[error("failed to create sync storage: {0}")]
@@ -196,6 +200,18 @@ impl SyncManager {
 
         self.stop_current_connection()?;
 
+        // The home's at-rest cipher: an opaque home seals under the manager's
+        // library key, a browsable home stores in the clear. An opaque home with
+        // no library key is a config contradiction (a locked library, or a
+        // browsable/opaque storage mismatch) — decided from storage mode and the
+        // held encryption service alone, so check it before building the home and
+        // fail with a typed error rather than deep inside it. Built once here so
+        // the sync loop and storage share one instance — a member removal rotates
+        // the key in place through it.
+        let cipher =
+            CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
+                .ok_or(SyncError::OpaqueHomeWithoutEncryption)?;
+
         // Build the cloud home. A failure here is a real fault — surface it so the
         // caller never installs a manager that started nothing.
         let cloud_home = crate::storage::cloud::create_cloud_home_with_cloudkit(
@@ -207,14 +223,6 @@ impl SyncManager {
         .await
         .map_err(SyncError::from)?;
         let cloud_home: Arc<dyn CloudHome> = Arc::from(cloud_home);
-
-        // The home's at-rest cipher: an opaque home seals under the manager's
-        // library key, a browsable home stores in the clear. Built here so the
-        // sync loop and storage share one instance — a member removal rotates the
-        // key in place through it.
-        let cipher =
-            CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
-                .expect("an opaque cloud home must be built with an encryption service");
 
         // Initialize sync loop. The synced-table set is owned by the Database, so
         // init_sync reads it from there rather than from a separately-held copy.
@@ -684,6 +692,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_sync_rejects_an_opaque_home_without_an_encryption_service() {
+        test_keyring::install();
+        let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
+        let open_guard = LibraryOpenGuard::acquire_for_test(&library_dir);
+        let mut config = Config::with_defaults(
+            "lib-opaque-no-encryption".to_string(),
+            "test-device".to_string(),
+            library_dir,
+            "Test Library".to_string(),
+        );
+        // Opaque storage (the default) with a configured provider but no
+        // encryption service is a locked-library contradiction — the manager
+        // holds `None` for the encryption service.
+        config.cloud_home.provider = Some(CloudProvider::S3);
+        let manager = SyncManager::new(
+            Arc::new(move || config.clone()),
+            KeyService::new("lib-opaque-no-encryption".to_string()),
+            None,
+            crate::sync::test_helpers::open_test_db(),
+            Arc::new(SystemClock),
+            None,
+            None,
+            open_guard,
+        );
+
+        let error = manager
+            .start_sync()
+            .await
+            .expect_err("opaque home without an encryption service must fail");
+        assert!(
+            matches!(error, SyncError::OpaqueHomeWithoutEncryption),
+            "expected OpaqueHomeWithoutEncryption, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn start_sync_with_home_stops_the_previous_loop_before_replacement() {
         test_keyring::install();
@@ -755,7 +799,9 @@ mod tests {
                 Arc::new(move || config.read().unwrap().clone())
             },
             KeyService::new("lib-manager-failed-restart".to_string()),
-            None,
+            // An encryption service so the opaque default storage passes the
+            // cipher precondition and the restart fails at the home build itself.
+            Some(EncryptionService::from_key([7u8; 32])),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,

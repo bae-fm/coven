@@ -24,6 +24,10 @@ pub enum KeyError {
         "no bundled keyring store exists for this target; the host must supply one via keyring_core::set_default_store before registering the keyring service"
     )]
     UnsupportedKeyringPlatform,
+    #[error(
+        "no keyring service is registered; the host must call set_keyring_service at startup before any key operation"
+    )]
+    ServiceNotRegistered,
 }
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.

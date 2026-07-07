@@ -132,22 +132,17 @@ impl GoogleDriveCloudHome {
         tokens: OAuthTokens,
         key_service: KeyService,
         clock: ClockRef,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CloudHomeError> {
+        let config = Self::oauth_config().map_err(|e| CloudHomeError::Storage(e.to_string()))?;
+        Ok(Self {
             folder_id,
-            session: OAuthSession::new(
-                tokens,
-                key_service,
-                clock,
-                Self::oauth_config(),
-                "Google Drive",
-            ),
-        }
+            session: OAuthSession::new(tokens, key_service, clock, config, "Google Drive"),
+        })
     }
 
-    pub fn oauth_config() -> OAuthConfig {
-        let creds = crate::oauth::oauth_client_creds("google_drive");
-        OAuthConfig {
+    pub fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
+        let creds = crate::oauth::oauth_client_creds("google_drive")?;
+        Ok(OAuthConfig {
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
@@ -159,7 +154,7 @@ impl GoogleDriveCloudHome {
             ],
             redirect_port: 19284,
             extra_auth_params: vec![("access_type".to_string(), "offline".to_string())],
-        }
+        })
     }
 
     /// The Drive HTTP client (shared, owned by the session).
@@ -821,6 +816,7 @@ mod tests {
     use std::sync::Arc;
 
     fn home() -> GoogleDriveCloudHome {
+        crate::oauth::install_test_client_creds();
         GoogleDriveCloudHome::new(
             "folder123".to_string(),
             OAuthTokens {
@@ -831,6 +827,7 @@ mod tests {
             KeyService::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
+        .expect("build test Google Drive home")
     }
 
     #[test]

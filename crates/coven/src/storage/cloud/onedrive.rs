@@ -40,23 +40,18 @@ impl OneDriveCloudHome {
         tokens: OAuthTokens,
         key_service: KeyService,
         clock: ClockRef,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CloudHomeError> {
+        let config = Self::oauth_config().map_err(|e| CloudHomeError::Storage(e.to_string()))?;
+        Ok(Self {
             drive_id,
             folder_id,
-            session: OAuthSession::new(
-                tokens,
-                key_service,
-                clock,
-                Self::oauth_config(),
-                "OneDrive",
-            ),
-        }
+            session: OAuthSession::new(tokens, key_service, clock, config, "OneDrive"),
+        })
     }
 
-    pub fn oauth_config() -> OAuthConfig {
-        let creds = crate::oauth::oauth_client_creds("onedrive");
-        OAuthConfig {
+    pub fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
+        let creds = crate::oauth::oauth_client_creds("onedrive")?;
+        Ok(OAuthConfig {
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             auth_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
@@ -70,7 +65,7 @@ impl OneDriveCloudHome {
             ],
             redirect_port: 19284,
             extra_auth_params: vec![],
-        }
+        })
     }
 
     fn client(&self) -> &reqwest::Client {
@@ -414,6 +409,7 @@ mod tests {
     use std::sync::Arc;
 
     fn home() -> OneDriveCloudHome {
+        crate::oauth::install_test_client_creds();
         OneDriveCloudHome::new(
             "drive123".to_string(),
             "folder456".to_string(),
@@ -425,6 +421,7 @@ mod tests {
             KeyService::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
+        .expect("build test OneDrive home")
     }
 
     #[test]
@@ -461,7 +458,8 @@ mod tests {
 
     #[test]
     fn oauth_config_uses_consumers_endpoint() {
-        let config = OneDriveCloudHome::oauth_config();
+        crate::oauth::install_test_client_creds();
+        let config = OneDriveCloudHome::oauth_config().expect("build OneDrive oauth config");
         assert!(config.auth_url.contains("/consumers/"));
         assert!(config.token_url.contains("/consumers/"));
         assert!(config.scopes.contains(&"Files.ReadWrite".to_string()));
