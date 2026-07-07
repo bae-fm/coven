@@ -9,8 +9,8 @@
 /// ```text
 /// changes/{device_id}/{seq}{suffix}              -- changeset envelopes
 /// heads/{device_id}.json{suffix}                 -- head pointers
-/// images/{ab}/{cd}/{id}                          -- library images (blobs), hashed scheme
-/// images/{cloud_path}                            -- library images (blobs), plain scheme
+/// {namespace}/{uploader}/{ab}/{cd}/{id}          -- blobs, hashed scheme (opaque home)
+/// {namespace}/{cloud_path}                       -- blobs, plain scheme (browsable home)
 /// snapshot/{author}/{seq}.db{suffix}             -- a generation's full DB snapshot
 /// snapshot/{author}/{seq}_meta.json{suffix}      -- a generation's per-device cursors
 /// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, seq}
@@ -19,15 +19,26 @@
 /// keys/{owner_pubkey}/{recipient_pubkey}{suffix} -- library key wrapped by an owner for a member
 /// ```
 ///
-/// The layout is aligned to one storage-access rule so a provider ACL can
-/// enforce it: **a member writes only under its own public key** — its changes
-/// (`changes/{device}/`), snapshots (`snapshot/{author}/`), membership entries
-/// and head (`membership/{author}/`), and the wrapped keys it authors as an owner
-/// (`keys/{owner}/`) all sit under a prefix keyed by that member's identity.
-/// Reads that must span writers scan the relevant writers' prefixes: a member
-/// resolving its rotated library key reads `keys/{owner}/{self}` across the
-/// current owners and adopts the highest-generation wrap an owner's signature
-/// authenticates.
+/// The layout is aligned to one storage-access rule a provider ACL can enforce:
+/// **a member writes (and deletes) only under its own public key; an owner may
+/// write and delete anywhere.** Every writable surface sits under a prefix keyed
+/// by the writing member's identity — its changes (`changes/{device}/`), snapshots
+/// (`snapshot/{author}/`), membership entries and head (`membership/{author}/`),
+/// the wrapped keys it authors as an owner (`keys/{owner}/`), and the blobs it
+/// uploads (`{namespace}/{uploader}/`) on an opaque home. Deletion follows the
+/// same rule: a member's GC reclaims only its own-prefix blobs, and an owner
+/// sweeps absent members' orphans (owners retain bucket-wide delete).
+///
+/// A read that must span writers dispatches on where the object lives, never a
+/// blind search: a member resolving its rotated library key reads
+/// `keys/{owner}/{self}` across the current owners and adopts the
+/// highest-generation wrap an owner's signature authenticates; a blob read keys
+/// under the uploader recorded in the device-local `blob_uploaders` index (written
+/// at pull from the changeset author, and at the device's own upload), falling
+/// back for an unrecorded blob to a one-time listing scan that records what it
+/// finds. The browsable plain scheme keeps human-readable `{namespace}/{cloud_path}`
+/// keys with no uploader segment — a browsable home has no membership chain to key
+/// one from and no rotation to defend, so the per-member ACL does not apply there.
 ///
 /// A snapshot is published as a generation under the publishing device's
 /// `{author}` (its hex public key): the `{author}/{seq}.db` and then the
@@ -44,10 +55,12 @@
 ///
 /// Blob keys follow the home's
 /// [`BlobPathScheme`](crate::sync::cloud_storage::BlobPathScheme): the default
-/// hashed scheme shards each blob by its id (`{namespace}/{ab}/{cd}/{id}`); the
-/// plain scheme keys it at the consumer-supplied readable path
-/// (`{namespace}/{cloud_path}`) so the bucket is browsable. The blob-path scheme
-/// is independent of the at-rest cipher below.
+/// hashed scheme keys each blob under its uploader and shards by its id
+/// (`{namespace}/{uploader}/{ab}/{cd}/{id}`); the plain scheme keys it at the
+/// consumer-supplied readable path (`{namespace}/{cloud_path}`) so the bucket is
+/// browsable. A device only ever writes blobs it authored, so a write keys under
+/// itself; a read resolves the uploader (which may be a peer) and keys under it.
+/// The blob-path scheme is independent of the at-rest cipher below.
 ///
 /// An encrypted home seals every object under the library key before upload and
 /// opens it after download; a plaintext home stores and serves objects verbatim.
