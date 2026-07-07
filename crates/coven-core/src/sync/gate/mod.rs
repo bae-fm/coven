@@ -61,7 +61,6 @@
 
 use std::ffi::c_int;
 
-use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Params};
 
 mod create_table;
@@ -118,15 +117,12 @@ where
         .optional()
         .map_err(|e| GateError::Sql(format!("query: {sql}"), e))
 }
+/// Render a row column read against the live db as text, matching what the raw
+/// changeset path produces for the same value, so a gate resolved from a live
+/// row and one resolved from a changeset agree. The single rendering rule —
+/// including SQLite's REAL→text — lives in [`crate::changeset::value_ref_to_string`].
 fn row_value_to_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
-    match row.get_ref(idx)? {
-        ValueRef::Null => Ok(None),
-        ValueRef::Integer(i) => Ok(Some(i.to_string())),
-        ValueRef::Real(r) => Ok(Some(r.to_string())),
-        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
-            Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
-        }
-    }
+    Ok(crate::changeset::value_ref_to_string(row.get_ref(idx)?))
 }
 
 #[derive(Debug)]
