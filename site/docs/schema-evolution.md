@@ -28,6 +28,11 @@ are separate questions, answered by different mechanisms.
 
 ## The migration ladder
 
+Each device has to move its own database forward on its own schedule, and the
+database itself has to know how far it got: version as a fact of the *file*,
+not of whichever binary happens to open it. That is what the ladder over
+`PRAGMA user_version` provides.
+
 The host passes an ordered ladder of
 [`Migration`](rustdoc:struct:coven::migration::Migration)s to the builder;
 coven applies it over `PRAGMA user_version` at every open, after reconciling

@@ -54,7 +54,9 @@ table.
 
 ## Generations and the pointer
 
-A snapshot is not a single object that gets overwritten. Each publish is a
+A publish takes minutes and a reader can arrive at any moment; with no server
+to coordinate them, the layout itself has to make a torn read impossible. So
+a snapshot is not a single object that gets overwritten. Each publish is a
 **generation**, keyed under the publishing device's own `{author}` (its hex public
 key) and the seq it was taken at:
 
@@ -127,8 +129,11 @@ pull.
 
 ## Snapshot policy
 
+Snapshots cost an upload of the whole database, so they should be rare; stale
+snapshots make every join replay a long changeset tail, so they should not be
+too rare.
 [`should_create_snapshot`](rustdoc:fn:coven::sync::snapshot::should_create_snapshot)
-decides when a cycle creates one. The defaults:
+holds that balance. The defaults:
 
 - 100 changesets since the last snapshot, or
 - 24 hours since the last snapshot, but only if at least one changeset was pushed
@@ -258,7 +263,10 @@ with each peer.
 ## Garbage collection
 
 Once a snapshot covers a range of changesets, those changesets are redundant: any
-device joining now bootstraps from the snapshot instead of replaying them.
+device joining now bootstraps from the snapshot instead of replaying them. But
+deleting shared state is the most dangerous thing a device can do to its
+peers, so GC trusts nothing it has not authenticated and touches nothing
+outside what the signed cursors prove redundant.
 [`garbage_collect`](rustdoc:fn:coven::sync::snapshot::garbage_collect) reclaims
 them, returning a [`GcResult`](rustdoc:struct:coven::sync::snapshot::GcResult) with
 counts of deleted changesets and non-fatal errors. It reclaims two kinds of

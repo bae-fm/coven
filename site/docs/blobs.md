@@ -18,7 +18,11 @@ has to reach every other device too.
 
 ## Declaring which rows carry blobs
 
-Blob-bearing-ness is a per-table declaration, not a runtime callback. The host
+Three different paths must each work out which files a set of rows carries: an
+outgoing changeset, an incoming one, and a whole database after bootstrap. A
+runtime callback could answer only for the code path that happens to be
+running; a declaration can be evaluated by all three, identically, any time.
+So blob-bearing-ness is a per-table declaration, not a runtime callback. The host
 marks a synced table with
 [`carries_blob`](rustdoc:method:coven::sync::session::SyncedTable::carries_blob),
 passing a [`BlobDecl`](rustdoc:struct:coven::sync::session::BlobDecl) that names the
@@ -186,8 +190,10 @@ published. A host writes the row and bytes together through
 root's gate. If the bytes are not on disk the cycle aborts rather than publishing
 a row that points at a blob the cloud does not hold.
 
-**Through the upload outbox (user-provided).** A user-provided blob is the user's
-own file; coven uploads it from that path through the durable upload outbox, with
+**Through the upload outbox (user-provided).** A user-provided blob is the
+user's own file, often large, on a connection that can drop; the upload has to
+survive restarts and retries without re-asking the host. That is what the
+durable upload outbox is for: coven uploads the file from its path with
 progress and retry. The host starts that transition through
 [`CovenHandle::make_remote`](rustdoc:method:coven::CovenHandle::make_remote):
 
