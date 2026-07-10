@@ -108,6 +108,16 @@ impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
 #[derive(Clone)]
 pub struct CovenHandle {
     db: Database,
+
+    /// A read-only companion connection on the same WAL database, opened at
+    /// [`open`](crate::CovenBuilder::open) after the writer's migrations completed.
+    /// Backs [`sql_read`](Self::sql_read): a pure read runs here on its own
+    /// connection thread, concurrent with the writer's thread rather than queued
+    /// behind it, and attaches no changeset session. `Database` is `Clone` (clones
+    /// share one connection thread), so every [`CovenHandle`] clone shares this one
+    /// reader — many readers coexist with the single writer under WAL, each seeing
+    /// the last committed state.
+    read_db: Database,
     stamper: crate::sync::hlc::UpdatedAtStamper,
     library_dir: LibraryDir,
 
@@ -161,6 +171,7 @@ impl CovenHandle {
     /// host's transition bookkeeping; pass `None` if it surfaces none.
     pub(crate) fn new(
         db: Database,
+        read_db: Database,
         stamper: crate::sync::hlc::UpdatedAtStamper,
         library_dir: LibraryDir,
         config_provider: ConfigProvider,
@@ -172,6 +183,7 @@ impl CovenHandle {
     ) -> Self {
         Self {
             db,
+            read_db,
             stamper,
             library_dir,
             config_provider,
@@ -203,6 +215,12 @@ impl CovenHandle {
     /// to reach row-level helpers.
     pub(crate) fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// The read-only companion [`Database`] backing [`sql_read`](Self::sql_read).
+    /// A pure read runs against this connection, concurrent with the writer.
+    pub(crate) fn read_db(&self) -> &Database {
+        &self.read_db
     }
 
     pub(crate) fn stamper(&self) -> crate::sync::hlc::UpdatedAtStamper {
@@ -778,6 +796,10 @@ mod tests {
         let config_provider: ConfigProvider = Arc::new(move || config.clone());
         let handle = CovenHandle::new(
             db.clone(),
+            // `read_db`: these tests never call `sql_read`, and the test db is
+            // `:memory:` (unique per connection, no shareable read-only companion),
+            // so the writer clone stands in.
+            db.clone(),
             db.stamper(),
             library_dir.clone(),
             config_provider,
@@ -815,6 +837,10 @@ mod tests {
         );
         let config_provider: ConfigProvider = Arc::new(move || config.clone());
         CovenHandle::new(
+            db.clone(),
+            // `read_db`: these tests never call `sql_read`, and the test db is
+            // `:memory:` (unique per connection, no shareable read-only companion),
+            // so the writer clone stands in.
             db.clone(),
             db.stamper(),
             library_dir.clone(),
@@ -948,6 +974,10 @@ mod tests {
         let stamper = db.stamper();
         let handle = CovenHandle::new(
             db.clone(),
+            // `read_db`: this test never calls `sql_read`, and the test db is
+            // `:memory:` (no shareable read-only companion), so the writer clone
+            // stands in.
+            db.clone(),
             stamper,
             library_dir.clone(),
             config_provider,
@@ -1046,6 +1076,10 @@ mod tests {
 
         let handle = CovenHandle::new(
             db.clone(),
+            // `read_db`: these tests never call `sql_read`, and the test db is
+            // `:memory:` (unique per connection, no shareable read-only companion),
+            // so the writer clone stands in.
+            db.clone(),
             db.stamper(),
             library_dir.clone(),
             config_provider,
@@ -1130,6 +1164,10 @@ mod tests {
         };
         let handle = CovenHandle::new(
             db.clone(),
+            // `read_db`: these tests never call `sql_read`, and the test db is
+            // `:memory:` (unique per connection, no shareable read-only companion),
+            // so the writer clone stands in.
+            db.clone(),
             db.stamper(),
             library_dir.clone(),
             config_provider,
@@ -1191,6 +1229,10 @@ mod tests {
         };
         let handle = CovenHandle::new(
             db.clone(),
+            // `read_db`: these tests never call `sql_read`, and the test db is
+            // `:memory:` (unique per connection, no shareable read-only companion),
+            // so the writer clone stands in.
+            db.clone(),
             db.stamper(),
             library_dir.clone(),
             config_provider,
@@ -1245,6 +1287,10 @@ mod tests {
         };
 
         let handle = CovenHandle::new(
+            db.clone(),
+            // `read_db`: these tests never call `sql_read`, and the test db is
+            // `:memory:` (unique per connection, no shareable read-only companion),
+            // so the writer clone stands in.
             db.clone(),
             db.stamper(),
             library_dir.clone(),
@@ -1309,6 +1355,10 @@ mod tests {
             Arc::new(move || config.clone())
         };
         let handle = CovenHandle::new(
+            db.clone(),
+            // `read_db`: these tests never call `sql_read`, and the test db is
+            // `:memory:` (unique per connection, no shareable read-only companion),
+            // so the writer clone stands in.
             db.clone(),
             db.stamper(),
             library_dir.clone(),

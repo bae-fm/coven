@@ -257,6 +257,19 @@ impl CovenBuilder {
         remove_orphaned_local_blob_temps(&library_dir, std::time::SystemTime::now())?;
         let (db, stamper) = Database::open(
             &db_path,
+            tables.clone(),
+            self.blob_tombstone_grace,
+            config.device_id.clone(),
+            &migrations,
+        )?;
+        // A second, read-only connection on the same WAL database, opened after the
+        // writer completed its migrations so the schema exists. It backs
+        // [`CovenHandle::sql_read`]: a pure read runs here on its own connection
+        // thread, concurrent with the writer rather than queued behind it, and
+        // attaches no changeset session. Opening it fails `open()` loudly — there is
+        // no full handle without its read path.
+        let read_db = Database::open_read_only(
+            &db_path,
             tables,
             self.blob_tombstone_grace,
             config.device_id.clone(),
@@ -264,6 +277,7 @@ impl CovenBuilder {
         )?;
         Ok(CovenHandle::new(
             db,
+            read_db,
             stamper,
             library_dir,
             provider,
@@ -407,6 +421,36 @@ impl CovenHandle {
                     |tx| f(SqlContext::new(tx, stamper)),
                 ))
             })
+            .await
+            .map_err(CovenError::from)?;
+        outcome
+    }
+
+    /// Run a pure read against this handle's read-only companion connection and
+    /// await the result.
+    ///
+    /// Unlike [`sql`](Self::sql), this attaches no changeset session and opens no
+    /// journaled transaction: a read pays nothing for capture it would produce
+    /// nothing for, and runs on a separate `SQLITE_OPEN_READONLY` connection thread
+    /// (concurrent with the writer, not queued behind it). The connection is
+    /// read-only, so an `INSERT`/`UPDATE`/`DELETE`/DDL in the closure is refused by
+    /// SQLite — a read cannot silently escape the sync journal because it cannot
+    /// write at all. The closure receives the `&Connection` directly, so a host
+    /// closure written against [`CovenReadHandle::sql`](crate::CovenReadHandle::sql)
+    /// runs unchanged here.
+    ///
+    /// Read-your-writes holds for committed writes: a `sql_read` issued after an
+    /// awaited [`sql`](Self::sql) or [`write`](Self::write) sees that data (the WAL
+    /// reader reads the last committed state). It may not see another task's write
+    /// that has not yet committed.
+    pub async fn sql_read<F, R>(&self, f: F) -> CovenResult<R>
+    where
+        F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let outcome = self
+            .read_db()
+            .call(move |conn| Ok(f(conn)))
             .await
             .map_err(CovenError::from)?;
         outcome
@@ -1326,6 +1370,98 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(CovenError::Sqlite(_))));
+    }
+
+    #[tokio::test]
+    async fn sql_read_sees_a_committed_write() {
+        let (_tmp, handle) = open_files_handle();
+        handle
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('file-read-your-write', NULL, 0, ?1)",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("insert through sql");
+
+        // The read runs on the separate read-only connection; it must observe the
+        // just-committed write (WAL read-your-writes for committed data).
+        let id: String = handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT id FROM files WHERE id = 'file-read-your-write'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read the committed row back through sql_read");
+        assert_eq!(id, "file-read-your-write");
+    }
+
+    #[tokio::test]
+    async fn sql_read_cannot_write() {
+        let (_tmp, handle) = open_files_handle();
+        let result: CovenResult<()> = handle
+            .sql_read(|conn| {
+                conn.execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('file-read-only', NULL, 0, '0')",
+                    [],
+                )
+                .map_err(CovenError::from)?;
+                Ok(())
+            })
+            .await;
+        // The companion connection is SQLITE_OPEN_READONLY, so the write is refused
+        // at the SQLite layer with the readonly code — a read cannot escape the sync
+        // journal because it cannot write at all.
+        match result {
+            Err(CovenError::Sqlite(rusqlite::Error::SqliteFailure(err, _))) => {
+                assert_eq!(err.code, rusqlite::ErrorCode::ReadOnly);
+            }
+            other => panic!("expected a readonly sqlite failure, got {other:?}"),
+        }
+
+        let count: i64 = handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM files WHERE id = 'file-read-only'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("count rows through sql_read");
+        assert_eq!(count, 0, "the refused write left no row behind");
+    }
+
+    #[tokio::test]
+    async fn open_on_a_fresh_library_serves_sql_read() {
+        // A fresh (empty) directory: `open` runs the writer's migrations, then opens
+        // the read connection against the schema they created. A `sql_read` over the
+        // host table then succeeds rather than failing on a missing table — proof the
+        // read connection opened after, not before, the schema exists.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = Coven::builder(config(dir))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open()
+            .expect("open on an empty directory");
+        let count: i64 = handle
+            .sql_read(|conn| {
+                conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+                    .map_err(CovenError::from)
+            })
+            .await
+            .expect("sql_read on a fresh library");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

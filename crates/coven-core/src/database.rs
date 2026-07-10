@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
-use tracing::debug;
+use tracing::warn;
 // `error!` fires only from the native connection thread's shutdown path.
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::error;
@@ -775,7 +775,13 @@ impl Database {
         changeset: &[u8],
     ) -> Result<(), DbError> {
         if changeset.is_empty() {
-            debug!("journaled transaction produced no synced changes");
+            // A tripwire, not a routine event. Two ways it fires, once hosts route
+            // pure reads through the journal-free read path (native
+            // `CovenHandle::sql_read`, the wasm facade's `query`): a read still on the
+            // write path — move it off — or a conditional write that happened to
+            // no-op this cycle (e.g. an idempotent `mint_item_key` re-mint), which is
+            // legitimate and stays on `sql()`. Warn so the first case is visible.
+            warn!("journaled sql transaction produced no synced changes; pure reads belong on sql_read");
             return Ok(());
         }
         tx.execute(
