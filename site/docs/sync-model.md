@@ -61,23 +61,52 @@ fresh-device bootstrap from a snapshot has its own page,
 A missed write is a silent divergence: two devices disagree and nothing
 reports it. If capture meant the host reporting its own changes, every
 forgotten call site in every app would be such a miss. So coven owns the
-connection and records changes itself; a host write that skips the recording
-cannot happen, because there is no other connection to write through.
+connections and records changes itself; a host write that skips the recording
+cannot happen, because the only connection that can write is the one capture
+is attached to.
 
 The host opens the library once through
 `Coven::builder(config).synced_tables(...).migrations(...).open()`, declaring
-its [synced tables](/docs/local-data), and from then on runs all its SQL
-through `handle.sql(...)`. The connection lives on one dedicated thread (an
-actor). Capture is the SQLite session extension, attached to every declared
-table on that owned connection: each insert, update, and delete to a synced
-table is recorded into an in-memory changeset. The host writes as usual.
-Capture is passive, and there is no host-lent pointer to a connection coven
-does not own.
+its [synced tables](/docs/local-data), and from then on runs all its writes
+through `handle.sql(...)`. The writer connection lives on one dedicated
+thread (an actor). Capture is the SQLite session extension, attached to every
+declared table on that owned connection: each insert, update, and delete to a
+synced table is recorded into an in-memory changeset. The host writes as
+usual. Capture is passive, and there is no host-lent pointer to a connection
+coven does not own.
 
 The set is not a tuning knob. With no tables declared the session attaches
 nothing and produces empty changesets forever, so
 [`init_sync_over_storage`](rustdoc:fn:coven::sync::cycle::init_sync_over_storage)
 treats an empty set as a hard error and refuses to start.
+
+## Reads
+
+Reads don't need capture, and they don't get it. Two read paths exist, and
+both hold the invariant above the same way: they run on read-only SQLite
+connections, so a write through them is refused by SQLite itself — a read
+cannot bypass capture because it cannot write at all.
+
+- **In the host's own process**: `handle.sql_read(...)`. The full handle
+  opens a read-only companion connection on the same WAL database, on its own
+  thread; a pure read runs there, concurrent with the writer instead of
+  queued behind it, with no session attached. Read-your-writes holds for
+  committed writes: a `sql_read` after an awaited `sql`/`write` sees that
+  data.
+- **From a second process (or a second handle)**:
+  `Coven::builder(config).open_read_only()` returns a
+  [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-library
+  reader for something like a macOS File Provider extension that must serve
+  reads while the app holds the full handle open. It takes no library lock
+  and runs no migrations (it refuses a schema newer than its binary), and it
+  exposes reads only: SQL, and blob reads that may fetch from the cloud into
+  the device cache. WAL makes the coexistence safe: many readers, one writer,
+  each read seeing the last committed state.
+
+The write path polices itself: a `handle.sql(...)` transaction that captures
+an empty changeset logs a warning, because it means either a pure read is
+still on the write path (move it to `sql_read`) or a conditional write
+no-op'd this time (legitimate; it stays on `sql`).
 
 ## The sync cycle
 

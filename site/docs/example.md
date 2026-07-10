@@ -11,13 +11,14 @@ them) reach teammates; the rest stay on the device that wrote them.
 
 ## Open the library
 
-coven owns the connection. The host opens one native handle with
+coven owns the connections. The host opens one native handle with
 [`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
 that sync and the [migration ladder](/docs/schema-evolution) that creates the
 app's own tables. coven runs its bookkeeping migration first, then any ladder
 rungs above the database's version, seeds its clock off the rows already on
 disk, attaches the change-capture session to the synced tables, and spawns the
-thread that owns the connection.
+threads that own the connections — a writer, and a read-only companion that
+backs `handle.sql_read`.
 
 ```rust
 use coven::{Coven, Migration, SyncedTable};
@@ -103,13 +104,17 @@ always sorts after them.
 
 ## Read a row
 
-Reads go through the same `handle.sql`. Nothing about reading is coven-specific,
-the closure just runs your query.
+Reads go through [`handle.sql_read`](rustdoc:struct:coven::CovenHandle), which
+runs the closure on a read-only companion connection: no change capture, and
+reads run concurrently with the writer instead of queuing behind it. The
+closure gets the `&Connection` directly (there is no stamp to mint on a read),
+and a write inside it is refused by SQLite — the connection is read-only. A
+read issued after an awaited write sees that write.
 
 ```rust
 let titles: Vec<String> = handle
-    .sql(move |sql| {
-        let mut stmt = sql.tx().prepare(
+    .sql_read(move |conn| {
+        let mut stmt = conn.prepare(
             "SELECT title FROM todos WHERE list_id = ?1 ORDER BY _updated_at",
         )?;
         let rows = stmt
@@ -120,8 +125,8 @@ let titles: Vec<String> = handle
     .await?;
 ```
 
-A local-only app stops here: open the handle, write and read through `handle.sql`,
-and never build any of the sync machinery below.
+A local-only app stops here: open the handle, write through `handle.sql`, read
+through `handle.sql_read`, and never build any of the sync machinery below.
 
 ## Turn on sync
 

@@ -6,8 +6,8 @@ that holds every user's data in the clear.
 coven syncs without the server. Devices exchange end-to-end-encrypted changes
 through storage the user already has, and merge them locally.
 
-The data is SQLite. You keep your schema; coven owns the connection and runs
-your queries through it, so it can
+The data is SQLite. You keep your schema; coven owns the connections and runs
+your queries through them, so it can
 [capture](https://www.sqlite.org/sessionintro.html) each change with SQLite's
 session extension, encrypt and sign it, move it through the user's storage,
 and apply remote changes back.
@@ -110,6 +110,20 @@ handle.sql(move |sql| {
 }).await?;
 ```
 
+**Read on the read connection.** Pure reads go through `handle.sql_read`,
+which runs on a read-only companion connection: no change capture, and reads
+run concurrently with the writer instead of queuing behind it. The connection
+is read-only at the SQLite layer, so a write inside the closure is refused. A
+read issued after an awaited write sees that write.
+
+```rust
+let titles: Vec<String> = handle.sql_read(|conn| {
+    let mut stmt = conn.prepare("SELECT title FROM todos ORDER BY _updated_at")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}).await?;
+```
+
 Everything else is more of the same shape: `handle.write` commits a row and
 its file bytes in one transaction, `handle.connect_sync` starts the background
 loop, `handle.subscribe_sync_status` streams what each cycle applied, and
@@ -120,10 +134,12 @@ loop, `handle.subscribe_sync_status` streams what each cycle applied, and
 The integration stays small because the boundary is strict: coven owns what
 sync needs to be correct, and the host owns the product.
 
-coven owns the sync layer and the database connection:
+coven owns the sync layer and the database connections:
 
-- The one SQLite connection. coven opens it, runs the change-capture session on
-  it, and keeps its own bookkeeping there. You run your queries through it.
+- The SQLite connections: one writer, where coven runs the change-capture
+  session and keeps its own bookkeeping, and a read-only companion for
+  queries. You run your writes through the first and your reads through the
+  second; there is no connection coven does not own.
 - Capturing local changes and applying remote ones.
 - Encrypting, signing, and verifying everything that leaves the device.
 - Moving rows and files through your storage.
@@ -131,7 +147,7 @@ coven owns the sync layer and the database connection:
 
 You own the app:
 
-- Your schema and your queries, run through coven's connection.
+- Your schema and your queries, run through coven's connections.
 - Which tables sync and which stay local.
 - Where user-provided blob files live on disk.
 - Provider configuration and credentials.

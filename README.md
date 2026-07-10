@@ -7,8 +7,8 @@ coven syncs without the server. Devices exchange end-to-end-encrypted changes
 through storage the user already has (Google Drive, Dropbox, OneDrive, iCloud,
 or any S3-compatible endpoint), and merge them locally.
 
-The data is SQLite. You keep your schema; coven owns the connection and runs
-your queries through it, so it can capture each change with SQLite's session
+The data is SQLite. You keep your schema; coven owns the connections and runs
+your queries through them, so it can capture each change with SQLite's session
 extension, encrypt and sign it, move it through the user's storage, and apply
 remote changes back.
 
@@ -44,6 +44,10 @@ handle.sql(move |sql| {
     Ok(())
 }).await?;
 ```
+
+Pure reads go through `handle.sql_read`, which runs on a read-only companion
+connection: no change capture, and reads run concurrently with the writer
+instead of queuing behind it.
 
 Connect storage when there is somewhere to sync to. A library with no cloud
 home is complete on its own. Identity and keys live in the OS keyring: the
