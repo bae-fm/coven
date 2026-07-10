@@ -197,6 +197,40 @@ pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<u32
     read_user_version(conn)
 }
 
+/// Validate the ladder and check the on-disk schema is one this binary supports,
+/// **without applying anything** — the read-only counterpart of [`run_migrations`]
+/// for [`Database::open_read_only`](crate::database::Database::open_read_only).
+///
+/// Runs the same contiguity validation and the same `SchemaTooNew` refusal as
+/// [`run_migrations`], then returns the current `PRAGMA user_version` unchanged. A
+/// reader cannot migrate (its connection is read-only), so an on-disk version below
+/// this binary's top is left as-is: the reader reads the schema the writer left,
+/// and a writer that opens the same db migrates it forward.
+pub fn ensure_schema_supported(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> Result<u32, MigrationError> {
+    for (i, m) in migrations.iter().enumerate() {
+        let expected = i as u32 + 1;
+        if m.version != expected {
+            return Err(MigrationError::NotContiguous {
+                position: i,
+                found: m.version,
+                expected,
+            });
+        }
+    }
+    let top = supported_version(migrations);
+    let current = read_user_version(conn)?;
+    if current > top {
+        return Err(MigrationError::SchemaTooNew {
+            current,
+            supported: top,
+        });
+    }
+    Ok(current)
+}
+
 /// Read the db's applied synced-schema version from `PRAGMA user_version`.
 fn read_user_version(conn: &Connection) -> Result<u32, MigrationError> {
     conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -406,6 +440,43 @@ mod tests {
                 position: 0,
                 found: 2,
                 expected: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn ensure_schema_supported_checks_without_migrating() {
+        let migrations = vec![
+            Migration::sql(1, "a", "CREATE TABLE a (id TEXT PRIMARY KEY)"),
+            Migration::sql(2, "b", "CREATE TABLE b (id TEXT PRIMARY KEY)"),
+        ];
+
+        // A db at version 1 (an older schema than this 2-step binary) is supported and
+        // read as-is: no migration runs, no table is created, the version is unchanged.
+        let conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "user_version", 1u32)
+            .expect("set user_version");
+        assert_eq!(
+            ensure_schema_supported(&conn, &migrations).expect("v1 is supported"),
+            1
+        );
+        assert!(
+            !table_exists(&conn, "b"),
+            "ensure_schema_supported must not apply any migration",
+        );
+        assert_eq!(user_version(&conn), 1, "the version is left untouched");
+
+        // A db a newer binary migrated past this one is refused with the matchable
+        // variant — same policy as run_migrations, so a reader can prompt "update the app".
+        let ahead = Connection::open_in_memory().expect("open");
+        ahead
+            .pragma_update(None, "user_version", 5u32)
+            .expect("set user_version");
+        assert!(matches!(
+            ensure_schema_supported(&ahead, &migrations),
+            Err(MigrationError::SchemaTooNew {
+                current: 5,
+                supported: 2
             })
         ));
     }

@@ -64,6 +64,13 @@ struct DatabaseState {
     /// `synced_tables` so the sync layer reads it from the one owner rather than
     /// threading a separately-passed copy that could diverge.
     blob_tombstone_grace: chrono::Duration,
+    /// True for a `SQLITE_OPEN_READONLY` handle opened by
+    /// [`Database::open_read_only`] — a same-library secondary reader. The blob
+    /// read path reads it (via [`Database::is_read_only`]) to skip the
+    /// device-local uploader-index writes it would otherwise make; those writes
+    /// are a listing-scan-avoidance cache, not read correctness, and a read-only
+    /// connection would refuse them. Always false for a writer open.
+    read_only: bool,
 }
 
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
@@ -85,6 +92,7 @@ struct DatabaseCore {
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
+    read_only: bool,
 }
 
 impl DatabaseCore {
@@ -161,10 +169,71 @@ impl DatabaseCore {
             gates,
             blob_decls,
             blob_tombstone_grace,
+            read_only: false,
         };
         let state = core.state();
 
         Ok((core, state, stamper))
+    }
+
+    /// Open the connection at `path` read-only: a `SQLITE_OPEN_READONLY`
+    /// connection resolving the same gate/blob models a writer open resolves, but
+    /// running no migration ladder and no schema/bookkeeping writes. It refuses a
+    /// db a newer binary migrated past this one (the writer's `SchemaTooNew`
+    /// policy), since its models must understand the on-disk schema. Backs
+    /// [`Database::open_read_only`]; see it for why a reader takes no library lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_read_only(
+        path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        hlc: Arc<Hlc>,
+        migrations: &[Migration],
+    ) -> Result<(Self, DatabaseState), OpenError> {
+        let conn = open_connection_read_only(path)?;
+        // `foreign_keys` is a per-connection runtime setting, not a write to the db
+        // file, so it is allowed on a read-only connection; keeping it on matches the
+        // writer's relational view. A read never inserts, so it enforces nothing new.
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(DbError::from)?;
+
+        // Open against the on-disk schema exactly as the writer left it: run no
+        // migration ladder (that writes), but refuse a schema newer than this binary
+        // knows — the same policy `run_migrations` applies — because the gate and blob
+        // models below are resolved against a schema this binary must understand.
+        let schema_version = crate::migration::ensure_schema_supported(&conn, migrations)?;
+
+        // Reads only (PRAGMA table_info): assert the host tables the writer created
+        // still present the synced-table contract, so a wrong schema fails loud at
+        // open rather than mid-read.
+        validate_host_synced_tables(&conn, &synced_tables)?;
+
+        // Same coven-owned `item_keys` injection the writer open does, so the gate and
+        // blob models resolve over the identical table set.
+        let mut synced_tables = synced_tables;
+        synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
+        let synced_tables = Arc::new(synced_tables);
+
+        // No register-clock seeding: a reader never mints an `_updated_at`, so it has
+        // no stamp to keep ahead of on-disk values.
+        let gates = Arc::new(
+            Gates::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
+        );
+        let blob_decls = Arc::new(
+            BlobDecls::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
+        );
+        let core = DatabaseCore {
+            conn,
+            hlc,
+            synced_tables,
+            schema_version,
+            gates,
+            blob_decls,
+            blob_tombstone_grace,
+            read_only: true,
+        };
+        let state = core.state();
+        Ok((core, state))
     }
 
     fn state(&self) -> DatabaseState {
@@ -175,6 +244,7 @@ impl DatabaseCore {
             gates: self.gates.clone(),
             blob_decls: self.blob_decls.clone(),
             blob_tombstone_grace: self.blob_tombstone_grace,
+            read_only: self.read_only,
         }
     }
 
@@ -501,6 +571,59 @@ impl Database {
         };
 
         Ok((database, stamper))
+    }
+
+    /// Open the library at `path` read-only for a same-library secondary reader
+    /// (e.g. a separate process reading while another holds the writer open).
+    ///
+    /// Distinct from [`Database::open`] in three ways, all so the reader never
+    /// mutates shared state a concurrent writer owns: the connection is
+    /// `SQLITE_OPEN_READONLY`; no migration ladder or bookkeeping DDL runs (it
+    /// opens against the schema the writer left, and refuses one newer than this
+    /// binary knows — the writer's `SchemaTooNew` policy); and it returns no
+    /// stamper, because a reader mints no `_updated_at`. Reads are safe across
+    /// processes because the writer opens the db in WAL mode, so a reader observes
+    /// committed rows while the writer commits more.
+    ///
+    /// The caller takes no library open-lock for a read-only open: the exclusive
+    /// advisory lock guards against a second *writer*, and a read-only connection
+    /// cannot write, so multiple readers and one writer coexist under WAL.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_read_only(
+        path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        device_id: String,
+        migrations: &[Migration],
+    ) -> Result<Database, OpenError> {
+        let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
+        let (core, state) = DatabaseCore::open_read_only(
+            path,
+            synced_tables,
+            blob_tombstone_grace,
+            Arc::new(hlc),
+            migrations,
+        )?;
+        let (jobs_tx, jobs_rx) = tokio::sync::mpsc::unbounded_channel::<DbJob>();
+        let join = std::thread::Builder::new()
+            .name("coven-db-ro".to_string())
+            .spawn(move || run_connection_thread(core, jobs_rx))
+            .map_err(|e| DbError(format!("spawn database connection thread: {e}")))?;
+        Ok(Database {
+            thread: Arc::new(ConnectionThread {
+                jobs: jobs_tx,
+                join: Some(join),
+            }),
+            state,
+        })
+    }
+
+    /// Whether this handle owns a read-only (`SQLITE_OPEN_READONLY`) connection.
+    /// The blob read path reads it to skip the device-local uploader-index writes
+    /// a read-only connection would refuse — those are a listing-scan-avoidance
+    /// cache, not read correctness.
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.state.read_only
     }
 
     /// The host's declared synced-table set, the single owner of which tables
@@ -1563,8 +1686,20 @@ thread_local! {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+static PLATFORM_READONLY_CONNECTION_OPENER: std::sync::OnceLock<PlatformConnectionOpener> =
+    std::sync::OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn register_platform_connection_opener(opener: PlatformConnectionOpener) {
     let _ = PLATFORM_CONNECTION_OPENER.set(opener);
+}
+
+/// Register the opener a read-only open ([`Database::open_read_only`]) uses,
+/// separate from the read-write one so a platform can hand each the flags it
+/// needs (the native opener passes `SQLITE_OPEN_READ_ONLY`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn register_platform_readonly_connection_opener(opener: PlatformConnectionOpener) {
+    let _ = PLATFORM_READONLY_CONNECTION_OPENER.set(opener);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1575,9 +1710,25 @@ pub fn register_platform_connection_opener(opener: PlatformConnectionOpener) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_native_connection(path: &Path) -> Result<Connection, DbError> {
     let conn = Connection::open(path).map_err(DbError::from)?;
+    // WAL so a read-only connection in another process can read committed rows while
+    // this writer commits. The mode is stored in the db header and persists, so a
+    // later read-only open finds the db already in WAL.
     conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
         .map_err(DbError::from)?;
     Ok(conn)
+}
+
+/// Open a `SQLITE_OPEN_READONLY` connection: the native opener behind
+/// [`Database::open_read_only`]. `NO_MUTEX` because coven serializes every access
+/// on its one connection thread; the connection sets no journal mode (a read-only
+/// connection cannot, and the writer already put the db in WAL).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_native_connection_read_only(path: &Path) -> Result<Connection, DbError> {
+    use rusqlite::OpenFlags;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    Connection::open_with_flags(path, flags).map_err(DbError::from)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1593,6 +1744,24 @@ fn open_connection(path: &Path) -> Result<Connection, DbError> {
         {
             Err(DbError(
                 "platform SQLite connection opener is not registered".to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_connection_read_only(path: &Path) -> Result<Connection, DbError> {
+    if let Some(opener) = PLATFORM_READONLY_CONNECTION_OPENER.get() {
+        opener(path)
+    } else {
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            open_native_connection_read_only(path)
+        }
+        #[cfg(not(any(test, feature = "test-utils")))]
+        {
+            Err(DbError(
+                "platform read-only SQLite connection opener is not registered".to_string(),
             ))
         }
     }

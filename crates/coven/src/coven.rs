@@ -130,6 +130,25 @@ pub struct CovenBuilder {
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
+/// The single-writer library lock: an exclusive advisory lock on
+/// `<library>/.coven-lock`, held for the life of a full [`open`](CovenBuilder::open)
+/// handle (and its running sync loop). A second full open of the same library is
+/// refused with [`CovenError::AlreadyOpen`] while the lock is held — the invariant
+/// that keeps two writers from racing the same db and blob store.
+///
+/// # Read-only opens take no lock
+///
+/// [`open_read_only`](CovenBuilder::open_read_only) deliberately does **not** touch
+/// this lock. The lock is exclusive, so a shared lock on the same file would block
+/// against a writer that already holds it (and vice versa) — a reader could never
+/// coexist with the writer it exists to read alongside. But a read-only open needs
+/// no lock at all: the lock guards against a second *writer*, and a read-only handle
+/// holds a `SQLITE_OPEN_READONLY` connection that cannot write. So a read-only open
+/// skips the guard entirely. Cross-process safety comes from WAL mode (a reader sees
+/// committed rows while the writer commits more), not from this lock; the blob cache
+/// a reader may populate is per-device scratch written atomically (temp + rename), so
+/// a reader and the writer touching the same cache file never tear it. This lets one
+/// writer and any number of read-only readers coexist on one library.
 pub(crate) struct LibraryOpenGuard {
     _file: std::fs::File,
 }
@@ -253,6 +272,53 @@ impl CovenBuilder {
             self.cloudkit_ops,
             self.observer,
             open_guard,
+        ))
+    }
+
+    /// Open the library read-only for a same-library secondary reader: a separate
+    /// process (or a second handle) that must read rows and blobs while another
+    /// handle holds the full [`open`](Self::open). Returns a [`CovenReadHandle`],
+    /// whose surface is reads only — SQL queries and blob reads — with no write,
+    /// sync, migration, or stamp API by construction.
+    ///
+    /// Unlike [`open`](Self::open) this takes no library lock (see
+    /// [`LibraryOpenGuard`]): it succeeds while a writer holds the exclusive lock,
+    /// and any number of read-only opens coexist. It opens a `SQLITE_OPEN_READONLY`
+    /// connection against the schema on disk, running no migration ladder — but it
+    /// refuses a db a newer binary migrated past what this binary supports
+    /// ([`CovenError::Migration`] with [`MigrationError::SchemaTooNew`]), the same
+    /// policy the writer enforces. It runs no orphan-temp cleanup either (that is a
+    /// write the lock-holding writer owns).
+    ///
+    /// Cross-process reads are safe because the writer opens the db in WAL mode; a
+    /// blob read that misses locally fetches from the cloud into the per-device
+    /// cache (files written atomically), which is device scratch and touches no
+    /// synced state.
+    pub fn open_read_only(self) -> CovenResult<crate::read_handle::CovenReadHandle> {
+        crate::install_platform();
+        let config = self.config.current();
+        let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
+        let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
+        let db_path = config.library_dir.db_path();
+        let provider = self.config.provider();
+        let library_dir = config.library_dir.clone();
+        // No LibraryOpenGuard and no orphan-temp cleanup: both are writer concerns
+        // (see LibraryOpenGuard). A reader must not take the exclusive lock the
+        // writer holds, nor write the filesystem the writer owns.
+        let db = Database::open_read_only(
+            &db_path,
+            tables,
+            self.blob_tombstone_grace,
+            config.device_id.clone(),
+            &migrations,
+        )?;
+        Ok(crate::read_handle::CovenReadHandle::new(
+            db,
+            library_dir,
+            provider,
+            self.key_service,
+            self.clock,
+            self.cloudkit_ops,
         ))
     }
 }
@@ -2165,6 +2231,281 @@ mod tests {
         assert!(
             !stale_local_stage.exists(),
             "local-store staging temps are still swept at open",
+        );
+    }
+
+    // ========================================================================
+    // Read-only opens (CovenReadHandle)
+    // ========================================================================
+
+    fn try_open_read_only(dir: &LibraryDir) -> CovenResult<crate::read_handle::CovenReadHandle> {
+        Coven::builder(config(dir.clone()))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open_read_only()
+    }
+
+    async fn read_files_count(handle: &crate::read_handle::CovenReadHandle) -> i64 {
+        handle
+            .sql(|conn| {
+                conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+                    .map_err(CovenError::from)
+            })
+            .await
+            .expect("count files through the read handle")
+    }
+
+    /// The requirement's failing baseline made to pass: a second FULL open is still
+    /// refused while the first holds the library, but a read-only open succeeds
+    /// against the same held library — it takes no writer lock.
+    #[tokio::test]
+    async fn read_only_open_succeeds_while_a_full_open_holds_the_library() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let writer = open_files_handle_in(dir.clone());
+
+        // A second full open is refused (the invariant the lock protects).
+        assert!(matches!(
+            try_open(&dir),
+            Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+        ));
+
+        // A read-only open succeeds against the very same held library.
+        let reader = try_open_read_only(&dir).expect("read-only open succeeds under a full open");
+        assert_eq!(read_files_count(&reader).await, 0);
+
+        drop(writer);
+    }
+
+    /// Multiple read-only opens coexist with each other and with the writer.
+    #[tokio::test]
+    async fn multiple_read_only_opens_coexist_with_a_writer() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let writer = open_files_handle_in(dir.clone());
+
+        let reader_a = try_open_read_only(&dir).expect("first read-only open");
+        let reader_b = try_open_read_only(&dir).expect("second read-only open");
+
+        assert_eq!(read_files_count(&reader_a).await, 0);
+        assert_eq!(read_files_count(&reader_b).await, 0);
+        drop(writer);
+    }
+
+    /// A read-only handle sees rows the writer committed — both before the reader
+    /// opened and after (WAL cross-connection visibility on the one db file).
+    #[tokio::test]
+    async fn read_only_open_sees_committed_writer_data() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let writer = open_files_handle_in(dir.clone());
+
+        writer
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('row-before-reader', NULL, 0, ?1)",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("writer inserts before the reader opens");
+
+        let reader = try_open_read_only(&dir).expect("read-only open");
+        assert_eq!(
+            read_files_count(&reader).await,
+            1,
+            "the reader sees the row committed before it opened",
+        );
+
+        // A commit after the reader is open is visible on its next read: coven runs
+        // each read as its own transaction, so it never pins an old WAL snapshot.
+        writer
+            .sql(|sql| {
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('row-after-reader', NULL, 0, ?1)",
+                    [sql.stamp()],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("writer inserts after the reader opened");
+        assert_eq!(
+            read_files_count(&reader).await,
+            2,
+            "the reader sees a row the writer committed after the reader opened",
+        );
+        drop(writer);
+    }
+
+    /// A read-only handle has no write API at all — writes are absent by
+    /// construction. The one place a raw statement could be run is the `sql`
+    /// closure's `&Connection`; because the connection is `SQLITE_OPEN_READONLY`,
+    /// SQLite refuses the write there rather than mutating the library.
+    #[tokio::test]
+    async fn read_only_handle_connection_refuses_writes() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let _writer = open_files_handle_in(dir.clone());
+        let reader = try_open_read_only(&dir).expect("read-only open");
+
+        let result: CovenResult<()> = reader
+            .sql(|conn| {
+                conn.execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('should-not-write', NULL, 0, 'x')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(result, Err(CovenError::Sqlite(_))),
+            "a write through the read-only connection is refused by SQLite: {result:?}",
+        );
+    }
+
+    /// A read-only open runs no migration ladder, but refuses a db a newer binary
+    /// migrated past what this binary knows — the writer's `SchemaTooNew` policy.
+    #[tokio::test]
+    async fn read_only_open_refuses_a_too_new_schema() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+
+        // A newer binary migrates the db to synced-schema version 2.
+        let ahead = Coven::builder(config(dir.clone()))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![
+                files_migration(),
+                Migration::sql(2, "add-extra", "CREATE TABLE extra (id TEXT PRIMARY KEY)"),
+            ])
+            .open()
+            .expect("open at version 2");
+        drop(ahead);
+
+        // An older binary opens the same db read-only with only the version-1 ladder:
+        // it cannot understand the schema, so it refuses with the matchable variant.
+        let reopened = Coven::builder(config(dir))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration()])
+            .open_read_only();
+        assert!(matches!(
+            reopened,
+            Err(CovenError::Migration(MigrationError::SchemaTooNew {
+                current: 2,
+                supported: 1
+            }))
+        ));
+    }
+
+    /// End-to-end blob read through the read handle: the writer stores a
+    /// host-provided blob on a remote-root table (its bytes land in the local store
+    /// as upload staging); the read-only handle resolves the blob's locality and
+    /// serves those bytes — no cloud, no writer lock.
+    #[tokio::test]
+    async fn read_only_handle_reads_a_host_provided_blob() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let writer = Coven::builder(config(dir.clone()))
+            .synced_tables(vec![remote_root_files_table()])
+            .migrations(vec![files_migration()])
+            .open()
+            .expect("open writer");
+
+        let bytes = b"read-only-handle-serves-these-blob-bytes".to_vec();
+        writer
+            .write(
+                {
+                    let bytes = bytes.clone();
+                    move |w| {
+                        w.put_blob("media-files", "roblob01", bytes);
+                        Ok(())
+                    }
+                },
+                {
+                    let len = bytes.len() as i64;
+                    move |sql| {
+                        sql.tx().execute(
+                            "INSERT INTO files (id, blob_id, size, _updated_at) \
+                             VALUES (?1, ?2, ?3, ?4)",
+                            params!["file-ro", "roblob01", len, sql.stamp()],
+                        )?;
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .expect("writer stores the row and blob");
+
+        let reader = Coven::builder(config(dir))
+            .synced_tables(vec![remote_root_files_table()])
+            .migrations(vec![files_migration()])
+            .open_read_only()
+            .expect("read-only open");
+
+        let blob = BlobRef {
+            namespace: "media-files".to_string(),
+            id: "roblob01".to_string(),
+            scope: BlobScope::Master,
+            cloud_path: None,
+            provenance: Provenance::HostProvided,
+            fill: CacheFill::CacheLazy,
+        };
+        let read = reader
+            .read_blob(&blob)
+            .await
+            .expect("read blob via read handle");
+        assert_eq!(
+            read, bytes,
+            "the read handle serves the blob the writer stored"
+        );
+
+        // A ranged read through the same handle serves the requested slice.
+        let (offset, len) = (5u64, 10u64);
+        let range = reader
+            .open_blob_stream(&blob, bytes.len() as u64, offset, len)
+            .await
+            .expect("ranged read via read handle");
+        assert_eq!(range, &bytes[offset as usize..(offset + len) as usize]);
+        drop(writer);
+    }
+
+    /// Concurrent same-path cache populate by two producers (the writer's and the
+    /// reader's fetch both writing the same blob into `cache/`) is safe: the atomic
+    /// temp-then-rename write means the destination is always one producer's whole
+    /// file, never a torn interleave. This is the primitive requirement 6 rests on.
+    #[tokio::test]
+    async fn concurrent_same_blob_cache_writes_never_tear() {
+        crate::install_platform();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let dest = dir
+            .cache_blob_path("media-files", "raceblob")
+            .expect("cache path");
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).expect("create cache shard dir");
+        }
+
+        // Two full-length payloads that differ everywhere, so any interleave would be
+        // detectable as a mixed file. In production both producers write the same
+        // blob's bytes; the distinct payloads only make tearing observable.
+        let a = vec![b'A'; 64 * 1024];
+        let b = vec![b'B'; 64 * 1024];
+        let (ra, rb) = tokio::join!(
+            crate::local_blob::write_atomic(&dest, &a),
+            crate::local_blob::write_atomic(&dest, &b),
+        );
+        ra.expect("first concurrent cache write");
+        rb.expect("second concurrent cache write");
+
+        let final_bytes = crate::local_blob::read(&dest)
+            .await
+            .expect("read cache file");
+        assert!(
+            final_bytes == a || final_bytes == b,
+            "the cache file is exactly one producer's whole payload, never a torn mix",
         );
     }
 }

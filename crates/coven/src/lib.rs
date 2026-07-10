@@ -336,6 +336,7 @@ mod coven;
 mod database_backend;
 mod handle;
 mod keyring_backend;
+mod read_handle;
 
 pub(crate) fn install_platform() {
     database_backend::install_platform_connection_opener();
@@ -350,6 +351,7 @@ pub use coven::{
     Coven, CovenBuilder, CovenConfig, CovenError, CovenResult, SqlContext, WriteBatch,
 };
 pub use handle::CovenHandle;
+pub use read_handle::CovenReadHandle;
 
 // --- coven-core's curated engine surface, re-exported so a host names it as
 //     `coven::…` and never depends on `coven-core` directly. ---

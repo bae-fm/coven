@@ -1,0 +1,185 @@
+//! The read-only native handle: a same-library secondary reader.
+//!
+//! Where [`CovenHandle`](crate::CovenHandle) is the one full handle a host opens to
+//! drive rows, blobs, and sync, [`CovenReadHandle`] is the deliberately narrow
+//! counterpart for a second reader of the *same* library — a separate process (the
+//! macOS File Provider extension) or a second in-process handle — that must read
+//! while another handle holds the writer open.
+//!
+//! It is opened with [`Coven::builder(cfg).open_read_only()`](crate::CovenBuilder::open_read_only)
+//! and exposes reads only: SQL queries against the connection coven owns, and blob
+//! reads (local store, pinned/evictable cache, or a cloud fetch into the cache).
+//! There is no write, sync-manager, migration, or stamp API on it — those are absent
+//! by construction, so a reader cannot mutate the synced state a concurrent writer
+//! owns. Its connection is `SQLITE_OPEN_READONLY`, so even the raw
+//! [`sql`](CovenReadHandle::sql) closure's `&Connection` refuses DML at the SQLite
+//! layer.
+//!
+//! It takes no library lock: it coexists with the writer that holds the exclusive
+//! `.coven-lock`, and with any number of other read-only opens (a read-only
+//! connection cannot write, so the single-writer lock does not apply to it).
+//! Cross-process reads are safe because the writer opens the db in WAL mode.
+
+use std::sync::Arc;
+
+use crate::blob::cache::BlobCacheError;
+use crate::blob::BlobRef;
+use crate::clock::ClockRef;
+use crate::config::Config;
+use crate::coven::{CovenError, CovenResult};
+use crate::database::Database;
+use crate::keys::KeyService;
+use crate::library_dir::LibraryDir;
+use crate::sync::storage::SyncStorage;
+use crate::sync::sync_manager::ConfigProvider;
+
+/// A read-only handle over one coven library, for a same-library secondary reader.
+///
+/// Open it with
+/// [`Coven::builder(cfg).open_read_only()`](crate::CovenBuilder::open_read_only).
+/// Cheap to [`clone`](Clone) — every field is shared (an `Arc` or a `Clone` handle),
+/// so a clone reads the same database and storage as the original.
+///
+/// # What it can do
+///
+/// - **Rows** — read via [`sql`](Self::sql). The closure receives the `&Connection`
+///   coven owns; because the connection is read-only, any write statement fails at
+///   the SQLite layer.
+/// - **Blobs** — [`read_blob`](Self::read_blob) and
+///   [`open_blob_stream`](Self::open_blob_stream) resolve a blob's locality and serve
+///   it from the local store, the cache, or a cloud fetch into the per-device cache.
+///   [`is_pinned`](Self::is_pinned) reports whether a set is kept offline.
+///
+/// It builds read storage from the current [`Config`] on a cloud miss, exactly as a
+/// home-less full handle does — there is no sync loop to reuse.
+#[derive(Clone)]
+pub struct CovenReadHandle {
+    db: Database,
+    library_dir: LibraryDir,
+    config_provider: ConfigProvider,
+    key_service: KeyService,
+    clock: ClockRef,
+    cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+}
+
+impl CovenReadHandle {
+    pub(crate) fn new(
+        db: Database,
+        library_dir: LibraryDir,
+        config_provider: ConfigProvider,
+        key_service: KeyService,
+        clock: ClockRef,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+    ) -> Self {
+        Self {
+            db,
+            library_dir,
+            config_provider,
+            key_service,
+            clock,
+            cloudkit_ops,
+        }
+    }
+
+    fn config(&self) -> Config {
+        (self.config_provider)()
+    }
+
+    /// Run a read against the connection coven owns and await the result.
+    ///
+    /// The closure receives the `&Connection` directly (coven serializes access on
+    /// its connection thread, so this never races the writer's process). The
+    /// connection is `SQLITE_OPEN_READONLY`: a `SELECT`/`PRAGMA` reads normally, and
+    /// any `INSERT`/`UPDATE`/`DELETE`/DDL is refused by SQLite — the read-only
+    /// guarantee is enforced at the connection, not left to the caller.
+    pub async fn sql<F, R>(&self, f: F) -> CovenResult<R>
+    where
+        F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let outcome = self
+            .db
+            .call(move |conn| Ok(f(conn)))
+            .await
+            .map_err(CovenError::from)?;
+        outcome
+    }
+
+    /// The read [`SyncStorage`] for a cloud miss, or `None` for a home-less library.
+    ///
+    /// A read-only handle holds no sync manager, so — unlike the full handle — it
+    /// always builds storage from the current [`Config`]: `None` when no provider is
+    /// configured (a home-less library holds only Local blobs, which never reach the
+    /// cloud-miss path), `Some` built from config otherwise. A provider configured
+    /// but unbuildable (missing credentials) surfaces its setup error.
+    async fn blob_storage(
+        &self,
+    ) -> Result<Option<Arc<dyn SyncStorage>>, crate::storage::cloud::setup::StorageSetupError> {
+        let config = self.config();
+        if config.cloud_home.provider.is_none() {
+            return Ok(None);
+        }
+        let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
+            &config,
+            &self.key_service,
+            None,
+            self.clock.clone(),
+            self.cloudkit_ops.clone(),
+        )
+        .await?;
+        Ok(Some(Arc::new(storage)))
+    }
+
+    /// Read a blob's whole plaintext through coven's locality-aware read: served from
+    /// coven's local store (Local host-provided), the user's file (Local
+    /// user-provided), the pinned/evictable cache on a Remote hit, or fetched from
+    /// the cloud into the cache on a Remote miss. The read counterpart of
+    /// [`CovenHandle::read_blob`](crate::CovenHandle::read_blob).
+    ///
+    /// A cloud fetch writes the fetched bytes into the per-device cache
+    /// (`storage/cache/`) with an atomic temp-then-rename — device scratch, no synced
+    /// state touched — so a File Provider materializing remote content works through a
+    /// read-only handle. It records no db rows: the uploader-index write the writer's
+    /// read path makes to skip a later listing scan is skipped for a read-only handle,
+    /// which re-scans instead.
+    pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
+        let storage = self.blob_storage().await?;
+        crate::blob::cache::read_blob(&self.db, &self.library_dir, storage.as_deref(), blob).await
+    }
+
+    /// Serve `len` plaintext bytes of a blob starting at `offset`, for streaming or
+    /// seeking without loading the whole file. The ranged sibling of
+    /// [`read_blob`](Self::read_blob); a Remote-miss range read fetches from the cloud
+    /// but writes no cache file (only a whole-file read populates).
+    pub async fn open_blob_stream(
+        &self,
+        blob: &BlobRef,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, BlobCacheError> {
+        let storage = self.blob_storage().await?;
+        crate::blob::cache::open_blob_stream(
+            &self.db,
+            &self.library_dir,
+            storage.as_deref(),
+            blob,
+            source_size,
+            offset,
+            len,
+        )
+        .await
+    }
+
+    /// Whether every blob in `blobs` is pinned for offline — present in coven's kept
+    /// cache folder (`storage/pinned/`). An empty set is vacuously pinned. A read; it
+    /// stats the folder, never writes.
+    pub async fn is_pinned(&self, blobs: &[BlobRef]) -> Result<bool, BlobCacheError> {
+        for blob in blobs {
+            if !crate::blob::cache::is_pinned(&self.library_dir, &blob.namespace, &blob.id).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}

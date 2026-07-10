@@ -1272,6 +1272,20 @@ async fn reresolve_after_stale_uploader(
     storage: &dyn SyncStorage,
     blob: &BlobRef,
 ) -> Result<Option<String>, BlobCacheError> {
+    // A read-only handle cannot forget the stale record (its connection refuses
+    // writes) — and re-running `resolve_blob_uploader` would just read the same
+    // stale record back. Bypass it: scan the cloud listing directly for a surviving
+    // copy, without persisting what it finds. A writer forgets the stale record so
+    // the next read skips the scan; a reader re-scans each time, which is correct if
+    // slower.
+    if db.is_read_only() {
+        tracing::debug!(
+            namespace = %blob.namespace,
+            id = %blob.id,
+            "read-only handle: recorded blob uploader is stale; rescanning without forgetting it"
+        );
+        return scan_and_maybe_record(db, storage, blob).await;
+    }
     db.forget_blob_uploader(&blob.namespace, &blob.id)
         .await
         .map_err(|e| BlobCacheError::Io(e.0))?;
@@ -1309,21 +1323,44 @@ pub(crate) async fn resolve_blob_uploader(
     {
         return Ok(Some(uploader));
     }
+    scan_and_maybe_record(db, storage, blob).await
+}
+
+/// Discover which uploader's prefix holds `blob` by listing the namespace, and —
+/// unless this is a read-only handle — record it so the next read skips the scan.
+/// A read-only handle cannot write the record (its connection refuses it), so it
+/// resolves the same value but re-scans on the next read; the uploader index is a
+/// scan-avoidance cache, not read correctness. A namespace with no copy under any
+/// prefix is a genuine `NotFound`.
+async fn scan_and_maybe_record(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    blob: &BlobRef,
+) -> Result<Option<String>, BlobCacheError> {
     match storage
         .find_blob_uploader(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
         .await
         .map_err(BlobCacheError::Storage)?
     {
         Some(uploader) => {
-            db.record_blob_uploader(&blob.namespace, &blob.id, &uploader)
-                .await
-                .map_err(|e| BlobCacheError::Io(e.0))?;
-            tracing::debug!(
-                namespace = %blob.namespace,
-                id = %blob.id,
-                %uploader,
-                "resolved blob uploader by listing scan; recorded it so later reads skip the scan"
-            );
+            if db.is_read_only() {
+                tracing::debug!(
+                    namespace = %blob.namespace,
+                    id = %blob.id,
+                    %uploader,
+                    "read-only handle: resolved blob uploader by listing scan; not recording it"
+                );
+            } else {
+                db.record_blob_uploader(&blob.namespace, &blob.id, &uploader)
+                    .await
+                    .map_err(|e| BlobCacheError::Io(e.0))?;
+                tracing::debug!(
+                    namespace = %blob.namespace,
+                    id = %blob.id,
+                    %uploader,
+                    "resolved blob uploader by listing scan; recorded it so later reads skip the scan"
+                );
+            }
             Ok(Some(uploader))
         }
         None => Err(BlobCacheError::Storage(StorageError::NotFound(format!(
