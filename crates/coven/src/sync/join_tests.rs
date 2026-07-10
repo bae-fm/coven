@@ -430,7 +430,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .put_blob(
             "photos",
             "photo1",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"cover-bytes".to_vec(),
         )

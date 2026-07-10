@@ -29,9 +29,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::changeset::RowChange;
 use crate::sync::gate::Gates;
-use crate::sync::session::{
-    quote_ident, table_columns as session_table_columns, BlobScopeSpec, SyncedTable,
-};
+use crate::sync::session::{quote_ident, table_columns as session_table_columns, SyncedTable};
 
 /// Why building the blob-declaration model failed.
 #[derive(Debug)]
@@ -109,16 +107,8 @@ struct TableBlob {
     cloud_path_col: Option<usize>,
     /// Name of the readable cloud-path column, if declared.
     cloud_path_col_name: Option<String>,
-    /// The encryption scope, with any column reference resolved to an index.
-    scope: ResolvedScopeSpec,
-}
-
-/// [`BlobScopeSpec`] with its column reference resolved to a schema index.
-enum ResolvedScopeSpec {
-    Master,
-    Derived(String),
-    /// The item id is the value of this column in the blob's row.
-    ItemColumn(usize),
+    /// The encryption scope, fixed per table by the declaration.
+    scope: BlobScope,
 }
 
 impl TableBlob {
@@ -146,17 +136,7 @@ impl TableBlob {
             .cloud_path_col
             .and_then(|i| change.col(i))
             .map(str::to_string);
-        let scope = match &self.scope {
-            ResolvedScopeSpec::Master => BlobScope::Master,
-            ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
-            ResolvedScopeSpec::ItemColumn(i) => {
-                let Some(item) = change.col(*i) else {
-                    return Ok(None);
-                };
-                BlobScope::Item(item.to_string())
-            }
-        };
-        Ok(Some(self.blob_ref(id, scope, cloud_path)))
+        Ok(Some(self.blob_ref(id, self.scope.clone(), cloud_path)))
     }
 
     fn size_from_change(
@@ -182,7 +162,7 @@ impl TableBlob {
     }
 
     /// Build the [`BlobRef`] for a live `SELECT *` row of this table, or `None` when
-    /// the row's blob id (or an `ItemColumn` scope value) is NULL. The resolved
+    /// the row's blob id is NULL. The resolved
     /// indices address a `SELECT *` row in schema order, exactly as they address a
     /// changeset row. Shared by [`BlobDecls::refs_in_db`] (whole DB) and
     /// [`BlobDecls::refs_for_root`] (one root's subtree).
@@ -194,15 +174,7 @@ impl TableBlob {
             Some(i) => row.get::<_, Option<String>>(i)?,
             None => None,
         };
-        let scope = match &self.scope {
-            ResolvedScopeSpec::Master => BlobScope::Master,
-            ResolvedScopeSpec::Derived(s) => BlobScope::Derived(s.clone()),
-            ResolvedScopeSpec::ItemColumn(i) => match row.get::<_, Option<String>>(*i)? {
-                Some(item) => BlobScope::Item(item),
-                None => return Ok(None),
-            },
-        };
-        Ok(Some(self.blob_ref(id, scope, cloud_path)))
+        Ok(Some(self.blob_ref(id, self.scope.clone(), cloud_path)))
     }
 }
 
@@ -258,11 +230,6 @@ impl BlobDecls {
                 Some(c) => Some(index_of(c)?),
                 None => None,
             };
-            let scope = match &decl.scope {
-                BlobScopeSpec::Master => ResolvedScopeSpec::Master,
-                BlobScopeSpec::Derived(s) => ResolvedScopeSpec::Derived(s.clone()),
-                BlobScopeSpec::ItemColumn(c) => ResolvedScopeSpec::ItemColumn(index_of(c)?),
-            };
 
             map.insert(
                 t.name().to_string(),
@@ -276,7 +243,7 @@ impl BlobDecls {
                     size_col_name: decl.size_column.clone(),
                     cloud_path_col,
                     cloud_path_col_name: decl.cloud_path_column.clone(),
-                    scope,
+                    scope: decl.scope.clone(),
                 },
             );
         }

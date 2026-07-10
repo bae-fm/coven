@@ -24,7 +24,6 @@ use crate::blob::transition::{cancel_make_remote, make_local, make_remote};
 use crate::blob::upload::drain_uploads;
 use crate::blob::{
     cache, local_files, BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
-    ResolvedScope,
 };
 use crate::clock::SystemClock;
 use crate::database::Database;
@@ -268,7 +267,7 @@ async fn seed_remote_release(
         .put_blob(
             "photos",
             photo_id,
-            ResolvedScope::Master,
+            BlobScope::Master,
             Some(cloud_path),
             bytes.to_vec(),
         )
@@ -1284,7 +1283,7 @@ async fn make_local_rejects_remote_root() {
         .put_blob(
             "covers",
             "coverrrr",
-            ResolvedScope::Master,
+            BlobScope::Master,
             Some("cv/remote-root.jpg"),
             b"REMOTE-ROOT".to_vec(),
         )
@@ -1700,7 +1699,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
                 "photos",
                 None,
                 "photoaaa",
-                ResolvedScope::Master,
+                BlobScope::Master,
                 Some("cv/photoaaa.jpg")
             )
             .await
@@ -1765,7 +1764,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
                 "photos",
                 None,
                 "photoaaa",
-                ResolvedScope::Master,
+                BlobScope::Master,
                 Some("cv/photoaaa.jpg")
             )
             .await
@@ -2031,7 +2030,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
                 "photos",
                 None,
                 "photoaaa",
-                ResolvedScope::Master,
+                BlobScope::Master,
                 Some("cv/photoaaa.jpg")
             )
             .await

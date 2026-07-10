@@ -23,7 +23,7 @@ use crate::sync::pull::{HeldChangesetReason, PullError};
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
 use crate::sync::service::{self, SyncCycleError};
-use crate::sync::session::{BlobDecl, BlobScopeSpec, SyncedTable};
+use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
@@ -731,7 +731,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         .put_blob(
             "photos",
             "p1ab",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"PHOTOBYTES".to_vec(),
         )
@@ -955,7 +955,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         .put_blob(
             "audio",
             "audio1",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"AUDIO-PAYLOAD".to_vec(),
         )
@@ -1002,7 +1002,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
                 "audio",
                 None,
                 "audio1",
-                crate::blob::ResolvedScope::Master,
+                crate::blob::BlobScope::Master,
                 None
             )
             .await
@@ -1162,7 +1162,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         .put_blob(
             "audio",
             "audio1",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"AUDIO-PAYLOAD".to_vec(),
         )
@@ -1466,7 +1466,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let plaintext = b"COVER-ART-BYTES";
     let decl = || {
         BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
-            .with_scope(BlobScopeSpec::Derived("covers".to_string()))
+            .with_scope(crate::blob::BlobScope::Derived("covers".to_string()))
     };
 
     let db1 = open_test_db_with_blob(decl());
@@ -1637,7 +1637,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
                 "photos",
                 None,
                 "peager01",
-                crate::blob::ResolvedScope::Master,
+                crate::blob::BlobScope::Master,
                 None
             )
             .await
@@ -1650,7 +1650,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
                 "covers",
                 None,
                 "clazy001",
-                crate::blob::ResolvedScope::Master,
+                crate::blob::BlobScope::Master,
                 None
             )
             .await
@@ -1705,7 +1705,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         .put_blob(
             "photos",
             "pdel1234",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"COVERBYTES".to_vec(),
         )
@@ -1757,7 +1757,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         .put_blob(
             "photos",
             "sharedblob",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"SHARED-BYTES".to_vec(),
         )
@@ -1778,7 +1778,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         .put_blob(
             "photos",
             "newblob",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"NEW-BYTES".to_vec(),
         )
@@ -2650,7 +2650,7 @@ mod schema_version_too_old_display {
 /// the write, skip the row, surface it — never write outside, never panic.
 mod blob_path_traversal {
     use super::*;
-    use crate::blob::ResolvedScope;
+    use crate::blob::BlobScope;
 
     /// A blob whose `id` climbs out of the cache directory with `..` must NOT have
     /// its bytes written outside it. coven builds the destination from the id under
@@ -2670,7 +2670,7 @@ mod blob_path_traversal {
             .put_blob(
                 "photos",
                 "x/../../../PWNED",
-                ResolvedScope::Master,
+                BlobScope::Master,
                 None,
                 evil_bytes,
             )
@@ -2761,7 +2761,7 @@ mod blob_path_traversal {
             .put_blob(
                 "photos",
                 "p1ab",
-                ResolvedScope::Master,
+                BlobScope::Master,
                 None,
                 b"PHOTOBYTES".to_vec(),
             )

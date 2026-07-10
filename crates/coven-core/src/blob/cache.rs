@@ -114,10 +114,6 @@ pub enum BlobCacheError {
     /// external ref, or reading its cache budget or expected size. A database read
     /// the blob path depends on, distinct from a disk I/O failure.
     Metadata(DbError),
-    /// The blob's encryption scope could not be resolved to a key (a missing
-    /// `item_keys` row for an item-scoped blob). Distinct from a disk failure: the
-    /// bytes may be present but cannot be opened.
-    ScopeResolution(DbError),
     /// Building the sync storage from config failed — missing credentials or cloud
     /// configuration — when a Remote blob needed it. A configuration fault, not a
     /// disk I/O error.
@@ -189,7 +185,6 @@ impl std::fmt::Display for BlobCacheError {
             }
             BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
             BlobCacheError::Metadata(e) => write!(f, "blob metadata error: {e}"),
-            BlobCacheError::ScopeResolution(e) => write!(f, "blob scope resolution failed: {e}"),
             BlobCacheError::StorageSetup(e) => write!(f, "sync storage setup failed: {e}"),
             BlobCacheError::ChangesetWalkMismatch {
                 old_count,
@@ -749,14 +744,14 @@ pub(crate) async fn materialize_remote_blob_to_file(
     }
 
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
-    let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    validate_blob_ref(blob)?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
     match storage
         .read_blob_to_file(
             &blob.namespace,
             uploader.as_deref(),
             &blob.id,
-            resolved.clone(),
+            blob.scope.clone(),
             blob.cloud_path.as_deref(),
             expected_size,
             dest,
@@ -771,7 +766,7 @@ pub(crate) async fn materialize_remote_blob_to_file(
                     &blob.namespace,
                     fresh.as_deref(),
                     &blob.id,
-                    resolved,
+                    blob.scope.clone(),
                     blob.cloud_path.as_deref(),
                     expected_size,
                     dest,
@@ -1230,14 +1225,14 @@ pub(crate) async fn fetch_from_cloud(
     storage: &dyn SyncStorage,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    validate_blob_ref(blob)?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
     match storage
         .get_blob(
             &blob.namespace,
             uploader.as_deref(),
             &blob.id,
-            resolved.clone(),
+            blob.scope.clone(),
             blob.cloud_path.as_deref(),
         )
         .await
@@ -1250,7 +1245,7 @@ pub(crate) async fn fetch_from_cloud(
                     &blob.namespace,
                     fresh.as_deref(),
                     &blob.id,
-                    resolved,
+                    blob.scope.clone(),
                     blob.cloud_path.as_deref(),
                 )
                 .await
@@ -1381,14 +1376,14 @@ async fn fetch_range_from_cloud(
     offset: u64,
     len: u64,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let resolved = validate_and_resolve_blob_scope(db, blob).await?;
+    validate_blob_ref(blob)?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
     match storage
         .read_blob_range(
             &blob.namespace,
             uploader.as_deref(),
             &blob.id,
-            resolved.clone(),
+            blob.scope.clone(),
             blob.cloud_path.as_deref(),
             source_size,
             offset,
@@ -1404,7 +1399,7 @@ async fn fetch_range_from_cloud(
                     &blob.namespace,
                     fresh.as_deref(),
                     &blob.id,
-                    resolved,
+                    blob.scope.clone(),
                     blob.cloud_path.as_deref(),
                     source_size,
                     offset,
@@ -1417,19 +1412,15 @@ async fn fetch_range_from_cloud(
     }
 }
 
-async fn validate_and_resolve_blob_scope(
-    db: &Database,
-    blob: &BlobRef,
-) -> Result<crate::blob::ResolvedScope, BlobCacheError> {
+/// Refuse a blob whose namespace/id is not a safe path token or whose
+/// cloud_path escapes its prefix, before any storage read uses them.
+fn validate_blob_ref(blob: &BlobRef) -> Result<(), BlobCacheError> {
     crate::library_dir::validate_path_token(&blob.namespace)?;
     crate::library_dir::validate_path_token(&blob.id)?;
     if let Some(cloud_path) = blob.cloud_path.as_deref() {
         crate::library_dir::validate_cloud_path(cloud_path)?;
     }
-
-    db.resolve_blob_scope(blob.scope.clone())
-        .await
-        .map_err(BlobCacheError::ScopeResolution)
+    Ok(())
 }
 
 pub(crate) async fn expected_blob_size(

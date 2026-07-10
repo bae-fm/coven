@@ -519,8 +519,8 @@ pub(crate) async fn open_db_and_pull(
         ));
     }
 
-    // Pull over the set coven owns (the host's tables plus coven's injected
-    // `item_keys`), not the raw host list — one source of truth. Load and anchor the
+    // Pull over the synced set coven owns, not the raw host list — one source of
+    // truth. Load and anchor the
     // membership chain first (join is a standalone, non-cycle pull), against the
     // owner just pinned above; restore hasn't pinned yet, so it loads the chain
     // best-effort and pins from the founder below.

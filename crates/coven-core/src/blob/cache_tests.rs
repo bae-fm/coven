@@ -13,7 +13,7 @@ use super::cache::{
     clear_cache, evict_to_budget, fetch_from_cloud, open_blob_stream, pin, read_blob, unpin,
     write_blob, BlobCacheError,
 };
-use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance, ResolvedScope};
+use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::database::Database;
 use crate::sync::session::BlobDecl;
 use crate::sync::session::SyncedTable;
@@ -89,7 +89,7 @@ fn plain_blob_db(decl: BlobDecl) -> Database {
 /// `get_blob` reads back (master scope, no cloud_path), so a cache miss can fetch it.
 async fn put_cloud_blob(storage: &MockSyncStorage, id: &str, namespace: &str, bytes: &[u8]) {
     storage
-        .put_blob(namespace, id, ResolvedScope::Master, None, bytes.to_vec())
+        .put_blob(namespace, id, BlobScope::Master, None, bytes.to_vec())
         .await
         .expect("put blob in mock cloud");
 }

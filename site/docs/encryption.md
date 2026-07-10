@@ -67,13 +67,11 @@ access to every sealed box wrapped to its derived X25519 key, since that X25519
 key cannot be reconstructed without it.
 
 
-<svg class="flow" viewBox="0 0 660 190" role="img" aria-label="The library keyring holds key generations; scoped keys derive from the current one; item keys are independent and synced">
+<svg class="flow" viewBox="0 0 500 190" role="img" aria-label="The library keyring holds key generations; scoped keys derive from the current one">
 <text class="hdr" x="130" y="22" text-anchor="middle">LIBRARY KEYRING</text>
 <text class="hdr" x="390" y="22" text-anchor="middle">DERIVED</text>
-<text class="hdr" x="580" y="22" text-anchor="middle">ITEM KEYS</text>
 <rect class="lane" x="10" y="32" width="240" height="118" rx="10"/>
 <rect class="lane" x="290" y="32" width="200" height="118" rx="10"/>
-<rect class="lane" x="510" y="32" width="140" height="118" rx="10"/>
 <rect class="chip" x="30" y="48" width="90" height="26" rx="6"/>
 <text class="lbl s11" x="75" y="65" text-anchor="middle">gen 1</text>
 <rect class="chipa" x="130" y="48" width="100" height="26" rx="6"/>
@@ -84,11 +82,7 @@ key cannot be reconstructed without it.
 <rect class="chipo" x="310" y="48" width="160" height="26" rx="6"/>
 <text class="lbl s11" x="390" y="65" text-anchor="middle">HKDF per scope label</text>
 <text class="sub" x="390" y="96" text-anchor="middle">deterministic · one-way</text>
-<rect class="chipo" x="526" y="48" width="108" height="26" rx="6"/>
-<text class="lbl s11" x="580" y="65" text-anchor="middle">random per item</text>
-<text class="sub" x="580" y="96" text-anchor="middle">independent of the master</text>
-<text class="sub" x="580" y="112" text-anchor="middle">synced in item_keys</text>
-<text class="sub" x="330" y="176" text-anchor="middle">a blob's scope (Master · Derived · Item) picks which of these seals it</text>
+<text class="sub" x="250" y="176" text-anchor="middle">a blob's scope (Master · Derived) picks which of these seals it</text>
 </svg>
 
 ## What the storage provider sees

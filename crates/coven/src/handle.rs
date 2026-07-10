@@ -712,14 +712,6 @@ impl CovenHandle {
         self.db.set_cache_budget(namespace, max_bytes).await
     }
 
-    pub async fn mint_item_key(&self, item_id: &str) -> Result<[u8; 32], crate::DbError> {
-        self.db.mint_item_key(item_id).await
-    }
-
-    pub async fn item_key(&self, item_id: &str) -> Result<Option<[u8; 32]>, crate::DbError> {
-        self.db.item_key(item_id).await
-    }
-
     pub fn get_user_pubkey(&self) -> Result<Option<String>, SyncError> {
         self.key_service
             .get_user_public_key()

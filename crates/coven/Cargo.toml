@@ -56,7 +56,6 @@ tempfile = "3.8"
 [features]
 test-utils = ["coven-core/test-utils"]
 oauth-providers = ["coven-core/oauth-providers", "dep:open"]
-share-proxy = ["coven-core/share-proxy"]
 
 [lints]
 workspace = true

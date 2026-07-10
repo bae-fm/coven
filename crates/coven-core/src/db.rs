@@ -1,26 +1,12 @@
-//! coven's bookkeeping schema, the `item_keys` synced table, and the
-//! cloud-outbox row types.
+//! coven's bookkeeping schema and the cloud-outbox row types.
 //!
 //! coven owns eight device-local bookkeeping tables — `sync_cursors`,
 //! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
 //! `local_cleanup_intents`, `published_blob_drop_intents`,
-//! `pending_changesets` — plus the library-global synced table `item_keys`, all
-//! created by [`apply_coven_schema`], which coven runs against the connection it owns
-//! during open. The host does not implement any of this; native app SQL goes through
-//! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
-//!
-//! Unlike the bookkeeping tables, `item_keys` is content every member needs, so
-//! coven injects it into the synced-table set during open and it rides both sync
-//! paths: a `mint_item_key` INSERT journals into the pending-changeset journal like
-//! any host write, and the snapshot preserves it (it is in the synced set, so
-//! `clear_non_synced` keeps its rows).
-
-/// The coven-owned synced table holding per-item content keys. Injected into the
-/// synced-table set during open, so it is captured, snapshotted, and applied
-/// like any synced table — but is owned by coven, not the host. The `_updated_at`
-/// HLC stamp satisfies the synced-table contract; rows are immutable
-/// (idempotent INSERT) so LWW never has to pick a winner.
-pub(crate) const ITEM_KEYS_TABLE: &str = stringify!(item_keys);
+//! `pending_changesets` — all created by [`apply_coven_schema`], which coven runs
+//! against the connection it owns during open. The host does not implement any of
+//! this; native app SQL goes through [`crate::CovenHandle::sql`] or
+//! [`crate::CovenHandle::write`].
 
 macro_rules! coven_tables {
     ($visit:ident) => {
@@ -111,14 +97,6 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
-            item_keys,
-            "
-    item_id TEXT PRIMARY KEY,
-    key BLOB NOT NULL,
-    _updated_at TEXT NOT NULL
-"
-        );
-        $visit!(
             blob_uploaders,
             "
     namespace TEXT NOT NULL,
@@ -134,8 +112,8 @@ macro_rules! coven_tables {
     };
 }
 
-/// Creates coven's bookkeeping tables and the `item_keys` synced table before
-/// the host's own migrations. Idempotent (`IF NOT EXISTS`).
+/// Creates coven's bookkeeping tables before the host's own migrations.
+/// Idempotent (`IF NOT EXISTS`).
 pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
         ($name:ident, $columns:literal) => {
@@ -153,8 +131,8 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     Ok(())
 }
 
-/// Whether `name` is a table coven owns for sync bookkeeping or library-global
-/// key material. Hosts may not declare these as synced tables.
+/// Whether `name` is a table coven owns for sync bookkeeping. Hosts may not
+/// declare these as synced tables.
 pub(crate) fn is_reserved_table_name(name: &str) -> bool {
     macro_rules! matches_table {
         ($table:ident, $columns:literal) => {
@@ -207,10 +185,9 @@ pub struct OutboxEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboxOperation {
     /// Upload a local blob. Carries the local source, the host-named encryption
-    /// scope (resolved to a key at drain — looking up `item_keys` for a
-    /// [`crate::blob::BlobScope::Item`] scope, since the upload runs long after
-    /// the enqueue site is gone), the `file_id` the upload reports progress
-    /// under, and whether to keep the uploaded blob pinned in the local cache.
+    /// scope (resolved to a key at drain, since the upload runs long after the
+    /// enqueue site is gone), the `file_id` the upload reports progress under,
+    /// and whether to keep the uploaded blob pinned in the local cache.
     Upload {
         file_id: String,
         /// Local plaintext source. `None` means the blob lives at coven's

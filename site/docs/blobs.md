@@ -33,7 +33,7 @@ SyncedTable::new("todo_attachments").carries_blob(
     BlobDecl::new("attachments", Provenance::UserProvided, CacheFill::CacheEager)
         // .with_id_column("file_id")              // defaults to the PK ("id")
         // .with_cloud_path_column("path")         // for a browsable home
-        // .with_scope(BlobScopeSpec::ItemColumn("todo_id"))
+        // .with_scope(BlobScope::Derived("attachments".into()))
 )
 ```
 
@@ -42,7 +42,7 @@ pub struct BlobDecl {
     pub id_column: String,                  // blob-id column; defaults to the PK ("id")
     pub namespace: String,                  // cloud namespace, e.g. "attachments"
     pub cloud_path_column: Option<String>,  // readable-key column for a browsable home
-    pub scope: BlobScopeSpec,               // Master | Derived(name) | ItemColumn(col)
+    pub scope: BlobScope,                   // Master | Derived(name)
     pub provenance: Provenance,             // UserProvided | HostProvided  (the Local story)
     pub fill: CacheFill,                    // CacheEager | CacheLazy       (the Remote story)
 }
@@ -70,7 +70,7 @@ path. coven reads the declared columns off the row to build a
 pub struct BlobRef {
     pub namespace: String,          // cloud namespace, e.g. "attachments"
     pub id: String,                 // blob id, from the id column (the row's id by default)
-    pub scope: BlobScope,           // Master | Derived(id) | Item(id)
+    pub scope: BlobScope,           // Master | Derived(id)
     pub cloud_path: Option<String>, // readable path for a browsable home
     pub provenance: Provenance,     // UserProvided | HostProvided
     pub fill: CacheFill,            // CacheEager | CacheLazy
@@ -151,12 +151,8 @@ declares both:
 
 ## Encryption scope
 
-The declaration's
-[`BlobScopeSpec`](rustdoc:enum:coven::sync::session::BlobScopeSpec) says where a
-blob's scope comes from: `Master`, a fixed `Derived(name)`, or `ItemColumn(col)`
-(the item id is the value of that column in the blob's row). coven resolves it per
-row to a [`BlobScope`](rustdoc:enum:coven::blob::BlobScope), which selects the key
-the blob is encrypted under. Either way the host names *what* a blob is scoped to,
+The declaration's [`BlobScope`](rustdoc:enum:coven::blob::BlobScope) selects the
+key the blob is encrypted under. The host names *what* a blob is scoped to,
 never the raw key bytes:
 
 - `Master` encrypts with the library master key. Every member holds it, so every
@@ -167,22 +163,6 @@ never the raw key bytes:
   same key on push and on pull, which is what lets a puller re-derive it and
   decrypt. The corollary is that `scope_id` must be stable; a row id that later
   changes would re-derive a different key and the stored blob would not decrypt.
-- `Item(item_id)` encrypts with a coven-managed **item key**: a random per-item
-  key coven mints with `handle.mint_item_key(...)`, keeps in the synced
-  `item_keys` table (so it reaches every member and survives a snapshot), and
-  resolves by `item_id` on push and pull. The host names the item; coven holds
-  the key. Unlike `Derived`, an item key is independent of the master, so one
-  item's key never exposes the library (see
-  [item keys](/docs/sharing#item-keys)).
-
-coven resolves the public scope to an internal key (looking up the `item_keys` row
-for `Item`) before it touches storage, at one resolution point shared by all three
-blob paths (inline push, pull, outbox drain). A missing `item_keys` row is a host
-bug, surfaced as an error rather than silently falling back to the master
-key.
-
-Item keys are opt-in. An app that never emits `Item` stays on `Master`/`Derived`
-and the `item_keys` table stays empty.
 
 ## How a blob moves out
 

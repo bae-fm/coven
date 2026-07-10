@@ -571,7 +571,7 @@ impl SyncStorage for HostWriteInjector {
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
@@ -583,7 +583,7 @@ impl SyncStorage for HostWriteInjector {
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_path: &std::path::Path,
     ) -> Result<(), StorageError> {
@@ -596,7 +596,7 @@ impl SyncStorage for HostWriteInjector {
         namespace: &str,
         uploader: Option<&str>,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
         self.inner
@@ -616,7 +616,7 @@ impl SyncStorage for HostWriteInjector {
         namespace: &str,
         uploader: Option<&str>,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
         offset: u64,
@@ -640,7 +640,7 @@ impl SyncStorage for HostWriteInjector {
         namespace: &str,
         uploader: Option<&str>,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
         dest: &std::path::Path,
@@ -1096,7 +1096,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .put_blob(
             "photos",
             "remoteonly",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"already durable".to_vec(),
         )
@@ -1329,7 +1329,7 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
         .put_blob(
             "audio",
             "audio1",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"AUDIO".to_vec(),
         )

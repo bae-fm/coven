@@ -430,15 +430,11 @@ async fn upload_host_provided_blob(
         },
     };
 
-    let resolved = db
-        .resolve_blob_scope(blob.scope.clone())
-        .await
-        .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
     storage
         .put_blob_from_file(
             &blob.namespace,
             &blob.id,
-            resolved,
+            blob.scope.clone(),
             blob.cloud_path.as_deref(),
             &source_path,
         )

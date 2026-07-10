@@ -113,9 +113,6 @@ pub mod migration;
 pub mod local_blob;
 #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
 mod local_blob_tests;
-#[cfg(feature = "share-proxy")]
-#[doc(hidden)]
-pub mod share;
 #[doc(hidden)]
 pub mod storage;
 #[doc(hidden)]
@@ -135,11 +132,7 @@ pub use rusqlite;
 // Blob descriptors, errors, the host-implemented observer.
 pub use blob::cache::BlobCacheError;
 // The Remote→Local transition (and its error) is native-only.
-pub use blob::{BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance, ResolvedScope};
-// The logical `(namespace, id)` cloud reference — only exists with share-proxy,
-// which is the only thing that puts a blob id into a cloud manifest.
-#[cfg(feature = "share-proxy")]
-pub use blob::BlobId;
+pub use blob::{BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance};
 
 // Applied-sync change notification (the host reacts to these).
 pub use changeset::{ChangeOp, RowChange};
@@ -212,11 +205,6 @@ pub use storage::cloud::test_utils::InMemoryCloudHome;
 // surface).
 #[cfg(any(test, feature = "test-utils"))]
 pub use db::{OutboxEntry, OutboxOperation};
-
-// Item sharing (share-proxy feature). `ShareManifest::allows` is the gate a
-// share server calls to authorize a blob request.
-#[cfg(feature = "share-proxy")]
-pub use share::{open_share, ShareError, ShareManifest, ShareProxy, ShareToken};
 
 /// Thread-safety floor for coven's async storage traits ([`storage::cloud::CloudHome`],
 /// [`sync::storage::SyncStorage`], [`blob::BlobTransitionObserver`]).

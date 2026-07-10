@@ -16,18 +16,11 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
-use crate::keys::UserKeypair;
 use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::hlc::Hlc;
-use crate::sync::invite::{create_invitation, unwrap_library_keyring_for_owners_with_activation};
-use crate::sync::membership::MemberRole;
-use crate::sync::storage::SyncStorage;
-use crate::sync::test_helpers::{
-    bootstrap_chain, pubkey_hex, publish_membership_chain_head, MockSyncStorage,
-};
 use rusqlite::OptionalExtension;
 
 /// Run the real [`drain_uploads`] with a throwaway HLC, the register coven stamps a
@@ -638,155 +631,6 @@ fn backoff_window_is_exponential_and_capped() {
     assert_eq!(backoff_window(50), Duration::seconds(3600));
 }
 
-/// The whole multi-device flow for Remote (cloud) content. Device A creates a
-/// library, invites device B (wrapping the library master key to B's identity),
-/// mints a per-release item key, and uploads a release's audio through the real
-/// upload drain scoped to that item. `drain_uploads` resolves the `Item` scope to
-/// the minted key and encrypts under it. Device B joins (unwraps the master key
-/// with its own keypair), then fetches the blob and decrypts it with the item key
-/// — the key that, in the app, rides the synced `item_keys` table.
-///
-/// The load-bearing assertion is that the master key — which every member holds —
-/// does NOT decrypt the content: the per-item key is what scopes a release so it
-/// can be read (or handed to a share recipient) without exposing the whole
-/// library. This test fails if `drain_uploads` encrypts content with the master
-/// key instead of resolving the entry's `Item` scope to the item key.
-#[tokio::test]
-async fn member_joins_then_fetches_and_decrypts_per_release_content() {
-    // --- Device A: library master key, owner identity, membership chain. ---
-    let master_key: [u8; 32] = [7u8; 32];
-    let owner = UserKeypair::generate(); // device A
-    let joiner = UserKeypair::generate(); // device B
-    let mut chain = bootstrap_chain(&owner);
-
-    // The content blob lives in the cloud home; the wrapped library key lives in
-    // the membership storage. (In production both are paths in one cloud home;
-    // the join API routes the wrapped key through `SyncStorage`, so the test uses
-    // a `MockSyncStorage` for it and an `InMemoryCloudHome` for content.)
-    let cloud = InMemoryCloudHome::new();
-    let membership = MockSyncStorage::new();
-    let owner_pk = pubkey_hex(&owner);
-    let founder = chain.entries()[0].clone();
-    membership
-        .put_membership_entry(&owner_pk, 1, serde_json::to_vec(&founder).unwrap())
-        .await
-        .unwrap();
-    publish_membership_chain_head(&membership, &chain, &owner).await;
-
-    // Device A invites device B: seals the master key to B's pubkey, signs the
-    // binding, and records a signed membership entry.
-    create_invitation(
-        &membership,
-        &membership,
-        &mut chain,
-        &owner,
-        &pubkey_hex(&joiner),
-        None,
-        MemberRole::Member,
-        &master_key,
-        "lib-outbox",
-        "0000000002000-0000-dev1",
-    )
-    .await
-    .expect("invite device B");
-
-    // --- Device A mints a per-release item key (distinct from the master key)
-    // and uploads the release's audio through the real upload drain scoped to
-    // that item. `drain_uploads` resolves the `Item` scope to the minted key. ---
-    let plaintext = b"AUDIO-FILE-BYTES-for-one-release";
-    let tmp = tempfile::tempdir().unwrap();
-    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
-
-    let cloud_key = "storage/ab/cd/file-1";
-    let db = open_outbox_db();
-    let k_release = db
-        .mint_item_key("release-1")
-        .await
-        .expect("mint the per-release item key");
-    assert_ne!(
-        k_release, master_key,
-        "a minted item key is independent of the master"
-    );
-    db.enqueue_upload(
-        "file-1",
-        cloud_key,
-        Some(source.as_str()),
-        crate::blob::BlobScope::Item("release-1".to_string()),
-        false,
-        T0,
-    )
-    .await
-    .expect("enqueue the release blob scoped to its item");
-    let master_enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        master_key,
-    )));
-
-    let n = run_drain(
-        &db,
-        &cloud,
-        &master_enc,
-        &LibraryDir::new(tmp.path()),
-        &fixed_clock(T0),
-        None,
-    )
-    .await
-    .expect("upload")
-    .uploaded;
-    assert_eq!(n, 1, "the release blob uploads");
-
-    // At rest the blob is per-release ciphertext: not plaintext, and NOT
-    // decryptable with the master key every member holds.
-    let at_rest = cloud.get(cloud_key).expect("blob present in cloud");
-    let aad_context = crate::sync::cloud_storage::cloud_aad_context("test-lib", cloud_key);
-    assert_ne!(at_rest, plaintext, "content is encrypted at rest");
-    assert!(
-        EncryptionService::from_key(master_key)
-            .decrypt(&at_rest, &aad_context)
-            .is_err(),
-        "the master key must NOT decrypt per-release content"
-    );
-    assert_eq!(
-        EncryptionService::from_key(k_release)
-            .decrypt(&at_rest, &aad_context)
-            .unwrap(),
-        plaintext,
-        "the per-release key decrypts the content"
-    );
-
-    // --- Device B joins: unwraps the library master key with its own identity,
-    // authenticating it against the owner that signed it. ---
-    let owner_pk = pubkey_hex(&owner);
-    let joined_master = unwrap_library_keyring_for_owners_with_activation(
-        &membership as &dyn CloudHome,
-        &joiner,
-        "lib-outbox",
-        std::iter::once(owner_pk.as_str()),
-        None,
-    )
-    .await
-    .expect("device B unwraps the library key by joining")
-    .key_bytes();
-    assert_eq!(
-        joined_master, master_key,
-        "joining recovers the library master key"
-    );
-
-    // Device B fetches the blob. Membership alone (the master key) does not unlock
-    // it; with the release's content key — which rides the synced `releases` row,
-    // handed here as the sync would deliver it — B recovers the audio.
-    let fetched = cloud.get(cloud_key).expect("device B fetches the blob");
-    assert!(
-        EncryptionService::from_key(joined_master)
-            .decrypt(&fetched, &aad_context)
-            .is_err(),
-        "membership alone does not unlock a release's content"
-    );
-    let recovered = EncryptionService::from_key(k_release)
-        .decrypt(&fetched, &aad_context)
-        .expect("device B decrypts the content with the per-release key");
-    assert_eq!(recovered, plaintext, "device B recovers the original audio");
-}
-
 /// `enqueue_upload_on` composes with a host transaction: a rollback takes the
 /// queued upload with it, and a commit lands it — so a host can make "row +
 /// its upload intent" a single atomic fact.
@@ -819,7 +663,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             "f-commit",
             "k-commit",
             Some("/tmp/source.flac"),
-            crate::blob::BlobScope::Item("rel-1".to_string()),
+            crate::blob::BlobScope::Derived("rel-1".to_string()),
             false,
             T0,
         )?;

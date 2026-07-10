@@ -366,11 +366,8 @@ pub use coven_core::{BlobDecl, Migration, MigrationStep, SyncedTable};
 pub use coven_core::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};
 
 // Blob descriptors, cache error, the host-implemented transition observer.
-#[cfg(feature = "share-proxy")]
-pub use coven_core::BlobId;
 pub use coven_core::{
     BlobCacheError, BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
-    ResolvedScope,
 };
 
 // Applied-sync change notification.
@@ -415,9 +412,6 @@ pub use sync::sync_loop::SyncLoopStatus;
 // In-memory cloud home and durable upload-queue rows for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
-
-#[cfg(feature = "share-proxy")]
-pub use coven_core::{open_share, ShareError, ShareManifest, ShareProxy, ShareToken};
 
 // --- Native additions and native-only re-exports. ---
 

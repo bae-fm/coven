@@ -107,34 +107,22 @@ impl DatabaseCore {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
 
-        // coven's bookkeeping tables and the coven-owned `item_keys` synced table
-        // first (declarative, idempotent, run every open), then the host's synced
-        // schema ladder over `PRAGMA user_version`. The two are kept separate by
-        // sync-visibility: coven's bookkeeping rows are stripped on snapshot, so a
-        // versioned ledger can't track them; the host's synced ladder version rides
-        // inside the snapshot's DB header.
+        // coven's bookkeeping tables first (declarative, idempotent, run every
+        // open), then the host's synced schema ladder over `PRAGMA user_version`.
+        // The two are kept separate by sync-visibility: coven's bookkeeping rows
+        // are stripped on snapshot, so a versioned ledger can't track them; the
+        // host's synced ladder version rides inside the snapshot's DB header.
         apply_coven_schema(&conn).map_err(DbError::from)?;
         migrate_bookkeeping_schema(&conn)?;
         let schema_version = run_migrations(&conn, migrations)?;
 
-        // Enforce the synced-table contract against the live host schema, before
-        // `item_keys` is appended below: each host table must present the pk shape
-        // and `_updated_at` the capture/gate/apply paths assume. Validating here —
-        // after the migration ladder built the tables, on the integrator's own
-        // device — turns a wrong shape into an open error naming the table, rather
-        // than a peer's cursor wedging forever at pull time. `item_keys` is coven's
-        // own and keyed by `item_id`, so it is excluded by running before the push.
+        // Enforce the synced-table contract against the live host schema: each
+        // host table must present the pk shape and `_updated_at` the
+        // capture/gate/apply paths assume. Validating here — after the migration
+        // ladder built the tables, on the integrator's own device — turns a wrong
+        // shape into an open error naming the table, rather than a peer's cursor
+        // wedging forever at pull time.
         validate_host_synced_tables(&conn, &synced_tables)?;
-
-        // `item_keys` is coven-owned but is library-global content every member
-        // needs, so coven — not the host — declares it synced. Injecting it here
-        // is the single point that puts it on every path that reads the set: each
-        // journaled write's capture session attaches it, the snapshot preserves it,
-        // and the gate and apply operate over it. The host never sees or declares
-        // it. A coven-reserved table name the host cannot declare, so this appends
-        // unconditionally.
-        let mut synced_tables = synced_tables;
-        synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
 
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
@@ -208,10 +196,6 @@ impl DatabaseCore {
         // open rather than mid-read.
         validate_host_synced_tables(&conn, &synced_tables)?;
 
-        // Same coven-owned `item_keys` injection the writer open does, so the gate and
-        // blob models resolve over the identical table set.
-        let mut synced_tables = synced_tables;
-        synced_tables.push(SyncedTable::new(crate::db::ITEM_KEYS_TABLE));
         let synced_tables = Arc::new(synced_tables);
 
         // No register-clock seeding: a reader never mints an `_updated_at`, so it has
@@ -779,7 +763,7 @@ impl Database {
             // pure reads through the journal-free read path (native
             // `CovenHandle::sql_read`, the wasm facade's `query`): a read still on the
             // write path — move it off — or a conditional write that happened to
-            // no-op this cycle (e.g. an idempotent `mint_item_key` re-mint), which is
+            // no-op this cycle (an idempotent INSERT OR IGNORE re-run), which is
             // legitimate and stays on `sql()`. Warn so the first case is visible.
             warn!("journaled sql transaction produced no synced changes; pure reads belong on sql_read");
             return Ok(());
@@ -1035,108 +1019,12 @@ impl Database {
         .await
     }
 
-    // ---- Item keys ----
-
-    /// Mint a random per-item content key and store it in the synced `item_keys`
-    /// table, keyed by `item_id`. Idempotent: a no-op if the item already has a
-    /// key (a re-mint must not rotate it out from under blobs already encrypted
-    /// under it).
-    ///
-    /// The INSERT runs inside a
-    /// [`Self::run_pending_journaled_transaction_on`] transaction, so it lands in
-    /// the pending-changeset journal a running cycle pushes from and it replays to
-    /// every member; the `_updated_at` HLC stamp satisfies the synced-table
-    /// contract. Because `item_keys` is in the synced set, the row also survives a
-    /// snapshot bootstrap. Returns the item's key (the freshly minted one, or the
-    /// existing one if it was already present).
-    ///
-    /// `item_id` must be unique at creation. coven does not coordinate two devices
-    /// independently minting the SAME `item_id` while offline: they would generate
-    /// different random keys, last-writer-wins on the `item_keys` row keeps one,
-    /// and any blobs the loser already encrypted under its key become
-    /// undecryptable. Hosts avoid this by minting at item-creation time, where the
-    /// id is freshly allocated and the item does not yet exist on another device.
-    pub async fn mint_item_key(&self, item_id: &str) -> Result<[u8; 32], DbError> {
-        let item_id = item_id.to_string();
-        let new_key = crate::encryption::generate_random_key();
-        let updated_at = self.state.hlc.now().to_string();
-        let tables = self.synced_tables().to_vec();
-        self.call(move |conn| {
-            Self::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-                Self::mint_item_key_on(tx, &item_id, new_key, &updated_at)
-            })
-        })
-        .await
-    }
-
-    /// Transaction-composable form of [`mint_item_key`](Self::mint_item_key):
-    /// runs on a connection the host already holds inside a
-    /// [`call`](Self::call) closure, so the host can mint an item's key
-    /// atomically with the item's own rows. The caller supplies the random
-    /// key ([`crate::encryption::generate_random_key`]) and the `_updated_at`
-    /// stamp (the host's [`crate::sync::hlc::UpdatedAtStamper`], which shares
-    /// this database's HLC register).
-    pub fn mint_item_key_on(
-        conn: &Connection,
-        item_id: &str,
-        new_key: [u8; 32],
-        updated_at: &str,
-    ) -> Result<[u8; 32], DbError> {
-        conn.execute(
-            "INSERT OR IGNORE INTO item_keys (item_id, key, _updated_at) \
-             VALUES (?1, ?2, ?3)",
-            (item_id, new_key.to_vec(), updated_at),
-        )
-        .map_err(DbError::from)?;
-        // Read back the stored key — `INSERT OR IGNORE` keeps the existing
-        // row, so on a re-mint this returns the original key, not `new_key`.
-        read_item_key(conn, item_id)?
-            .ok_or_else(|| DbError(format!("item_keys row absent after mint for {item_id}")))
-    }
-
-    /// The content key for `item_id` from the synced `item_keys` table, or `None`
-    /// if no key has been minted for it. A local SELECT — the row arrives via the
-    /// changeset (for members) or the snapshot (for a bootstrapped joiner).
-    pub async fn item_key(&self, item_id: &str) -> Result<Option<[u8; 32]>, DbError> {
-        let item_id = item_id.to_string();
-        self.call(move |conn| read_item_key(conn, &item_id)).await
-    }
-
-    /// Resolve a public [`crate::blob::BlobScope`] to the internal
-    /// [`crate::blob::ResolvedScope`] storage and encryption consume. `Master`
-    /// and `Derived` pass through unchanged; `Item(id)` looks up the item's key
-    /// in `item_keys`. This is the single resolution point shared by the three
-    /// blob paths (changeset push, changeset pull, outbox drain).
-    ///
-    /// A missing `item_keys` row is a host bug — the host must mint the key (and
-    /// let it sync) before tagging a blob with that item. coven surfaces it as an
-    /// error rather than silently falling back to the master key, which would
-    /// encrypt the blob so no share recipient could ever read it.
-    pub async fn resolve_blob_scope(
-        &self,
-        scope: crate::blob::BlobScope,
-    ) -> Result<crate::blob::ResolvedScope, DbError> {
-        use crate::blob::{BlobScope, ResolvedScope};
-        match scope {
-            BlobScope::Master => Ok(ResolvedScope::Master),
-            BlobScope::Derived(s) => Ok(ResolvedScope::Derived(s)),
-            BlobScope::Item(item_id) => match self.item_key(&item_id).await? {
-                Some(key) => Ok(ResolvedScope::Key(key)),
-                None => Err(DbError(format!(
-                    "no item key for {item_id:?}: a blob was scoped to an item with no minted key \
-                     (mint_item_key must run and sync before tagging the blob)"
-                ))),
-            },
-        }
-    }
-
     // ---- Cloud outbox ----
 
     /// Enqueue a blob upload. `scope` names which key the blob is encrypted
-    /// under (master, a derived scope, or a coven-managed item); coven persists
-    /// it on the row and resolves it to a key at drain — looking up the
-    /// `item_keys` row for an [`crate::blob::BlobScope::Item`] scope — long after
-    /// the enqueue site is gone. Idempotent on `(operation, cloud_key)`. Queuing an
+    /// under (master or a derived scope); coven persists it on the row and
+    /// resolves it to a key at drain, long after the enqueue site is gone.
+    /// Idempotent on `(operation, cloud_key)`. Queuing an
     /// upload also cancels any pending delete of the same key — latest intent wins,
     /// so a re-upload isn't tombstoned in the same cycle.
     #[cfg(any(test, feature = "test-utils"))]
@@ -1544,32 +1432,6 @@ impl Database {
     }
 }
 
-/// Read the 32-byte content key for `item_id` from `item_keys`, or `None` if no
-/// row exists. A stored key of the wrong length is a corrupt DB and surfaces as a
-/// [`DbError`] — `mint_item_key` only ever writes 32 bytes, so this names the
-/// offending row rather than failing later as an opaque decrypt error.
-fn read_item_key(conn: &Connection, item_id: &str) -> Result<Option<[u8; 32]>, DbError> {
-    let stored: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT key FROM item_keys WHERE item_id = ?1",
-            [item_id],
-            |r| r.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?;
-    match stored {
-        None => Ok(None),
-        Some(bytes) => {
-            let len = bytes.len();
-            bytes.try_into().map(Some).map_err(|_| {
-                DbError(format!(
-                    "item_keys.key for {item_id} is {len} bytes, not 32"
-                ))
-            })
-        }
-    }
-}
-
 /// Map a `cloud_outbox` row to an [`OutboxEntry`]. Column order matches the
 /// SELECT in [`Database::pending_outbox`]. The flat row reads back as one
 /// [`OutboxOperation`] variant or the other, built from the columns that belong
@@ -1957,7 +1819,7 @@ mod tests {
 
     #[tokio::test]
     async fn database_open_rejects_host_declared_reserved_tables() {
-        for table_name in [crate::db::ITEM_KEYS_TABLE, "sync_state"] {
+        for table_name in ["cloud_outbox", "sync_state"] {
             let result = Database::open(
                 Path::new(":memory:"),
                 vec![SyncedTable::new(table_name)],

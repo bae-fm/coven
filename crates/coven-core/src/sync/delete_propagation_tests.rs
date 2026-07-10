@@ -133,7 +133,7 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
         .put_blob(
             "storage",
             "blob1",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"audio-bytes".to_vec(),
         )
@@ -178,7 +178,7 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
     );
     assert!(
         storage
-            .get_blob("storage", "blob1", crate::blob::ResolvedScope::Master, None)
+            .get_blob("storage", "blob1", crate::blob::BlobScope::Master, None)
             .await
             .is_ok(),
         "B can still read the blob the row points at — no strand",
@@ -301,7 +301,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
         .put_blob(
             "storage",
             "blob1",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"audio-bytes".to_vec(),
         )
@@ -362,7 +362,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
         .put_blob(
             "storage",
             "blob2",
-            crate::blob::ResolvedScope::Master,
+            crate::blob::BlobScope::Master,
             None,
             b"more-audio".to_vec(),
         )

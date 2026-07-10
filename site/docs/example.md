@@ -197,9 +197,8 @@ that reference them, and it learns which rows carry one from a per-table
 with [`carries_blob`](rustdoc:method:coven::sync::session::SyncedTable::carries_blob)
 when it builds the set it passes to `open`, naming the columns that locate each blob
 plus its cloud namespace, a
-[`BlobScopeSpec`](rustdoc:enum:coven::sync::session::BlobScopeSpec)
-(`Master` for a key every member holds, `Derived` for a fixed per-scope key, or
-`ItemColumn` for a per-item key keyed by a column), a
+[`BlobScope`](rustdoc:enum:coven::blob::BlobScope)
+(`Master` for a key every member holds, `Derived` for a fixed per-scope key), a
 [`Provenance`](rustdoc:enum:coven::blob::Provenance) (the Local story:
 `UserProvided` for the user's own file, `HostProvided` for data coven keeps), and a
 [`CacheFill`](rustdoc:enum:coven::blob::CacheFill) (the Remote story: `CacheEager` to

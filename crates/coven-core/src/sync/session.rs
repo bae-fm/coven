@@ -193,8 +193,8 @@ pub struct BlobDecl {
     /// object key under the plain (browsable) blob-path scheme. `None` means the
     /// blob is keyed only by its hashed id (the default obfuscated scheme).
     pub cloud_path_column: Option<String>,
-    /// How the blob is scoped for encryption (see [`BlobScopeSpec`]).
-    pub scope: BlobScopeSpec,
+    /// How the blob is scoped for encryption (see [`crate::blob::BlobScope`]).
+    pub scope: crate::blob::BlobScope,
     /// The blob's **Local story**: [`crate::blob::Provenance::UserProvided`] (the
     /// user's file at a path) or [`crate::blob::Provenance::HostProvided`] (coven's
     /// own copy in the local store).
@@ -203,20 +203,6 @@ pub struct BlobDecl {
     /// into the cache on every pull) or [`crate::blob::CacheFill::CacheLazy`]
     /// (fetched into the cache on first read).
     pub fill: crate::blob::CacheFill,
-}
-
-/// How a blob's encryption scope is declared on a blob-bearing table. coven
-/// resolves it to a [`crate::blob::BlobScope`] per row when it builds the blob's
-/// reference.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlobScopeSpec {
-    /// The library master key — every member reads it.
-    Master,
-    /// A per-scope key derived from the master key, named by this fixed string.
-    Derived(String),
-    /// A coven-managed item key, named by the value of this column in the blob's
-    /// row (resolves to [`crate::blob::BlobScope::Item`]).
-    ItemColumn(String),
 }
 
 impl BlobDecl {
@@ -234,7 +220,7 @@ impl BlobDecl {
             size_column: "size".to_string(),
             namespace: namespace.into(),
             cloud_path_column: None,
-            scope: BlobScopeSpec::Master,
+            scope: crate::blob::BlobScope::Master,
             provenance,
             fill,
         }
@@ -258,8 +244,8 @@ impl BlobDecl {
         self
     }
 
-    /// Scope the blob's encryption (defaults to [`BlobScopeSpec::Master`]).
-    pub fn with_scope(mut self, scope: BlobScopeSpec) -> Self {
+    /// Scope the blob's encryption (defaults to [`crate::blob::BlobScope::Master`]).
+    pub fn with_scope(mut self, scope: crate::blob::BlobScope) -> Self {
         self.scope = scope;
         self
     }

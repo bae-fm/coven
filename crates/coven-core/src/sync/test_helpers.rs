@@ -963,7 +963,7 @@ impl SyncStorage for MockSyncStorage {
         &self,
         namespace: &str,
         id: &str,
-        _scope: crate::blob::ResolvedScope,
+        _scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
@@ -1002,7 +1002,7 @@ impl SyncStorage for MockSyncStorage {
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_path: &std::path::Path,
     ) -> Result<(), StorageError> {
@@ -1019,7 +1019,7 @@ impl SyncStorage for MockSyncStorage {
         namespace: &str,
         _uploader: Option<&str>,
         id: &str,
-        _scope: crate::blob::ResolvedScope,
+        _scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
         // The mock keys blobs flat by (namespace, id) and ignores the uploader
@@ -1048,7 +1048,7 @@ impl SyncStorage for MockSyncStorage {
         namespace: &str,
         _uploader: Option<&str>,
         id: &str,
-        _scope: crate::blob::ResolvedScope,
+        _scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
         offset: u64,
@@ -1082,7 +1082,7 @@ impl SyncStorage for MockSyncStorage {
         namespace: &str,
         uploader: Option<&str>,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
         dest: &std::path::Path,

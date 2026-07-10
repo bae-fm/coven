@@ -22,7 +22,7 @@ use std::sync::RwLock;
 use rusqlite::OptionalExtension;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
-use crate::blob::{local_files, BlobRef, BlobScope, CacheFill, Provenance, ResolvedScope};
+use crate::blob::{local_files, BlobRef, BlobScope, CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
@@ -279,7 +279,7 @@ async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
         .put_blob(
             "photos",
             "photo-torn",
-            ResolvedScope::Master,
+            BlobScope::Master,
             None,
             photo_bytes.clone(),
         )

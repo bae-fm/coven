@@ -88,8 +88,7 @@ schema *is* adding a migration; a device cannot stamp a version it has not
 migrated to.
 
 The ladder covers the host's *synced* schema only. coven's own bookkeeping
-tables and its `item_keys` table are reconciled declaratively at every open,
-outside the ladder.
+tables are reconciled declaratively at every open, outside the ladder.
 
 ## Additive vs. structural changes
 

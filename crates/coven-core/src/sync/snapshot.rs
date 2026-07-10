@@ -1016,10 +1016,10 @@ pub async fn bootstrap_from_snapshot(
 ///
 /// `refs_in_db` is a read-only enumeration run against a short-lived connection to
 /// the same on-disk DB the `db` actor owns; `db` is still needed because
-/// `download_blobs` resolves each blob's scope through it (an `Item`-scoped blob
-/// reads its key from the `item_keys` rows). At bootstrap the pull has not started;
-/// in a cycle this runs after the pull. It is read-only either way (a SELECT, which
-/// journals nothing), so it does not re-record rows or race the connection thread.
+/// `download_blobs` resolves each blob's uploader through it. At bootstrap the
+/// pull has not started; in a cycle this runs after the pull. It is read-only
+/// either way (a SELECT, which journals nothing), so it does not re-record rows
+/// or race the connection thread.
 pub async fn reconcile_snapshot_blobs(
     db: &crate::database::Database,
     db_path: &Path,
@@ -1045,24 +1045,12 @@ pub async fn reconcile_snapshot_blobs(
     }
 
     let total = blobs.len();
-    // No in-changeset key map here: a snapshot's blobs take their keys from the
-    // `item_keys` rows the snapshot itself carried into this DB, so resolution
-    // goes through the DB (issue #111's pull path uses the map for keys minted in
-    // the changeset being applied; the bootstrap has no such changeset). The blobs
-    // are `CacheEager`, so `download_blobs` writes each into the evictable cache
-    // `storage/cache/<namespace>/<id>` under `library_dir`.
+    // The blobs are `CacheEager`, so `download_blobs` writes each into the
+    // evictable cache `storage/cache/<namespace>/<id>` under `library_dir`.
     // A snapshot's restored rows carry no per-blob uploader, so each blob's prefix
     // is resolved from the index (empty on a fresh restore) and then a listing
     // scan that records what it finds.
-    let all_ok = crate::sync::pull::download_blobs(
-        db,
-        blobs,
-        storage,
-        library_dir,
-        &std::collections::HashMap::new(),
-        None,
-    )
-    .await;
+    let all_ok = crate::sync::pull::download_blobs(db, blobs, storage, library_dir, None).await;
     if all_ok {
         info!(total, "snapshot blob reconciliation complete");
     } else {
@@ -1113,7 +1101,7 @@ async fn publish_signed_generation<I, K>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::{local_files, CacheFill, ResolvedScope};
+    use crate::blob::{local_files, BlobScope, CacheFill};
     use crate::database::DbError;
     use crate::sync::apply::resolve_and_apply_changeset;
     use crate::sync::session::BlobDecl;
@@ -1864,7 +1852,7 @@ mod tests {
             .put_blob(
                 "audio",
                 "audio1",
-                ResolvedScope::Master,
+                BlobScope::Master,
                 None,
                 b"AUDIO".to_vec(),
             )
@@ -1884,7 +1872,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .get_blob("covers", None, "cover1", ResolvedScope::Master, None)
+                .get_blob("covers", None, "cover1", BlobScope::Master, None)
                 .await
                 .expect("host cover uploaded"),
             b"COVER",

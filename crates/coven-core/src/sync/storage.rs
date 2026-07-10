@@ -180,16 +180,14 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// `{namespace}/{cloud_path}` verbatim, so the bucket is browsable, and a
     /// missing `cloud_path` is an error. A device only ever uploads blobs it
     /// authored, so a write always keys under itself.
-    /// On an encrypted home the plaintext is sealed with the key the resolved
-    /// `scope` selects (master, a per-scope derived key, or an explicit item key);
-    /// on a plaintext home it is stored verbatim (scope ignored). The caller
-    /// resolves the public [`crate::blob::BlobScope`] to a
-    /// [`crate::blob::ResolvedScope`] before storage sees it.
+    /// On an encrypted home the plaintext is sealed with the key `scope` selects
+    /// (master, or a per-scope derived key); on a plaintext home it is stored
+    /// verbatim (scope ignored).
     async fn put_blob(
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError>;
@@ -200,7 +198,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         &self,
         namespace: &str,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_path: &Path,
     ) -> Result<(), StorageError>;
@@ -219,7 +217,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         namespace: &str,
         uploader: Option<&str>,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError>;
 
@@ -254,7 +252,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         namespace: &str,
         uploader: Option<&str>,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
         offset: u64,
@@ -269,7 +267,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         namespace: &str,
         uploader: Option<&str>,
         id: &str,
-        scope: crate::blob::ResolvedScope,
+        scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
         dest: &Path,

@@ -293,9 +293,8 @@ pub async fn load_cycle_membership(
 /// into the next outgoing changeset, while a host write landing during this pull's
 /// network phases journals normally.
 ///
-/// `tables` is the synced set coven owns — the host's declared tables plus
-/// coven's injected `item_keys` (for the `_updated_at` index map and apply
-/// conflict resolution); call sites pass `db.synced_tables()`. `cursors` maps
+/// `tables` is the host's declared synced set; call sites pass
+/// `db.synced_tables()`. `cursors` maps
 /// device_id -> last_seq we've applied from that device. `membership_chain` and
 /// `owner_pubkey` are the cycle's once-loaded membership (see [`CycleMembership`]).
 ///
@@ -656,24 +655,6 @@ pub async fn pull_changes(
                 }
             };
 
-            // The item content keys this changeset itself mints, recovered from its
-            // `item_keys` rows BEFORE applying, so an item-scoped blob's key is
-            // available without the changeset being applied first. Keys minted by
-            // earlier (already-applied) changesets are not here -- `download_blobs`
-            // falls back to the DB for those.
-            let in_changeset_keys = match item_keys_in_changeset(&changeset_bytes) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        "failed to read item_keys from changeset, skipping without applying: {e}"
-                    );
-                    result.asset_downloads_failed = true;
-                    break;
-                }
-            };
-
             // Download + fsync every CacheEager blob BEFORE applying any row. If
             // any fails, skip the whole changeset -- nothing applied, cursor not
             // advanced -- and stop this device's pull so a later seq's success
@@ -699,7 +680,6 @@ pub async fn pull_changes(
                 cache_eager,
                 storage,
                 library_dir,
-                &in_changeset_keys,
                 env.author_pubkey.as_deref(),
             )
             .await;
@@ -1227,31 +1207,6 @@ fn advance_max_updated_at(
     }
 }
 
-/// Build the `item_id -> 32-byte content key` map an incoming changeset mints in
-/// its own `item_keys` rows, recovered BEFORE the changeset is applied so an
-/// item-scoped blob can be downloaded ahead of the apply (issue #111). A key
-/// column that isn't exactly 32 bytes is bad data: it is logged and dropped, so
-/// the blob falls back to the DB key — and fails the download if none exists,
-/// which skips the changeset rather than encrypting under a wrong key.
-fn item_keys_in_changeset(changeset_bytes: &[u8]) -> Result<HashMap<String, [u8; 32]>, String> {
-    let mut map = HashMap::new();
-    for (item_id, key) in
-        crate::changeset::insert_text_blob_pairs(changeset_bytes, "item_keys", 0, 1)?
-    {
-        match <[u8; 32]>::try_from(key.as_slice()) {
-            Ok(k) => {
-                map.insert(item_id, k);
-            }
-            Err(_) => warn!(
-                item_id = %item_id,
-                len = key.len(),
-                "item_keys row has a non-32-byte key, ignoring"
-            ),
-        }
-    }
-    Ok(map)
-}
-
 pub(crate) struct BlobDownload {
     blob: crate::blob::BlobRef,
     size: BlobDownloadSize,
@@ -1493,27 +1448,6 @@ async fn drop_deleted_blob_local(
     Ok(())
 }
 
-/// Resolve a blob's public scope to its internal key scope WITHOUT requiring the
-/// minting changeset to be applied first: an `Item(id)` scope takes its key from
-/// `in_changeset_keys` (keys this changeset mints) when present, else from the DB
-/// (keys minted by earlier, already-applied changesets, or carried by a
-/// snapshot). `Master`/`Derived` need no key lookup. This is what lets the pull
-/// download an item-scoped blob before applying the changeset (issue #111).
-async fn resolve_pull_scope(
-    scope: crate::blob::BlobScope,
-    in_changeset_keys: &HashMap<String, [u8; 32]>,
-    db: &Database,
-) -> Result<crate::blob::ResolvedScope, crate::database::DbError> {
-    use crate::blob::{BlobScope, ResolvedScope};
-    match scope {
-        BlobScope::Item(item_id) => match in_changeset_keys.get(&item_id) {
-            Some(key) => Ok(ResolvedScope::Key(*key)),
-            None => db.resolve_blob_scope(BlobScope::Item(item_id)).await,
-        },
-        other => db.resolve_blob_scope(other).await,
-    }
-}
-
 /// Download each blob in `blobs` into the evictable cache
 /// `storage/cache/<namespace>/<id>` under `library_dir`, decrypting via storage
 /// (which returns plaintext) and writing the bytes atomically. Returns true if every
@@ -1528,17 +1462,9 @@ async fn resolve_pull_scope(
 /// read re-fetches it; covers are not pinned.) The destination is coven-built from
 /// the validated namespace + blob id.
 ///
-/// Each blob's public scope is resolved to the internal key scope here — the blob
-/// declaration carries no key — via [`resolve_pull_scope`], which consults
-/// `in_changeset_keys` (item keys the current changeset mints) before the DB so
-/// resolution does not depend on the changeset being applied. A blob whose item
-/// key is missing is a failed download (logged, `all_ok = false`) so a caller
-/// that gates on the result can retry once the key row has landed.
-///
 /// Shared by the incremental pull (per applied changeset) and the snapshot
-/// bootstrap backfill (per row in the freshly bootstrapped DB, where
-/// `in_changeset_keys` is empty and keys come from the DB the snapshot carried),
-/// so the download/decrypt/write path lives in one place.
+/// bootstrap backfill (per row in the freshly bootstrapped DB), so the
+/// download/decrypt/write path lives in one place.
 /// Download a set of blobs into the cache. `known_uploader` is the prefix each
 /// blob lives under when the caller already knows it — the changeset author for an
 /// incremental pull, since the author of a changeset uploaded the blobs it
@@ -1551,7 +1477,6 @@ pub(crate) async fn download_blobs(
     blobs: Vec<BlobDownload>,
     storage: &dyn SyncStorage,
     library_dir: &LibraryDir,
-    in_changeset_keys: &HashMap<String, [u8; 32]>,
     known_uploader: Option<&str>,
 ) -> bool {
     let mut all_ok = true;
@@ -1621,14 +1546,6 @@ pub(crate) async fn download_blobs(
             }
         }
 
-        let resolved = match resolve_pull_scope(blob.scope.clone(), in_changeset_keys, db).await {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot resolve blob scope, skipping download");
-                all_ok = false;
-                continue;
-            }
-        };
         let source_size = match BlobDownload::resolve_source_size(db, &blob, size).await {
             Ok(size) => size,
             Err(e) => {
@@ -1657,7 +1574,7 @@ pub(crate) async fn download_blobs(
                 &blob.namespace,
                 uploader.as_deref(),
                 &blob.id,
-                resolved,
+                blob.scope.clone(),
                 blob.cloud_path.as_deref(),
                 source_size,
                 &dest,

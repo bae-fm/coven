@@ -146,36 +146,28 @@ async fn record_failure(
     }
 }
 
-/// Resolve an upload's scope to a key and open a streaming [`BlobBody`] over its
-/// local plaintext file — sealing each chunk under the scope's key for an
-/// encrypted home, or passing the plaintext through for a browsable one — without
-/// ever reading or sealing the whole blob into memory. The cloud write consumes
-/// the body chunk by chunk; a `retain_pinned` upload pins by stream-copying the
-/// same source file afterward (it never holds the plaintext in RAM).
+/// Open a streaming [`BlobBody`] over an upload's local plaintext file —
+/// sealing each chunk under the scope's key for an encrypted home, or passing
+/// the plaintext through for a browsable one — without ever reading or sealing
+/// the whole blob into memory. The cloud write consumes the body chunk by
+/// chunk; a `retain_pinned` upload pins by stream-copying the same source file
+/// afterward (it never holds the plaintext in RAM).
 ///
-/// The two failure modes — the scope can't be resolved to a key (a missing
-/// `item_keys` row), or the local file can't be opened — both surface as an `Err`
-/// carrying a host-readable message, so the upload loop has one failure path
-/// (warn + record + skip) instead of one per step. The scope is resolved at drain
-/// (not enqueue) because the key may be minted/synced after the blob was queued,
-/// and an `Item` scope reads `item_keys` here, holding `db`.
-async fn resolve_and_open(
-    db: &Database,
+/// A local file that can't be opened surfaces as an `Err` carrying a
+/// host-readable message, so the upload loop has one failure path
+/// (warn + record + skip).
+async fn open_scoped_body(
     cipher: &std::sync::RwLock<CloudCipher>,
     file_path: &Path,
     library_id: &str,
     cloud_key: &str,
     scope: BlobScope,
 ) -> Result<BlobBody, String> {
-    let resolved = db
-        .resolve_blob_scope(scope)
-        .await
-        .map_err(|e| format!("cannot resolve blob scope: {e}"))?;
     // Snapshot the cipher out of the lock so the (streaming, await-holding) body
     // doesn't keep the guard across the upload.
     let cipher = cipher.read().unwrap().clone();
     let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, cloud_key);
-    cipher.open_body(resolved, file_path, &aad_context).await
+    cipher.open_body(scope, file_path, &aad_context).await
 }
 
 /// The result of one upload-queue drain pass.
@@ -315,13 +307,9 @@ pub async fn drain_uploads(
             },
         };
 
-        // Resolve the scope to a key (an `Item` scope reads `item_keys` here,
-        // holding `db`) and open a streaming body over the local plaintext — the
-        // body seals each chunk as it uploads, never holding the whole blob. A
-        // missing key is a host bug; record it as a failure rather than silently
-        // sealing under the master key (which no share recipient could read).
-        let body = match resolve_and_open(
-            db,
+        // Open a streaming body over the local plaintext — the body seals each
+        // chunk under the scope's key as it uploads, never holding the whole blob.
+        let body = match open_scoped_body(
             cipher,
             &file_path,
             library_id,
