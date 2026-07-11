@@ -772,6 +772,14 @@ impl Database {
             // legitimate but rare, tolerated.
             if rows_changed == 0 {
                 warn!("journaled sql transaction changed nothing; pure reads belong on sql_read");
+                // Debug builds name the offender: the backtrace runs through the
+                // host's monomorphized closure, whose symbol carries the call
+                // site's module path. Captured only when the warn fires.
+                #[cfg(debug_assertions)]
+                warn!(
+                    "zero-change sql transaction backtrace:\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
             }
             return Ok(());
         }
