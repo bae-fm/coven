@@ -53,11 +53,11 @@ async function handle(message) {
     case "addNote": {
       const updatedAt = store.stamp();
       const createdAt = new Date().toISOString();
-      // Parameterized through coven's `exec`. The values are escaped here for the
+      // Parameterized through coven's `sql`. The values are escaped here for the
       // demo's single-quote-free inputs; a real app would pass bound parameters.
       const id = sqlString(data.id);
       const body = sqlString(data.body);
-      store.exec(
+      store.sql(
         `INSERT INTO notes (id, body, _updated_at, created_at) ` +
           `VALUES (${id}, ${body}, ${sqlString(updatedAt)}, ${sqlString(createdAt)}) ` +
           `ON CONFLICT(id) DO UPDATE SET body = excluded.body, _updated_at = excluded._updated_at`,
@@ -81,7 +81,7 @@ async function handle(message) {
 }
 
 async function sendNotes() {
-  const rows = await store.query(
+  const rows = await store.sqlRead(
     "SELECT id, body, _updated_at FROM notes ORDER BY _updated_at DESC",
   );
   self.postMessage({ type: "notes", rows });

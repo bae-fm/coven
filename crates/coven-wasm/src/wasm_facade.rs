@@ -8,8 +8,8 @@
 //! file is the single entry that wires them together for a web page:
 //! [`CovenStore::open`] takes a config object, installs the browser storage VFS,
 //! opens the database, builds the storage + sync runtime, and hands back a handle
-//! the page drives through [`exec`](CovenStore::exec) /
-//! [`query`](CovenStore::query) and [`start_sync`](CovenStore::start_sync) /
+//! the page drives through [`sql`](CovenStore::sql) /
+//! [`sql_read`](CovenStore::sql_read) and [`start_sync`](CovenStore::start_sync) /
 //! [`stop_sync`](CovenStore::stop_sync) / [`sync_now`](CovenStore::sync_now).
 //!
 //! ## Worker-only
@@ -96,7 +96,7 @@ struct JsSyncedTable {
 
 /// The browser-facing coven handle: an open database plus the sync runtime that
 /// keeps it converged with the cloud. Construct with [`open`](Self::open), then
-/// drive app SQL through [`exec`](Self::exec) / [`query`](Self::query) and the
+/// drive app SQL through [`sql`](Self::sql) / [`sql_read`](Self::sql_read) and the
 /// sync loop through [`start_sync`](Self::start_sync) and friends.
 #[wasm_bindgen]
 pub struct CovenStore {
@@ -212,7 +212,7 @@ impl CovenStore {
     /// journal, so [`start_sync`](Self::start_sync) publishes it. Synced rows must
     /// carry the `_updated_at` register stamp the synced-table contract requires;
     /// wasm hosts with an open store mint those stamps with [`stamp`](Self::stamp).
-    pub fn exec(&self, sql: String) -> Result<(), JsValue> {
+    pub fn sql(&self, sql: String) -> Result<(), JsValue> {
         // The wasm `Database::call` runs the closure synchronously on the borrowed
         // connection and returns an already-complete future, so `now_or_never`
         // drives it to its value without awaiting. It returns `None` only if a
@@ -227,20 +227,21 @@ impl CovenStore {
             })
             .now_or_never()
             .expect("wasm Database::call returns a ready future")
-            .map_err(|e| JsValue::from_str(&format!("exec failed: {e}")))
+            .map_err(|e| JsValue::from_str(&format!("sql failed: {e}")))
     }
 
-    /// Run a read query and return its rows as a JSON value: an array of objects,
-    /// one per row, keyed by column name. SQLite NULL maps to JSON `null`, integers
-    /// and reals to JSON numbers, and text to JSON strings; a non-UTF-8 text or a
-    /// BLOB column is an error rather than a silently corrupted string (see
-    /// [`value_ref_to_json`]).
-    pub async fn query(&self, sql: String) -> Result<JsValue, JsValue> {
+    /// Run a pure read query and return its rows as a JSON value: an array of
+    /// objects, one per row, keyed by column name. SQLite NULL maps to JSON
+    /// `null`, integers and reals to JSON numbers, and text to JSON strings; a
+    /// non-UTF-8 text or a BLOB column is an error rather than a silently
+    /// corrupted string (see [`value_ref_to_json`]).
+    #[wasm_bindgen(js_name = sqlRead)]
+    pub async fn sql_read(&self, sql: String) -> Result<JsValue, JsValue> {
         let rows = self
             .db
             .call(move |conn| query_rows(conn, &sql))
             .await
-            .map_err(|e| JsValue::from_str(&format!("query failed: {e}")))?;
+            .map_err(|e| JsValue::from_str(&format!("sql_read failed: {e}")))?;
         // `json_compatible` serializes each row's map as a plain JS object, so the
         // page can read `row.body`; the default serializer would emit JS `Map`s,
         // which have no property access.
@@ -474,8 +475,8 @@ fn parse_synced_tables(value: JsValue) -> Result<Vec<SyncedTable>, String> {
 }
 
 /// Run a `SELECT` and collect its rows as `serde_json` values, keyed by column
-/// name, so the facade can hand them to JavaScript. Shared by [`CovenStore::query`]
-/// and the headless test.
+/// name, so the facade can hand them to JavaScript. Shared by
+/// [`CovenStore::sql_read`] and the headless test.
 fn query_rows(conn: &Connection, sql: &str) -> Result<Vec<serde_json::Value>, DbError> {
     let mut stmt = conn.prepare(sql).map_err(DbError::from)?;
     let column_count = stmt.column_count();
@@ -502,9 +503,9 @@ fn query_rows(conn: &Connection, sql: &str) -> Result<Vec<serde_json::Value>, Db
 
 /// Render one column value as JSON. SQLite's storage classes map directly: NULL →
 /// null, INTEGER/REAL → number, TEXT → string. A BLOB is surfaced as an error —
-/// this facade's `query` is for the demo's text columns, and lossily stringifying
-/// arbitrary bytes would corrupt them silently; a real app that stores blobs adds
-/// an explicit (e.g. base64) encoding here.
+/// this facade's `sql_read` is for the demo's text columns, and lossily
+/// stringifying arbitrary bytes would corrupt them silently; a real app that
+/// stores blobs adds an explicit (e.g. base64) encoding here.
 fn value_ref_to_json(column: &str, value: ValueRef<'_>) -> Result<serde_json::Value, DbError> {
     Ok(match value {
         ValueRef::Null => serde_json::Value::Null,
@@ -517,7 +518,7 @@ fn value_ref_to_json(column: &str, value: ValueRef<'_>) -> Result<serde_json::Va
         ),
         ValueRef::Blob(_) => {
             return Err(DbError(format!(
-                "column {column} is a BLOB; query() renders only text/number columns as JSON"
+                "column {column} is a BLOB; sql_read() renders only text/number columns as JSON"
             )))
         }
     })

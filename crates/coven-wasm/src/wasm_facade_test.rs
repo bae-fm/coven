@@ -1,6 +1,6 @@
 //! Headless wasm proof that the facade ([`CovenStore`]) correctly assembles the
 //! whole browser stack: two instances over one shared in-memory cloud converge a
-//! row **through the public facade API** — `exec`, `query`, `start_sync`,
+//! row **through the public facade API** — `sql`, `sql_read`, `start_sync`,
 //! `sync_now` — with no live S3.
 //!
 //! [`CovenStore::open`] builds an [`S3WasmCloudHome`] and hands it to the
@@ -13,7 +13,7 @@
 //! the event-loop [`WasmSyncRuntime`](crate::sync::wasm_runtime::WasmSyncRuntime).
 //!
 //! Tab A writes a note and triggers a sync; the test waits (bounded) for tab B's
-//! `query` to return the row. That the row crosses with the test only ever calling
+//! `sql_read` to return the row. That the row crosses with the test only ever calling
 //! the facade's own methods is the proof: the facade assembles a working store,
 //! and two of them converge. Drive it with `wasm-pack test --headless --firefox`.
 //!
@@ -181,21 +181,22 @@ async fn assert_public_open_rejects(
 }
 
 /// Whether `lib`'s `notes` table holds a row with `id`, read through the facade's
-/// public `query` (which returns the rows as a JSON value the test parses back).
+/// public `sql_read` (which returns the rows as a JSON value the test parses
+/// back).
 async fn has_note(lib: &CovenStore, id: &str) -> bool {
     let rows_js = lib
-        .query(format!("SELECT id FROM notes WHERE id = '{id}'"))
+        .sql_read(format!("SELECT id FROM notes WHERE id = '{id}'"))
         .await
-        .expect("query notes through the facade");
+        .expect("sql_read notes through the facade");
     let rows: Vec<serde_json::Value> =
-        serde_wasm_bindgen::from_value(rows_js).expect("query returns a JSON array of rows");
+        serde_wasm_bindgen::from_value(rows_js).expect("sql_read returns a JSON array of rows");
     !rows.is_empty()
 }
 
 /// Two stores over one cloud, both syncing: tab A writes a note and triggers a
 /// sync, and the note converges to tab B — observed entirely through the facade's
 /// public API. No `run_single_sync_cycle`, no direct `Database`: only `from_home`
-/// (the seam `open` uses), `exec`, `query`, `start_sync`, and `sync_now`.
+/// (the seam `open` uses), `sql`, `sql_read`, `start_sync`, and `sync_now`.
 #[wasm_bindgen_test]
 async fn two_stores_converge_a_note_through_the_facade() {
     console_error_panic_hook::set_once();
@@ -209,11 +210,11 @@ async fn two_stores_converge_a_note_through_the_facade() {
     let lib_a = open_store(&format!("tab-a-{run}"), "device-a", &cloud).await;
     let lib_b = open_store(&format!("tab-b-{run}"), "device-b", &cloud).await;
 
-    // Tab A writes a note through `exec`. The synced `notes` row carries the
+    // Tab A writes a note through `sql`. The synced `notes` row carries the
     // `_updated_at` register the contract requires (here a literal HLC-shaped stamp
     // ending in the device id; a real app mints it with the `UpdatedAtStamper`).
     lib_a
-        .exec(
+        .sql(
             "INSERT INTO notes (id, body, _updated_at, created_at) \
              VALUES ('note-1', 'hello from tab A', '0000000001000-0000-device-a', '2026-01-01')"
                 .to_string(),
@@ -251,13 +252,14 @@ async fn two_stores_converge_a_note_through_the_facade() {
          not converge over the shared cloud",
     );
 
-    // The converged row carries A's content, read back through the facade's query.
+    // The converged row carries A's content, read back through the facade's
+    // sql_read.
     let rows_js = lib_b
-        .query("SELECT body FROM notes WHERE id = 'note-1'".to_string())
+        .sql_read("SELECT body FROM notes WHERE id = 'note-1'".to_string())
         .await
         .expect("read body on tab B");
     let rows: Vec<serde_json::Value> =
-        serde_wasm_bindgen::from_value(rows_js).expect("query returns a JSON array of rows");
+        serde_wasm_bindgen::from_value(rows_js).expect("sql_read returns a JSON array of rows");
     assert_eq!(
         rows.first()
             .and_then(|r| r.get("body"))

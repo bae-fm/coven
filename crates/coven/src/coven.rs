@@ -434,8 +434,9 @@ impl CovenHandle {
     /// read-only, so an `INSERT`/`UPDATE`/`DELETE`/DDL in the closure is refused by
     /// SQLite — a read cannot silently escape the sync journal because it cannot
     /// write at all. The closure receives the `&Connection` directly, so a host
-    /// closure written against [`CovenReadHandle::sql`](crate::CovenReadHandle::sql)
-    /// runs unchanged here.
+    /// closure written against
+    /// [`CovenReadHandle::sql_read`](crate::CovenReadHandle::sql_read) runs
+    /// unchanged here.
     ///
     /// Read-your-writes holds for committed writes: a `sql_read` issued after an
     /// awaited [`sql`](Self::sql) or [`write`](Self::write) sees that data (the WAL
@@ -2374,7 +2375,7 @@ mod tests {
 
     async fn read_files_count(handle: &crate::read_handle::CovenReadHandle) -> i64 {
         handle
-            .sql(|conn| {
+            .sql_read(|conn| {
                 conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                     .map_err(CovenError::from)
             })
@@ -2468,9 +2469,10 @@ mod tests {
     }
 
     /// A read-only handle has no write API at all — writes are absent by
-    /// construction. The one place a raw statement could be run is the `sql`
-    /// closure's `&Connection`; because the connection is `SQLITE_OPEN_READONLY`,
-    /// SQLite refuses the write there rather than mutating the store.
+    /// construction. The one place a raw statement could be run is the
+    /// `sql_read` closure's `&Connection`; because the connection is
+    /// `SQLITE_OPEN_READONLY`, SQLite refuses the write there rather than
+    /// mutating the store.
     #[tokio::test]
     async fn read_only_handle_connection_refuses_writes() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -2479,7 +2481,7 @@ mod tests {
         let reader = try_open_read_only(&dir).expect("read-only open");
 
         let result: CovenResult<()> = reader
-            .sql(|conn| {
+            .sql_read(|conn| {
                 conn.execute(
                     "INSERT INTO files (id, blob_id, size, _updated_at) \
                      VALUES ('should-not-write', NULL, 0, 'x')",

@@ -12,8 +12,8 @@
 //! There is no write, sync-manager, migration, or stamp API on it — those are absent
 //! by construction, so a reader cannot mutate the synced state a concurrent writer
 //! owns. Its connection is `SQLITE_OPEN_READONLY`, so even the raw
-//! [`sql`](CovenReadHandle::sql) closure's `&Connection` refuses DML at the SQLite
-//! layer.
+//! [`sql_read`](CovenReadHandle::sql_read) closure's `&Connection` refuses DML at
+//! the SQLite layer.
 //!
 //! It takes no store lock: it coexists with the writer that holds the exclusive
 //! `.coven-lock`, and with any number of other read-only opens (a read-only
@@ -42,9 +42,9 @@ use crate::sync::sync_manager::ConfigProvider;
 ///
 /// # What it can do
 ///
-/// - **Rows** — read via [`sql`](Self::sql). The closure receives the `&Connection`
-///   coven owns; because the connection is read-only, any write statement fails at
-///   the SQLite layer.
+/// - **Rows** — read via [`sql_read`](Self::sql_read). The closure receives the
+///   `&Connection` coven owns; because the connection is read-only, any write
+///   statement fails at the SQLite layer.
 /// - **Blobs** — [`read_blob`](Self::read_blob) and
 ///   [`open_blob_stream`](Self::open_blob_stream) resolve a blob's locality and serve
 ///   it from the local store, the cache, or a cloud fetch into the per-device cache.
@@ -85,14 +85,17 @@ impl CovenReadHandle {
         (self.config_provider)()
     }
 
-    /// Run a read against the connection coven owns and await the result.
+    /// Run a pure read against the connection coven owns and await the result.
     ///
-    /// The closure receives the `&Connection` directly (coven serializes access on
-    /// its connection thread, so this never races the writer's process). The
-    /// connection is `SQLITE_OPEN_READONLY`: a `SELECT`/`PRAGMA` reads normally, and
-    /// any `INSERT`/`UPDATE`/`DELETE`/DDL is refused by SQLite — the read-only
+    /// This is the read handle's form of
+    /// [`CovenHandle::sql_read`](crate::CovenHandle::sql_read): the closure receives
+    /// the `&Connection` directly (coven serializes access on its connection
+    /// thread, so this never races the writer's process), and a host closure
+    /// written against `CovenHandle::sql_read` ports unchanged here. The connection
+    /// is `SQLITE_OPEN_READONLY`: a `SELECT`/`PRAGMA` reads normally, and any
+    /// `INSERT`/`UPDATE`/`DELETE`/DDL is refused by SQLite — the read-only
     /// guarantee is enforced at the connection, not left to the caller.
-    pub async fn sql<F, R>(&self, f: F) -> CovenResult<R>
+    pub async fn sql_read<F, R>(&self, f: F) -> CovenResult<R>
     where
         F: FnOnce(&rusqlite::Connection) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
@@ -131,8 +134,8 @@ impl CovenReadHandle {
     }
 
     /// Read a blob's whole plaintext through coven's locality-aware read: served from
-    /// coven's local store (Local host-provided), the user's file (Local
-    /// user-provided), the pinned/evictable cache on a Remote hit, or fetched from
+    /// the user's file (Local user-provided), coven's local store (Local
+    /// host-provided), the pinned/evictable cache on a Remote hit, or fetched from
     /// the cloud into the cache on a Remote miss. The read counterpart of
     /// [`CovenHandle::read_blob`](crate::CovenHandle::read_blob).
     ///
