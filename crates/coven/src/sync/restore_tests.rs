@@ -58,7 +58,7 @@ async fn restore_result_for(
         &test_migrations(),
         None,
         None,
-        app_dir,
+        &crate::store_dir::StoreLayout::new(app_dir),
         Arc::new(SystemClock),
         ids,
         |_| {},

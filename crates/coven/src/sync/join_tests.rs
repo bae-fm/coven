@@ -67,7 +67,7 @@ async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Co
     let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
     join_from_invite_code(
         code_str,
-        app_dir,
+        &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
         None,
@@ -290,7 +290,7 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
     let ids = crate::id_provider::SequentialIdProvider::new("dev");
 
     let result = crate::sync::join::join_store(
-        data_dir,
+        &crate::store_dir::StoreLayout::new(data_dir),
         code,
         &test_synced_tables(),
         &test_migrations(),

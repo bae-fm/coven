@@ -373,8 +373,11 @@ pub use coven_core::{
 // Applied-sync change notification.
 pub use coven_core::{ChangeOp, RowChange};
 
-// At-rest crypto the host configures, the store directory, the DB error.
-pub use coven_core::{DbError, EncryptionError, EncryptionService, StoreDir, CHUNK_SIZE};
+// At-rest crypto the host configures, the store directory and its
+// host-configurable layout, the DB error.
+pub use coven_core::{
+    DbError, EncryptionError, EncryptionService, StoreDir, StoreLayout, CHUNK_SIZE,
+};
 
 // The register clock vocabulary carried on every synced row.
 pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};

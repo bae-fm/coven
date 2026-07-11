@@ -153,7 +153,7 @@ pub use keys::{CloudHomeCredentials, KeyError, KeyPersistence, UserKeypair};
 // At-rest crypto the host configures (the host sizes cloud stream reads from
 // `CHUNK_SIZE`), and the store directory the host points coven at.
 pub use encryption::{EncryptionError, EncryptionService, CHUNK_SIZE};
-pub use store_dir::StoreDir;
+pub use store_dir::{StoreDir, StoreLayout};
 
 // Sync vocabulary exposed through the native handle.
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};

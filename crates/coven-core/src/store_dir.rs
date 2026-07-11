@@ -127,6 +127,61 @@ pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
     Ok(())
 }
 
+/// Default name of the parent directory a store lives under — overridden
+/// per host via [`StoreLayout::stores_dirname`].
+const DEFAULT_STORES_DIRNAME: &str = "stores";
+/// Default name of a store's own database file — overridden per host via
+/// [`StoreLayout::db_filename`].
+const DEFAULT_DB_FILENAME: &str = "store.db";
+
+/// The host's on-disk layout for stores: where they live and what the
+/// database file is called. One rule shared by create, open, join, and
+/// restore, so a host that wants `libraries/<id>/library.db` instead of
+/// coven's default `stores/<id>/store.db` names it once here rather than
+/// each flow hardwiring (or working around) coven's own choice.
+#[derive(Clone, Debug)]
+pub struct StoreLayout {
+    app_dir: PathBuf,
+    stores_dirname: String,
+    db_filename: String,
+}
+
+impl StoreLayout {
+    pub fn new(app_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            app_dir: app_dir.into(),
+            stores_dirname: DEFAULT_STORES_DIRNAME.to_string(),
+            db_filename: DEFAULT_DB_FILENAME.to_string(),
+        }
+    }
+
+    pub fn stores_dirname(mut self, name: impl Into<String>) -> Self {
+        self.stores_dirname = name.into();
+        self
+    }
+
+    pub fn db_filename(mut self, name: impl Into<String>) -> Self {
+        self.db_filename = name.into();
+        self
+    }
+
+    /// The stores parent dir (for host listing/discovery).
+    pub fn stores_root(&self) -> PathBuf {
+        self.app_dir.join(&self.stores_dirname)
+    }
+
+    /// The one `(app_dir, store_id) -> StoreDir` rule, named with this
+    /// layout's directory and database filename. Callers validate an
+    /// untrusted `store_id` ([`validate_path_token`]) BEFORE calling, as
+    /// every join/restore/create flow already does.
+    pub fn store_dir(&self, store_id: &str) -> StoreDir {
+        StoreDir {
+            path: self.stores_root().join(store_id),
+            db_filename: self.db_filename.clone(),
+        }
+    }
+}
+
 /// Typed wrapper for a store directory path.
 ///
 /// Centralizes the on-disk layout so callers use methods instead of
@@ -134,22 +189,19 @@ pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoreDir {
     path: PathBuf,
+    db_filename: String,
 }
 
 impl StoreDir {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-
-    /// The directory of `store_id` under `app_dir`'s `stores/` — the one
-    /// layout rule for where a store lives, shared by every flow that
-    /// creates, opens, or refuses one.
-    pub fn for_store(app_dir: &Path, store_id: &str) -> Self {
-        Self::new(app_dir.join("stores").join(store_id))
+        Self {
+            path: path.into(),
+            db_filename: DEFAULT_DB_FILENAME.to_string(),
+        }
     }
 
     pub fn db_path(&self) -> PathBuf {
-        self.path.join("store.db")
+        self.path.join(&self.db_filename)
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -326,18 +378,27 @@ impl StoreDir {
     /// `Config::save_active_store()` afterward.
     ///
     /// `store_id` is device-generated here (trusted), but it still has to name a
-    /// single directory under `stores/`, so it passes the same
+    /// single directory under `layout`'s stores dir, so it passes the same
     /// [`validate_path_token`] gate the untrusted join/restore ids pass — a
     /// malformed id fails loudly rather than forming a stray path.
+    ///
+    /// Refuses with [`ConfigError::StoreExists`] if the directory already
+    /// exists — the same refusal join and restore give their own `stores/<id>`,
+    /// so a `store_id` collision (e.g. a device-generated id reused, or two
+    /// concurrent creates) fails loudly here too rather than overwriting an
+    /// existing store's directory.
     pub fn create(
-        data_dir: &Path,
+        layout: &StoreLayout,
         store_id: String,
         store_name: String,
         ids: &dyn crate::id_provider::IdProvider,
     ) -> Result<Config, ConfigError> {
         validate_path_token(&store_id)
             .map_err(|e| ConfigError::Config(format!("invalid store id: {e}")))?;
-        let store_dir = StoreDir::for_store(data_dir, &store_id);
+        let store_dir = layout.store_dir(&store_id);
+        if store_dir.exists() {
+            return Err(ConfigError::StoreExists(store_id));
+        }
         std::fs::create_dir_all(&*store_dir)?;
 
         let device_id = ids.new_id();
@@ -365,7 +426,10 @@ impl AsRef<Path> for StoreDir {
 
 impl From<PathBuf> for StoreDir {
     fn from(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            db_filename: DEFAULT_DB_FILENAME.to_string(),
+        }
     }
 }
 

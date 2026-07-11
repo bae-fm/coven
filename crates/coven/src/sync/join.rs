@@ -15,7 +15,7 @@ use crate::join_code::InviteCode;
 use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
 use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
-use crate::store_dir::StoreDir;
+use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::invite::{unwrap_store_keyring, InviteError};
 use crate::sync::pull::{pull_changes, PullError};
@@ -236,7 +236,7 @@ async fn build_cloud_home_for_join(
 #[allow(clippy::too_many_arguments)]
 pub async fn join_from_invite_code(
     invite_code_str: &str,
-    app_dir: &Path,
+    layout: &StoreLayout,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
@@ -256,7 +256,7 @@ pub async fn join_from_invite_code(
     // the destructive failure-cleanup; this check exists so a refused join also
     // leaves no residue from `build_cloud_home_for_join`, which runs first and
     // saves OAuth tokens to the keyring and can accept a CloudKit share.
-    if StoreDir::for_store(app_dir, &code.store_id).exists() {
+    if layout.store_dir(&code.store_id).exists() {
         return Err(JoinError::StoreExists(code.store_id));
     }
 
@@ -268,7 +268,7 @@ pub async fn join_from_invite_code(
             .await?;
 
     let config = join_store(
-        app_dir,
+        layout,
         code,
         synced_tables,
         migrations,
@@ -291,7 +291,7 @@ pub async fn join_from_invite_code(
 /// `on_status` is called with progress messages for UI feedback.
 #[allow(clippy::too_many_arguments)]
 pub async fn join_store(
-    data_dir: &Path,
+    layout: &StoreLayout,
     code: InviteCode,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
@@ -315,7 +315,7 @@ pub async fn join_store(
     // blobs during cleanup. This is the authoritative guard: it makes the
     // failure-cleanup below only ever remove a directory this invocation
     // created.
-    let store_dir = StoreDir::for_store(data_dir, &code.store_id);
+    let store_dir = layout.store_dir(&code.store_id);
     if store_dir.exists() {
         return Err(JoinError::StoreExists(code.store_id));
     }

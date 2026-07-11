@@ -132,6 +132,8 @@ pub enum ConfigError {
     Config(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("store already exists locally: {0}")]
+    StoreExists(String),
 }
 
 /// Sync + storage configuration for one store.

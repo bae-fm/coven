@@ -4,7 +4,6 @@
 //! the encryption key directly from the user — present for an opaque home,
 //! absent for a browsable one.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tracing::info;
@@ -15,7 +14,7 @@ use crate::keys::{KeyError, KeyService, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
-use crate::store_dir::StoreDir;
+use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::join::{bootstrap_and_save_store, BootstrapSaveError, JoinError};
 use crate::sync::pull::PullError;
@@ -209,7 +208,7 @@ pub async fn restore_from_cloud(
     migrations: &[Migration],
     source: RestoreSource,
     keypair: &UserKeypair,
-    app_dir: &Path,
+    layout: &StoreLayout,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
@@ -223,12 +222,12 @@ pub async fn restore_from_cloud(
 
     // Refuse a store already present locally before any provider side effect. The
     // decode guaranteed the id is a safe single component, so the directory is a
-    // direct child of `stores/` and cannot escape it. Re-running a restore for a
-    // store you already have adds nothing — the existing store is the data — and
-    // letting it proceed would, on any bootstrap failure below, delete that store's
-    // database and blobs during cleanup. Refusing here makes the failure-cleanup only
-    // ever remove a directory this invocation created.
-    let store_dir = StoreDir::for_store(app_dir, store_id);
+    // direct child of the layout's stores dir and cannot escape it. Re-running a
+    // restore for a store you already have adds nothing — the existing store is
+    // the data — and letting it proceed would, on any bootstrap failure below,
+    // delete that store's database and blobs during cleanup. Refusing here makes
+    // the failure-cleanup only ever remove a directory this invocation created.
+    let store_dir = layout.store_dir(store_id);
     if store_dir.exists() {
         return Err(RestoreError::StoreExists(store_id.to_string()));
     }
@@ -321,7 +320,7 @@ pub async fn restore_from_code(
     migrations: &[Migration],
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
-    app_dir: &Path,
+    layout: &StoreLayout,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
@@ -402,7 +401,7 @@ pub async fn restore_from_code(
         migrations,
         source,
         &keypair,
-        app_dir,
+        layout,
         clock,
         ids,
         on_status,
