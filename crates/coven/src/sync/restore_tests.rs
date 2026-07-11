@@ -9,25 +9,39 @@
 //! reaches the directory step: a decoded `RestoreCode` always carries a safe id.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
+use crate::blob::{CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::config::HomeStorage;
-use crate::database::DbError;
+use crate::database::{Database, DbError};
+use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::cycle::run_single_sync_cycle;
+use crate::sync::hlc::Hlc;
 use crate::sync::join::{
-    bootstrap_and_save_store, cleanup_after_bootstrap_failure, BootstrapContext, BootstrapError,
+    bootstrap_and_save_store, cleanup_after_bootstrap_failure, open_db_and_pull, BootstrapContext,
+    BootstrapError,
 };
+use crate::sync::membership::MembershipChain;
 use crate::sync::restore::restore_from_code;
 use crate::sync::restore_code::{
     decode_restore_code, encode_restore_code, RestoreCode, RestoreCodeError,
 };
-use crate::sync::snapshot::{create_snapshot, push_snapshot, SnapshotBlobPreflight};
-use crate::sync::test_helpers::{open_test_db, test_migrations, test_synced_tables};
+use crate::sync::session::BlobDecl;
+use crate::sync::snapshot::{
+    bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
+};
+use crate::sync::storage::SyncStorage;
+use crate::sync::test_helpers::{
+    append_membership_entry, exec, founder_entry, open_test_db, open_test_db_with_blob, pubkey_hex,
+    publish_membership_chain_head, temp_store_dir, test_migrations, test_synced_tables,
+    test_synced_tables_with_blob, MockSyncStorage,
+};
 
 /// A restore code carrying the given `sid`. The provider points at a loopback
 /// endpoint nothing listens on, so if execution ever reached the network it would
@@ -463,5 +477,381 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             .expect("read keyring")
             .is_none(),
         "the cloud home credentials must be rolled back",
+    );
+}
+
+/// `bootstrap_and_save_store` is the shared helper both `join_store` and
+/// `restore_from_cloud` call — join_tests.rs's
+/// `joined_device_first_cycle_does_not_clobber_the_shared_snapshot` already pins
+/// its lower-level `open_db_and_pull` (with `owner_pubkey: None`, restore's own
+/// no-owner shape) against a synthetic `MockSyncStorage`. This test drives one
+/// level up, through `bootstrap_and_save_store` itself with
+/// `BootstrapContext::Restore` over a real [`CloudSyncStorage`] /
+/// `InMemoryCloudHome`, so the restore entry's bookkeeping (steps 7-9: keyring,
+/// config, and — inside `open_db_and_pull` — the `sync_state` that keeps a first
+/// real cycle from thinking it's a brand-new store) is proven wired correctly,
+/// not just the shared helper's own inner logic.
+///
+/// Driving through the actual public entry points (`restore_from_cloud` /
+/// `restore_from_code`) isn't reachable here: their `build_cloud_home` only
+/// dispatches to real S3/CloudKit/OAuth homes, with no test-only hook to inject
+/// an in-memory one (unlike join, which has `join_store` as a lower-level entry
+/// that accepts a pre-built `CloudHome` directly). `bootstrap_and_save_store` is
+/// the exact shared helper the gap this test fixes names, so it's the reachable
+/// unit that best pins the restore entry's wiring.
+#[tokio::test]
+async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
+    crate::keys::test_keyring::install();
+
+    let store_id = "restore-anti-clobber-test";
+    let cloud = crate::InMemoryCloudHome::new();
+    let cipher = CloudCipher::Plaintext;
+    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
+    let tables = test_synced_tables();
+    let owner_keypair = UserKeypair::generate();
+
+    let owner_storage = CloudSyncStorage::new(
+        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        owner_keypair.clone(),
+    );
+
+    // Owner: a store with one shared note, captured straight into the published
+    // snapshot — the shape a device sees the first time it opens a shared store.
+    let db_owner = open_test_db();
+    exec(
+        &db_owner,
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
+    )
+    .await;
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_owner
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &owner_storage,
+        store_id,
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db_owner.schema_version(),
+        &owner_keypair,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_owner,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    let snapshot_before = owner_storage
+        .get_snapshot_pointer()
+        .await
+        .expect("snapshot pointer present");
+
+    // Device B restores through the shared bootstrap entry, over its own
+    // CloudSyncStorage handle onto the same cloud.
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let joiner_keypair = UserKeypair::generate();
+    let joiner_storage = CloudSyncStorage::new(
+        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        joiner_keypair.clone(),
+    );
+    let store_keys = StoreKeys::new(store_id.to_string());
+    let join_info = CloudHomeJoinInfo::CloudKit;
+
+    bootstrap_and_save_store(
+        &joiner_storage,
+        &cipher,
+        None,
+        &lib_b,
+        store_id,
+        "device-b",
+        BootstrapContext::Restore,
+        &tables,
+        &test_migrations(),
+        &join_info,
+        "Restored Store",
+        &store_keys,
+        &|_status: &str| {},
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await
+    .expect("restore bootstrap");
+
+    let (db_b, _stamper) = Database::open(
+        &lib_b.db_path(),
+        tables.clone(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        "device-b".to_string(),
+        &test_migrations(),
+    )
+    .expect("open B db");
+
+    // B's first real sync cycle, with no local changes of its own.
+    let enc_lock = RwLock::new(cipher.clone());
+    let b_hlc = Hlc::new("device-b".to_string());
+    run_single_sync_cycle(
+        &joiner_storage,
+        store_id,
+        "device-b",
+        &b_hlc,
+        &SystemClock,
+        &db_b,
+        &enc_lock,
+        &joiner_keypair,
+        None,
+        &lib_b,
+        None,
+        None,
+    )
+    .await
+    .expect("B sync cycle");
+
+    let snapshot_after = joiner_storage
+        .get_snapshot_pointer()
+        .await
+        .expect("snapshot pointer present");
+    assert_eq!(
+        snapshot_after, snapshot_before,
+        "a restored device's first cycle must not republish/clobber the shared snapshot",
+    );
+}
+
+/// The restore-only branch in `open_db_and_pull` (join.rs, around the
+/// `owner_pubkey.is_none()` block): restore carries no owner from an invite, so
+/// it adopts the chain founder as the pinned owner itself, after the pull, from
+/// membership entries loaded straight from the bootstrapped storage. No existing
+/// test publishes a founder chain and checks this — join_tests.rs's
+/// `open_db_and_pull` calls also pass `owner_pubkey: None`, but never publish any
+/// membership entries, so that branch's `if !entries.is_empty()` body never runs
+/// there. This seeds a real founder entry (and its head) before bootstrapping,
+/// then asserts the joiner's `sync_state` pins that founder's pubkey.
+#[tokio::test]
+async fn restore_pins_the_chain_founder_as_owner() {
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+
+    let owner_keypair = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner_keypair);
+    let mut chain = MembershipChain::new();
+    let founder = founder_entry(&owner_keypair, "0000000001000-0000-owner");
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner_keypair).await;
+
+    // A chain-less-looking but chain-bearing store: the owner also publishes an
+    // (empty) snapshot, the shape `bootstrap_from_snapshot` needs to succeed.
+    let db_owner = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_owner
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &storage,
+        "test-lib",
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db_owner.schema_version(),
+        &owner_keypair,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_owner,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
+        .await
+        .expect("B bootstrap");
+    open_db_and_pull(
+        &lib_b.db_path(),
+        &tables,
+        &test_migrations(),
+        "B",
+        None,
+        &storage,
+        &boot.cursors,
+        &lib_b,
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await
+    .expect("B open_db_and_pull");
+
+    let (db_b, _stamper) = Database::open(
+        &lib_b.db_path(),
+        tables.clone(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        "B".to_string(),
+        &test_migrations(),
+    )
+    .expect("open B db");
+
+    let pinned_owner_sql = format!(
+        "SELECT value FROM sync_state WHERE key = '{}'",
+        crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY
+    );
+    assert_eq!(
+        crate::sync::test_helpers::query_text(&db_b, &pinned_owner_sql).await,
+        owner_pk,
+        "restore must pin the chain founder's pubkey as the store owner",
+    );
+}
+
+/// Mirrors `bootstrap_backfills_blob_files_for_snapshot_rows` (join_tests.rs),
+/// which already pins the blob backfill at the `open_db_and_pull` level with
+/// `owner_pubkey: None` (restore's own shape). This drives one level up, through
+/// `bootstrap_and_save_store` with `BootstrapContext::Restore` over a real
+/// `CloudSyncStorage` / `InMemoryCloudHome`, to pin that a restored store's blob
+/// backfill survives the full shared-helper entry, not just the inner pull. See
+/// the anti-clobber test above for why `restore_from_cloud` itself isn't
+/// reachable here.
+#[tokio::test]
+async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
+    crate::keys::test_keyring::install();
+
+    let store_id = "restore-blob-backfill-test";
+    let cloud = crate::InMemoryCloudHome::new();
+    let cipher = CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32]));
+    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
+    let tables = test_synced_tables_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    let owner_keypair = UserKeypair::generate();
+
+    let owner_storage = CloudSyncStorage::new(
+        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        owner_keypair.clone(),
+    );
+
+    // Owner: a shared note with a cover photo, both captured into the snapshot.
+    let db_owner = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    exec(
+        &db_owner,
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db_owner,
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-owner', '2026-01-01')",
+    )
+    .await;
+
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_owner
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &owner_storage,
+        store_id,
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        1,
+        db_owner.schema_version(),
+        &owner_keypair,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_owner,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    // The cover blob exists in the cloud (uploaded when the owner first imported
+    // the album).
+    owner_storage
+        .put_blob(
+            "photos",
+            "photo1",
+            crate::blob::BlobScope::Master,
+            None,
+            b"cover-bytes".to_vec(),
+        )
+        .await
+        .expect("seed cover blob");
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let expected_blob = lib_b
+        .cache_blob_path("photos", "photo1")
+        .expect("cache blob path");
+
+    let joiner_storage = CloudSyncStorage::new(
+        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        UserKeypair::generate(),
+    );
+    let store_keys = StoreKeys::new(store_id.to_string());
+    let join_info = CloudHomeJoinInfo::CloudKit;
+
+    bootstrap_and_save_store(
+        &joiner_storage,
+        &cipher,
+        None,
+        &lib_b,
+        store_id,
+        "device-b",
+        BootstrapContext::Restore,
+        &tables,
+        &test_migrations(),
+        &join_info,
+        "Restored Store",
+        &store_keys,
+        &|_status: &str| {},
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await
+    .expect("restore bootstrap backfills the blob");
+
+    assert!(
+        expected_blob.exists(),
+        "the cover blob file must be backfilled to {} after restore",
+        expected_blob.display(),
+    );
+    assert_eq!(
+        std::fs::read(&expected_blob).expect("read backfilled blob"),
+        b"cover-bytes",
+        "the backfilled file must hold the blob's plaintext bytes",
     );
 }
