@@ -101,6 +101,20 @@ fn require_join_oauth(
         .ok_or_else(|| JoinError::Provider(format!("{provider_name} join requires an OAuth token")))
 }
 
+/// Persist the caller-supplied OAuth tokens for the store `ks` is scoped to, so
+/// the next launch's home construction (`parse_oauth_tokens` in
+/// `storage::cloud`) can read them back from the keyring instead of erroring on
+/// their absence. Both join and restore build an OAuth provider home from
+/// tokens the caller already holds; both must save them here before returning
+/// that home.
+#[cfg(feature = "oauth-providers")]
+pub(crate) fn persist_oauth_tokens(
+    ks: &KeyService,
+    tokens: &crate::oauth::OAuthTokens,
+) -> Result<(), KeyError> {
+    ks.set_cloud_home_oauth_tokens(tokens)
+}
+
 /// Build a CloudHome from a JoinInfo for the join flow.
 ///
 /// For OAuth providers, the caller supplies the tokens — fetched via the host's
@@ -143,7 +157,7 @@ async fn build_cloud_home_for_join(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
-            lib_ks.set_cloud_home_oauth_tokens(&tokens)?;
+            persist_oauth_tokens(lib_ks, &tokens)?;
             Ok(Box::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
                 tokens,
@@ -155,7 +169,7 @@ async fn build_cloud_home_for_join(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
-            lib_ks.set_cloud_home_oauth_tokens(&tokens)?;
+            persist_oauth_tokens(lib_ks, &tokens)?;
             Ok(Box::new(dropbox::DropboxCloudHome::new(
                 shared_folder_id.clone(),
                 tokens,
@@ -170,7 +184,7 @@ async fn build_cloud_home_for_join(
             folder_id,
         } => {
             let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
-            lib_ks.set_cloud_home_oauth_tokens(&tokens)?;
+            persist_oauth_tokens(lib_ks, &tokens)?;
             Ok(Box::new(onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),

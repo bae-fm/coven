@@ -141,6 +141,7 @@ async fn build_cloud_home(
         #[cfg(feature = "oauth-providers")]
         RestoreSource::GoogleDrive { folder_id, tokens } => {
             let ks = KeyService::new(store_id.to_string());
+            crate::sync::join::persist_oauth_tokens(&ks, &tokens)?;
             let home =
                 google_drive::GoogleDriveCloudHome::new(folder_id.clone(), tokens, ks, clock)?;
             let info = CloudHomeJoinInfo::GoogleDrive { folder_id };
@@ -153,6 +154,7 @@ async fn build_cloud_home(
             tokens,
         } => {
             let ks = KeyService::new(store_id.to_string());
+            crate::sync::join::persist_oauth_tokens(&ks, &tokens)?;
             let home = dropbox::DropboxCloudHome::new(folder_path.clone(), tokens, ks, clock)?;
             let info = CloudHomeJoinInfo::Dropbox {
                 shared_folder_id: folder_path,
@@ -167,6 +169,7 @@ async fn build_cloud_home(
             tokens,
         } => {
             let ks = KeyService::new(store_id.to_string());
+            crate::sync::join::persist_oauth_tokens(&ks, &tokens)?;
             let home = onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),
@@ -408,4 +411,55 @@ pub async fn restore_from_code(
         .map_err(RestoreError::Key)?;
 
     Ok(config)
+}
+
+// The only test here exercises the OAuth-provider arms of `build_cloud_home`,
+// which only exist under this feature; the module (not just the test fn) is
+// gated so its imports aren't unused in a build without the feature.
+#[cfg(all(test, feature = "oauth-providers"))]
+mod tests {
+    use super::*;
+    use crate::keys::CloudHomeCredentials;
+
+    /// Restore's per-provider `build_cloud_home` must save the caller-supplied
+    /// OAuth tokens to the store-scoped keyring, the same way join's parallel
+    /// arms already do. Launch-time home construction (`parse_oauth_tokens` in
+    /// `storage::cloud`) reads them back from there and errors when they're
+    /// absent, so a store restored over an OAuth provider must be able to build
+    /// its cloud home again on the next launch. Dropbox is the smallest OAuth
+    /// arm, so it stands in for Google Drive and OneDrive here.
+    #[tokio::test]
+    async fn restore_dropbox_build_cloud_home_persists_oauth_tokens() {
+        crate::keys::test_keyring::install();
+        crate::oauth::install_test_client_creds();
+
+        let store_id = "restore-dropbox-persist-test";
+        let tokens = OAuthTokens {
+            access_token: "access-token".to_string(),
+            refresh_token: Some("refresh-token".to_string()),
+            expires_at: None,
+        };
+        let source = RestoreSource::Dropbox {
+            folder_path: "/Apps/coven/my-store".to_string(),
+            tokens: tokens.clone(),
+        };
+
+        build_cloud_home(source, store_id, Arc::new(crate::clock::SystemClock))
+            .await
+            .expect("build restore cloud home for Dropbox");
+
+        let stored = KeyService::new(store_id.to_string())
+            .get_cloud_home_credentials()
+            .expect("read cloud home credentials")
+            .expect("restore must persist OAuth tokens to the keyring");
+        match stored {
+            CloudHomeCredentials::OAuth { token_json } => {
+                let stored_tokens: OAuthTokens =
+                    serde_json::from_str(&token_json).expect("stored OAuth tokens deserialize");
+                assert_eq!(stored_tokens.access_token, tokens.access_token);
+                assert_eq!(stored_tokens.refresh_token, tokens.refresh_token);
+            }
+            other => panic!("expected OAuth credentials, got {other:?}"),
+        }
+    }
 }
