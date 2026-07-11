@@ -245,6 +245,8 @@ pub async fn join_from_invite_code(
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
+    crate::install_platform();
+
     let code = crate::join_code::decode(invite_code_str)
         .map_err(|e| JoinError::InvalidCode(e.to_string()))?;
 
@@ -298,6 +300,8 @@ pub async fn join_store(
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
 ) -> Result<Config, JoinError> {
+    crate::install_platform();
+
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::store_dir::validate_path_token(&code.store_id)
@@ -496,7 +500,6 @@ pub(crate) async fn open_db_and_pull(
     cursors: &HashMap<String, u64>,
     store_dir: &StoreDir,
 ) -> Result<u64, JoinError> {
-    crate::install_platform();
     let (db, _stamper) = Database::open(
         db_path,
         synced_tables.to_vec(),
