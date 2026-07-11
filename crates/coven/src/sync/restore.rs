@@ -17,7 +17,9 @@ use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::join::{bootstrap_and_save_store, BootstrapError};
+use crate::sync::join::{
+    bootstrap_and_save_store, cleanup_after_bootstrap_failure, BootstrapError,
+};
 use crate::sync::session::SyncedTable;
 
 /// Cloud provider source for restore: the join info a restore code carries
@@ -194,60 +196,69 @@ pub async fn restore_from_cloud(
         return Err(BootstrapError::StoreExists(store_id.to_string()));
     }
 
-    on_status("Preparing restore...");
-
-    // The key's presence is the home's storage mode: a key present ⇒ an opaque
-    // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
-    // (plaintext, readable blob paths). The cipher and the blob-path scheme both
-    // follow from it, so this device computes the same blob keys the source wrote.
-    let storage = if encryption_key_hex.is_some() {
-        HomeStorage::Opaque
-    } else {
-        HomeStorage::Browsable
-    };
-    let cipher = match encryption_key_hex {
-        Some(key_hex) => {
-            on_status("Verifying encryption key...");
-            CloudCipher::Encrypted(EncryptionService::new(key_hex)?)
-        }
-        None => CloudCipher::Plaintext,
-    };
-
-    let blob_paths = BlobPathScheme::for_storage(storage);
-
-    let (join_info, cloud_home) = build_cloud_home(source, store_id, clock).await?;
-
-    let storage = CloudSyncStorage::new(
-        std::sync::Arc::from(cloud_home),
-        cipher.clone(),
-        blob_paths,
-        store_id.to_string(),
-        keypair.clone(),
-    );
-
-    // Create the store directory under `stores/` (its non-existence was checked
-    // up front, so this create and the failure-cleanup below own it entirely).
-    let device_id = ids.new_id();
-    std::fs::create_dir_all(&*store_dir)?;
-
+    // Hoisted here, before any durable write below, so a failure at any step —
+    // including `build_cloud_home`'s OAuth persist, which runs before the store
+    // directory is created — funnels through the same rollback instead of a
+    // bare `?` escaping it.
     let store_keys = StoreKeys::new(store_id.to_string());
 
-    let result = bootstrap_and_save_store(
-        &storage,
-        &cipher,
-        encryption_key_hex,
-        &store_dir,
-        store_id,
-        &device_id,
-        crate::sync::join::BootstrapContext::Restore,
-        synced_tables,
-        migrations,
-        &join_info,
-        store_name,
-        &store_keys,
-        &on_status,
-        cancel,
-    )
+    let result = async {
+        on_status("Preparing restore...");
+
+        // The key's presence is the home's storage mode: a key present ⇒ an
+        // opaque home (encrypted, obfuscated blob paths); a key absent ⇒ a
+        // browsable home (plaintext, readable blob paths). The cipher and the
+        // blob-path scheme both follow from it, so this device computes the
+        // same blob keys the source wrote.
+        let storage = if encryption_key_hex.is_some() {
+            HomeStorage::Opaque
+        } else {
+            HomeStorage::Browsable
+        };
+        let cipher = match encryption_key_hex {
+            Some(key_hex) => {
+                on_status("Verifying encryption key...");
+                CloudCipher::Encrypted(EncryptionService::new(key_hex)?)
+            }
+            None => CloudCipher::Plaintext,
+        };
+
+        let blob_paths = BlobPathScheme::for_storage(storage);
+
+        let (join_info, cloud_home) = build_cloud_home(source, store_id, clock).await?;
+
+        let storage = CloudSyncStorage::new(
+            std::sync::Arc::from(cloud_home),
+            cipher.clone(),
+            blob_paths,
+            store_id.to_string(),
+            keypair.clone(),
+        );
+
+        // Create the store directory under `stores/` (its non-existence was
+        // checked up front, so this create and the failure-cleanup below own
+        // it entirely).
+        let device_id = ids.new_id();
+        std::fs::create_dir_all(&*store_dir)?;
+
+        bootstrap_and_save_store(
+            &storage,
+            &cipher,
+            encryption_key_hex,
+            &store_dir,
+            store_id,
+            &device_id,
+            crate::sync::join::BootstrapContext::Restore,
+            synced_tables,
+            migrations,
+            &join_info,
+            store_name,
+            &store_keys,
+            &on_status,
+            cancel,
+        )
+        .await
+    }
     .await;
 
     match result {
@@ -259,8 +270,10 @@ pub async fn restore_from_cloud(
             );
             Ok(config)
         }
-        Err(err) => Err(crate::sync::join::cleanup_after_bootstrap_failure(
-            &store_dir, err,
+        Err(err) => Err(cleanup_after_bootstrap_failure(
+            &store_dir,
+            &store_keys,
+            err,
         )),
     }
 }
@@ -332,8 +345,20 @@ pub async fn restore_from_code(
     .await?;
 
     // Import the device signing key after restore succeeds so we don't overwrite
-    // an existing keypair if the restore fails.
-    DeviceKeys::import_user_keypair(&signing_key_bytes).map_err(BootstrapError::Key)?;
+    // an existing keypair if the restore fails. `restore_from_code` returns `Ok`
+    // with everything durable, or `Err` with nothing durable — never a store left
+    // behind that a retry can't reach, so an import failure here rolls back the
+    // store `restore_from_cloud` just committed the same way a bootstrap failure
+    // does.
+    if let Err(e) = DeviceKeys::import_user_keypair(&signing_key_bytes) {
+        let store_dir = layout.store_dir(&parsed.sid);
+        let store_keys = StoreKeys::new(parsed.sid.clone());
+        return Err(cleanup_after_bootstrap_failure(
+            &store_dir,
+            &store_keys,
+            BootstrapError::Key(e),
+        ));
+    }
 
     Ok(config)
 }

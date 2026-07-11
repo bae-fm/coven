@@ -60,14 +60,15 @@ pub enum BootstrapError {
     #[error("invalid signing key: {0}")]
     InvalidSigningKey(String),
     /// The caller's cancel signal fired at a phase boundary, so the join or
-    /// restore stopped before saving the store. The partly-created store
-    /// directory is removed on this path exactly as on a failure, so a cancelled
-    /// bootstrap leaves no residue.
+    /// restore stopped before saving the store. This returns through the same
+    /// failure-cleanup path a real error takes — removing the partly-created
+    /// store directory and any per-store keyring entries written so far — so a
+    /// cancelled bootstrap leaves no residue in either place.
     #[error("the operation was cancelled")]
     Cancelled,
-    /// Bootstrap failed AND removing the partly-created store directory also
-    /// failed. Both are carried: `cause` is the original bootstrap failure that
-    /// triggered the cleanup, `cleanup` is why the removal itself failed — the
+    /// Bootstrap failed AND cleaning up what it had durably written also failed.
+    /// Both are carried: `cause` is the original bootstrap failure that
+    /// triggered the cleanup, `cleanup` is why the cleanup itself failed — the
     /// cause is preserved as a value, not flattened into a string.
     #[error("could not clean up the partial store after bootstrap failed: {cleanup} (bootstrap error: {cause})")]
     Cleanup {
@@ -76,22 +77,48 @@ pub enum BootstrapError {
     },
 }
 
-/// Remove the partly-created store directory after a bootstrap failure and
-/// return the error to propagate. On a clean removal the original `cause` is
-/// returned unchanged; if the removal itself fails, both failures are carried
-/// in a [`BootstrapError::Cleanup`] so neither is lost. Shared by join and
-/// restore — both create a `stores/<id>` directory this invocation owns and
-/// must undo it on any bootstrap failure below.
+/// Undo everything a bootstrap attempt may have durably written, then return
+/// the error to propagate. The exists-guard at the top of every join/restore
+/// entry point establishes that this invocation owns everything under the
+/// store id — no live store existed when it started, so the store-scoped
+/// directory and keyring accounts are this invocation's alone to remove, which
+/// makes total removal unconditionally safe here. Three steps, each
+/// best-effort so one failing doesn't skip the others: the store directory
+/// (tolerating it never having existed — a failure before `create_dir_all`
+/// leaves nothing to remove), the encryption master key, and the cloud-home
+/// credentials (OAuth tokens are stored *as* credentials — see
+/// `StoreKeys::set_cloud_home_oauth_tokens` — so this one delete covers both).
+/// On a clean run the original `cause` is returned unchanged; if any step
+/// fails, every failure is carried in a [`BootstrapError::Cleanup`] so none is
+/// lost. Shared by join and restore.
 pub(crate) fn cleanup_after_bootstrap_failure(
     store_dir: &StoreDir,
+    store_keys: &StoreKeys,
     cause: BootstrapError,
 ) -> BootstrapError {
+    let mut failures: Vec<String> = Vec::new();
+
     match std::fs::remove_dir_all(&**store_dir) {
-        Ok(()) => cause,
-        Err(cleanup) => BootstrapError::Cleanup {
-            cleanup: cleanup.to_string(),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => failures.push(format!("store directory: {e}")),
+    }
+
+    if let Err(e) = store_keys.delete_encryption_key() {
+        failures.push(format!("encryption key: {e}"));
+    }
+
+    if let Err(e) = store_keys.delete_cloud_home_credentials() {
+        failures.push(format!("cloud home credentials: {e}"));
+    }
+
+    if failures.is_empty() {
+        cause
+    } else {
+        BootstrapError::Cleanup {
+            cleanup: failures.join("; "),
             cause: Box::new(cause),
-        },
+        }
     }
 }
 
@@ -291,35 +318,50 @@ pub async fn join_from_invite_code(
     // the destructive failure-cleanup; this check exists so a refused join also
     // leaves no residue from `build_cloud_home_for_join`, which runs first and
     // saves OAuth tokens to the keyring and can accept a CloudKit share.
-    if layout.store_dir(&code.store_id).exists() {
+    let store_dir = layout.store_dir(&code.store_id);
+    if store_dir.exists() {
         return Err(BootstrapError::StoreExists(code.store_id));
     }
 
+    // Hoisted here, before any durable write below, so a failure at any step —
+    // including `build_cloud_home_for_join`'s OAuth persist, which runs before
+    // `join_store` even creates the store directory — funnels through the same
+    // rollback instead of escaping via `?`.
     let store_keys = StoreKeys::new(code.store_id.clone());
 
-    let cloud_home = build_cloud_home_for_join(
-        &code.join_info,
-        &store_keys,
-        oauth_tokens,
-        cloudkit_ops,
-        clock,
-    )
-    .await?;
+    let result = async {
+        let cloud_home = build_cloud_home_for_join(
+            &code.join_info,
+            &store_keys,
+            oauth_tokens,
+            cloudkit_ops,
+            clock,
+        )
+        .await?;
 
-    let config = join_store(
-        layout,
-        code,
-        synced_tables,
-        migrations,
-        cloud_home,
-        ids.as_ref(),
-        &on_status,
-        cancel,
-    )
-    .await?;
+        join_store(
+            layout,
+            code,
+            synced_tables,
+            migrations,
+            cloud_home,
+            ids.as_ref(),
+            &on_status,
+            cancel,
+        )
+        .await
+    }
+    .await;
 
-    // The host records this as the active store after this returns.
-    Ok(config)
+    match result {
+        // The host records this as the active store after this returns.
+        Ok(config) => Ok(config),
+        Err(err) => Err(cleanup_after_bootstrap_failure(
+            &store_dir,
+            &store_keys,
+            err,
+        )),
+    }
 }
 
 /// Join an existing shared store using a decoded invite code.
@@ -359,80 +401,93 @@ pub async fn join_store(
         return Err(BootstrapError::StoreExists(code.store_id));
     }
 
-    // Load the device signing keypair (must already exist — the inviter wrapped
-    // the store key for this public key). It is device-global, not store-scoped.
-    on_status("Loading keypair...");
-    let user_keypair = DeviceKeys::get_user_keypair()?;
+    // Hoisted here, before any durable write below, so every step through the
+    // end of this function — keypair load, invitation accept, directory
+    // creation, bootstrap — funnels a failure through the same rollback
+    // instead of a bare `?` escaping it.
+    let store_keys = StoreKeys::new(code.store_id.clone());
 
-    // Accept the invitation to get the store encryption key. The joiner
-    // authenticates it against the current Owner set derived from the membership
-    // chain anchored to the owner the invite pins (the chain founder), so any
-    // current Owner's invite is joinable yet a bucket writer still can't
-    // substitute a key. The chain is sealed under the store key, so `Arc` the
-    // home once and reuse it for the sync storage below.
-    on_status("Accepting invitation...");
-    let cloud_home: std::sync::Arc<dyn CloudHome> = std::sync::Arc::from(cloud_home);
-    let encryption = unwrap_store_keyring(
-        cloud_home.clone(),
-        &user_keypair,
-        &code.store_id,
-        &code.owner_pubkey,
-    )
-    .await?;
-    let encryption_keyring = encryption.to_keyring_string()?;
+    let result = async {
+        // Load the device signing keypair (must already exist — the inviter
+        // wrapped the store key for this public key). It is device-global, not
+        // store-scoped.
+        on_status("Loading keypair...");
+        let user_keypair = DeviceKeys::get_user_keypair()?;
 
-    // Create the sync storage with the real encryption key. Joining a shared
-    // store only makes sense over an opaque home — the invite wraps the store
-    // key — so the home is always opaque here: the cipher is `Encrypted` and the
-    // blob-path scheme is `Hashed`, matching what the owner writes.
-    let cipher = CloudCipher::Encrypted(encryption);
-    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
-    // The device's signing identity signs the head/min_schema control objects it
-    // writes; it's the same keypair the invite wrapped the store key for.
-    let storage = CloudSyncStorage::new(
-        cloud_home,
-        cipher.clone(),
-        blob_paths,
-        code.store_id.clone(),
-        user_keypair.clone(),
-    );
+        // Accept the invitation to get the store encryption key. The joiner
+        // authenticates it against the current Owner set derived from the
+        // membership chain anchored to the owner the invite pins (the chain
+        // founder), so any current Owner's invite is joinable yet a bucket
+        // writer still can't substitute a key. The chain is sealed under the
+        // store key, so `Arc` the home once and reuse it for the sync storage
+        // below.
+        on_status("Accepting invitation...");
+        let cloud_home: std::sync::Arc<dyn CloudHome> = std::sync::Arc::from(cloud_home);
+        let encryption = unwrap_store_keyring(
+            cloud_home.clone(),
+            &user_keypair,
+            &code.store_id,
+            &code.owner_pubkey,
+        )
+        .await?;
+        let encryption_keyring = encryption.to_keyring_string()?;
 
-    // Create the store directory under `stores/`, named by the invite's id
-    // (its non-existence was checked up front, so this create and the
-    // failure-cleanup below own it entirely).
-    let store_id = code.store_id;
-    let device_id = ids.new_id();
-    std::fs::create_dir_all(&*store_dir)?;
+        // Create the sync storage with the real encryption key. Joining a
+        // shared store only makes sense over an opaque home — the invite wraps
+        // the store key — so the home is always opaque here: the cipher is
+        // `Encrypted` and the blob-path scheme is `Hashed`, matching what the
+        // owner writes.
+        let cipher = CloudCipher::Encrypted(encryption);
+        let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
+        // The device's signing identity signs the head/min_schema control
+        // objects it writes; it's the same keypair the invite wrapped the
+        // store key for.
+        let storage = CloudSyncStorage::new(
+            cloud_home,
+            cipher.clone(),
+            blob_paths,
+            code.store_id.clone(),
+            user_keypair.clone(),
+        );
 
-    // All steps after directory creation are wrapped so we can clean up on failure.
-    let store_keys = StoreKeys::new(store_id.clone());
+        // Create the store directory under `stores/`, named by the invite's id
+        // (its non-existence was checked up front, so this create and the
+        // failure-cleanup below own it entirely).
+        let device_id = ids.new_id();
+        std::fs::create_dir_all(&*store_dir)?;
 
-    let result = bootstrap_and_save_store(
-        &storage,
-        &cipher,
-        Some(&encryption_keyring),
-        &store_dir,
-        &store_id,
-        &device_id,
-        BootstrapContext::Join {
-            owner_pubkey: &code.owner_pubkey,
-        },
-        synced_tables,
-        migrations,
-        &code.join_info,
-        &code.store_name,
-        &store_keys,
-        &on_status,
-        cancel,
-    )
+        bootstrap_and_save_store(
+            &storage,
+            &cipher,
+            Some(&encryption_keyring),
+            &store_dir,
+            &code.store_id,
+            &device_id,
+            BootstrapContext::Join {
+                owner_pubkey: &code.owner_pubkey,
+            },
+            synced_tables,
+            migrations,
+            &code.join_info,
+            &code.store_name,
+            &store_keys,
+            &on_status,
+            cancel,
+        )
+        .await
+    }
     .await;
 
     match result {
         Ok(config) => {
-            info!("Joined store {} at {}", store_id, store_dir.display());
+            info!("Joined store {} at {}", code.store_id, store_dir.display());
             Ok(config)
         }
-        Err(err) => Err(cleanup_after_bootstrap_failure(&store_dir, err)),
+        Err(err) => Err(cleanup_after_bootstrap_failure(
+            &store_dir,
+            &store_keys,
+            err,
+        )),
     }
 }
 
@@ -794,16 +849,21 @@ mod tests {
     /// carried: `cleanup` records why the removal failed and `cause` preserves
     /// the ORIGINAL bootstrap error as a value — not flattened into a string.
     /// Join and restore both route their failure path through this one helper,
-    /// so exercising it covers both flows' cleanup behavior.
+    /// so exercising it covers both flows' cleanup behavior. The dir removal is
+    /// the failure here: a *file* sits where the store dir should be, so
+    /// `remove_dir_all` fails with something other than not-found (which is
+    /// tolerated, not a failure — see the dedicated test below).
     #[test]
     fn cleanup_failure_carries_the_original_bootstrap_cause() {
+        crate::keys::test_keyring::install();
         let tmp = tempfile::tempdir().expect("temp dir");
-        // A directory that was never created: `remove_dir_all` fails, standing
-        // in for any cleanup failure the real flows can hit.
-        let missing = StoreDir::new(tmp.path().join("never-created"));
+        let blocked = StoreDir::new(tmp.path().join("blocked-by-a-file"));
+        std::fs::write(&*blocked, b"not a directory").expect("seed a file at the store dir path");
+        let store_keys = StoreKeys::new("cleanup-failure-cause-test".to_string());
 
         let wrapped = cleanup_after_bootstrap_failure(
-            &missing,
+            &blocked,
+            &store_keys,
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -823,12 +883,15 @@ mod tests {
     /// unchanged — no `Cleanup` wrapper — and the partial store dir is gone.
     #[test]
     fn successful_cleanup_returns_the_cause_unchanged() {
+        crate::keys::test_keyring::install();
         let tmp = tempfile::tempdir().expect("temp dir");
         let store_dir = StoreDir::new(tmp.path().join("to-remove"));
         std::fs::create_dir_all(&*store_dir).expect("create store dir");
+        let store_keys = StoreKeys::new("successful-cleanup-test".to_string());
 
         let returned = cleanup_after_bootstrap_failure(
             &store_dir,
+            &store_keys,
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -837,6 +900,77 @@ mod tests {
             "a clean removal returns the cause unchanged, got {returned:?}",
         );
         assert!(!store_dir.exists(), "the partial store dir was removed");
+    }
+
+    /// A bootstrap failure before `create_dir_all` ever ran (e.g. the OAuth
+    /// persist or cloud-home construction failed first) leaves no store dir to
+    /// remove. `remove_dir_all` on a path that never existed returns
+    /// `NotFound`, and that must be tolerated — not folded into `Cleanup` — so a
+    /// pre-directory failure still reports as the plain original cause.
+    #[test]
+    fn cleanup_tolerates_a_store_dir_that_was_never_created() {
+        crate::keys::test_keyring::install();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let never_created = StoreDir::new(tmp.path().join("never-created"));
+        let store_keys = StoreKeys::new("never-created-dir-test".to_string());
+
+        let returned = cleanup_after_bootstrap_failure(
+            &never_created,
+            &store_keys,
+            BootstrapError::Database("bootstrap boom".to_string()),
+        );
+
+        assert!(
+            matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+            "a missing store dir must not itself count as a cleanup failure, got {returned:?}",
+        );
+    }
+
+    /// The extended rollback also removes the store-scoped keyring accounts —
+    /// the encryption master key and the cloud-home credentials (which is also
+    /// where an OAuth token lands, via `set_cloud_home_oauth_tokens`) — not just
+    /// the directory. Seed both accounts the way a partial bootstrap would have
+    /// written them, then assert cleanup leaves neither behind.
+    #[test]
+    fn cleanup_also_removes_both_keyring_accounts() {
+        crate::keys::test_keyring::install();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(tmp.path().join("keyring-cleanup-test"));
+        std::fs::create_dir_all(&*store_dir).expect("create store dir");
+        let store_keys = StoreKeys::new("keyring-cleanup-test".to_string());
+        store_keys
+            .set_encryption_key("aa".repeat(32).as_str())
+            .expect("seed encryption key");
+        store_keys
+            .set_cloud_home_credentials(&CloudHomeCredentials::S3 {
+                access_key: "ak".to_string(),
+                secret_key: "sk".to_string(),
+            })
+            .expect("seed cloud home credentials");
+
+        let returned = cleanup_after_bootstrap_failure(
+            &store_dir,
+            &store_keys,
+            BootstrapError::Database("bootstrap boom".to_string()),
+        );
+
+        assert!(
+            matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+            "a clean removal returns the cause unchanged, got {returned:?}",
+        );
+        assert!(!store_dir.exists(), "the partial store dir was removed");
+        assert_eq!(
+            store_keys.get_encryption_key().expect("read keyring"),
+            None,
+            "the encryption key must be removed from the keyring",
+        );
+        assert!(
+            store_keys
+                .get_cloud_home_credentials()
+                .expect("read keyring")
+                .is_none(),
+            "the cloud home credentials must be removed from the keyring",
+        );
     }
 
     /// Only S3 maps to a stored value; every other provider returns `None` so

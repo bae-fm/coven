@@ -247,6 +247,93 @@ async fn fresh_join_failure_cleans_up_its_own_directory() {
     );
 }
 
+/// `build_cloud_home_for_join` persists the caller's OAuth token to the
+/// store-scoped keyring BEFORE `join_store` ever creates the store directory
+/// (persist happens in `join_from_invite_code`, directory creation happens
+/// later, inside `join_store`). A failure between those two points used to
+/// escape the failure-cleanup entirely (a bare `?`), leaving the persisted
+/// token behind with no store directory to show for it. Here the persist
+/// succeeds (a real Dropbox home is built) and the very next step — loading
+/// the device signing keypair, `join_store`'s first line — is made to fail via
+/// a one-shot keyring error, landing exactly between persist and
+/// `create_dir_all`. The `SIGNING_KEY_GUARD` lock, held for the whole call,
+/// guarantees the injected error is consumed by this read and not raced by
+/// another test sharing the same device-global keyring account.
+#[cfg(feature = "oauth-providers")]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_keyring() {
+    crate::keys::test_keyring::install();
+    crate::oauth::install_test_client_creds();
+    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+    // Prime a one-shot error on the device signing-key account's next read.
+    let entry = keyring_core::Entry::new(
+        crate::keys::keyring_service().expect("keyring service registered"),
+        "coven_user_signing_key",
+    )
+    .expect("create signing-key entry");
+    let mock: &keyring_core::mock::Cred = entry
+        .as_any()
+        .downcast_ref()
+        .expect("mock keyring credential");
+    mock.set_error(keyring_core::Error::Invalid(
+        "induced".to_string(),
+        "keypair load fails right after OAuth persist, before create_dir_all".to_string(),
+    ));
+
+    let store_id = "oauth-persist-then-keypair-load-fails";
+    let encoded = encode(&InviteCode {
+        v: crate::join_code::INVITE_CODE_VERSION,
+        store_id: store_id.to_string(),
+        store_name: "Evil".to_string(),
+        join_info: CloudHomeJoinInfo::Dropbox {
+            folder_path: "/Apps/coven/oauth-cleanup-test".to_string(),
+        },
+        owner_pubkey: hex::encode([0xAB_u8; 32]),
+    });
+    let oauth_tokens = crate::oauth::OAuthTokens {
+        access_token: "access-token".to_string(),
+        refresh_token: Some("refresh-token".to_string()),
+        expires_at: None,
+    };
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+    let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
+    let result = join_from_invite_code(
+        &encoded,
+        &crate::store_dir::StoreLayout::new(app_dir),
+        &test_synced_tables(),
+        &test_migrations(),
+        Some(oauth_tokens),
+        None,
+        Arc::new(SystemClock),
+        ids,
+        |_| {},
+        &never_cancelled(),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::Key(_))),
+        "the induced keyring error must surface as a Key error, got {result:?}",
+    );
+
+    let store_dir = app_dir.join("stores").join(store_id);
+    assert!(
+        !store_dir.exists(),
+        "no store directory should exist — the failure predates `create_dir_all`",
+    );
+    assert!(
+        crate::keys::StoreKeys::new(store_id.to_string())
+            .get_cloud_home_credentials()
+            .expect("read keyring")
+            .is_none(),
+        "the OAuth token persisted before the keypair-load failure must be rolled back",
+    );
+}
+
 /// `join_store` is the lower-level, reusable function `join_from_invite_code`
 /// delegates to after its own exists-check — any other direct caller reaches
 /// `join_store` without that check. Its failure-cleanup removes the store

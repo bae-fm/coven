@@ -8,17 +8,26 @@
 //! tests pin that the id is refused the moment the code is decoded, so it never
 //! reaches the directory step: a decoded `RestoreCode` always carries a safe id.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::clock::SystemClock;
+use crate::config::HomeStorage;
+use crate::database::DbError;
 use crate::id_provider::SequentialIdProvider;
+use crate::keys::{StoreKeys, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
-use crate::sync::join::BootstrapError;
+use crate::store_dir::StoreLayout;
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::join::{
+    bootstrap_and_save_store, cleanup_after_bootstrap_failure, BootstrapContext, BootstrapError,
+};
 use crate::sync::restore::restore_from_code;
 use crate::sync::restore_code::{
     decode_restore_code, encode_restore_code, RestoreCode, RestoreCodeError,
 };
-use crate::sync::test_helpers::{test_migrations, test_synced_tables};
+use crate::sync::snapshot::{create_snapshot, push_snapshot, SnapshotBlobPreflight};
+use crate::sync::test_helpers::{open_test_db, test_migrations, test_synced_tables};
 
 /// A restore code carrying the given `sid`. The provider points at a loopback
 /// endpoint nothing listens on, so if execution ever reached the network it would
@@ -232,12 +241,18 @@ async fn restore_cancelled_before_snapshot_leaves_no_residue() {
         "a cancelled restore must leave no store directory at {}",
         store_dir.display(),
     );
+    let store_keys = crate::keys::StoreKeys::new("cancel-preset".to_string());
     assert_eq!(
-        crate::keys::StoreKeys::new("cancel-preset".to_string())
-            .get_encryption_key()
-            .expect("read keyring"),
+        store_keys.get_encryption_key().expect("read keyring"),
         None,
         "a cancelled restore must not write the store's encryption key",
+    );
+    assert!(
+        store_keys
+            .get_cloud_home_credentials()
+            .expect("read keyring")
+            .is_none(),
+        "a cancelled restore must not leave cloud home credentials in the keyring",
     );
 }
 
@@ -274,5 +289,179 @@ async fn restore_cancelled_via_status_callback_leaves_no_residue() {
         !store_dir.exists(),
         "a cancelled restore must leave no store directory at {}",
         store_dir.display(),
+    );
+}
+
+/// A failed restore must not leave a store directory behind that blocks a
+/// retry: a second `restore_from_code` attempt for the same `sid` must reach
+/// the same failure again, never `StoreExists`. `restore_from_code`'s signing-
+/// key import runs only after `restore_from_cloud` returns `Ok`, so an import
+/// failure needs this exact postcondition too — nothing durable survives a
+/// failed attempt, so the next attempt starts clean.
+#[tokio::test]
+async fn failed_restore_does_not_block_a_retry_with_store_exists() {
+    let encoded = restore_code_with_sid("retry-postcondition-test");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+
+    let first = restore_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(first, Err(BootstrapError::Snapshot(_))),
+        "the unreachable cloud endpoint must fail the first attempt at the snapshot download, got {first:?}",
+    );
+
+    let second = restore_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(second, Err(BootstrapError::Snapshot(_))),
+        "a retry after a failed attempt must reach the same failure again, not StoreExists, got {second:?}",
+    );
+}
+
+/// A failure at the very last step of bootstrap — saving `config.yaml`, after
+/// the encryption key and the cloud-home credentials are already written to the
+/// keyring (steps 7 and 8) — must roll back both keyring accounts, not just
+/// whichever the OLD code happened to reach. The public entry points
+/// (`join_store`, `restore_from_cloud`) refuse to run at all when the store
+/// directory already exists, so there is no way to pre-seed a conflicting path
+/// inside it before calling them; this drives `bootstrap_and_save_store`
+/// directly — the same function those entry points call — and blocks its
+/// final write by seeding a directory at the exact path `config.yaml` needs.
+///
+/// The store is chain-less (no membership entries published), so `open_db_and_pull`
+/// takes the no-owner-to-pin path and this test needs no invite/membership
+/// setup — only a snapshot the owner published, mirroring the bootstrap tests
+/// in `join_tests.rs`.
+#[tokio::test]
+async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
+    crate::keys::test_keyring::install();
+
+    let store_id = "late-step-rollback-test";
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let layout = StoreLayout::new(tmp.path());
+    let store_dir = layout.store_dir(store_id);
+    // No exists-guard runs here, so the store dir and its blocking content can
+    // be seeded directly, unlike through the public entry points.
+    std::fs::create_dir_all(&*store_dir).expect("create store dir directly");
+    std::fs::create_dir_all(store_dir.config_path())
+        .expect("seed a directory at the config path to block the final write");
+
+    let cloud = crate::InMemoryCloudHome::new();
+    let owner_keypair = UserKeypair::generate();
+    let cipher = CloudCipher::Plaintext;
+    let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
+    let owner_storage = CloudSyncStorage::new(
+        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        owner_keypair.clone(),
+    );
+
+    let tables = test_synced_tables();
+    let db = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("create owner snapshot");
+    push_snapshot(
+        &owner_storage,
+        store_id,
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db.schema_version(),
+        &owner_keypair,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    let joiner_storage = CloudSyncStorage::new(
+        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        UserKeypair::generate(),
+    );
+    let store_keys = StoreKeys::new(store_id.to_string());
+    let join_info = CloudHomeJoinInfo::S3 {
+        bucket: "b".to_string(),
+        region: "us-east-1".to_string(),
+        endpoint: None,
+        access_key: "ak".to_string(),
+        secret_key: "sk".to_string(),
+        key_prefix: None,
+    };
+
+    let result = bootstrap_and_save_store(
+        &joiner_storage,
+        &cipher,
+        Some(&"bb".repeat(32)),
+        &store_dir,
+        store_id,
+        "device-late",
+        BootstrapContext::Restore,
+        &tables,
+        &test_migrations(),
+        &join_info,
+        "Late Step Test",
+        &store_keys,
+        &|_status: &str| {},
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await;
+
+    let err = result.expect_err("the blocked config.yaml write must fail bootstrap");
+
+    // The meaningful precondition: steps 7 and 8 ran and wrote both keyring
+    // accounts before the failure at step 9.
+    assert!(
+        store_keys
+            .get_encryption_key()
+            .expect("read keyring")
+            .is_some(),
+        "the encryption key must have been written before the late failure",
+    );
+    assert!(
+        store_keys
+            .get_cloud_home_credentials()
+            .expect("read keyring")
+            .is_some(),
+        "the cloud home credentials must have been written before the late failure",
+    );
+
+    let wrapped = cleanup_after_bootstrap_failure(&store_dir, &store_keys, err);
+    assert!(
+        !matches!(wrapped, BootstrapError::Cleanup { .. }),
+        "cleanup of a directory blocked only by its own contents must fully succeed, got {wrapped:?}",
+    );
+    assert!(
+        !store_dir.exists(),
+        "the store dir, including the blocking config.yaml directory, must be fully removed",
+    );
+    assert!(
+        store_keys
+            .get_encryption_key()
+            .expect("read keyring")
+            .is_none(),
+        "the encryption key must be rolled back",
+    );
+    assert!(
+        store_keys
+            .get_cloud_home_credentials()
+            .expect("read keyring")
+            .is_none(),
+        "the cloud home credentials must be rolled back",
     );
 }
