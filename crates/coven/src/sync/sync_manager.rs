@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
-use crate::keys::{KeyError, KeyService};
+use crate::keys::{DeviceKeys, KeyError, StoreKeys};
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::{CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
@@ -88,7 +88,7 @@ fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<EncryptionServ
 /// so the service is consulted only on an opaque home.
 pub struct SyncManager {
     config_provider: ConfigProvider,
-    key_service: KeyService,
+    key_service: StoreKeys,
     encryption_service: Option<EncryptionService>,
     db: Database,
     clock: ClockRef,
@@ -127,7 +127,7 @@ impl SyncManager {
     /// connected.
     pub(crate) fn new(
         config_provider: ConfigProvider,
-        key_service: KeyService,
+        key_service: StoreKeys,
         encryption_service: Option<EncryptionService>,
         db: Database,
         clock: ClockRef,
@@ -224,7 +224,7 @@ impl SyncManager {
         // tables, storage/keypair/auth/membership bootstrap) that init_sync already
         // logged — surface it so the caller never installs a manager whose loop
         // never started.
-        let user_keypair = self.key_service.get_or_create_user_keypair()?;
+        let user_keypair = DeviceKeys::get_or_create_user_keypair()?;
         let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
             &self.key_service,
@@ -305,7 +305,7 @@ impl SyncManager {
         let config = (self.config_provider)();
         self.stop_current_connection()?;
 
-        let keypair = self.key_service.get_or_create_user_keypair()?;
+        let keypair = DeviceKeys::get_or_create_user_keypair()?;
         let storage = CloudSyncStorage::new(
             home.clone(),
             cipher.clone(),
@@ -426,7 +426,7 @@ impl SyncManager {
     /// uploads key under. Ready only once the keypair is loaded, which
     /// `is_sync_ready` has already established at the call sites below.
     fn self_uploader(&self) -> Result<String, MakeRemoteError> {
-        match self.key_service.get_user_public_key() {
+        match DeviceKeys::get_user_public_key() {
             Ok(Some(pk)) => Ok(hex::encode(pk)),
             // No keypair loaded yet: sync genuinely isn't ready.
             Ok(None) => Err(MakeRemoteError::SyncNotReady),
@@ -553,7 +553,7 @@ impl SyncManager {
             &owned_storage
         };
 
-        let user_pubkey = self.key_service.get_user_public_key()?;
+        let user_pubkey = DeviceKeys::get_user_public_key()?;
         crate::sync::membership_ops::get_members(
             storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
@@ -653,7 +653,7 @@ mod tests {
     use crate::clock::SystemClock;
     use crate::config::CloudProvider;
     use crate::coven::StoreOpenGuard;
-    use crate::keys::{test_keyring, KeyService};
+    use crate::keys::{test_keyring, StoreKeys};
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::store_dir::StoreDir;
@@ -665,7 +665,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let store_dir = StoreDir::new(tmp.path());
         let store_id = "sync-enabled-malformed-credentials";
-        let key_service = KeyService::new(store_id.to_string());
+        let key_service = StoreKeys::new(store_id.to_string());
         key_service
             .cloud_home_credentials_entry_for_test()
             .expect("create credentials entry")
@@ -734,7 +734,7 @@ mod tests {
         config.cloud_home.provider = Some(CloudProvider::S3);
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
-            KeyService::new("lib-opaque-no-encryption".to_string()),
+            StoreKeys::new("lib-opaque-no-encryption".to_string()),
             None,
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
@@ -770,7 +770,7 @@ mod tests {
         );
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
-            KeyService::new("lib-manager-restart".to_string()),
+            StoreKeys::new("lib-manager-restart".to_string()),
             None,
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
@@ -826,7 +826,7 @@ mod tests {
                 let config = config.clone();
                 Arc::new(move || config.read().unwrap().clone())
             },
-            KeyService::new("lib-manager-failed-restart".to_string()),
+            StoreKeys::new("lib-manager-failed-restart".to_string()),
             // An encryption service so the opaque default storage passes the
             // cipher precondition and the restart fails at the home build itself.
             Some(EncryptionService::from_key([7u8; 32])),

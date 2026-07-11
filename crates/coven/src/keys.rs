@@ -78,12 +78,87 @@ fn delete_keyring(account: &str) -> Result<bool, KeyError> {
     }
 }
 
+/// The device-global signing identity: one Ed25519 keypair per OS user, shared
+/// by every store on the device. It lives under a single fixed keyring account
+/// ([`SIGNING_KEY_KEYRING_ACCOUNT`](Self::SIGNING_KEY_KEYRING_ACCOUNT)) that no
+/// store scope touches, so attestations accumulate under one public key across
+/// all of this device's stores. Stateless — the keyring service is
+/// process-global, so these are associated functions with no per-store data.
+pub struct DeviceKeys;
+
+impl DeviceKeys {
+    /// The fixed keyring account the device signing key is stored under — the
+    /// same for every store, which is exactly what makes the identity
+    /// device-global rather than per-store. Changing this string strands every
+    /// already-stored device key, so it is a stable storage name, not an
+    /// implementation detail.
+    const SIGNING_KEY_KEYRING_ACCOUNT: &'static str = "coven_user_signing_key";
+
+    pub fn get_user_keypair() -> Result<UserKeypair, KeyError> {
+        Self::get_user_keypair_inner()?
+            .ok_or_else(|| KeyError::Crypto("No user keypair found in keyring".to_string()))
+    }
+
+    pub fn get_or_create_user_keypair() -> Result<UserKeypair, KeyError> {
+        if let Some(kp) = Self::get_user_keypair_inner()? {
+            return Ok(kp);
+        }
+
+        let kp = UserKeypair::generate();
+        Self::write_signing_key(&kp.to_keypair_bytes())?;
+        info!("Generated and saved new user Ed25519 keypair");
+        Ok(kp)
+    }
+
+    pub fn get_user_public_key() -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
+        Ok(Self::get_user_keypair_inner()?.map(|kp| kp.public_key()))
+    }
+
+    pub fn import_user_keypair(signing_key_bytes: &[u8]) -> Result<(), KeyError> {
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] =
+            signing_key_bytes.try_into().map_err(|_| {
+                KeyError::Crypto(format!(
+                    "Signing key must be {SIGN_SECRETKEYBYTES} bytes, got {}",
+                    signing_key_bytes.len()
+                ))
+            })?;
+        ed25519_dalek::SigningKey::from_keypair_bytes(&signing_key)
+            .map_err(|e| KeyError::Crypto(format!("Invalid keypair bytes: {e}")))?;
+
+        Self::write_signing_key(&signing_key)?;
+        info!("Imported user Ed25519 keypair");
+        Ok(())
+    }
+
+    fn write_signing_key(signing_key: &[u8; SIGN_SECRETKEYBYTES]) -> Result<(), KeyError> {
+        let sk_hex = hex::encode(signing_key);
+        write_keyring(Self::SIGNING_KEY_KEYRING_ACCOUNT, &sk_hex)
+    }
+
+    fn get_user_keypair_inner() -> Result<Option<UserKeypair>, KeyError> {
+        let Some(sk_hex) = read_keyring(Self::SIGNING_KEY_KEYRING_ACCOUNT)? else {
+            return Ok(None);
+        };
+
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
+            .map_err(|e| KeyError::Crypto(format!("Invalid signing key hex: {e}")))?
+            .try_into()
+            .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
+
+        Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
+    }
+}
+
+/// One store's key material: the encryption master key, cloud-home credentials,
+/// and OAuth tokens, each stored under a store-scoped keyring account
+/// (`{base}:{store_id}`). The device signing identity is *not* here — it is
+/// device-global; see [`DeviceKeys`].
 #[derive(Clone)]
-pub struct KeyService {
+pub struct StoreKeys {
     store_id: String,
 }
 
-impl KeyService {
+impl StoreKeys {
     pub fn new(store_id: String) -> Self {
         Self { store_id }
     }
@@ -167,65 +242,9 @@ impl KeyService {
         }
         Ok(())
     }
-
-    const SIGNING_KEY_KEYRING_ACCOUNT: &'static str = "coven_user_signing_key";
-
-    pub fn get_user_keypair(&self) -> Result<UserKeypair, KeyError> {
-        self.get_user_keypair_inner()?
-            .ok_or_else(|| KeyError::Crypto("No user keypair found in keyring".to_string()))
-    }
-
-    pub fn get_or_create_user_keypair(&self) -> Result<UserKeypair, KeyError> {
-        if let Some(kp) = self.get_user_keypair_inner()? {
-            return Ok(kp);
-        }
-
-        let kp = UserKeypair::generate();
-        self.write_signing_key(&kp.to_keypair_bytes())?;
-        info!("Generated and saved new user Ed25519 keypair");
-        Ok(kp)
-    }
-
-    pub fn get_user_public_key(&self) -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
-        Ok(self.get_user_keypair_inner()?.map(|kp| kp.public_key()))
-    }
-
-    pub fn import_user_keypair(&self, signing_key_bytes: &[u8]) -> Result<(), KeyError> {
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] =
-            signing_key_bytes.try_into().map_err(|_| {
-                KeyError::Crypto(format!(
-                    "Signing key must be {SIGN_SECRETKEYBYTES} bytes, got {}",
-                    signing_key_bytes.len()
-                ))
-            })?;
-        ed25519_dalek::SigningKey::from_keypair_bytes(&signing_key)
-            .map_err(|e| KeyError::Crypto(format!("Invalid keypair bytes: {e}")))?;
-
-        self.write_signing_key(&signing_key)?;
-        info!("Imported user Ed25519 keypair");
-        Ok(())
-    }
-
-    fn write_signing_key(&self, signing_key: &[u8; SIGN_SECRETKEYBYTES]) -> Result<(), KeyError> {
-        let sk_hex = hex::encode(signing_key);
-        write_keyring(Self::SIGNING_KEY_KEYRING_ACCOUNT, &sk_hex)
-    }
-
-    fn get_user_keypair_inner(&self) -> Result<Option<UserKeypair>, KeyError> {
-        let Some(sk_hex) = read_keyring(Self::SIGNING_KEY_KEYRING_ACCOUNT)? else {
-            return Ok(None);
-        };
-
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
-            .map_err(|e| KeyError::Crypto(format!("Invalid signing key hex: {e}")))?
-            .try_into()
-            .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
-
-        Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
-    }
 }
 
-impl KeyPersistence for KeyService {
+impl KeyPersistence for StoreKeys {
     fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
         self.set_encryption_key(value)
     }
@@ -273,7 +292,7 @@ mod tests {
     #[test]
     fn get_or_create_encryption_key_does_not_overwrite_a_corrupt_empty_entry() {
         test_keyring::install();
-        let service = KeyService::new("empty-encryption-key-store".to_string());
+        let service = StoreKeys::new("empty-encryption-key-store".to_string());
         let account = service.account("encryption_master_key");
         let entry =
             keyring_core::Entry::new(keyring_service().expect("service registered"), &account)
@@ -291,6 +310,53 @@ mod tests {
             entry.get_password().expect("read corrupt entry"),
             "",
             "corrupt value is not overwritten"
+        );
+    }
+
+    /// The keyring account names are a durable storage contract: a device's
+    /// already-stored keys are found only at these exact accounts, so
+    /// `StoreKeys` and `DeviceKeys` must keep using them verbatim. Pin all three.
+    #[test]
+    fn keyring_account_names_are_a_stable_storage_contract() {
+        let store = StoreKeys::new("store-42".to_string());
+        assert_eq!(
+            store.account("encryption_master_key"),
+            "encryption_master_key:store-42"
+        );
+        assert_eq!(
+            store.account("cloud_home_credentials"),
+            "cloud_home_credentials:store-42"
+        );
+        assert_eq!(
+            DeviceKeys::SIGNING_KEY_KEYRING_ACCOUNT,
+            "coven_user_signing_key"
+        );
+    }
+
+    /// The device signing key is store-independent and lives at one fixed
+    /// account. A keypair written straight to the raw keyring under that account
+    /// name reads back through `DeviceKeys` unchanged — the account math the two
+    /// sides use is the same, so the split doesn't strand an already-stored key.
+    #[test]
+    fn device_keys_reads_a_keypair_written_at_the_fixed_account() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let keypair = UserKeypair::generate();
+        let expected_pubkey = keypair.public_key();
+        // Write via the raw keyring under the fixed signing-key account, the way
+        // the storage layer does — no `DeviceKeys` involved on the write side.
+        write_keyring(
+            DeviceKeys::SIGNING_KEY_KEYRING_ACCOUNT,
+            &hex::encode(keypair.to_keypair_bytes()),
+        )
+        .expect("write signing key to the raw keyring");
+
+        let read = DeviceKeys::get_user_keypair().expect("read the device keypair back");
+        assert_eq!(
+            read.public_key(),
+            expected_pubkey,
+            "DeviceKeys must read the keypair stored at the fixed account",
         );
     }
 }

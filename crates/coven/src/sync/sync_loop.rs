@@ -23,7 +23,7 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::coven::StoreOpenGuard;
 use crate::database::Database;
-use crate::keys::{KeyService, UserKeypair};
+use crate::keys::{StoreKeys, UserKeypair};
 use crate::store_dir::StoreDir;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
@@ -99,7 +99,7 @@ struct SyncLoopInner {
     cipher: Arc<std::sync::RwLock<CloudCipher>>,
     db: Database,
     user_keypair: UserKeypair,
-    key_service: KeyService,
+    key_service: StoreKeys,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// The store-directory lock, held so it releases only when the loop's
@@ -114,7 +114,7 @@ impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
         db: Database,
-        key_service: KeyService,
+        key_service: StoreKeys,
         clock: ClockRef,
         store_dir: StoreDir,
         observer: Option<Arc<dyn BlobTransitionObserver>>,

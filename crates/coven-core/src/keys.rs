@@ -79,8 +79,8 @@ pub struct UserKeypair {
 
 impl UserKeypair {
     /// Generate a new random Ed25519 keypair. The unmanaged primitive behind
-    /// [`KeyService::get_or_create_user_keypair`]; also lets host code (and its
-    /// tests) mint an identity directly.
+    /// the native `DeviceKeys::get_or_create_user_keypair`; also lets host code
+    /// (and its tests) mint an identity directly.
     pub fn generate() -> Self {
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);

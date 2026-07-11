@@ -79,7 +79,7 @@ pub async fn revoke_by_email(
 mod tests {
     use super::*;
     use crate::clock::FixedClock;
-    use crate::keys::KeyService;
+    use crate::keys::StoreKeys;
     use crate::oauth::test_support::oauth_config;
     use crate::oauth::OAuthTokens;
     use axum::body::Body;
@@ -181,7 +181,7 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            KeyService::new(format!("sharing-pagination-{label}")),
+            StoreKeys::new(format!("sharing-pagination-{label}")),
             Arc::new(FixedClock(Utc.timestamp_opt(1_700_000_000, 0).unwrap())),
             oauth_config("http://127.0.0.1/token".to_string()),
             "Provider",

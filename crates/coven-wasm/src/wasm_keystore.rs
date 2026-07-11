@@ -1,8 +1,8 @@
 //! Browser keystore: persists coven's device identity (the Ed25519 user keypair)
 //! across browser sessions, encrypted at rest.
 //!
-//! On native, keys live behind [`KeyService`](crate::keys::KeyService), a
-//! `keyring_core::Store` over the OS keychain. That trait is synchronous and
+//! On native, the device signing key lives behind `DeviceKeys`, a
+//! `keyring_core::Store` over the OS keychain. That store is synchronous and
 //! `Send + Sync`; the browser's secure primitives — WebCrypto and IndexedDB — are
 //! asynchronous and single-thread-bound, and there is no synchronous secure
 //! storage in a browser at all. So the trait can't wrap them. coven keeps browser

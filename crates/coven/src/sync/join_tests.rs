@@ -151,9 +151,7 @@ async fn join_accepts_a_normal_store_id_past_decode() {
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::KeyService::new("join-test".to_string())
-        .get_or_create_user_keypair()
-        .expect("seed the device user keypair");
+    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     // End to end the join still fails — the S3 endpoint above is bogus — but it
     // fails at the cloud read past the decode boundary, not at the id.
@@ -179,9 +177,7 @@ async fn join_refuses_when_store_exists_and_leaves_it_untouched() {
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::KeyService::new("join-test".to_string())
-        .get_or_create_user_keypair()
-        .expect("seed the device user keypair");
+    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
@@ -222,9 +218,7 @@ async fn fresh_join_failure_cleans_up_its_own_directory() {
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::KeyService::new("join-test".to_string())
-        .get_or_create_user_keypair()
-        .expect("seed the device user keypair");
+    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
@@ -257,9 +251,7 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::KeyService::new("join-test".to_string())
-        .get_or_create_user_keypair()
-        .expect("seed the device user keypair");
+    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let data_dir = tmp.path();
@@ -287,7 +279,6 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
         .await
         .expect("construct S3 cloud home"),
     );
-    let key_service = crate::keys::KeyService::new("join-test".to_string());
     let ids = crate::id_provider::SequentialIdProvider::new("dev");
 
     let result = crate::sync::join::join_store(
@@ -295,7 +286,6 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
         code,
         &test_synced_tables(),
         &test_migrations(),
-        &key_service,
         cloud_home,
         &ids,
         |_| {},

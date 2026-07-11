@@ -49,8 +49,7 @@ pub(crate) mod join_code {
     pub use coven_core::join_code::*;
 
     pub fn generate_join_request(email: Option<String>) -> Result<String, crate::keys::KeyError> {
-        let global_ks = crate::keys::KeyService::new("global".to_string());
-        let keypair = global_ks.get_or_create_user_keypair()?;
+        let keypair = crate::keys::DeviceKeys::get_or_create_user_keypair()?;
         Ok(coven_core::join_code::generate_join_request_for_keypair(
             &keypair, email,
         ))
@@ -132,7 +131,7 @@ pub(crate) mod storage {
 
         #[cfg(feature = "oauth-providers")]
         fn require_oauth_token(
-            key_service: &crate::keys::KeyService,
+            key_service: &crate::keys::StoreKeys,
             provider_name: &str,
         ) -> Result<String, CloudHomeError> {
             match key_service.get_cloud_home_credentials().map_err(|e| {
@@ -147,7 +146,7 @@ pub(crate) mod storage {
 
         #[cfg(feature = "oauth-providers")]
         fn parse_oauth_tokens(
-            key_service: &crate::keys::KeyService,
+            key_service: &crate::keys::StoreKeys,
             provider_name: &str,
         ) -> Result<crate::oauth::OAuthTokens, CloudHomeError> {
             let token_json = require_oauth_token(key_service, provider_name)?;
@@ -162,7 +161,7 @@ pub(crate) mod storage {
         /// apart from a transient failure it should keep retrying.
         pub async fn create_cloud_home(
             config: &crate::config::Config,
-            key_service: &crate::keys::KeyService,
+            key_service: &crate::keys::StoreKeys,
             clock: crate::clock::ClockRef,
         ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
             create_cloud_home_with_cloudkit(config, key_service, clock, None).await
@@ -170,7 +169,7 @@ pub(crate) mod storage {
 
         pub async fn create_cloud_home_with_cloudkit(
             config: &crate::config::Config,
-            key_service: &crate::keys::KeyService,
+            key_service: &crate::keys::StoreKeys,
             clock: crate::clock::ClockRef,
             cloudkit_ops: Option<std::sync::Arc<dyn cloudkit::CloudKitOps>>,
         ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
@@ -421,8 +420,8 @@ pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
 pub use join_code::generate_join_request;
 pub use keys::{
-    keyring_service, read_keyring, set_keyring_service, CloudHomeCredentials, KeyError,
-    KeyPersistence, KeyService, UserKeypair,
+    keyring_service, read_keyring, set_keyring_service, CloudHomeCredentials, DeviceKeys, KeyError,
+    KeyPersistence, StoreKeys, UserKeypair,
 };
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;

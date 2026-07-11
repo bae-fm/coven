@@ -9,7 +9,7 @@
 use tracing::info;
 
 use crate::config::{CloudProvider, Config};
-use crate::keys::{CloudHomeCredentials, KeyService};
+use crate::keys::{CloudHomeCredentials, DeviceKeys, StoreKeys};
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 use crate::oauth::OAuthTokens;
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,7 +19,7 @@ use crate::sync::cloud_storage::CloudCipher;
 use std::sync::Arc;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-fn save_oauth_tokens(key_service: &KeyService, tokens: &OAuthTokens) -> Result<(), SetupError> {
+fn save_oauth_tokens(key_service: &StoreKeys, tokens: &OAuthTokens) -> Result<(), SetupError> {
     key_service
         .set_cloud_home_oauth_tokens(tokens)
         .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))
@@ -34,7 +34,7 @@ fn save_oauth_tokens(key_service: &KeyService, tokens: &OAuthTokens) -> Result<(
 /// on `oauth-providers`.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_google_drive(
-    key_service: &KeyService,
+    key_service: &StoreKeys,
     store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
@@ -123,7 +123,7 @@ pub async fn sign_in_google_drive(
 /// Native-only (see [`sign_in_google_drive`]); also gated on `oauth-providers`.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_dropbox(
-    key_service: &KeyService,
+    key_service: &StoreKeys,
     store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
@@ -175,7 +175,7 @@ pub async fn sign_in_dropbox(
 /// Native-only (see [`sign_in_google_drive`]); also gated on `oauth-providers`.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_onedrive(
-    key_service: &KeyService,
+    key_service: &StoreKeys,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<(String, String), SetupError> {
@@ -252,7 +252,7 @@ pub async fn sign_in_onedrive(
 /// Build a RestoreCode from config and keyring, then encode it.
 pub fn generate_restore_code(
     config: &Config,
-    key_service: &KeyService,
+    key_service: &StoreKeys,
 ) -> Result<String, SetupError> {
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::sync::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
@@ -276,8 +276,7 @@ pub fn generate_restore_code(
         None
     };
 
-    let keypair = key_service
-        .get_or_create_user_keypair()
+    let keypair = DeviceKeys::get_or_create_user_keypair()
         .map_err(|e| SetupError(format!("Failed to get signing key: {e}")))?;
 
     let provider = match cloud_provider {
@@ -385,7 +384,7 @@ pub enum StorageSetupError {
 
 pub fn build_cloud_cipher(
     config: &Config,
-    key_service: &KeyService,
+    key_service: &StoreKeys,
 ) -> Result<CloudCipher, StorageSetupError> {
     if config.cloud_home.storage.is_browsable() {
         return Ok(CloudCipher::Plaintext);
@@ -409,7 +408,7 @@ pub fn build_cloud_cipher(
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn create_sync_storage_with_cloudkit(
     config: &Config,
-    key_service: &KeyService,
+    key_service: &StoreKeys,
     cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
@@ -422,7 +421,7 @@ pub async fn create_sync_storage_with_cloudkit(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn create_sync_storage_with_home(
     config: &Config,
-    key_service: &KeyService,
+    key_service: &StoreKeys,
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
@@ -434,7 +433,7 @@ pub fn create_sync_storage_with_home(
     // The device's global signing identity, used to sign the control objects the
     // storage writes (its head, the min_schema floor) so a reader can attribute
     // and verify them against the membership chain.
-    let keypair = key_service.get_or_create_user_keypair()?;
+    let keypair = DeviceKeys::get_or_create_user_keypair()?;
 
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
         home,

@@ -42,7 +42,7 @@ use crate::config::Config;
 use crate::coven::StoreOpenGuard;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
-use crate::keys::KeyService;
+use crate::keys::{DeviceKeys, StoreKeys};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
@@ -125,7 +125,7 @@ pub struct CovenHandle {
     /// call so a host with reactive config sees changes without rebuilding the
     /// handle. The same provider the [`SyncManager`] reads from.
     config_provider: ConfigProvider,
-    key_service: KeyService,
+    key_service: StoreKeys,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 
@@ -175,7 +175,7 @@ impl CovenHandle {
         stamper: crate::sync::hlc::UpdatedAtStamper,
         store_dir: StoreDir,
         config_provider: ConfigProvider,
-        key_service: KeyService,
+        key_service: StoreKeys,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -571,9 +571,7 @@ impl CovenHandle {
         let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
         // This device's own blobs key under its own public key (the host asks for
         // the key of a blob it uploaded).
-        let uploader = self
-            .key_service
-            .get_user_public_key()
+        let uploader = DeviceKeys::get_user_public_key()
             .map_err(|e| StorageError::Storage(format!("read device public key: {e}")))?
             .map(hex::encode);
         CloudSyncStorage::blob_key(
@@ -712,8 +710,7 @@ impl CovenHandle {
     }
 
     pub fn get_user_pubkey(&self) -> Result<Option<String>, SyncError> {
-        self.key_service
-            .get_user_public_key()
+        DeviceKeys::get_user_public_key()
             .map(|opt| opt.map(hex::encode))
             .map_err(SyncError::from)
     }
@@ -754,7 +751,7 @@ mod tests {
     use crate::clock::SystemClock;
     use crate::config::{CloudProvider, Config, HomeStorage};
     use crate::encryption::EncryptionService;
-    use crate::keys::{test_keyring, KeyService};
+    use crate::keys::{test_keyring, StoreKeys};
     use crate::storage::cloud::cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare};
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeError;
@@ -794,7 +791,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            KeyService::new("lib-setup-error".to_string()),
+            StoreKeys::new("lib-setup-error".to_string()),
             Arc::new(SystemClock),
             None,
             None,
@@ -836,7 +833,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            KeyService::new(store_id.to_string()),
+            StoreKeys::new(store_id.to_string()),
             Arc::new(SystemClock),
             None,
             None,
@@ -972,7 +969,7 @@ mod tests {
             stamper,
             store_dir.clone(),
             config_provider,
-            KeyService::new("lib-test".to_string()),
+            StoreKeys::new("lib-test".to_string()),
             Arc::new(SystemClock),
             None,
             None,
@@ -1074,7 +1071,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            KeyService::new("lib-cloudkit-home-reuse".to_string()),
+            StoreKeys::new("lib-cloudkit-home-reuse".to_string()),
             Arc::new(SystemClock),
             Some(Arc::new(TestCloudKitOps::new())),
             None,
@@ -1162,7 +1159,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            KeyService::new("lib-reconnect-loop".to_string()),
+            StoreKeys::new("lib-reconnect-loop".to_string()),
             Arc::new(SystemClock),
             None,
             None,
@@ -1227,7 +1224,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            KeyService::new("lib-stopped-loop-readiness".to_string()),
+            StoreKeys::new("lib-stopped-loop-readiness".to_string()),
             Arc::new(SystemClock),
             None,
             None,
@@ -1286,7 +1283,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            KeyService::new("lib-test".to_string()),
+            StoreKeys::new("lib-test".to_string()),
             Arc::new(SystemClock),
             None,
             None,
@@ -1354,7 +1351,7 @@ mod tests {
             db.stamper(),
             store_dir.clone(),
             config_provider,
-            KeyService::new(store_id.to_string()),
+            StoreKeys::new(store_id.to_string()),
             Arc::new(SystemClock),
             None,
             None,

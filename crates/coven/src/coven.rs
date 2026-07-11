@@ -13,7 +13,7 @@ use crate::clock::{ClockRef, SystemClock};
 use crate::config::Config;
 use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
-use crate::keys::KeyService;
+use crate::keys::StoreKeys;
 use crate::migration::{Migration, MigrationError};
 use crate::store_dir::PathTokenError;
 use crate::sync::hlc::UpdatedAtStamper;
@@ -112,7 +112,7 @@ impl Coven {
             migrations: None,
             blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             clock: Arc::new(SystemClock),
-            key_service: KeyService::new(current.store_id),
+            key_service: StoreKeys::new(current.store_id),
             cloudkit_ops: None,
             observer: None,
         }
@@ -125,7 +125,7 @@ pub struct CovenBuilder {
     migrations: Option<Vec<Migration>>,
     blob_tombstone_grace: chrono::Duration,
     clock: ClockRef,
-    key_service: KeyService,
+    key_service: StoreKeys,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
@@ -214,7 +214,7 @@ impl CovenBuilder {
         self
     }
 
-    pub fn key_service(mut self, key_service: KeyService) -> Self {
+    pub fn key_service(mut self, key_service: StoreKeys) -> Self {
         self.key_service = key_service;
         self
     }

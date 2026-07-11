@@ -21,7 +21,7 @@ use super::{
     RevokeOutcome,
 };
 use crate::clock::ClockRef;
-use crate::keys::KeyService;
+use crate::keys::StoreKeys;
 use crate::oauth::{OAuthConfig, OAuthTokens};
 use tracing::warn;
 
@@ -39,7 +39,7 @@ impl DropboxCloudHome {
     pub fn new(
         folder_path: String,
         tokens: OAuthTokens,
-        key_service: KeyService,
+        key_service: StoreKeys,
         clock: ClockRef,
     ) -> Result<Self, CloudHomeError> {
         let config =
@@ -699,7 +699,7 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            KeyService::new("test".to_string()),
+            StoreKeys::new("test".to_string()),
             Arc::new(crate::clock::SystemClock),
         )
         .expect("build test Dropbox home")

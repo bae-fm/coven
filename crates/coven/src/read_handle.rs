@@ -28,7 +28,7 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::{CovenError, CovenResult};
 use crate::database::Database;
-use crate::keys::KeyService;
+use crate::keys::StoreKeys;
 use crate::store_dir::StoreDir;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_manager::ConfigProvider;
@@ -57,7 +57,7 @@ pub struct CovenReadHandle {
     db: Database,
     store_dir: StoreDir,
     config_provider: ConfigProvider,
-    key_service: KeyService,
+    key_service: StoreKeys,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
@@ -67,7 +67,7 @@ impl CovenReadHandle {
         db: Database,
         store_dir: StoreDir,
         config_provider: ConfigProvider,
-        key_service: KeyService,
+        key_service: StoreKeys,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Self {

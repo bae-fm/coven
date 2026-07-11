@@ -12,7 +12,7 @@ use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
 use crate::encryption::EncryptionError;
 use crate::join_code::InviteCode;
-use crate::keys::{CloudHomeCredentials, KeyError, KeyService};
+use crate::keys::{CloudHomeCredentials, DeviceKeys, KeyError, StoreKeys};
 use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::{StoreDir, StoreLayout};
@@ -109,7 +109,7 @@ fn require_join_oauth(
 /// that home.
 #[cfg(feature = "oauth-providers")]
 pub(crate) fn persist_oauth_tokens(
-    ks: &KeyService,
+    ks: &StoreKeys,
     tokens: &crate::oauth::OAuthTokens,
 ) -> Result<(), KeyError> {
     ks.set_cloud_home_oauth_tokens(tokens)
@@ -122,7 +122,7 @@ pub(crate) fn persist_oauth_tokens(
 /// saved to the store-scoped keyring.
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
-    lib_ks: &KeyService,
+    lib_ks: &StoreKeys,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
@@ -260,19 +260,22 @@ pub async fn join_from_invite_code(
         return Err(JoinError::StoreExists(code.store_id));
     }
 
-    let global_ks = KeyService::new("global".to_string());
-    let lib_ks = KeyService::new(code.store_id.clone());
+    let store_keys = StoreKeys::new(code.store_id.clone());
 
-    let cloud_home =
-        build_cloud_home_for_join(&code.join_info, &lib_ks, oauth_tokens, cloudkit_ops, clock)
-            .await?;
+    let cloud_home = build_cloud_home_for_join(
+        &code.join_info,
+        &store_keys,
+        oauth_tokens,
+        cloudkit_ops,
+        clock,
+    )
+    .await?;
 
     let config = join_store(
         layout,
         code,
         synced_tables,
         migrations,
-        &global_ks,
         cloud_home,
         ids.as_ref(),
         &on_status,
@@ -295,7 +298,6 @@ pub async fn join_store(
     code: InviteCode,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
-    key_service: &KeyService,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
@@ -320,10 +322,10 @@ pub async fn join_store(
         return Err(JoinError::StoreExists(code.store_id));
     }
 
-    // Load user keypair (must already exist — the inviter wrapped the
-    // store key for this public key).
+    // Load the device signing keypair (must already exist — the inviter wrapped
+    // the store key for this public key). It is device-global, not store-scoped.
     on_status("Loading keypair...");
-    let user_keypair = key_service.get_user_keypair()?;
+    let user_keypair = DeviceKeys::get_user_keypair()?;
 
     // Accept the invitation to get the store encryption key. The joiner
     // authenticates it against the current Owner set derived from the membership
@@ -366,7 +368,7 @@ pub async fn join_store(
     std::fs::create_dir_all(&*store_dir)?;
 
     // All steps after directory creation are wrapped so we can clean up on failure.
-    let new_key_service = KeyService::new(store_id.clone());
+    let store_keys = StoreKeys::new(store_id.clone());
 
     let result = bootstrap_and_save_store(
         &storage,
@@ -382,7 +384,7 @@ pub async fn join_store(
         migrations,
         &code.join_info,
         &code.store_name,
-        &new_key_service,
+        &store_keys,
         &on_status,
     )
     .await;
@@ -419,7 +421,7 @@ pub(crate) async fn bootstrap_and_save_store(
     migrations: &[Migration],
     join_info: &CloudHomeJoinInfo,
     store_name: &str,
-    key_service: &KeyService,
+    key_service: &StoreKeys,
     on_status: &impl Fn(&str),
 ) -> Result<Config, BootstrapSaveError> {
     // Join pins the store owner from the invite. Restore adopts the owner

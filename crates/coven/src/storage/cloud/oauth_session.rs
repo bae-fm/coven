@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use super::CloudHomeError;
 use crate::clock::ClockRef;
-use crate::keys::KeyService;
+use crate::keys::StoreKeys;
 use crate::oauth::{self, OAuthConfig, OAuthTokens};
 
 /// Waits out one retry delay. A field so tests exercise the retry schedule
@@ -64,7 +64,7 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
 pub struct OAuthSession {
     client: reqwest::Client,
     tokens: RwLock<OAuthTokens>,
-    key_service: KeyService,
+    key_service: StoreKeys,
     clock: ClockRef,
     config: OAuthConfig,
     /// Human-readable provider name, used only in log lines.
@@ -75,7 +75,7 @@ pub struct OAuthSession {
 impl OAuthSession {
     pub fn new(
         tokens: OAuthTokens,
-        key_service: KeyService,
+        key_service: StoreKeys,
         clock: ClockRef,
         config: OAuthConfig,
         provider_label: &'static str,
@@ -282,7 +282,7 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            KeyService::new("oauth-retry".to_string()),
+            StoreKeys::new("oauth-retry".to_string()),
             Arc::new(SystemClock),
             oauth_config("http://token.invalid/token".to_string()),
             "Provider",
@@ -401,7 +401,7 @@ mod tests {
         let _ = shutdown.send(());
     }
 
-    fn fail_next_cloud_credentials_write(key_service: &KeyService) {
+    fn fail_next_cloud_credentials_write(key_service: &StoreKeys) {
         let entry = key_service
             .cloud_home_credentials_entry_for_test()
             .expect("create mock keyring entry");
@@ -422,7 +422,7 @@ mod tests {
         )
         .await;
         crate::keys::test_keyring::install();
-        let key_service = KeyService::new("oauth-persist-failure".to_string());
+        let key_service = StoreKeys::new("oauth-persist-failure".to_string());
         fail_next_cloud_credentials_write(&key_service);
         let session = OAuthSession::new(
             OAuthTokens {

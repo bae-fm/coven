@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::config::{Config, ConfigError, HomeStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
-use crate::keys::{KeyError, KeyService, UserKeypair};
+use crate::keys::{DeviceKeys, KeyError, StoreKeys, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
@@ -81,11 +81,11 @@ fn require_and_persist_oauth(
     oauth_tokens: Option<OAuthTokens>,
     store_id: &str,
     provider_name: &str,
-) -> Result<(OAuthTokens, KeyService), RestoreError> {
+) -> Result<(OAuthTokens, StoreKeys), RestoreError> {
     let tokens = oauth_tokens.ok_or_else(|| {
         RestoreError::Provider(format!("{provider_name} restore requires OAuth token"))
     })?;
-    let ks = KeyService::new(store_id.to_string());
+    let ks = StoreKeys::new(store_id.to_string());
     crate::sync::join::persist_oauth_tokens(&ks, &tokens)?;
     Ok((tokens, ks))
 }
@@ -271,7 +271,7 @@ pub async fn restore_from_cloud(
     let device_id = ids.new_id();
     std::fs::create_dir_all(&*store_dir)?;
 
-    let key_service = KeyService::new(store_id.to_string());
+    let store_keys = StoreKeys::new(store_id.to_string());
 
     let result = bootstrap_and_save_store(
         &storage,
@@ -285,7 +285,7 @@ pub async fn restore_from_cloud(
         migrations,
         &join_info,
         store_name,
-        &key_service,
+        &store_keys,
         &on_status,
     )
     .await;
@@ -375,12 +375,9 @@ pub async fn restore_from_code(
     )
     .await?;
 
-    // Import signing key after restore succeeds so we don't overwrite an existing
-    // keypair if the restore fails.
-    let global_ks = KeyService::new("global".to_string());
-    global_ks
-        .import_user_keypair(&signing_key_bytes)
-        .map_err(RestoreError::Key)?;
+    // Import the device signing key after restore succeeds so we don't overwrite
+    // an existing keypair if the restore fails.
+    DeviceKeys::import_user_keypair(&signing_key_bytes).map_err(RestoreError::Key)?;
 
     Ok(config)
 }
@@ -423,7 +420,7 @@ mod tests {
             .await
             .expect("build restore cloud home for Dropbox");
 
-        let stored = KeyService::new(store_id.to_string())
+        let stored = StoreKeys::new(store_id.to_string())
             .get_cloud_home_credentials()
             .expect("read cloud home credentials")
             .expect("restore must persist OAuth tokens to the keyring");
