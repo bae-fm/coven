@@ -236,12 +236,10 @@ pub async fn join_from_invite_code(
 
     // Refuse a store already present locally before any keyring or provider side
     // effect. Re-joining a store you already have adds nothing — the existing
-    // store is the data — and letting the join proceed would, on any bootstrap
-    // failure below, delete that store's database and blobs during cleanup. The
-    // check runs ahead of `build_cloud_home_for_join` (which saves OAuth tokens to
-    // the keyring and can accept a CloudKit share) so a refused join leaves no
-    // residue, and it makes the failure-cleanup only ever remove a directory this
-    // invocation created.
+    // store is the data. `join_store` below is the authoritative guard against
+    // the destructive failure-cleanup; this check exists so a refused join also
+    // leaves no residue from `build_cloud_home_for_join`, which runs first and
+    // saves OAuth tokens to the keyring and can accept a CloudKit share.
     if StoreDir::for_store(app_dir, &code.store_id).exists() {
         return Err(JoinError::StoreExists(code.store_id));
     }
@@ -291,6 +289,19 @@ pub async fn join_store(
     crate::store_dir::validate_path_token(&code.store_id)
         .map_err(|e| JoinError::InvalidCode(format!("invalid store id: {e}")))?;
 
+    // Refuse a store already present locally before any keyring or filesystem
+    // side effect, independent of whatever `join_from_invite_code` (or any
+    // other caller) already checked. Re-joining a store you already have adds
+    // nothing — the existing store is the data — and letting the join proceed
+    // would, on any bootstrap failure below, delete that store's database and
+    // blobs during cleanup. This is the authoritative guard: it makes the
+    // failure-cleanup below only ever remove a directory this invocation
+    // created.
+    let store_dir = StoreDir::for_store(data_dir, &code.store_id);
+    if store_dir.exists() {
+        return Err(JoinError::StoreExists(code.store_id));
+    }
+
     // Load user keypair (must already exist — the inviter wrapped the
     // store key for this public key).
     on_status("Loading keypair...");
@@ -329,10 +340,11 @@ pub async fn join_store(
         user_keypair.clone(),
     );
 
-    // Create the store directory under `stores/`, named by the invite's id.
+    // Create the store directory under `stores/`, named by the invite's id
+    // (its non-existence was checked up front, so this create and the
+    // failure-cleanup below own it entirely).
     let store_id = code.store_id;
     let device_id = ids.new_id();
-    let store_dir = StoreDir::for_store(data_dir, &store_id);
     std::fs::create_dir_all(&*store_dir)?;
 
     // All steps after directory creation are wrapped so we can clean up on failure.

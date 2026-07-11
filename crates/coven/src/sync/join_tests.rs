@@ -241,6 +241,82 @@ async fn fresh_join_failure_cleans_up_its_own_directory() {
     );
 }
 
+/// `join_store` is the lower-level, reusable function `join_from_invite_code`
+/// delegates to after its own exists-check — any other direct caller reaches
+/// `join_store` without that check. Its failure-cleanup removes the store
+/// directory unconditionally, so `join_store` must refuse a store already
+/// present locally itself, independent of any check a wrapper does or doesn't
+/// do around it. The keypair is seeded (and the endpoint is unreachable) so
+/// that, absent its own guard, `join_store` would reach the cloud read and the
+/// destructive cleanup — the guard is what stops it first.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
+    let code = invite_code_with_store_id("abc-123");
+
+    crate::keys::test_keyring::install();
+    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+    crate::keys::KeyService::new("join-test".to_string())
+        .get_or_create_user_keypair()
+        .expect("seed the device user keypair");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let data_dir = tmp.path();
+
+    // A store with this id is already present locally, holding a database file
+    // and a blob join_store must not touch.
+    let store_dir = data_dir.join("stores").join("abc-123");
+    std::fs::create_dir_all(store_dir.join("storage")).expect("create existing store dir");
+    let db_path = store_dir.join("store.db");
+    let blob_path = store_dir.join("storage").join("cover.blob");
+    std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
+    std::fs::write(&blob_path, b"existing-blob-bytes").expect("seed existing blob");
+
+    // The S3 client builds without touching the network; its endpoint is never
+    // reached when the exists-check refuses the join first.
+    let cloud_home: Box<dyn crate::storage::cloud::CloudHome> = Box::new(
+        crate::storage::cloud::s3::S3CloudHome::new(
+            "b".to_string(),
+            "us-east-1".to_string(),
+            Some("http://127.0.0.1:1".to_string()),
+            "ak".to_string(),
+            "sk".to_string(),
+            None,
+        )
+        .await
+        .expect("construct S3 cloud home"),
+    );
+    let key_service = crate::keys::KeyService::new("join-test".to_string());
+    let ids = crate::id_provider::SequentialIdProvider::new("dev");
+
+    let result = crate::sync::join::join_store(
+        data_dir,
+        code,
+        &test_synced_tables(),
+        &test_migrations(),
+        &key_service,
+        cloud_home,
+        &ids,
+        |_| {},
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(JoinError::StoreExists(ref id)) if id == "abc-123"),
+        "join_store must refuse a store already present locally, got {result:?}",
+    );
+    assert_eq!(
+        std::fs::read(&db_path).expect("existing db still present"),
+        b"existing-db-bytes",
+        "the existing database must be left untouched",
+    );
+    assert_eq!(
+        std::fs::read(&blob_path).expect("existing blob still present"),
+        b"existing-blob-bytes",
+        "the existing blob must be left untouched",
+    );
+}
+
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let enc = CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32]));
