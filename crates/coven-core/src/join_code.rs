@@ -1,32 +1,41 @@
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::code_envelope::{self, EnvelopeError};
 use crate::storage::cloud::CloudHomeJoinInfo;
+
+pub const INVITE_CODE_VERSION: u8 = 1;
 
 /// An invite is always for a private home: sharing wraps and rotates the store
 /// key, which a public (plaintext) home has none of, so the joiner always builds
 /// an encrypted, obfuscated home. The invite therefore carries no visibility
 /// flag.
-#[derive(Serialize, Deserialize)]
+///
+/// `Debug` is derived: `join_info` (`CloudHomeJoinInfo`) already hand-writes
+/// its own redacting `Debug`, and no other field here carries a secret.
+#[derive(Serialize, Deserialize, Debug)]
 pub struct InviteCode {
+    /// Version (currently 1).
+    pub v: u8,
     pub store_id: String,
     pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
 }
 
+/// Encode an `InviteCode` into a prefixed base64url string.
 pub fn encode(code: &InviteCode) -> String {
-    let json = serde_json::to_vec(code).expect("InviteCode is always serializable");
-    URL_SAFE_NO_PAD.encode(&json)
+    code_envelope::encode_code(code_envelope::PREFIX, code)
 }
 
+/// Decode an invite code string back into an `InviteCode`.
 pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(s.trim())
-        .map_err(|_| JoinCodeError::InvalidBase64)?;
-    let code: InviteCode =
-        serde_json::from_slice(&bytes).map_err(|e| JoinCodeError::InvalidJson(e.to_string()))?;
+    let code: InviteCode = code_envelope::decode_code(code_envelope::PREFIX, s)?;
+    if code.v < INVITE_CODE_VERSION {
+        return Err(JoinCodeError::ObsoleteVersion(code.v));
+    }
+    if code.v > INVITE_CODE_VERSION {
+        return Err(JoinCodeError::NewerVersion(code.v));
+    }
     // An invite is unsigned, so `store_id` is attacker-controlled. It becomes the
     // name of a directory the joiner creates under `stores/` and recursively
     // deletes on a bootstrap failure, so a value carrying `..`, a separator, or an
@@ -34,10 +43,17 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     // it the moment the code is parsed: a decoded `InviteCode` always carries a
     // `store_id` that is a single safe path component.
     crate::store_dir::validate_path_token(&code.store_id).map_err(JoinCodeError::InvalidStoreId)?;
+    // `owner_pubkey` pins the membership-chain founder the joiner authenticates
+    // the invite against (`join.rs`): a malformed value can't name a real chain,
+    // so it is refused here rather than surfacing as an opaque chain-lookup
+    // failure deep in the join.
+    crate::sync::restore_code::decode_hex_bytes("owner public key", &code.owner_pubkey, 32)
+        .map_err(JoinCodeError::InvalidOwnerPubkey)?;
     Ok(code)
 }
 
-#[derive(Serialize, Deserialize)]
+/// `Debug` is derived: neither field carries a secret.
+#[derive(Serialize, Deserialize, Debug)]
 pub struct JoinRequestCode {
     pub public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,16 +74,15 @@ pub fn generate_join_request_for_keypair(
     encode_join_request(&code)
 }
 
+/// A join request carries no prefix or version: it is a short-lived exchange
+/// between the joiner and inviter, not a durable code a user stores and pastes
+/// back in later, so it reuses the envelope with an empty prefix.
 pub fn encode_join_request(code: &JoinRequestCode) -> String {
-    let json = serde_json::to_vec(code).expect("JoinRequestCode is always serializable");
-    URL_SAFE_NO_PAD.encode(&json)
+    code_envelope::encode_code("", code)
 }
 
 pub fn decode_join_request(s: &str) -> Result<JoinRequestCode, JoinCodeError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(s.trim())
-        .map_err(|_| JoinCodeError::InvalidBase64)?;
-    serde_json::from_slice(&bytes).map_err(|e| JoinCodeError::InvalidJson(e.to_string()))
+    Ok(code_envelope::decode_code("", s)?)
 }
 
 /// UI-ready info from a decoded invite code.
@@ -96,26 +111,60 @@ pub fn decode_invite_code_info(code: &str) -> Result<InviteCodeInfo, JoinCodeErr
 
 #[derive(Debug, thiserror::Error)]
 pub enum JoinCodeError {
-    #[error("invalid base64url encoding")]
+    #[error("That doesn't look like a coven invite code — it should start with \"coven:\".")]
+    MissingPrefix,
+    #[error("The invite code is incomplete or has a typo. Check that you copied the entire code.")]
     InvalidBase64,
-    #[error("invalid invite code payload: {0}")]
+    #[error("The invite code is corrupted. Ask the inviter to generate a new one. ({0})")]
     InvalidJson(String),
+    #[error(
+        "This invite code was made with an older version of the app (v{0}). Ask the inviter to generate a new one."
+    )]
+    ObsoleteVersion(u8),
+    #[error(
+        "This invite code was made with a newer version of the app (v{0}). Update the app to use it."
+    )]
+    NewerVersion(u8),
     /// The invite's `store_id` is not a safe path component, so it cannot name a
     /// store directory under `stores/`. The invite is unsigned and anyone can
     /// craft one, so the id is refused here at decode rather than reaching a path
     /// operation.
-    #[error("invalid store id in invite code: {0}")]
+    #[error(
+        "The store id in this invite code is invalid. Ask the inviter to generate a new one. ({0})"
+    )]
     InvalidStoreId(crate::store_dir::PathTokenError),
+    /// `owner_pubkey` pins the membership-chain founder (`join.rs`); a value
+    /// that isn't 32 bytes of hex can't name one, so it is refused at decode.
+    #[error(
+        "The owner key in this invite code is invalid. Ask the inviter to generate a new one. ({0})"
+    )]
+    InvalidOwnerPubkey(String),
+}
+
+impl From<EnvelopeError> for JoinCodeError {
+    fn from(e: EnvelopeError) -> Self {
+        match e {
+            EnvelopeError::MissingPrefix => JoinCodeError::MissingPrefix,
+            EnvelopeError::InvalidBase64 => JoinCodeError::InvalidBase64,
+            EnvelopeError::InvalidJson(s) => JoinCodeError::InvalidJson(s),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
 
-    #[test]
-    fn round_trip_s3() {
-        let code = InviteCode {
-            store_id: "lib-123".into(),
+    fn test_owner_pubkey() -> String {
+        hex::encode([0xAB_u8; 32])
+    }
+
+    fn sample_s3_code(store_id: &str) -> InviteCode {
+        InviteCode {
+            v: INVITE_CODE_VERSION,
+            store_id: store_id.to_string(),
             store_name: "My Store".into(),
             join_info: CloudHomeJoinInfo::S3 {
                 bucket: "my-bucket".into(),
@@ -125,13 +174,20 @@ mod tests {
                 secret_key: "secret123".into(),
                 key_prefix: None,
             },
-            owner_pubkey: "deadbeef".into(),
-        };
+            owner_pubkey: test_owner_pubkey(),
+        }
+    }
+
+    #[test]
+    fn round_trip_s3() {
+        let code = sample_s3_code("lib-123");
         let encoded = encode(&code);
+        assert!(encoded.starts_with(code_envelope::PREFIX));
         let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded.v, INVITE_CODE_VERSION);
         assert_eq!(decoded.store_id, "lib-123");
         assert_eq!(decoded.store_name, "My Store");
-        assert_eq!(decoded.owner_pubkey, "deadbeef");
+        assert_eq!(decoded.owner_pubkey, test_owner_pubkey());
         match decoded.join_info {
             CloudHomeJoinInfo::S3 {
                 bucket,
@@ -153,40 +209,52 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_s3_with_endpoint() {
-        let code = InviteCode {
-            store_id: "lib-456".into(),
-            store_name: "Shared".into(),
-            join_info: CloudHomeJoinInfo::S3 {
-                bucket: "bucket".into(),
-                region: "eu-west-1".into(),
-                endpoint: Some("https://s3.example.com".into()),
-                access_key: "ak".into(),
-                secret_key: "sk".into(),
-                key_prefix: None,
-            },
-            owner_pubkey: "cafebabe".into(),
+    fn round_trip_s3_with_endpoint_and_key_prefix() {
+        let mut code = sample_s3_code("lib-456");
+        code.join_info = CloudHomeJoinInfo::S3 {
+            bucket: "bucket".into(),
+            region: "eu-west-1".into(),
+            endpoint: Some("https://s3.example.com".into()),
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            key_prefix: Some("prefix/".into()),
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.store_id, "lib-456");
         match decoded.join_info {
-            CloudHomeJoinInfo::S3 { endpoint, .. } => {
+            CloudHomeJoinInfo::S3 {
+                endpoint,
+                key_prefix,
+                ..
+            } => {
                 assert_eq!(endpoint, Some("https://s3.example.com".to_string()));
+                assert_eq!(key_prefix, Some("prefix/".to_string()));
             }
             _ => panic!("expected S3 variant"),
         }
     }
 
+    /// Absent optional S3 fields (`endpoint`, `key_prefix`) must not appear in
+    /// the encoded JSON at all — a smaller invite code, and a `None` that isn't
+    /// confusable with an explicit `null`.
+    #[test]
+    fn absent_s3_optionals_omitted_from_json() {
+        let code = sample_s3_code("lib-omit");
+        let encoded = encode(&code);
+        let payload = encoded.strip_prefix(code_envelope::PREFIX).unwrap();
+        let bytes = URL_SAFE_NO_PAD.decode(payload).unwrap();
+        let json = String::from_utf8(bytes).unwrap();
+        assert!(!json.contains("endpoint"), "{json}");
+        assert!(!json.contains("key_prefix"), "{json}");
+    }
+
     #[test]
     fn round_trip_google_drive() {
-        let code = InviteCode {
-            store_id: "lib-789".into(),
-            store_name: "Cloud Shared".into(),
-            join_info: CloudHomeJoinInfo::GoogleDrive {
-                folder_id: "abc123".into(),
-            },
-            owner_pubkey: "cafebabe".into(),
+        let mut code = sample_s3_code("lib-789");
+        code.store_name = "Cloud Shared".into();
+        code.join_info = CloudHomeJoinInfo::GoogleDrive {
+            folder_id: "abc123".into(),
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
@@ -198,16 +266,28 @@ mod tests {
     }
 
     #[test]
+    fn decode_missing_prefix() {
+        let code = sample_s3_code("lib-noprefix");
+        let encoded = encode(&code);
+        let without_prefix = &encoded[code_envelope::PREFIX.len()..];
+        assert!(matches!(
+            decode(without_prefix),
+            Err(JoinCodeError::MissingPrefix)
+        ));
+    }
+
+    #[test]
     fn decode_invalid_base64() {
         assert!(matches!(
-            decode("not-valid!!!"),
+            decode("coven:not-valid!!!"),
             Err(JoinCodeError::InvalidBase64)
         ));
     }
 
     #[test]
     fn decode_invalid_json() {
-        let encoded = URL_SAFE_NO_PAD.encode(b"not json");
+        let b64 = URL_SAFE_NO_PAD.encode(b"not json");
+        let encoded = format!("coven:{b64}");
         assert!(matches!(
             decode(&encoded),
             Err(JoinCodeError::InvalidJson(_))
@@ -215,13 +295,54 @@ mod tests {
     }
 
     #[test]
+    fn decode_obsolete_version() {
+        let mut code = sample_s3_code("lib-old");
+        code.v = 0;
+        let encoded = encode(&code);
+        assert!(matches!(
+            decode(&encoded),
+            Err(JoinCodeError::ObsoleteVersion(0))
+        ));
+    }
+
+    #[test]
+    fn decode_newer_version() {
+        let mut code = sample_s3_code("lib-new");
+        code.v = 99;
+        let encoded = encode(&code);
+        assert!(matches!(
+            decode(&encoded),
+            Err(JoinCodeError::NewerVersion(99))
+        ));
+    }
+
+    #[test]
+    fn decode_invalid_owner_pubkey_wrong_length() {
+        let mut code = sample_s3_code("lib-short-key");
+        code.owner_pubkey = hex::encode([0xABu8; 16]);
+        let encoded = encode(&code);
+        assert!(matches!(
+            decode(&encoded),
+            Err(JoinCodeError::InvalidOwnerPubkey(_))
+        ));
+    }
+
+    #[test]
+    fn decode_invalid_owner_pubkey_non_hex() {
+        let mut code = sample_s3_code("lib-bad-hex-key");
+        code.owner_pubkey = "not hex".to_string();
+        let encoded = encode(&code);
+        assert!(matches!(
+            decode(&encoded),
+            Err(JoinCodeError::InvalidOwnerPubkey(_))
+        ));
+    }
+
+    #[test]
     fn round_trip_cloudkit() {
-        let code = InviteCode {
-            store_id: "lib-ck".into(),
-            store_name: "CloudKit Store".into(),
-            join_info: CloudHomeJoinInfo::CloudKit,
-            owner_pubkey: "aabbccdd".into(),
-        };
+        let mut code = sample_s3_code("lib-ck");
+        code.store_name = "CloudKit Store".into();
+        code.join_info = CloudHomeJoinInfo::CloudKit;
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.store_id, "lib-ck");
@@ -230,15 +351,12 @@ mod tests {
 
     #[test]
     fn round_trip_cloudkit_share() {
-        let code = InviteCode {
-            store_id: "lib-ck-share".into(),
-            store_name: "CloudKit Store".into(),
-            join_info: CloudHomeJoinInfo::CloudKitShare {
-                share_url: "https://www.icloud.com/share/example".into(),
-                owner_name: "_owner".into(),
-                zone_name: "bae-store".into(),
-            },
-            owner_pubkey: "aabbccdd".into(),
+        let mut code = sample_s3_code("lib-ck-share");
+        code.store_name = "CloudKit Store".into();
+        code.join_info = CloudHomeJoinInfo::CloudKitShare {
+            share_url: "https://www.icloud.com/share/example".into(),
+            owner_name: "_owner".into(),
+            zone_name: "bae-store".into(),
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
@@ -257,13 +375,10 @@ mod tests {
 
     #[test]
     fn decode_trims_whitespace() {
-        let code = InviteCode {
-            store_id: "lib-ws".into(),
-            store_name: "Trimmed".into(),
-            join_info: CloudHomeJoinInfo::Dropbox {
-                shared_folder_id: "sf1".into(),
-            },
-            owner_pubkey: "aabb".into(),
+        let mut code = sample_s3_code("lib-ws");
+        code.store_name = "Trimmed".into();
+        code.join_info = CloudHomeJoinInfo::Dropbox {
+            shared_folder_id: "sf1".into(),
         };
         let encoded = format!("  {} \n", encode(&code));
         let decoded = decode(&encoded).unwrap();

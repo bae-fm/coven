@@ -86,6 +86,8 @@ pub mod blob;
 pub mod changeset;
 #[doc(hidden)]
 pub mod clock;
+// Shared wire format for pasted codes (invite, restore): prefix + base64url(json).
+mod code_envelope;
 #[doc(hidden)]
 pub mod config;
 #[doc(hidden)]

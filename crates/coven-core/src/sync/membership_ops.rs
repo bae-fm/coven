@@ -175,6 +175,7 @@ pub async fn invite_member(
 
     // Build the invite code
     Ok(crate::join_code::InviteCode {
+        v: crate::join_code::INVITE_CODE_VERSION,
         store_id: store_id.to_string(),
         store_name: store_name.to_string(),
         join_info,

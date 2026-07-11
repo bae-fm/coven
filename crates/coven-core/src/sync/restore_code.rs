@@ -12,11 +12,10 @@
 //! (plaintext, readable blob paths). The restorer rebuilds both the cipher and
 //! the blob-path scheme from that one signal.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-const PREFIX: &str = "coven:";
+use crate::code_envelope::{self, EnvelopeError};
+
 pub const RESTORE_CODE_VERSION: u8 = 2;
 
 /// Everything needed to restore a store from cloud storage.
@@ -159,24 +158,24 @@ pub enum RestoreCodeError {
     InvalidSigningKey(String),
 }
 
+impl From<EnvelopeError> for RestoreCodeError {
+    fn from(e: EnvelopeError) -> Self {
+        match e {
+            EnvelopeError::MissingPrefix => RestoreCodeError::MissingPrefix,
+            EnvelopeError::InvalidBase64 => RestoreCodeError::InvalidBase64,
+            EnvelopeError::InvalidJson(s) => RestoreCodeError::InvalidJson(s),
+        }
+    }
+}
+
 /// Encode a `RestoreCode` into a prefixed base64url string.
 pub fn encode_restore_code(code: &RestoreCode) -> String {
-    let json = serde_json::to_string(code).expect("RestoreCode serialization cannot fail");
-    let b64 = URL_SAFE_NO_PAD.encode(json.as_bytes());
-    format!("{PREFIX}{b64}")
+    code_envelope::encode_code(code_envelope::PREFIX, code)
 }
 
 /// Decode a restore code string back into a `RestoreCode`.
 pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
-    let trimmed = s.trim();
-    let payload = trimmed
-        .strip_prefix(PREFIX)
-        .ok_or(RestoreCodeError::MissingPrefix)?;
-    let bytes = URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|_| RestoreCodeError::InvalidBase64)?;
-    let code: RestoreCode =
-        serde_json::from_slice(&bytes).map_err(|e| RestoreCodeError::InvalidJson(e.to_string()))?;
+    let code: RestoreCode = code_envelope::decode_code(code_envelope::PREFIX, s)?;
     if code.v < RESTORE_CODE_VERSION {
         return Err(RestoreCodeError::ObsoleteVersion(code.v));
     }
@@ -198,7 +197,14 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     Ok(code)
 }
 
-fn decode_hex_bytes(label: &str, hex_value: &str, expected_len: usize) -> Result<Vec<u8>, String> {
+/// Decode `hex_value` and check it is exactly `expected_len` bytes. Shared
+/// with `join_code`'s `owner_pubkey` check, since both are fixed-length
+/// hex-encoded key material that must be validated at decode time.
+pub(crate) fn decode_hex_bytes(
+    label: &str,
+    hex_value: &str,
+    expected_len: usize,
+) -> Result<Vec<u8>, String> {
     let bytes = hex::decode(hex_value).map_err(|e| format!("{label} is not hex: {e}"))?;
     if bytes.len() != expected_len {
         return Err(format!(
@@ -256,6 +262,8 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
 
     fn test_sk() -> String {
         hex::encode([0xAB_u8; 64])
@@ -400,7 +408,7 @@ mod tests {
         let code = sample_s3_code();
         let encoded = encode_restore_code(&code);
         // Strip the "coven:" prefix
-        let without_prefix = &encoded[PREFIX.len()..];
+        let without_prefix = &encoded[code_envelope::PREFIX.len()..];
         assert!(matches!(
             decode_restore_code(without_prefix),
             Err(RestoreCodeError::MissingPrefix)

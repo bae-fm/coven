@@ -60,10 +60,11 @@ pub enum CloudHomeJoinInfo {
     S3 {
         bucket: String,
         region: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
         access_key: String,
         secret_key: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
     GoogleDrive {

@@ -43,6 +43,7 @@ const SCHEMA_VERSION: u32 = 1;
 /// filesystem work runs.
 fn invite_code_with_store_id(store_id: &str) -> InviteCode {
     InviteCode {
+        v: crate::join_code::INVITE_CODE_VERSION,
         store_id: store_id.to_string(),
         store_name: "Evil".to_string(),
         join_info: CloudHomeJoinInfo::S3 {
@@ -56,7 +57,7 @@ fn invite_code_with_store_id(store_id: &str) -> InviteCode {
             secret_key: "sk".to_string(),
             key_prefix: None,
         },
-        owner_pubkey: "deadbeef".to_string(),
+        owner_pubkey: hex::encode([0xAB_u8; 32]),
     }
 }
 
