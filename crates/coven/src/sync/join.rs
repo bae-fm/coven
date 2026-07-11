@@ -774,11 +774,10 @@ pub(crate) fn build_config(
         }
         CloudHomeJoinInfo::CloudKit => {}
         CloudHomeJoinInfo::CloudKitShare {
-            share_url,
             owner_name,
             zone_name,
+            ..
         } => {
-            config.cloud_home.cloudkit_share_url = Some(share_url.clone());
             config.cloud_home.cloudkit_owner_name = Some(owner_name.clone());
             config.cloud_home.cloudkit_zone_name = Some(zone_name.clone());
         }

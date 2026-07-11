@@ -92,8 +92,6 @@ pub struct CloudHomeConfig {
     #[serde(default)]
     pub onedrive_folder_id: Option<String>,
     #[serde(default)]
-    pub cloudkit_share_url: Option<String>,
-    #[serde(default)]
     pub cloudkit_owner_name: Option<String>,
     #[serde(default)]
     pub cloudkit_zone_name: Option<String>,
@@ -115,7 +113,6 @@ impl Default for CloudHomeConfig {
             dropbox_folder_path: None,
             onedrive_drive_id: None,
             onedrive_folder_id: None,
-            cloudkit_share_url: None,
             cloudkit_owner_name: None,
             cloudkit_zone_name: None,
             storage: HomeStorage::Opaque,
@@ -270,6 +267,32 @@ mod tests {
         config.save_to_config_yaml().expect("save");
         let loaded = Config::load_from_config_yaml(store_dir).expect("load");
 
+        assert_eq!(loaded, config);
+    }
+
+    /// A CloudKit share join persists `cloudkit_owner_name` and
+    /// `cloudkit_zone_name` — the only two fields the share arm writes — and
+    /// both come back unchanged.
+    #[test]
+    fn round_trips_cloudkit_share_owner_and_zone() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(dir.path());
+        let mut config = Config::with_defaults(
+            "store-1".to_string(),
+            "device-1".to_string(),
+            store_dir.clone(),
+            "Shared CloudKit Store".to_string(),
+        );
+        config.cloud_home = CloudHomeConfig {
+            provider: Some(CloudProvider::CloudKit),
+            cloudkit_owner_name: Some("owner-name".to_string()),
+            cloudkit_zone_name: Some("zone-name".to_string()),
+            storage: HomeStorage::Opaque,
+            ..CloudHomeConfig::default()
+        };
+
+        config.save_to_config_yaml().expect("save");
+        let loaded = Config::load_from_config_yaml(store_dir).expect("load");
         assert_eq!(loaded, config);
     }
 

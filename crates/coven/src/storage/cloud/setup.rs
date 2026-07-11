@@ -315,7 +315,22 @@ pub fn generate_restore_code(
                 secret_key,
             }
         }
-        CloudProvider::CloudKit => CloudHomeJoinInfo::CloudKit,
+        CloudProvider::CloudKit => {
+            // A device that joined via a CloudKit share has these set
+            // (`build_config`'s `CloudKitShare` arm); restore recovers your
+            // own zone, never one shared to you — the same line
+            // `decode_restore_code` already draws by rejecting
+            // `CloudHomeJoinInfo::CloudKitShare`. Only a truly private config
+            // (neither set) may emit `CloudHomeJoinInfo::CloudKit`.
+            if config.cloud_home.cloudkit_owner_name.is_some()
+                || config.cloud_home.cloudkit_zone_name.is_some()
+            {
+                return Err(SetupError(
+                    "This store was joined through a CloudKit share; only the store's owner can create a restore code.".to_string(),
+                ));
+            }
+            CloudHomeJoinInfo::CloudKit
+        }
         CloudProvider::GoogleDrive => CloudHomeJoinInfo::GoogleDrive {
             folder_id: config
                 .cloud_home
@@ -448,3 +463,75 @@ pub fn create_sync_storage_with_home(
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct SetupError(pub String);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::HomeStorage;
+    use crate::storage::cloud::CloudHomeJoinInfo;
+    use crate::store_dir::StoreDir;
+    use crate::sync::restore_code::decode_restore_code;
+
+    /// A CloudKit config with `storage: Browsable` so the test exercises only
+    /// the CloudKit provider arm, never the opaque-home encryption-key read
+    /// (that path is unrelated to the restore-code provider guard under test).
+    fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
+        let mut config = Config::with_defaults(
+            "store-1".to_string(),
+            "device-1".to_string(),
+            StoreDir::new("unused-store-dir"),
+            "CloudKit Store".to_string(),
+        );
+        config.cloud_home.provider = Some(CloudProvider::CloudKit);
+        config.cloud_home.storage = HomeStorage::Browsable;
+        if let Some((owner, zone)) = owner_zone {
+            config.cloud_home.cloudkit_owner_name = Some(owner.to_string());
+            config.cloud_home.cloudkit_zone_name = Some(zone.to_string());
+        }
+        config
+    }
+
+    /// A device that joined via a CloudKit share has `cloudkit_owner_name` /
+    /// `cloudkit_zone_name` set (`build_config`'s `CloudKitShare` arm).
+    /// Restoring a share is illegitimate — decode already rejects
+    /// `CloudKitShare` (`RestoreCodeError::CloudKitShareNotRestorable`) — so
+    /// generation must refuse a share-joined config too, rather than mapping
+    /// it to `CloudHomeJoinInfo::CloudKit`, which would restore against the
+    /// restoring device's own empty private zone.
+    #[test]
+    fn generate_restore_code_rejects_a_share_joined_cloudkit_config() {
+        crate::keys::test_keyring::install();
+        crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed device keypair");
+
+        let config = cloudkit_config(Some(("owner-name", "zone-name")));
+        let key_service = StoreKeys::new(config.store_id.clone());
+
+        let err = generate_restore_code(&config, &key_service)
+            .expect_err("a share-joined CloudKit config must not generate a restore code");
+        let message = err.to_string();
+        assert!(
+            message.contains("share"),
+            "error should explain the store was joined via a share: {message}"
+        );
+    }
+
+    /// A truly private CloudKit config (no owner/zone set) still emits a `ck`
+    /// restore code that decodes back to `CloudHomeJoinInfo::CloudKit`.
+    #[test]
+    fn generate_restore_code_private_cloudkit_round_trips() {
+        crate::keys::test_keyring::install();
+        crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed device keypair");
+
+        let config = cloudkit_config(None);
+        let key_service = StoreKeys::new(config.store_id.clone());
+
+        let code = generate_restore_code(&config, &key_service)
+            .expect("a private CloudKit config generates a restore code");
+        let decoded = decode_restore_code(&code).expect("generated code decodes");
+        assert!(
+            matches!(decoded.provider, CloudHomeJoinInfo::CloudKit),
+            "expected CloudKit provider, got {:?}",
+            decoded.provider
+        );
+    }
+}

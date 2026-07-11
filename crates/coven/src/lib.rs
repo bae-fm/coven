@@ -291,14 +291,13 @@ pub(crate) mod storage {
                         CloudHomeError::Configuration("CloudKit driver not provided".to_string())
                     })?;
                     match (
-                        config.cloud_home.cloudkit_share_url.as_ref(),
                         config.cloud_home.cloudkit_owner_name.as_ref(),
                         config.cloud_home.cloudkit_zone_name.as_ref(),
                     ) {
-                        (None, None, None) => {
+                        (None, None) => {
                             Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(ops)))
                         }
-                        (Some(_), Some(owner_name), Some(zone_name)) => {
+                        (Some(owner_name), Some(zone_name)) => {
                             Ok(Box::new(cloudkit::CloudKitCloudHome::new_shared(
                                 ops,
                                 owner_name.clone(),
@@ -306,10 +305,186 @@ pub(crate) mod storage {
                             )))
                         }
                         _ => Err(CloudHomeError::Configuration(
-                            "CloudKit share config requires share URL, owner name, and zone name"
+                            "CloudKit share config requires both cloudkit_owner_name and cloudkit_zone_name"
                                 .to_string(),
                         )),
                     }
+                }
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            use crate::clock::FixedClock;
+            use crate::config::{CloudProvider, Config, HomeStorage};
+            use crate::keys::StoreKeys;
+            use crate::storage::cloud::cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare};
+            use crate::store_dir::StoreDir;
+            use std::sync::Mutex;
+
+            /// Records the scope each `list_records` call carried, so a test can
+            /// tell whether `create_cloud_home_with_cloudkit` built a private or a
+            /// shared home without reaching into its private fields. Every other
+            /// method is unused by these tests and panics if called.
+            struct ScopeRecordingOps {
+                seen: Mutex<Vec<CloudKitScope>>,
+            }
+
+            impl ScopeRecordingOps {
+                fn new() -> Self {
+                    Self {
+                        seen: Mutex::new(Vec::new()),
+                    }
+                }
+            }
+
+            impl CloudKitOps for ScopeRecordingOps {
+                fn write_record(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _key: &str,
+                    _data: Vec<u8>,
+                ) -> Result<(), CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn read_record(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _key: &str,
+                ) -> Result<Vec<u8>, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn list_records(
+                    &self,
+                    scope: &CloudKitScope,
+                    _prefix: &str,
+                ) -> Result<Vec<String>, CloudHomeError> {
+                    self.seen.lock().unwrap().push(scope.clone());
+                    Ok(Vec::new())
+                }
+                fn delete_record(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _key: &str,
+                ) -> Result<(), CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn record_exists(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _key: &str,
+                ) -> Result<bool, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn grant_share(
+                    &self,
+                    _member_pubkey: &str,
+                ) -> Result<CloudKitShare, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn revoke_share(&self, _member_pubkey: &str) -> Result<(), CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn accept_share(&self, _share_url: &str) -> Result<CloudKitShare, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+            }
+
+            fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
+                let mut config = Config::with_defaults(
+                    "store-1".to_string(),
+                    "device-1".to_string(),
+                    StoreDir::new("unused-store-dir"),
+                    "CloudKit Store".to_string(),
+                );
+                config.cloud_home.provider = Some(CloudProvider::CloudKit);
+                config.cloud_home.storage = HomeStorage::Opaque;
+                if let Some((owner, zone)) = owner_zone {
+                    config.cloud_home.cloudkit_owner_name = Some(owner.to_string());
+                    config.cloud_home.cloudkit_zone_name = Some(zone.to_string());
+                }
+                config
+            }
+
+            /// Neither `cloudkit_owner_name` nor `cloudkit_zone_name` set builds a
+            /// private home — the scope every subsequent op sees is `Private`.
+            #[tokio::test]
+            async fn neither_owner_nor_zone_builds_a_private_home() {
+                let config = cloudkit_config(None);
+                let key_service = StoreKeys::new(config.store_id.clone());
+                let ops = std::sync::Arc::new(ScopeRecordingOps::new());
+                let clock: crate::clock::ClockRef =
+                    std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+
+                let home = create_cloud_home_with_cloudkit(
+                    &config,
+                    &key_service,
+                    clock,
+                    Some(ops.clone()),
+                )
+                .await
+                .expect("private CloudKit config builds a home");
+                home.list("").await.expect("list against the built home");
+
+                assert_eq!(
+                    ops.seen.lock().unwrap().as_slice(),
+                    [CloudKitScope::Private]
+                );
+            }
+
+            /// Both `cloudkit_owner_name` and `cloudkit_zone_name` set builds a
+            /// shared home scoped to that owner/zone pair.
+            #[tokio::test]
+            async fn both_owner_and_zone_build_a_shared_home() {
+                let config = cloudkit_config(Some(("owner-name", "zone-name")));
+                let key_service = StoreKeys::new(config.store_id.clone());
+                let ops = std::sync::Arc::new(ScopeRecordingOps::new());
+                let clock: crate::clock::ClockRef =
+                    std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+
+                let home = create_cloud_home_with_cloudkit(
+                    &config,
+                    &key_service,
+                    clock,
+                    Some(ops.clone()),
+                )
+                .await
+                .expect("shared CloudKit config builds a home");
+                home.list("").await.expect("list against the built home");
+
+                assert_eq!(
+                    ops.seen.lock().unwrap().as_slice(),
+                    [CloudKitScope::Shared {
+                        owner_name: "owner-name".to_string(),
+                        zone_name: "zone-name".to_string(),
+                    }]
+                );
+            }
+
+            /// Only one of `cloudkit_owner_name` / `cloudkit_zone_name` set is the
+            /// broken shape the config module can't rule out by construction (see
+            /// the module doc: config stays flat, provider-prefixed fields rather
+            /// than one enum for CloudKit alone) — surfaced as a `Configuration`
+            /// error naming both fields, not a silent guess at which home to build.
+            #[tokio::test]
+            async fn mixed_owner_zone_is_a_configuration_error() {
+                let mut config = cloudkit_config(None);
+                config.cloud_home.cloudkit_owner_name = Some("owner-name".to_string());
+                let key_service = StoreKeys::new(config.store_id.clone());
+                let ops = std::sync::Arc::new(ScopeRecordingOps::new());
+                let clock: crate::clock::ClockRef =
+                    std::sync::Arc::new(FixedClock(chrono::Utc::now()));
+
+                let result =
+                    create_cloud_home_with_cloudkit(&config, &key_service, clock, Some(ops)).await;
+                match result {
+                    Ok(_) => panic!("mixed owner/zone must not build a home"),
+                    Err(CloudHomeError::Configuration(message)) => {
+                        assert!(message.contains("cloudkit_owner_name"), "{message}");
+                        assert!(message.contains("cloudkit_zone_name"), "{message}");
+                    }
+                    Err(other) => panic!("expected Configuration error, got {other:?}"),
                 }
             }
         }
