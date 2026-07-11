@@ -378,7 +378,7 @@ mod tests {
         let mut code = sample_s3_code("lib-ws");
         code.store_name = "Trimmed".into();
         code.join_info = CloudHomeJoinInfo::Dropbox {
-            shared_folder_id: "sf1".into(),
+            folder_path: "/Apps/your-app/sf1".into(),
         };
         let encoded = format!("  {} \n", encode(&code));
         let decoded = decode(&encoded).unwrap();

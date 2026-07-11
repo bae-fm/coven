@@ -167,11 +167,11 @@ async fn build_cloud_home_for_join(
         }
 
         #[cfg(feature = "oauth-providers")]
-        CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
+        CloudHomeJoinInfo::Dropbox { folder_path } => {
             let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
             persist_oauth_tokens(lib_ks, &tokens)?;
             Ok(Box::new(dropbox::DropboxCloudHome::new(
-                shared_folder_id.clone(),
+                folder_path.clone(),
                 tokens,
                 lib_ks.clone(),
                 clock,
@@ -705,8 +705,8 @@ pub(crate) fn build_config(
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             config.cloud_home.google_drive_folder_id = Some(folder_id.clone());
         }
-        CloudHomeJoinInfo::Dropbox { shared_folder_id } => {
-            config.cloud_home.dropbox_folder_path = Some(shared_folder_id.clone());
+        CloudHomeJoinInfo::Dropbox { folder_path } => {
+            config.cloud_home.dropbox_folder_path = Some(folder_path.clone());
         }
         CloudHomeJoinInfo::OneDrive {
             drive_id,
@@ -763,7 +763,7 @@ mod tests {
                 folder_id: "f".to_string(),
             },
             CloudHomeJoinInfo::Dropbox {
-                shared_folder_id: "f".to_string(),
+                folder_path: "f".to_string(),
             },
             CloudHomeJoinInfo::OneDrive {
                 drive_id: "d".to_string(),

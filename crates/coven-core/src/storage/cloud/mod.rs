@@ -53,10 +53,16 @@ impl CloudHomeError {
 
 /// Information needed to join a cloud home from another device.
 ///
+/// The compact tagged shape (short `t` tags) is shared by invite codes and
+/// restore codes — both wrap this same type, so a code adding neither weight
+/// nor a second serde shape to carry around.
+///
 /// `Debug` is hand-written so the S3 `secret_key` prints as `<redacted>` —
 /// `{:?}` in an error path cannot leak the storage credential.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "t")]
 pub enum CloudHomeJoinInfo {
+    #[serde(rename = "s3")]
     S3 {
         bucket: String,
         region: String,
@@ -67,17 +73,18 @@ pub enum CloudHomeJoinInfo {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
-    GoogleDrive {
-        folder_id: String,
-    },
-    Dropbox {
-        shared_folder_id: String,
-    },
-    OneDrive {
-        drive_id: String,
-        folder_id: String,
-    },
+    #[serde(rename = "gd")]
+    GoogleDrive { folder_id: String },
+    /// `folder_path` matches `CloudHomeConfig.dropbox_folder_path`, whose
+    /// `dropbox_` is the flat-config provider prefix (like `s3_bucket`) — one
+    /// name for this value everywhere it's carried.
+    #[serde(rename = "db")]
+    Dropbox { folder_path: String },
+    #[serde(rename = "od")]
+    OneDrive { drive_id: String, folder_id: String },
+    #[serde(rename = "ck")]
     CloudKit,
+    #[serde(rename = "cks")]
     CloudKitShare {
         share_url: String,
         owner_name: String,
@@ -108,9 +115,9 @@ impl std::fmt::Debug for CloudHomeJoinInfo {
                 .debug_struct("GoogleDrive")
                 .field("folder_id", folder_id)
                 .finish(),
-            CloudHomeJoinInfo::Dropbox { shared_folder_id } => f
+            CloudHomeJoinInfo::Dropbox { folder_path } => f
                 .debug_struct("Dropbox")
-                .field("shared_folder_id", shared_folder_id)
+                .field("folder_path", folder_path)
                 .finish(),
             CloudHomeJoinInfo::OneDrive {
                 drive_id,
@@ -577,6 +584,58 @@ pub trait CloudHome: crate::MaybeThreadSafe {
 #[cfg(test)]
 mod join_info_tests {
     use super::*;
+
+    /// The wire shape is the compact `{"t": "<short-tag>", ...}` form, not the
+    /// derive default's `{"VariantName": {...}}` — invite and restore codes
+    /// both wrap this type and rely on it staying compact.
+    #[test]
+    fn wire_shape_uses_short_t_tags() {
+        let cases = [
+            (
+                CloudHomeJoinInfo::S3 {
+                    bucket: "b".to_string(),
+                    region: "r".to_string(),
+                    endpoint: None,
+                    access_key: "ak".to_string(),
+                    secret_key: "sk".to_string(),
+                    key_prefix: None,
+                },
+                "s3",
+            ),
+            (
+                CloudHomeJoinInfo::GoogleDrive {
+                    folder_id: "f".to_string(),
+                },
+                "gd",
+            ),
+            (
+                CloudHomeJoinInfo::Dropbox {
+                    folder_path: "/p".to_string(),
+                },
+                "db",
+            ),
+            (
+                CloudHomeJoinInfo::OneDrive {
+                    drive_id: "d".to_string(),
+                    folder_id: "f".to_string(),
+                },
+                "od",
+            ),
+            (CloudHomeJoinInfo::CloudKit, "ck"),
+            (
+                CloudHomeJoinInfo::CloudKitShare {
+                    share_url: "https://share.example".to_string(),
+                    owner_name: "owner".to_string(),
+                    zone_name: "zone".to_string(),
+                },
+                "cks",
+            ),
+        ];
+        for (info, tag) in cases {
+            let json = serde_json::to_value(&info).unwrap();
+            assert_eq!(json["t"], tag, "{info:?} must tag as {tag:?}: {json}");
+        }
+    }
 
     #[test]
     fn debug_redacts_s3_secret_key() {

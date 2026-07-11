@@ -50,6 +50,16 @@ impl DropboxCloudHome {
         })
     }
 
+    /// The join info a device needs to reach this same folder: the path files
+    /// are read and written under — never the Dropbox sharing API's
+    /// `shared_folder_id` (a member-management handle for that API, unrelated
+    /// to locating a file).
+    fn join_info(&self) -> CloudHomeJoinInfo {
+        CloudHomeJoinInfo::Dropbox {
+            folder_path: self.folder_path.clone(),
+        }
+    }
+
     pub fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
         let creds = crate::oauth::oauth_client_creds("dropbox")?;
         Ok(OAuthConfig {
@@ -627,7 +637,7 @@ impl CloudHome for DropboxCloudHome {
             })
             .await?;
         ensure_ok(resp, &format!("grant access to {email}"), self.not_found()).await?;
-        Ok(CloudHomeJoinInfo::Dropbox { shared_folder_id })
+        Ok(self.join_info())
     }
 
     async fn revoke_access(
@@ -693,6 +703,22 @@ mod tests {
             Arc::new(crate::clock::SystemClock),
         )
         .expect("build test Dropbox home")
+    }
+
+    /// `join_info()` (what `grant_access` returns to a newly-added member) must
+    /// carry the folder *path* files are read/written under — the same value
+    /// passed to `DropboxCloudHome::new` — not Dropbox's own sharing-API
+    /// `shared_folder_id`, which is an unrelated member-management handle a
+    /// joiner's `full_path` could never resolve against.
+    #[test]
+    fn join_info_carries_the_folder_path() {
+        let home = home_with_folder("/Apps/your-app/my-store");
+        match home.join_info() {
+            CloudHomeJoinInfo::Dropbox { folder_path } => {
+                assert_eq!(folder_path, "/Apps/your-app/my-store");
+            }
+            other => panic!("expected Dropbox join info, got {other:?}"),
+        }
     }
 
     #[test]

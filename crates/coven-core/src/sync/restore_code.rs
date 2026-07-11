@@ -15,6 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::code_envelope::{self, EnvelopeError};
+use crate::storage::cloud::CloudHomeJoinInfo;
 
 pub const RESTORE_CODE_VERSION: u8 = 2;
 
@@ -37,8 +38,12 @@ pub struct RestoreCode {
     pub ek: Option<String>,
     /// Store display name.
     pub name: String,
-    /// Cloud provider and its connection details.
-    pub provider: RestoreProvider,
+    /// Cloud provider and its connection details. Shared with the invite code
+    /// (`InviteCode::join_info`) — one wire representation for both. A
+    /// [`CloudHomeJoinInfo::CloudKitShare`] is never valid here: restore
+    /// recovers your own zone, not one shared to you, so
+    /// [`decode_restore_code`] rejects it.
+    pub provider: CloudHomeJoinInfo,
     /// Ed25519 signing key, hex-encoded, 64 bytes. Required.
     pub sk: String,
 }
@@ -55,74 +60,6 @@ impl std::fmt::Debug for RestoreCode {
             .field("provider", &self.provider)
             .field("sk", &"<redacted>")
             .finish()
-    }
-}
-
-/// Cloud provider details. Each variant carries only the fields needed for that provider.
-/// OAuth tokens are NOT stored (they expire); the user re-authenticates during restore.
-///
-/// `Debug` is hand-written so the S3 `secret_key` prints as `<redacted>`.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "t")]
-pub enum RestoreProvider {
-    #[serde(rename = "s3")]
-    S3 {
-        bucket: String,
-        region: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        endpoint: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key_prefix: Option<String>,
-        access_key: String,
-        secret_key: String,
-    },
-    #[serde(rename = "ck")]
-    CloudKit,
-    #[serde(rename = "gd")]
-    GoogleDrive { folder_id: String },
-    #[serde(rename = "db")]
-    Dropbox { folder_path: String },
-    #[serde(rename = "od")]
-    OneDrive { drive_id: String, folder_id: String },
-}
-
-impl std::fmt::Debug for RestoreProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RestoreProvider::S3 {
-                bucket,
-                region,
-                endpoint,
-                key_prefix,
-                access_key,
-                secret_key: _,
-            } => f
-                .debug_struct("S3")
-                .field("bucket", bucket)
-                .field("region", region)
-                .field("endpoint", endpoint)
-                .field("key_prefix", key_prefix)
-                .field("access_key", access_key)
-                .field("secret_key", &"<redacted>")
-                .finish(),
-            RestoreProvider::CloudKit => f.write_str("CloudKit"),
-            RestoreProvider::GoogleDrive { folder_id } => f
-                .debug_struct("GoogleDrive")
-                .field("folder_id", folder_id)
-                .finish(),
-            RestoreProvider::Dropbox { folder_path } => f
-                .debug_struct("Dropbox")
-                .field("folder_path", folder_path)
-                .finish(),
-            RestoreProvider::OneDrive {
-                drive_id,
-                folder_id,
-            } => f
-                .debug_struct("OneDrive")
-                .field("drive_id", drive_id)
-                .field("folder_id", folder_id)
-                .finish(),
-        }
     }
 }
 
@@ -156,6 +93,13 @@ pub enum RestoreCodeError {
     InvalidEncryptionKey(String),
     #[error("The signing key in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidSigningKey(String),
+    /// A CloudKit share is a zone shared *to* this device by another owner;
+    /// restore recovers *your own* zone, so a restore code can never carry
+    /// one. Rejected at decode rather than reaching provider setup.
+    #[error(
+        "This restore code names a shared CloudKit zone, which restore can't use. Restore recovers your own store, not one shared to you — generate a restore code from the device that owns it."
+    )]
+    CloudKitShareNotRestorable,
 }
 
 impl From<EnvelopeError> for RestoreCodeError {
@@ -189,6 +133,12 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     // it the moment the code is parsed: a decoded `RestoreCode` always carries a
     // `sid` that is a single safe path component.
     crate::store_dir::validate_path_token(&code.sid).map_err(RestoreCodeError::InvalidStoreId)?;
+    // A restore code is unsigned, so a crafted one could name a share the
+    // decoder holds no rights to. Restore recovers your own zone, never a
+    // shared one, so reject the case structurally at decode.
+    if matches!(code.provider, CloudHomeJoinInfo::CloudKitShare { .. }) {
+        return Err(RestoreCodeError::CloudKitShareNotRestorable);
+    }
     if let Some(key_hex) = &code.ek {
         crate::encryption::EncryptionService::new(key_hex)
             .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
@@ -216,12 +166,12 @@ pub(crate) fn decode_hex_bytes(
 }
 
 /// Returns true if this provider requires an OAuth flow before restore.
-pub fn provider_needs_oauth(provider: &RestoreProvider) -> bool {
+pub fn provider_needs_oauth(provider: &CloudHomeJoinInfo) -> bool {
     matches!(
         provider,
-        RestoreProvider::GoogleDrive { .. }
-            | RestoreProvider::Dropbox { .. }
-            | RestoreProvider::OneDrive { .. }
+        CloudHomeJoinInfo::GoogleDrive { .. }
+            | CloudHomeJoinInfo::Dropbox { .. }
+            | CloudHomeJoinInfo::OneDrive { .. }
     )
 }
 
@@ -239,13 +189,7 @@ pub struct RestoreCodeInfo {
 pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCodeError> {
     let parsed = decode_restore_code(code)?;
 
-    let cloud_provider = match &parsed.provider {
-        RestoreProvider::S3 { .. } => crate::config::CloudProvider::S3,
-        RestoreProvider::CloudKit => crate::config::CloudProvider::CloudKit,
-        RestoreProvider::GoogleDrive { .. } => crate::config::CloudProvider::GoogleDrive,
-        RestoreProvider::Dropbox { .. } => crate::config::CloudProvider::Dropbox,
-        RestoreProvider::OneDrive { .. } => crate::config::CloudProvider::OneDrive,
-    };
+    let cloud_provider = parsed.provider.cloud_provider();
 
     let signing_key = decode_hex_bytes("signing key", &parsed.sk, 64)
         .map_err(RestoreCodeError::InvalidSigningKey)?;
@@ -275,7 +219,7 @@ mod tests {
             sid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             ek: Some("aa".repeat(32)),
             name: "Test Store".to_string(),
-            provider: RestoreProvider::S3 {
+            provider: CloudHomeJoinInfo::S3 {
                 bucket: "my-bucket".to_string(),
                 region: "us-east-1".to_string(),
                 endpoint: Some("https://s3.example.com".to_string()),
@@ -300,7 +244,7 @@ mod tests {
         assert_eq!(decoded.sk, code.sk);
         assert_eq!(decoded.name, "Test Store");
         match &decoded.provider {
-            RestoreProvider::S3 {
+            CloudHomeJoinInfo::S3 {
                 bucket,
                 region,
                 endpoint,
@@ -326,13 +270,13 @@ mod tests {
             sid: "lib-123".to_string(),
             ek: Some("bb".repeat(32)),
             name: "CloudKit Store".to_string(),
-            provider: RestoreProvider::CloudKit,
+            provider: CloudHomeJoinInfo::CloudKit,
             sk: test_sk(),
         };
         let encoded = encode_restore_code(&code);
         let decoded = decode_restore_code(&encoded).unwrap();
         assert_eq!(decoded.name, "CloudKit Store");
-        assert!(matches!(decoded.provider, RestoreProvider::CloudKit));
+        assert!(matches!(decoded.provider, CloudHomeJoinInfo::CloudKit));
     }
 
     #[test]
@@ -342,14 +286,14 @@ mod tests {
             sid: "lib-456".to_string(),
             ek: Some("cc".repeat(32)),
             name: "GDrive Store".to_string(),
-            provider: RestoreProvider::GoogleDrive {
+            provider: CloudHomeJoinInfo::GoogleDrive {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
             },
             sk: test_sk(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
-            RestoreProvider::GoogleDrive { folder_id } => {
+            CloudHomeJoinInfo::GoogleDrive { folder_id } => {
                 assert_eq!(folder_id, "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs");
             }
             _ => panic!("expected GoogleDrive provider"),
@@ -363,14 +307,14 @@ mod tests {
             sid: "lib-789".to_string(),
             ek: Some("dd".repeat(32)),
             name: "Dropbox Store".to_string(),
-            provider: RestoreProvider::Dropbox {
+            provider: CloudHomeJoinInfo::Dropbox {
                 folder_path: "/Apps/your-app/My Store".to_string(),
             },
             sk: test_sk(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
-            RestoreProvider::Dropbox { folder_path } => {
+            CloudHomeJoinInfo::Dropbox { folder_path } => {
                 assert_eq!(folder_path, "/Apps/your-app/My Store");
             }
             _ => panic!("expected Dropbox provider"),
@@ -384,7 +328,7 @@ mod tests {
             sid: "lib-abc".to_string(),
             ek: Some("ee".repeat(32)),
             name: "OneDrive Store".to_string(),
-            provider: RestoreProvider::OneDrive {
+            provider: CloudHomeJoinInfo::OneDrive {
                 drive_id: "drive-id-123".to_string(),
                 folder_id: "folder-id-456".to_string(),
             },
@@ -392,7 +336,7 @@ mod tests {
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
-            RestoreProvider::OneDrive {
+            CloudHomeJoinInfo::OneDrive {
                 drive_id,
                 folder_id,
             } => {
@@ -401,6 +345,29 @@ mod tests {
             }
             _ => panic!("expected OneDrive provider"),
         }
+    }
+
+    /// A restore code naming a CloudKit share is rejected at decode: restore
+    /// recovers your own zone, never one shared to you.
+    #[test]
+    fn decode_rejects_cloudkit_share() {
+        let code = RestoreCode {
+            v: RESTORE_CODE_VERSION,
+            sid: "lib-ck-share".to_string(),
+            ek: Some("ff".repeat(32)),
+            name: "CloudKit Share Store".to_string(),
+            provider: CloudHomeJoinInfo::CloudKitShare {
+                share_url: "https://share.example/abc".to_string(),
+                owner_name: "owner".to_string(),
+                zone_name: "zone".to_string(),
+            },
+            sk: test_sk(),
+        };
+        let encoded = encode_restore_code(&code);
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::CloudKitShareNotRestorable)
+        ));
     }
 
     #[test]
@@ -472,7 +439,7 @@ mod tests {
             sid: "lib-1".to_string(),
             ek: Some("aa".repeat(32)),
             name: "Test Store".to_string(),
-            provider: RestoreProvider::S3 {
+            provider: CloudHomeJoinInfo::S3 {
                 bucket: "b".to_string(),
                 region: "r".to_string(),
                 endpoint: None,
@@ -499,7 +466,7 @@ mod tests {
             sid: "lib-plain".to_string(),
             ek: None,
             name: "Plaintext Store".to_string(),
-            provider: RestoreProvider::S3 {
+            provider: CloudHomeJoinInfo::S3 {
                 bucket: "b".to_string(),
                 region: "r".to_string(),
                 endpoint: None,
@@ -537,7 +504,7 @@ mod tests {
 
     #[test]
     fn needs_oauth() {
-        assert!(!provider_needs_oauth(&RestoreProvider::S3 {
+        assert!(!provider_needs_oauth(&CloudHomeJoinInfo::S3 {
             bucket: String::new(),
             region: String::new(),
             endpoint: None,
@@ -545,14 +512,14 @@ mod tests {
             access_key: String::new(),
             secret_key: String::new(),
         }));
-        assert!(!provider_needs_oauth(&RestoreProvider::CloudKit));
-        assert!(provider_needs_oauth(&RestoreProvider::GoogleDrive {
+        assert!(!provider_needs_oauth(&CloudHomeJoinInfo::CloudKit));
+        assert!(provider_needs_oauth(&CloudHomeJoinInfo::GoogleDrive {
             folder_id: String::new(),
         }));
-        assert!(provider_needs_oauth(&RestoreProvider::Dropbox {
+        assert!(provider_needs_oauth(&CloudHomeJoinInfo::Dropbox {
             folder_path: String::new(),
         }));
-        assert!(provider_needs_oauth(&RestoreProvider::OneDrive {
+        assert!(provider_needs_oauth(&CloudHomeJoinInfo::OneDrive {
             drive_id: String::new(),
             folder_id: String::new(),
         }));
@@ -639,25 +606,5 @@ mod tests {
         assert!(!debug.contains(&code.sk), "signing key leaked: {debug}");
         // ek presence (the storage mode) is still observable.
         assert!(debug.contains("ek: Some"), "{debug}");
-    }
-
-    #[test]
-    fn provider_debug_redacts_s3_secret_key() {
-        let provider = RestoreProvider::S3 {
-            bucket: "my-bucket".to_string(),
-            region: "us-east-1".to_string(),
-            endpoint: None,
-            key_prefix: None,
-            access_key: "AKIAIOSFODNN7EXAMPLE".to_string(),
-            secret_key: "wJalrXUtnFEMI-secret-value".to_string(),
-        };
-        let debug = format!("{provider:?}");
-
-        assert!(debug.contains("<redacted>"), "{debug}");
-        assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"), "{debug}");
-        assert!(
-            !debug.contains("wJalrXUtnFEMI-secret-value"),
-            "S3 secret key leaked: {debug}"
-        );
     }
 }

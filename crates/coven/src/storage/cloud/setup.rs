@@ -254,9 +254,8 @@ pub fn generate_restore_code(
     config: &Config,
     key_service: &KeyService,
 ) -> Result<String, SetupError> {
-    use crate::sync::restore_code::{
-        encode_restore_code, RestoreCode, RestoreProvider, RESTORE_CODE_VERSION,
-    };
+    use crate::storage::cloud::CloudHomeJoinInfo;
+    use crate::sync::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
 
     let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
         SetupError("No cloud provider configured. Set up sync first.".to_string())
@@ -308,7 +307,7 @@ pub fn generate_restore_code(
                 .s3_region
                 .clone()
                 .ok_or_else(|| SetupError("S3 region not configured".to_string()))?;
-            RestoreProvider::S3 {
+            CloudHomeJoinInfo::S3 {
                 bucket,
                 region,
                 endpoint: config.cloud_home.s3_endpoint.clone(),
@@ -317,15 +316,15 @@ pub fn generate_restore_code(
                 secret_key,
             }
         }
-        CloudProvider::CloudKit => RestoreProvider::CloudKit,
-        CloudProvider::GoogleDrive => RestoreProvider::GoogleDrive {
+        CloudProvider::CloudKit => CloudHomeJoinInfo::CloudKit,
+        CloudProvider::GoogleDrive => CloudHomeJoinInfo::GoogleDrive {
             folder_id: config
                 .cloud_home
                 .google_drive_folder_id
                 .clone()
                 .ok_or_else(|| SetupError("Google Drive folder ID not configured".to_string()))?,
         },
-        CloudProvider::Dropbox => RestoreProvider::Dropbox {
+        CloudProvider::Dropbox => CloudHomeJoinInfo::Dropbox {
             folder_path: config
                 .cloud_home
                 .dropbox_folder_path
@@ -343,7 +342,7 @@ pub fn generate_restore_code(
                 .onedrive_folder_id
                 .clone()
                 .ok_or_else(|| SetupError("OneDrive folder ID not configured".to_string()))?;
-            RestoreProvider::OneDrive {
+            CloudHomeJoinInfo::OneDrive {
                 drive_id,
                 folder_id,
             }

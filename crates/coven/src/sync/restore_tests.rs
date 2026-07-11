@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use crate::clock::SystemClock;
 use crate::id_provider::SequentialIdProvider;
+use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::restore::{restore_from_code, RestoreError};
 use crate::sync::restore_code::{
-    decode_restore_code, encode_restore_code, RestoreCode, RestoreCodeError, RestoreProvider,
+    decode_restore_code, encode_restore_code, RestoreCode, RestoreCodeError,
 };
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 
@@ -27,7 +28,7 @@ fn restore_code_with_sid(sid: &str) -> String {
         sid: sid.to_string(),
         ek: Some("aa".repeat(32)),
         name: "Evil".to_string(),
-        provider: RestoreProvider::S3 {
+        provider: CloudHomeJoinInfo::S3 {
             bucket: "bucket".to_string(),
             region: "us-east-1".to_string(),
             // Port 1 / loopback: nothing listens, so a connect fails at once.
