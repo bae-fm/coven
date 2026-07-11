@@ -347,6 +347,20 @@ pub(crate) enum PendingChangesetBatch {
     Pending { max_id: i64, changeset: Vec<u8> },
 }
 
+/// The result of a declared device-local transaction
+/// ([`Database::run_declared_local_transaction_on`]). A local-only write is
+/// expected to touch no synced table, so the two states are exactly "it kept its
+/// promise" and "it broke it" — the caller maps the broken case to a loud error.
+pub enum LocalTransactionOutcome<R> {
+    /// The closure captured no synced-table change: the write was truly
+    /// device-local and the transaction committed. Carries the closure's value.
+    Local(R),
+    /// The closure captured a synced-table change: it was declared local-only
+    /// but wrote a synced table, so the transaction rolled back and committed
+    /// nothing. The caller surfaces this as an error at its call site.
+    TouchedSyncedTable,
+}
+
 fn validate_host_synced_tables(
     conn: &Connection,
     synced_tables: &[SyncedTable],
@@ -759,13 +773,19 @@ impl Database {
         changeset: &[u8],
     ) -> Result<(), DbError> {
         if changeset.is_empty() {
-            // A tripwire, not a routine event. Two ways it fires, once hosts route
-            // pure reads through the journal-free read path (native
-            // `CovenHandle::sql_read`, the wasm facade's `query`): a read still on the
-            // write path — move it off — or a conditional write that happened to
-            // no-op this cycle (an idempotent INSERT OR IGNORE re-run), which is
-            // legitimate and stays on `sql()`. Warn so the first case is visible.
-            warn!("journaled sql transaction produced no synced changes; pure reads belong on sql_read");
+            // A tripwire, not a routine event. Three ways an empty capture arises,
+            // and only one still belongs on `sql()`:
+            //   - a pure read left on the write path — move it to the journal-free
+            //     read path (native `CovenHandle::sql_read`, the wasm facade's
+            //     `query`);
+            //   - a legitimate write to a device-local (non-synced) table — declare
+            //     it with `CovenHandle::sql_local`, which expects an empty capture,
+            //     does not warn, and errors loudly if it captures a synced change;
+            //   - a conditional write to a *synced* table that no-op'd this cycle
+            //     (an idempotent INSERT OR IGNORE re-run) — legitimate, and it stays
+            //     here on `sql()`. This is the only empty capture the warn still
+            //     wants, so it is kept as a warn rather than an error.
+            warn!("journaled sql transaction produced no synced changes; move pure reads to sql_read and declare local-only writes with sql_local");
             return Ok(());
         }
         tx.execute(
@@ -795,6 +815,49 @@ impl Database {
         Self::insert_pending_changeset_on(&tx, &changeset).map_err(E::from)?;
         tx.commit().map_err(DbError::from).map_err(E::from)?;
         Ok(value)
+    }
+
+    /// Run a write the caller declares device-local, verifying the declaration.
+    ///
+    /// The mirror of [`run_pending_journaled_transaction_on`](Self::run_pending_journaled_transaction_on):
+    /// it attaches the same capture session over the synced tables and runs the
+    /// closure in a transaction, so a synced-table write can never slip past
+    /// capture — but it inverts what a captured change *means* and never touches
+    /// `pending_changesets`:
+    ///
+    /// - **Empty capture** — the declared, expected outcome for a device-local
+    ///   write: the transaction commits, and nothing is enqueued.
+    /// - **Non-empty capture** — the caller declared local-only but wrote a synced
+    ///   table: the transaction is *not* committed (dropping `tx` rolls it back, so
+    ///   nothing lands and nothing is enqueued) and [`LocalTransactionOutcome::TouchedSyncedTable`]
+    ///   is returned for the caller to surface as an error.
+    ///
+    /// Verifying the declaration this way — rather than trusting it — is what keeps
+    /// a mislabeled synced write from becoming a silent hole in change capture.
+    pub fn run_declared_local_transaction_on<R, E>(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
+    ) -> Result<LocalTransactionOutcome<R>, E>
+    where
+        E: From<DbError>,
+    {
+        let mut journal =
+            Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(DbError::from)
+            .map_err(E::from)?;
+        let value = f(&tx)?;
+        let changeset = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
+        if !changeset.is_empty() {
+            // Declared local-only but captured a synced-table change: leave `tx`
+            // uncommitted so its Drop rolls the write back, and report the
+            // violation. No commit, no `pending_changesets` insert.
+            return Ok(LocalTransactionOutcome::TouchedSyncedTable);
+        }
+        tx.commit().map_err(DbError::from).map_err(E::from)?;
+        Ok(LocalTransactionOutcome::Local(value))
     }
 
     pub(crate) async fn pending_changeset_batch(&self) -> Result<PendingChangesetBatch, DbError> {

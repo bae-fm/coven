@@ -25,7 +25,10 @@ Everything else about the schema is yours. Tables you do *not* pass to
 [`synced_tables`](rustdoc:method:coven::CovenBuilder::synced_tables) never
 leave the device: that is also the mechanism for per-device state (window
 positions, per-device pin bookkeeping, local paths). Put it in a table you
-don't declare.
+don't declare. Write to those tables through
+[`sql_local`](rustdoc:method:coven::CovenHandle::sql_local), which commits a
+device-local write without journaling it and errors if it turns out to touch a
+synced table — see [Sync](/docs/sync-model#reads-and-local-writes).
 
 <svg class="flow" viewBox="0 0 660 168" role="img" aria-label="Declared tables sync to the cloud; undeclared tables never leave the device">
 <text class="hdr" x="155" y="22" text-anchor="middle">THIS DEVICE</text>

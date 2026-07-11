@@ -11,7 +11,7 @@ use crate::blob::local_files::LocalBlobError;
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::Config;
-use crate::database::{Database, DbError, OpenError};
+use crate::database::{Database, DbError, LocalTransactionOutcome, OpenError};
 use crate::handle::CovenHandle;
 use crate::keys::KeyService;
 use crate::library_dir::PathTokenError;
@@ -40,6 +40,10 @@ pub enum CovenError {
     MalformedPath(String),
     #[error("the write SQL closure panicked")]
     WriteClosurePanicked,
+    #[error(
+        "a write declared device-local through sql_local wrote a synced table; it was rolled back"
+    )]
+    LocalWriteTouchedSyncedTable,
     #[error("synced_tables must be set before opening a coven library")]
     MissingSyncedTables,
     #[error("migrations must be set before opening a coven library")]
@@ -454,6 +458,53 @@ impl CovenHandle {
             .await
             .map_err(CovenError::from)?;
         outcome
+    }
+
+    /// Run a write the host declares device-local — touching only non-synced
+    /// tables — and await the result.
+    ///
+    /// Like [`sql`](Self::sql) it attaches the change-capture session over the
+    /// synced tables and runs the closure in a journaled transaction, so a write
+    /// to a synced table can never bypass capture. It differs only in what a
+    /// captured change means:
+    ///
+    /// - **No synced-table change captured** — the declared, expected outcome:
+    ///   the transaction commits silently. This is the path a device-local write
+    ///   takes (e.g. bae persisting playback position once a second to a local
+    ///   `playback_state` table). It does *not* fire the empty-changeset warning
+    ///   [`sql`](Self::sql) logs, because an empty capture is correct here, not a
+    ///   tripwire.
+    /// - **A synced-table change captured** — the caller declared local-only but
+    ///   wrote a synced table: the transaction rolls back (nothing committed,
+    ///   nothing enqueued) and this returns
+    ///   [`CovenError::LocalWriteTouchedSyncedTable`], a host bug surfaced loudly
+    ///   at the call site. This verification is what makes the local-only
+    ///   declaration trustworthy rather than a silent hole in change capture.
+    ///
+    /// The closure receives the transaction directly, not a [`SqlContext`]: a
+    /// device-local table carries no `_updated_at`, so there is no register stamp
+    /// to mint and none is offered.
+    pub async fn sql_local<F, R>(&self, f: F) -> CovenResult<R>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let tables = self.db().synced_tables().to_vec();
+        let outcome = self
+            .db()
+            .call(move |conn| {
+                Ok(Database::run_declared_local_transaction_on(
+                    conn, &tables, f,
+                ))
+            })
+            .await
+            .map_err(CovenError::from)?;
+        match outcome? {
+            LocalTransactionOutcome::Local(value) => Ok(value),
+            LocalTransactionOutcome::TouchedSyncedTable => {
+                Err(CovenError::LocalWriteTouchedSyncedTable)
+            }
+        }
     }
 
     pub async fn write<F, S, R>(&self, f: F, sql: S) -> CovenResult<R>
@@ -936,6 +987,28 @@ mod tests {
         let handle = Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
+            .open()
+            .expect("open handle");
+        (tmp, handle)
+    }
+
+    /// A device-local table — not passed to `synced_tables`, so the capture
+    /// session never attaches to it. Mirrors bae's per-second `playback_state`
+    /// write, the case `sql_local` exists for.
+    fn playback_state_migration() -> Migration {
+        Migration::sql(
+            2,
+            "add-local-playback-state",
+            "CREATE TABLE playback_state (id TEXT PRIMARY KEY, position INTEGER NOT NULL);",
+        )
+    }
+
+    fn open_local_table_handle() -> (tempfile::TempDir, CovenHandle) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = LibraryDir::new(tmp.path());
+        let handle = Coven::builder(config(dir))
+            .synced_tables(vec![files_table()])
+            .migrations(vec![files_migration(), playback_state_migration()])
             .open()
             .expect("open handle");
         (tmp, handle)
@@ -1462,6 +1535,117 @@ mod tests {
             .await
             .expect("sql_read on a fresh library");
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn sql_local_write_to_a_local_table_commits_without_journaling() {
+        let (_tmp, handle) = open_local_table_handle();
+        handle
+            .sql_local(|tx| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO playback_state (id, position) \
+                     VALUES ('track-1', 42)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("a declared-local write commits");
+
+        // The row is durable — read it back through the read path.
+        let position: i64 = handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT position FROM playback_state WHERE id = 'track-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("read the local row back");
+        assert_eq!(position, 42);
+
+        // A local-only write captures nothing, so it enqueues no changeset — the
+        // whole point over `sql`, whose empty capture would also warn.
+        let pending: i64 = handle
+            .sql_read(|conn| {
+                conn.query_row("SELECT count(*) FROM pending_changesets", [], |row| {
+                    row.get(0)
+                })
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("count pending changesets");
+        assert_eq!(pending, 0, "a declared-local write enqueues no changeset");
+    }
+
+    #[tokio::test]
+    async fn sql_local_that_writes_a_synced_table_errors_and_rolls_back() {
+        let (_tmp, handle) = open_local_table_handle();
+        let result: CovenResult<()> = handle
+            .sql_local(|tx| {
+                // Touch the local table too, to prove the *whole* transaction rolls
+                // back, not just the synced write.
+                tx.execute(
+                    "INSERT OR REPLACE INTO playback_state (id, position) \
+                     VALUES ('track-x', 7)",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('file-x', NULL, 0, '0')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(result, Err(CovenError::LocalWriteTouchedSyncedTable)),
+            "a declared-local write that touched a synced table must error",
+        );
+
+        // Rolled back: neither the synced row nor the local row survived, and
+        // nothing was enqueued.
+        let synced: i64 = handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM files WHERE id = 'file-x'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("count synced rows");
+        assert_eq!(synced, 0, "the synced write rolled back");
+
+        let local: i64 = handle
+            .sql_read(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM playback_state WHERE id = 'track-x'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("count local rows");
+        assert_eq!(
+            local, 0,
+            "the local write in the same transaction rolled back too"
+        );
+
+        let pending: i64 = handle
+            .sql_read(|conn| {
+                conn.query_row("SELECT count(*) FROM pending_changesets", [], |row| {
+                    row.get(0)
+                })
+                .map_err(CovenError::from)
+            })
+            .await
+            .expect("count pending changesets");
+        assert_eq!(pending, 0, "the rolled-back write enqueued nothing");
     }
 
     #[tokio::test]
