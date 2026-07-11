@@ -399,13 +399,23 @@ struct ColumnInfo {
 /// requirement it broke, so the integrator learns it on their own device instead
 /// of a peer's pull failing on the row.
 fn validate_synced_table_contract(conn: &Connection, table: &str) -> Result<(), DbError> {
-    if !table_is_strict(conn, table)? {
-        return Err(DbError(format!(
-            "synced table {table:?} is not declared STRICT; the sync contract assumes typed \
-             columns (apply preserves storage classes peer-to-peer, LWW arbitration renders \
-             values to strings for comparison), which STRICT enforces at the insert — declare \
-             it STRICT: `CREATE TABLE {table} (...) STRICT`"
-        )));
+    match table_is_strict(conn, table)? {
+        None => {
+            return Err(DbError(format!(
+                "synced table {table:?} is declared in `synced_tables` but no migration \
+                 creates it — add a `CREATE TABLE {table} (...) STRICT` to the schema \
+                 migrations, or remove the declaration"
+            )));
+        }
+        Some(false) => {
+            return Err(DbError(format!(
+                "synced table {table:?} is not declared STRICT; the sync contract assumes typed \
+                 columns (apply preserves storage classes peer-to-peer, LWW arbitration renders \
+                 values to strings for comparison), which STRICT enforces at the insert — declare \
+                 it STRICT: `CREATE TABLE {table} (...) STRICT`"
+            )));
+        }
+        Some(true) => {}
     }
 
     let sql = format!(
@@ -504,8 +514,10 @@ fn declared_as_text(declared_type: &str) -> bool {
 /// Whether `table` (in the `main` schema) is declared STRICT, via `PRAGMA
 /// table_list`'s `strict` column (SQLite 3.37+) — the schema-level flag itself,
 /// not `sqlite_master.sql` text, which a hand-formatted `CREATE TABLE` could spell
-/// many ways.
-fn table_is_strict(conn: &Connection, table: &str) -> Result<bool, DbError> {
+/// many ways. `None` means the table doesn't exist in `main` at all — a declared
+/// synced table no migration created — which the caller reports as its own
+/// contract error rather than folding into "not STRICT".
+fn table_is_strict(conn: &Connection, table: &str) -> Result<Option<bool>, DbError> {
     let sql = format!(
         "PRAGMA table_list({})",
         crate::sync::session::quote_ident(table)
@@ -519,10 +531,10 @@ fn table_is_strict(conn: &Connection, table: &str) -> Result<bool, DbError> {
     for row in rows {
         let (schema, strict) = row.map_err(DbError::from)?;
         if schema == "main" {
-            return Ok(strict != 0);
+            return Ok(Some(strict != 0));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 impl Database {
@@ -2050,6 +2062,19 @@ mod tests {
         assert!(
             error.contains("things") && error.contains("STRICT"),
             "error names the table and the STRICT requirement: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_declared_table_no_migration_creates() {
+        let error = open_contract_error(
+            "CREATE TABLE other (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
+            vec![SyncedTable::new("things")],
+            "declared-never-created",
+        );
+        assert!(
+            error.contains("things") && error.contains("no migration creates it"),
+            "error says the declared table was never created: {error}",
         );
     }
 
