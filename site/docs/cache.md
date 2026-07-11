@@ -12,7 +12,7 @@ covers how a blob is uploaded, downloaded, and deleted across devices. This page
 covers the one device's copy: where it sits, when it is fetched, how long it is
 kept, and how a user pins a blob to keep it offline.
 
-The cache is coven's, under the library directory. Examples: a todos app whose
+The cache is coven's, under the store directory. Examples: a todos app whose
 `todo_attachments` rows each point at a photo; audio is the case the lazy half
 exists for.
 
@@ -23,7 +23,7 @@ store (host-provided). See [Blobs](/docs/blobs) for that distinction.
 
 ## Two folders, no table
 
-A Remote blob is in exactly one of two folders under the library directory, or in
+A Remote blob is in exactly one of two folders under the store directory, or in
 neither. Both are segmented by the blob's namespace, so each namespace's cache
 evicts against its own budget without touching another's:
 
@@ -35,8 +35,8 @@ neither                                     remote-only: no file, fetched on nex
 
 `{ab}` and `{cd}` are the first two byte-pairs of the dash-stripped id (the same
 content-addressed shard the cloud layout uses, built by
-[`LibraryDir::pinned_blob_path`](rustdoc:method:coven::library_dir::LibraryDir::pinned_blob_path)
-/ [`cache_blob_path`](rustdoc:method:coven::library_dir::LibraryDir::cache_blob_path)).
+[`StoreDir::pinned_blob_path`](rustdoc:method:coven::store_dir::StoreDir::pinned_blob_path)
+/ [`cache_blob_path`](rustdoc:method:coven::store_dir::StoreDir::cache_blob_path)).
 
 There is no cache table, because a table would be a second copy of the truth:
 every crash between a file write and its row would leave the two disagreeing,
@@ -155,7 +155,7 @@ fill**, declared per blob in the table's
 [`CacheFill`](rustdoc:enum:coven::blob::CacheFill):
 
 - `CacheEager`: fetched into the cache on every device's pull. Part of "having the
-  library", e.g. an album's cover art, so a grid renders from local bytes without a
+  store", e.g. an album's cover art, so a grid renders from local bytes without a
   fetch. It lands in the **evictable** `storage/cache/<namespace>/<id>`; it is not
   pinned, so if it later falls out of its namespace's budget it shows a placeholder
   until the next read re-fetches it.

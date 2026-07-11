@@ -18,8 +18,8 @@ pub trait IdProvider: Send + Sync {
     fn new_id(&self) -> String;
 }
 
-/// Shared handle to an id provider. Held by `Clone` types (`LibraryManager`)
-/// so they clone the handle, not the implementation.
+/// Shared handle to an id provider. Held by `Clone` types that need to share
+/// one id source, so they clone the handle, not the implementation.
 pub type IdRef = Arc<dyn IdProvider>;
 
 /// Production provider: random v4 UUIDs.

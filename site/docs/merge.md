@@ -1,13 +1,13 @@
 # Merge
 
-Two devices edit the same library while apart; eventually both changesets
+Two devices edit the same store while apart; eventually both changesets
 apply everywhere, and every device must land on the same rows. This page is
 the semantics of that landing: the clock that orders edits, the column-level
 merge, and what wins when edits truly collide.
 
 How changesets travel between devices is the [Sync](/docs/sync-model) page;
 this one starts where a changeset is already in hand. Examples: Alice and Bob
-share the todos library.
+share the todos store.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 

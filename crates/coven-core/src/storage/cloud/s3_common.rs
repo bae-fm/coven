@@ -1,6 +1,6 @@
 //! Pure helpers shared by both S3 backends.
 //!
-//! S3-compatible backends must compute the same object keys, so a library
+//! S3-compatible backends must compute the same object keys, so a store
 //! created on one platform opens unchanged on the other. These free functions
 //! are that shared definition; backends call them rather than each holding its
 //! own copy.

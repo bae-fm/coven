@@ -896,7 +896,7 @@ mod tests {
             Ok(CloudKitShare {
                 share_url: format!("https://share.example/{member_pubkey}"),
                 owner_name: "owner-name".to_string(),
-                zone_name: "bae-library".to_string(),
+                zone_name: "bae-store".to_string(),
             })
         }
 
@@ -908,7 +908,7 @@ mod tests {
             Ok(CloudKitShare {
                 share_url: share_url.to_string(),
                 owner_name: "owner-name".to_string(),
-                zone_name: "bae-library".to_string(),
+                zone_name: "bae-store".to_string(),
             })
         }
     }
@@ -1551,7 +1551,7 @@ mod tests {
             CloudHomeJoinInfo::CloudKitShare {
                 share_url: "https://share.example/member-pubkey".to_string(),
                 owner_name: "owner-name".to_string(),
-                zone_name: "bae-library".to_string(),
+                zone_name: "bae-store".to_string(),
             }
         );
     }

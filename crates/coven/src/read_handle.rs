@@ -1,8 +1,8 @@
-//! The read-only native handle: a same-library secondary reader.
+//! The read-only native handle: a same-store secondary reader.
 //!
 //! Where [`CovenHandle`](crate::CovenHandle) is the one full handle a host opens to
 //! drive rows, blobs, and sync, [`CovenReadHandle`] is the deliberately narrow
-//! counterpart for a second reader of the *same* library — a separate process (the
+//! counterpart for a second reader of the *same* store — a separate process (the
 //! macOS File Provider extension) or a second in-process handle — that must read
 //! while another handle holds the writer open.
 //!
@@ -15,7 +15,7 @@
 //! [`sql`](CovenReadHandle::sql) closure's `&Connection` refuses DML at the SQLite
 //! layer.
 //!
-//! It takes no library lock: it coexists with the writer that holds the exclusive
+//! It takes no store lock: it coexists with the writer that holds the exclusive
 //! `.coven-lock`, and with any number of other read-only opens (a read-only
 //! connection cannot write, so the single-writer lock does not apply to it).
 //! Cross-process reads are safe because the writer opens the db in WAL mode.
@@ -29,11 +29,11 @@ use crate::config::Config;
 use crate::coven::{CovenError, CovenResult};
 use crate::database::Database;
 use crate::keys::KeyService;
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_manager::ConfigProvider;
 
-/// A read-only handle over one coven library, for a same-library secondary reader.
+/// A read-only handle over one coven store, for a same-store secondary reader.
 ///
 /// Open it with
 /// [`Coven::builder(cfg).open_read_only()`](crate::CovenBuilder::open_read_only).
@@ -55,7 +55,7 @@ use crate::sync::sync_manager::ConfigProvider;
 #[derive(Clone)]
 pub struct CovenReadHandle {
     db: Database,
-    library_dir: LibraryDir,
+    store_dir: StoreDir,
     config_provider: ConfigProvider,
     key_service: KeyService,
     clock: ClockRef,
@@ -65,7 +65,7 @@ pub struct CovenReadHandle {
 impl CovenReadHandle {
     pub(crate) fn new(
         db: Database,
-        library_dir: LibraryDir,
+        store_dir: StoreDir,
         config_provider: ConfigProvider,
         key_service: KeyService,
         clock: ClockRef,
@@ -73,7 +73,7 @@ impl CovenReadHandle {
     ) -> Self {
         Self {
             db,
-            library_dir,
+            store_dir,
             config_provider,
             key_service,
             clock,
@@ -105,11 +105,11 @@ impl CovenReadHandle {
         outcome
     }
 
-    /// The read [`SyncStorage`] for a cloud miss, or `None` for a home-less library.
+    /// The read [`SyncStorage`] for a cloud miss, or `None` for a home-less store.
     ///
     /// A read-only handle holds no sync manager, so — unlike the full handle — it
     /// always builds storage from the current [`Config`]: `None` when no provider is
-    /// configured (a home-less library holds only Local blobs, which never reach the
+    /// configured (a home-less store holds only Local blobs, which never reach the
     /// cloud-miss path), `Some` built from config otherwise. A provider configured
     /// but unbuildable (missing credentials) surfaces its setup error.
     async fn blob_storage(
@@ -144,7 +144,7 @@ impl CovenReadHandle {
     /// which re-scans instead.
     pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::read_blob(&self.db, &self.library_dir, storage.as_deref(), blob).await
+        crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await
     }
 
     /// Serve `len` plaintext bytes of a blob starting at `offset`, for streaming or
@@ -161,7 +161,7 @@ impl CovenReadHandle {
         let storage = self.blob_storage().await?;
         crate::blob::cache::open_blob_stream(
             &self.db,
-            &self.library_dir,
+            &self.store_dir,
             storage.as_deref(),
             blob,
             source_size,
@@ -176,7 +176,7 @@ impl CovenReadHandle {
     /// stats the folder, never writes.
     pub async fn is_pinned(&self, blobs: &[BlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.library_dir, &blob.namespace, &blob.id).await? {
+            if !crate::blob::cache::is_pinned(&self.store_dir, &blob.namespace, &blob.id).await? {
                 return Ok(false);
             }
         }

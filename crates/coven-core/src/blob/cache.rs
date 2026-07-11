@@ -10,7 +10,7 @@
 //! for where the cache sits in the whole storage model.
 //!
 //! There is no cache table. A cached Remote blob is in **exactly one** of two
-//! folders under the library dir, or in neither. Both are segmented by the blob's
+//! folders under the store dir, or in neither. Both are segmented by the blob's
 //! namespace, so each namespace's cache evicts against its own budget without
 //! touching another's:
 //!
@@ -73,7 +73,7 @@
 
 use crate::blob::{BlobRef, Provenance};
 use crate::database::{Database, DbError};
-use crate::library_dir::{LibraryDir, PathTokenError};
+use crate::store_dir::{PathTokenError, StoreDir};
 use crate::sync::storage::{StorageError, SyncStorage};
 
 /// Prefix for the `sync_state` keys holding each namespace's device-local cache-size
@@ -94,14 +94,14 @@ pub fn cache_budget_state_key(namespace: &str) -> String {
 #[derive(Debug)]
 pub enum BlobCacheError {
     /// A blob `id`/`namespace`/`cloud_path` that can't form a safe path — bad data
-    /// that could escape the library dir or can't be partitioned. The blob is
+    /// that could escape the store dir or can't be partitioned. The blob is
     /// refused before any path is built (the same gate the pull runs).
     Path(PathTokenError),
     /// A cloud read failed: the blob isn't in the cloud, or the backend errored
     /// (surfaced from [`SyncStorage::get_blob`]).
     Storage(StorageError),
     /// A Remote blob's bytes were needed from the cloud but no cloud home is
-    /// connected, so there is no storage to fetch them from. A home-less library
+    /// connected, so there is no storage to fetch them from. A home-less store
     /// holds only Local blobs (external refs + the local store), which serve
     /// straight off disk and never reach the cloud-miss path; reaching here means
     /// a Remote blob was read with no provider connected — a real fault, surfaced
@@ -152,7 +152,7 @@ pub enum BlobCacheError {
     /// A blob could not be resolved to a locality: its namespace declares no
     /// blob-bearing table, or that table has no row with the id, or the row reaches no
     /// gated root or remote root — so the source of Local-vs-Remote truth can't be
-    /// read. In a consistent library every readable blob has a locality root, so this
+    /// read. In a consistent store every readable blob has a locality root, so this
     /// is a real fault — surfaced rather than guessing a source by probing.
     LocalityUnresolved { id: String },
     /// The gate resolved a blob to **Local + user-provided**, but no external-ref row
@@ -269,19 +269,19 @@ impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
 #[cfg(test)]
 pub(crate) async fn write_blob(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     bytes: &[u8],
 ) -> Result<(), BlobCacheError> {
-    let dest = library_dir.cache_blob_path(namespace, id)?;
+    let dest = store_dir.cache_blob_path(namespace, id)?;
     crate::local_blob::write_atomic(&dest, bytes)
         .await
         .map_err(BlobCacheError::Io)?;
     // The write into `cache/<namespace>/` may have pushed that namespace over its
     // budget; evict its oldest files back under it, never the file just written
     // (passed as `protect`). A no-op when the namespace has no budget set.
-    evict_to_budget(db, library_dir, namespace, Some(&dest)).await?;
+    evict_to_budget(db, store_dir, namespace, Some(&dest)).await?;
     Ok(())
 }
 
@@ -290,16 +290,16 @@ pub(crate) async fn write_blob(
 /// contract as the byte-slice cache writer used by tests.
 pub(crate) async fn write_blob_from_file(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
-    let dest = library_dir.cache_blob_path(namespace, id)?;
+    let dest = store_dir.cache_blob_path(namespace, id)?;
     crate::local_blob::copy_atomic(src_path, &dest)
         .await
         .map_err(BlobCacheError::Io)?;
-    evict_to_budget(db, library_dir, namespace, Some(&dest)).await?;
+    evict_to_budget(db, store_dir, namespace, Some(&dest)).await?;
     Ok(())
 }
 
@@ -319,12 +319,12 @@ pub(crate) async fn write_blob_from_file(
 /// neither push the evictable cache over budget nor be trimmed. Later reads verify
 /// the file length before trusting the pinned bytes.
 pub(crate) async fn populate_pinned(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
-    let dest = library_dir.pinned_blob_path(namespace, id)?;
+    let dest = store_dir.pinned_blob_path(namespace, id)?;
     crate::local_blob::copy_atomic(src_path, &dest)
         .await
         .map_err(BlobCacheError::Io)
@@ -344,24 +344,24 @@ pub(crate) async fn populate_pinned(
 ///   fallback, and a `None` from both tells the push the blob is not ready, so it
 ///   aborts rather than publishing a row whose blob never reached the cloud.
 pub async fn read_staged(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     expected_size: u64,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
-    read_cached_blob(library_dir, namespace, id, expected_size).await
+    read_cached_blob(store_dir, namespace, id, expected_size).await
 }
 
 /// Return the cached plaintext file path for a Remote blob when either cache
 /// folder has a copy with exactly `expected_size` bytes.
 pub(crate) async fn staged_path(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     expected_size: u64,
 ) -> Result<Option<std::path::PathBuf>, BlobCacheError> {
     Ok(
-        cached_blob_path_with_size(library_dir, namespace, id, expected_size)
+        cached_blob_path_with_size(store_dir, namespace, id, expected_size)
             .await?
             .map(CachedBlobPath::into_path),
     )
@@ -379,13 +379,13 @@ pub(crate) async fn staged_path(
 /// An absent file in either folder is the expected case (a blob is in at most one
 /// folder, or neither), not an error. Every other I/O failure is surfaced.
 pub async fn drop_cached_blob(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
 ) -> Result<(), BlobCacheError> {
     for path in [
-        library_dir.pinned_blob_path(namespace, id)?,
-        library_dir.cache_blob_path(namespace, id)?,
+        store_dir.pinned_blob_path(namespace, id)?,
+        store_dir.cache_blob_path(namespace, id)?,
     ] {
         // An absent file in either folder is the expected case (`remove_file`
         // reports it as `Ok(false)`, not an error); every real I/O failure surfaces.
@@ -402,12 +402,12 @@ pub async fn drop_cached_blob(
 /// "delete the bytes wherever they live" step shared by the apply-side delete
 /// cleanup and the host's `CovenHandle::evict_blob`.
 pub async fn drop_all_local_copies(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
 ) -> Result<(), BlobCacheError> {
-    drop_cached_blob(library_dir, namespace, id).await?;
-    crate::blob::local_files::drop_blob(library_dir, namespace, id)
+    drop_cached_blob(store_dir, namespace, id).await?;
+    crate::blob::local_files::drop_blob(store_dir, namespace, id)
         .await
         .map_err(BlobCacheError::from)?;
     Ok(())
@@ -420,11 +420,11 @@ pub async fn drop_all_local_copies(
 /// pinned. A failure to even check existence (broken filesystem) is surfaced,
 /// never collapsed into "not pinned".
 pub async fn is_pinned(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
 ) -> Result<bool, BlobCacheError> {
-    let pinned = library_dir.pinned_blob_path(namespace, id)?;
+    let pinned = store_dir.pinned_blob_path(namespace, id)?;
     crate::local_blob::exists(&pinned)
         .await
         .map_err(BlobCacheError::Io)
@@ -457,13 +457,13 @@ pub async fn is_pinned(
 /// [`BlobCacheError::NoLocalCopy`], fail-loud corruption, never a cloud fetch.
 pub async fn read_blob(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     match resolve_source(db, blob).await? {
         // Remote: the bytes live in the cloud fronted by the device cache.
-        BlobSource::Cache => read_remote_whole(db, library_dir, storage, blob).await,
+        BlobSource::Cache => read_remote_whole(db, store_dir, storage, blob).await,
         // Local + user-provided: the user's own external file. Its ref must be present
         // — gate-resolved Local + UserProvided with no ref is corruption, not a miss.
         BlobSource::External => {
@@ -478,7 +478,7 @@ pub async fn read_blob(
         // cloud copy). A miss is fail-loud corruption, not a cache miss to refetch.
         BlobSource::LocalStore => {
             let expected_size = expected_blob_size(db, blob).await?;
-            crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id, expected_size)
+            crate::blob::local_files::read(store_dir, &blob.namespace, &blob.id, expected_size)
                 .await?
                 .ok_or_else(|| BlobCacheError::NoLocalCopy {
                     namespace: blob.namespace.clone(),
@@ -496,7 +496,7 @@ pub async fn read_blob(
 /// of the locality dispatch.
 async fn read_remote_whole(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
@@ -505,13 +505,13 @@ async fn read_remote_whole(
     // pinned→cache probe [`read_staged`] runs. An existence-check failure there is
     // surfaced, not collapsed into a miss: re-downloading over a present file would be
     // wasteful and could mask a real fault.
-    if let Some(bytes) = read_staged(library_dir, &blob.namespace, &blob.id, expected_size).await? {
+    if let Some(bytes) = read_staged(store_dir, &blob.namespace, &blob.id, expected_size).await? {
         return Ok(bytes);
     }
 
     if blob.provenance == Provenance::HostProvided {
         if let Some(bytes) =
-            crate::blob::local_files::read(library_dir, &blob.namespace, &blob.id, expected_size)
+            crate::blob::local_files::read(store_dir, &blob.namespace, &blob.id, expected_size)
                 .await?
         {
             return Ok(bytes);
@@ -519,9 +519,9 @@ async fn read_remote_whole(
     }
 
     // Miss: fetch from the cloud and populate the evictable cache. A home-less
-    // library reaches here only when a Remote blob is read with no provider
+    // store reaches here only when a Remote blob is read with no provider
     // connected — there is no storage to fetch it from, so surface that fault.
-    let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+    let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     let bytes = fetch_from_cloud(db, storage, blob).await?;
     // Verify the fetched plaintext against the row's declared size before caching or
@@ -550,7 +550,7 @@ async fn read_remote_whole(
     // briefly over its budget is not wrong state — it self-corrects on the next
     // populate's sweep — so failing a successful read because cleanup failed would be
     // wrong. Log and return the bytes anyway.
-    if let Err(e) = evict_to_budget(db, library_dir, &blob.namespace, Some(&cache)).await {
+    if let Err(e) = evict_to_budget(db, store_dir, &blob.namespace, Some(&cache)).await {
         tracing::warn!(
             "read_blob: populated {} but eviction failed (cache may be over budget until the next populate): {e}",
             cache.display()
@@ -596,7 +596,7 @@ async fn read_remote_whole(
 /// [`NoLocalCopy`]: BlobCacheError::NoLocalCopy
 pub async fn open_blob_stream(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
     source_size: u64,
@@ -625,7 +625,7 @@ pub async fn open_blob_stream(
     match resolve_source(db, blob).await? {
         // Remote: the cache copy, else a ranged cloud read (populating nothing).
         BlobSource::Cache => {
-            read_remote_range(db, library_dir, storage, blob, source_size, offset, len).await
+            read_remote_range(db, store_dir, storage, blob, source_size, offset, len).await
         }
         // Local + user-provided: range-read the user's external file. The window was
         // validated against `source_size`, and `read_range` reads exactly `len`
@@ -641,7 +641,7 @@ pub async fn open_blob_stream(
         // Local + host-provided: range-read the local store, coven's only copy. A miss
         // is fail-loud corruption, never a cloud fetch.
         BlobSource::LocalStore => crate::blob::local_files::read_range(
-            library_dir,
+            store_dir,
             &blob.namespace,
             &blob.id,
             source_size,
@@ -664,7 +664,7 @@ pub async fn open_blob_stream(
 /// dispatch; the range was already validated by the caller against `source_size`.
 async fn read_remote_range(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
     source_size: u64,
@@ -676,7 +676,7 @@ async fn read_remote_range(
     // and `read_range` reads exactly `len` bytes. An existence-check failure is
     // surfaced, not read as a miss.
     if let Some(hit) =
-        cached_blob_path_with_size(library_dir, &blob.namespace, &blob.id, source_size).await?
+        cached_blob_path_with_size(store_dir, &blob.namespace, &blob.id, source_size).await?
     {
         return crate::local_blob::read_range(hit.path(), offset, len)
             .await
@@ -685,7 +685,7 @@ async fn read_remote_range(
 
     if blob.provenance == Provenance::HostProvided {
         if let Some(bytes) = crate::blob::local_files::read_range(
-            library_dir,
+            store_dir,
             &blob.namespace,
             &blob.id,
             source_size,
@@ -700,7 +700,7 @@ async fn read_remote_range(
 
     // Miss: serve the range from the cloud (range read + decrypt over the resolved
     // scope) WITHOUT writing a cache file. Only `read_blob` populates the cache. A
-    // home-less library has no storage to range-read a Remote blob from; surface it.
+    // home-less store has no storage to range-read a Remote blob from; surface it.
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     fetch_range_from_cloud(db, storage, blob, source_size, offset, len).await
 }
@@ -712,14 +712,14 @@ async fn read_remote_range(
 /// plaintext length written.
 pub(crate) async fn materialize_remote_blob_to_file(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
     dest: &std::path::Path,
 ) -> Result<u64, BlobCacheError> {
     let expected_size = expected_blob_size(db, blob).await?;
     if let Some(hit) =
-        cached_blob_path_with_size(library_dir, &blob.namespace, &blob.id, expected_size).await?
+        cached_blob_path_with_size(store_dir, &blob.namespace, &blob.id, expected_size).await?
     {
         crate::local_blob::copy_atomic(hit.path(), dest)
             .await
@@ -729,7 +729,7 @@ pub(crate) async fn materialize_remote_blob_to_file(
 
     if blob.provenance == Provenance::HostProvided {
         if let Some(path) = crate::blob::local_files::path_if_present(
-            library_dir,
+            store_dir,
             &blob.namespace,
             &blob.id,
             expected_size,
@@ -789,12 +789,12 @@ pub(crate) async fn materialize_remote_blob_to_file(
 /// (namespace, scope, cloud_path) an id alone lacks.
 pub async fn pin(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     blobs: &[BlobRef],
 ) -> Result<(), BlobCacheError> {
     for blob in blobs {
-        let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+        let pinned = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
 
         // Already protected — idempotent no-op. A failure to even check existence
         // (broken filesystem) is surfaced, not collapsed into "absent": fetching and
@@ -811,7 +811,7 @@ pub async fn pin(
         // so the blob is never in both folders or neither mid-move. An `exists`
         // failure here is surfaced too, never read as "not cached" (which would
         // re-fetch over a present file).
-        match cached_blob_path(library_dir, &blob.namespace, &blob.id).await? {
+        match cached_blob_path(store_dir, &blob.namespace, &blob.id).await? {
             Some(CachedBlobPath::Pinned(_)) => continue,
             Some(CachedBlobPath::Cache(path)) => {
                 rename_within_storage(&path, &pinned).await?;
@@ -821,8 +821,8 @@ pub async fn pin(
         }
 
         // In neither folder — fetch from the cloud straight into `pinned/`. A
-        // home-less library has no storage to fetch a Remote blob from; surface it.
-        materialize_remote_blob_to_file(db, library_dir, storage, blob, &pinned).await?;
+        // home-less store has no storage to fetch a Remote blob from; surface it.
+        materialize_remote_blob_to_file(db, store_dir, storage, blob, &pinned).await?;
     }
     Ok(())
 }
@@ -834,10 +834,10 @@ pub async fn pin(
 /// regardless of the blob's [`CacheFill`] — a `CacheEager` blob lands in the
 /// evictable cache on pull (it is not auto-pinned), so unpinning one that was never
 /// pinned is simply a no-op (it is already as-evictable-as-it-gets).
-pub async fn unpin(library_dir: &LibraryDir, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
+pub async fn unpin(store_dir: &StoreDir, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
     for blob in blobs {
-        let pinned = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-        let cache = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+        let pinned = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+        let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
 
         // Move it into the evictable cache if it is currently pinned. If it isn't in
         // `pinned/` (already in `cache/`, or remote), there is nothing to demote —
@@ -863,8 +863,8 @@ pub async fn unpin(library_dir: &LibraryDir, blobs: &[BlobRef]) -> Result<(), Bl
 /// returned — a swept directory must actually be gone, never reported clear over a
 /// failed delete.
 #[cfg(test)]
-pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError> {
-    let cache_dir = library_dir.cache_dir();
+pub async fn clear_cache(store_dir: &StoreDir) -> Result<(), BlobCacheError> {
+    let cache_dir = store_dir.cache_dir();
     match crate::local_blob::remove_dir_all(&cache_dir).await {
         Ok(true) => Ok(()),
         // No cache dir yet — nothing has been cached, so it is already clear.
@@ -920,7 +920,7 @@ pub async fn clear_cache(library_dir: &LibraryDir) -> Result<(), BlobCacheError>
 /// must fail loudly, not silently drift over budget.
 pub async fn evict_to_budget(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     protect: Option<&std::path::Path>,
 ) -> Result<(), BlobCacheError> {
@@ -935,7 +935,7 @@ pub async fn evict_to_budget(
         None => return Ok(()),
     };
 
-    let mut entries = crate::local_blob::walk_files(&library_dir.cache_namespace_dir(namespace)?)
+    let mut entries = crate::local_blob::walk_files(&store_dir.cache_namespace_dir(namespace)?)
         .await
         .map_err(BlobCacheError::Io)?;
     // The protected file's bytes count toward the total it must fit under, but it is
@@ -1100,13 +1100,13 @@ impl CachedBlobPath {
 }
 
 async fn cached_blob_path(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
 ) -> Result<Option<CachedBlobPath>, BlobCacheError> {
     for hit in [
-        CachedBlobPath::Pinned(library_dir.pinned_blob_path(namespace, id)?),
-        CachedBlobPath::Cache(library_dir.cache_blob_path(namespace, id)?),
+        CachedBlobPath::Pinned(store_dir.pinned_blob_path(namespace, id)?),
+        CachedBlobPath::Cache(store_dir.cache_blob_path(namespace, id)?),
     ] {
         match crate::local_blob::exists(hit.path()).await {
             Ok(true) => return Ok(Some(hit)),
@@ -1118,14 +1118,14 @@ async fn cached_blob_path(
 }
 
 async fn cached_blob_path_with_size(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     expected_size: u64,
 ) -> Result<Option<CachedBlobPath>, BlobCacheError> {
     for hit in [
-        CachedBlobPath::Pinned(library_dir.pinned_blob_path(namespace, id)?),
-        CachedBlobPath::Cache(library_dir.cache_blob_path(namespace, id)?),
+        CachedBlobPath::Pinned(store_dir.pinned_blob_path(namespace, id)?),
+        CachedBlobPath::Cache(store_dir.cache_blob_path(namespace, id)?),
     ] {
         match crate::local_blob::exists(hit.path()).await {
             Ok(true) => {
@@ -1150,12 +1150,12 @@ async fn cached_blob_path_with_size(
 }
 
 async fn read_cached_blob(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     expected_size: u64,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
-    let Some(hit) = cached_blob_path_with_size(library_dir, namespace, id, expected_size).await?
+    let Some(hit) = cached_blob_path_with_size(store_dir, namespace, id, expected_size).await?
     else {
         return Ok(None);
     };
@@ -1415,10 +1415,10 @@ async fn fetch_range_from_cloud(
 /// Refuse a blob whose namespace/id is not a safe path token or whose
 /// cloud_path escapes its prefix, before any storage read uses them.
 fn validate_blob_ref(blob: &BlobRef) -> Result<(), BlobCacheError> {
-    crate::library_dir::validate_path_token(&blob.namespace)?;
-    crate::library_dir::validate_path_token(&blob.id)?;
+    crate::store_dir::validate_path_token(&blob.namespace)?;
+    crate::store_dir::validate_path_token(&blob.id)?;
     if let Some(cloud_path) = blob.cloud_path.as_deref() {
-        crate::library_dir::validate_cloud_path(cloud_path)?;
+        crate::store_dir::validate_cloud_path(cloud_path)?;
     }
     Ok(())
 }

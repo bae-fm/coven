@@ -1,6 +1,6 @@
 # Local data
 
-A coven library is one SQLite database on the device, plus the files its rows
+A coven store is one SQLite database on the device, plus the files its rows
 carry. The host opens it through one handle, declares which tables participate
 in sync, and runs ordinary SQL. This page is about that declaration: what a
 synced table looks like, what stays local, and how a *gate* keeps chosen rows
@@ -51,7 +51,7 @@ synced table — see [Sync](/docs/sync-model#reads-and-local-writes).
 
 ## Declaring the set
 
-By default, every row of a synced table reaches every device in the library,
+By default, every row of a synced table reaches every device in the store,
 and some rows are not meant to: a draft, a private list. If keeping them back
 were application logic, every query and every sync path would have to
 remember it, and the first one that forgot would leak the row. Instead the

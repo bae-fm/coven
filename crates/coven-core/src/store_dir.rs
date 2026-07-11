@@ -8,8 +8,8 @@ use crate::config::{Config, ConfigError};
 ///
 /// An untrusted string becomes a path component in several places: a blob's
 /// `id`/`namespace` (interpolated into its on-disk file path and cloud object
-/// key), and a `library_id`/`lid` from an unsigned invite or restore code (the
-/// name of a directory under `libraries/`). All arrive from outside — an incoming
+/// key), and a `store_id`/`sid` from an unsigned invite or restore code (the
+/// name of a directory under `stores/`). All arrive from outside — an incoming
 /// changeset authored by any write-capable member, or a pasted code anyone can
 /// craft — so an unconstrained one could climb out of the directory it is joined
 /// onto (`..`, a path separator, an absolute leading slash) and make a pulling or
@@ -31,7 +31,7 @@ pub enum PathTokenError {
     ParentDir,
     /// The token is exactly `.`, which names the directory it is joined onto
     /// itself rather than a child. Like `..`, a trailing `.` component is
-    /// normalized away, so `libraries/.` resolves to `libraries`'s parent (the
+    /// normalized away, so `stores/.` resolves to `stores`'s parent (the
     /// data dir) — an escape just as `..` is.
     CurDir,
     /// The token contains a NUL byte, which truncates the path at the OS boundary.
@@ -66,7 +66,7 @@ impl std::fmt::Display for PathTokenError {
 impl std::error::Error for PathTokenError {}
 
 /// Reject a single untrusted path token (a blob `id`/`namespace`, or a
-/// `library_id`/`lid`) that could escape the directory it is joined onto. A safe
+/// `store_id`/`sid`) that could escape the directory it is joined onto. A safe
 /// token names exactly one child: no separator, no `..`, no `.`, no NUL, no `:` (a
 /// Windows stream/drive reference), non-empty. The single gate every path builder
 /// and every code decoder runs an untrusted token through, so traversal is refused
@@ -127,29 +127,29 @@ pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
     Ok(())
 }
 
-/// Typed wrapper for a library directory path.
+/// Typed wrapper for a store directory path.
 ///
 /// Centralizes the on-disk layout so callers use methods instead of
 /// ad-hoc `path.join("images")` etc.
 #[derive(Clone, Debug)]
-pub struct LibraryDir {
+pub struct StoreDir {
     path: PathBuf,
 }
 
-impl LibraryDir {
+impl StoreDir {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
-    /// The directory of `library_id` under `app_dir`'s `libraries/` — the one
-    /// layout rule for where a library lives, shared by every flow that
+    /// The directory of `store_id` under `app_dir`'s `stores/` — the one
+    /// layout rule for where a store lives, shared by every flow that
     /// creates, opens, or refuses one.
-    pub fn for_library(app_dir: &Path, library_id: &str) -> Self {
-        Self::new(app_dir.join("libraries").join(library_id))
+    pub fn for_store(app_dir: &Path, store_id: &str) -> Self {
+        Self::new(app_dir.join("stores").join(store_id))
     }
 
     pub fn db_path(&self) -> PathBuf {
-        self.path.join("library.db")
+        self.path.join("store.db")
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -320,36 +320,36 @@ impl LibraryDir {
         self.cache_folder_namespace_dir("cache", namespace)
     }
 
-    /// Create a library directory, generate a device_id, and save config.yaml.
+    /// Create a store directory, generate a device_id, and save config.yaml.
     ///
     /// The caller is responsible for encryption key setup and calling
-    /// `Config::save_active_library()` afterward.
+    /// `Config::save_active_store()` afterward.
     ///
-    /// `library_id` is device-generated here (trusted), but it still has to name a
-    /// single directory under `libraries/`, so it passes the same
+    /// `store_id` is device-generated here (trusted), but it still has to name a
+    /// single directory under `stores/`, so it passes the same
     /// [`validate_path_token`] gate the untrusted join/restore ids pass — a
     /// malformed id fails loudly rather than forming a stray path.
     pub fn create(
         data_dir: &Path,
-        library_id: String,
-        library_name: String,
+        store_id: String,
+        store_name: String,
         ids: &dyn crate::id_provider::IdProvider,
     ) -> Result<Config, ConfigError> {
-        validate_path_token(&library_id)
-            .map_err(|e| ConfigError::Config(format!("invalid library id: {e}")))?;
-        let library_dir = LibraryDir::for_library(data_dir, &library_id);
-        std::fs::create_dir_all(&*library_dir)?;
+        validate_path_token(&store_id)
+            .map_err(|e| ConfigError::Config(format!("invalid store id: {e}")))?;
+        let store_dir = StoreDir::for_store(data_dir, &store_id);
+        std::fs::create_dir_all(&*store_dir)?;
 
         let device_id = ids.new_id();
-        let config = Config::with_defaults(library_id, device_id, library_dir, library_name);
+        let config = Config::with_defaults(store_id, device_id, store_dir, store_name);
         config.save_to_config_yaml()?;
 
-        info!("Created library at {}", config.library_dir.display());
+        info!("Created store at {}", config.store_dir.display());
         Ok(config)
     }
 }
 
-impl Deref for LibraryDir {
+impl Deref for StoreDir {
     type Target = Path;
 
     fn deref(&self) -> &Path {
@@ -357,13 +357,13 @@ impl Deref for LibraryDir {
     }
 }
 
-impl AsRef<Path> for LibraryDir {
+impl AsRef<Path> for StoreDir {
     fn as_ref(&self) -> &Path {
         &self.path
     }
 }
 
-impl From<PathBuf> for LibraryDir {
+impl From<PathBuf> for StoreDir {
     fn from(path: PathBuf) -> Self {
         Self { path }
     }
@@ -380,7 +380,7 @@ mod tests {
     fn hashed_path_partitions_a_normal_id() {
         let id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         assert_eq!(
-            LibraryDir::hashed_path("images", id).expect("valid id"),
+            StoreDir::hashed_path("images", id).expect("valid id"),
             format!("images/a1/b2/{id}"),
         );
     }
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn hashed_path_refuses_a_short_id_instead_of_panicking() {
         assert_eq!(
-            LibraryDir::hashed_path("images", "a"),
+            StoreDir::hashed_path("images", "a"),
             Err(PathTokenError::Unindexable),
         );
     }
@@ -401,7 +401,7 @@ mod tests {
     fn hashed_path_refuses_a_misaligned_multibyte_id() {
         // 'é' is two bytes; "aé" puts a char boundary failure at byte 2.
         assert_eq!(
-            LibraryDir::hashed_path("images", "aé"),
+            StoreDir::hashed_path("images", "aé"),
             Err(PathTokenError::Unindexable),
         );
     }
@@ -411,19 +411,19 @@ mod tests {
     #[test]
     fn hashed_path_refuses_traversal_tokens() {
         assert_eq!(
-            LibraryDir::hashed_path("images", "ab/../../etc/passwd"),
+            StoreDir::hashed_path("images", "ab/../../etc/passwd"),
             Err(PathTokenError::Separator),
         );
         assert_eq!(
-            LibraryDir::hashed_path("images", ".."),
+            StoreDir::hashed_path("images", ".."),
             Err(PathTokenError::ParentDir),
         );
         assert_eq!(
-            LibraryDir::hashed_path("images", "a\0b"),
+            StoreDir::hashed_path("images", "a\0b"),
             Err(PathTokenError::NulByte),
         );
         assert_eq!(
-            LibraryDir::hashed_path("im/ages", "abcd"),
+            StoreDir::hashed_path("im/ages", "abcd"),
             Err(PathTokenError::Separator),
         );
     }
@@ -448,8 +448,8 @@ mod tests {
     }
 
     /// A lone `.` is rejected just as `..` is: a trailing `.` component is
-    /// normalized away when the path resolves, so `libraries/.` would land on
-    /// `libraries`'s parent (the data dir) rather than name a child of `libraries/`
+    /// normalized away when the path resolves, so `stores/.` would land on
+    /// `stores`'s parent (the data dir) rather than name a child of `stores/`
     /// — an escape. The unit under test is the rejection itself.
     #[test]
     fn validate_path_token_rejects_lone_current_dir() {

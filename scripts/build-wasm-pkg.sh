@@ -32,7 +32,7 @@ wasm-pack build "$crate_dir" --target web --out-dir "$tmp_dir"
 test -f "$tmp_dir/coven_wasm.js"
 test -f "$tmp_dir/coven_wasm.d.ts"
 test -f "$tmp_dir/coven_wasm_bg.wasm"
-grep -q 'static open(config: any, migrations: any, synced_tables: any): Promise<CovenLibrary>;' \
+grep -q 'static open(config: any, migrations: any, synced_tables: any): Promise<CovenStore>;' \
     "$tmp_dir/coven_wasm.d.ts"
 grep -q 'export function stamp(device_id: string): string;' "$tmp_dir/coven_wasm.d.ts"
 

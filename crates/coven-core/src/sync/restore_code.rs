@@ -1,6 +1,6 @@
-//! Restore codes: single-string encoding of everything needed to restore a library from cloud.
+//! Restore codes: single-string encoding of everything needed to restore a store from cloud.
 //!
-//! A restore code encodes the library ID, encryption key, cloud provider details, and
+//! A restore code encodes the store ID, encryption key, cloud provider details, and
 //! credentials into a single base64url string prefixed with "coven:".
 //!
 //! The code contains secrets (encryption key, S3 credentials). OAuth tokens are NOT included
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 const PREFIX: &str = "coven:";
 pub const RESTORE_CODE_VERSION: u8 = 2;
 
-/// Everything needed to restore a library from cloud storage.
+/// Everything needed to restore a store from cloud storage.
 ///
 /// `Debug` is hand-written: `ek` (encryption keyring) and `sk` (Ed25519 signing
 /// key) are secrets and print as `<redacted>` so `{:?}` in an error path
@@ -28,15 +28,15 @@ pub const RESTORE_CODE_VERSION: u8 = 2;
 pub struct RestoreCode {
     /// Version (currently 2).
     pub v: u8,
-    /// Library ID (UUID).
-    pub lid: String,
+    /// Store ID (UUID).
+    pub sid: String,
     /// Encryption keyring, present only for an opaque home.
     /// Its presence is the home's storage mode: present ⇒ opaque (the restorer
     /// builds `CloudCipher::Encrypted` + `BlobPathScheme::Hashed`); absent ⇒
     /// browsable (`CloudCipher::Plaintext` + `BlobPathScheme::Plain`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ek: Option<String>,
-    /// Library display name.
+    /// Store display name.
     pub name: String,
     /// Cloud provider and its connection details.
     pub provider: RestoreProvider,
@@ -48,7 +48,7 @@ impl std::fmt::Debug for RestoreCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RestoreCode")
             .field("v", &self.v)
-            .field("lid", &self.lid)
+            .field("sid", &self.sid)
             // Presence is the storage mode (opaque vs browsable), so show
             // Some/None; the key bytes themselves are redacted.
             .field("ek", &self.ek.as_ref().map(|_| "<redacted>"))
@@ -145,14 +145,14 @@ pub enum RestoreCodeError {
         "This restore code was made with a newer version of the app (v{0}). Update the app to use it."
     )]
     NewerVersion(u8),
-    /// The restore code's `lid` is not a safe path component, so it cannot name a
-    /// library directory under `libraries/`. The code is unsigned and anyone can
+    /// The restore code's `sid` is not a safe path component, so it cannot name a
+    /// store directory under `stores/`. The code is unsigned and anyone can
     /// craft one, so the id is refused here at decode rather than reaching a path
     /// operation.
     #[error(
-        "The library id in this restore code is invalid. Regenerate it on the source device. ({0})"
+        "The store id in this restore code is invalid. Regenerate it on the source device. ({0})"
     )]
-    InvalidLibraryId(crate::library_dir::PathTokenError),
+    InvalidStoreId(crate::store_dir::PathTokenError),
     #[error("The encryption key in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidEncryptionKey(String),
     #[error("The signing key in this restore code is invalid. Regenerate it on the source device. ({0})")]
@@ -183,14 +183,13 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     if code.v > RESTORE_CODE_VERSION {
         return Err(RestoreCodeError::NewerVersion(code.v));
     }
-    // A restore code is unsigned, so `lid` is attacker-controlled. It becomes the
-    // name of a directory the restorer creates under `libraries/` and recursively
+    // A restore code is unsigned, so `sid` is attacker-controlled. It becomes the
+    // name of a directory the restorer creates under `stores/` and recursively
     // deletes on a bootstrap failure, so a value carrying `..`, a separator, or an
-    // absolute path would put that create/delete outside the libraries root. Reject
+    // absolute path would put that create/delete outside the stores root. Reject
     // it the moment the code is parsed: a decoded `RestoreCode` always carries a
-    // `lid` that is a single safe path component.
-    crate::library_dir::validate_path_token(&code.lid)
-        .map_err(RestoreCodeError::InvalidLibraryId)?;
+    // `sid` that is a single safe path component.
+    crate::store_dir::validate_path_token(&code.sid).map_err(RestoreCodeError::InvalidStoreId)?;
     if let Some(key_hex) = &code.ek {
         crate::encryption::EncryptionService::new(key_hex)
             .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
@@ -222,8 +221,8 @@ pub fn provider_needs_oauth(provider: &RestoreProvider) -> bool {
 
 /// UI-ready info from a decoded restore code.
 pub struct RestoreCodeInfo {
-    pub library_id: String,
-    pub library_name: String,
+    pub store_id: String,
+    pub store_name: String,
     pub cloud_provider: crate::config::CloudProvider,
     pub needs_oauth: bool,
     /// Ed25519 signing key bytes (always 64 bytes).
@@ -246,8 +245,8 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
         .map_err(RestoreCodeError::InvalidSigningKey)?;
 
     Ok(RestoreCodeInfo {
-        library_id: parsed.lid,
-        library_name: parsed.name,
+        store_id: parsed.sid,
+        store_name: parsed.name,
         cloud_provider,
         needs_oauth: provider_needs_oauth(&parsed.provider),
         signing_key,
@@ -265,9 +264,9 @@ mod tests {
     fn sample_s3_code() -> RestoreCode {
         RestoreCode {
             v: RESTORE_CODE_VERSION,
-            lid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            sid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             ek: Some("aa".repeat(32)),
-            name: "Test Library".to_string(),
+            name: "Test Store".to_string(),
             provider: RestoreProvider::S3 {
                 bucket: "my-bucket".to_string(),
                 region: "us-east-1".to_string(),
@@ -288,10 +287,10 @@ mod tests {
 
         let decoded = decode_restore_code(&encoded).unwrap();
         assert_eq!(decoded.v, RESTORE_CODE_VERSION);
-        assert_eq!(decoded.lid, code.lid);
+        assert_eq!(decoded.sid, code.sid);
         assert_eq!(decoded.ek, code.ek);
         assert_eq!(decoded.sk, code.sk);
-        assert_eq!(decoded.name, "Test Library");
+        assert_eq!(decoded.name, "Test Store");
         match &decoded.provider {
             RestoreProvider::S3 {
                 bucket,
@@ -316,15 +315,15 @@ mod tests {
     fn roundtrip_cloudkit() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
-            lid: "lib-123".to_string(),
+            sid: "lib-123".to_string(),
             ek: Some("bb".repeat(32)),
-            name: "CloudKit Library".to_string(),
+            name: "CloudKit Store".to_string(),
             provider: RestoreProvider::CloudKit,
             sk: test_sk(),
         };
         let encoded = encode_restore_code(&code);
         let decoded = decode_restore_code(&encoded).unwrap();
-        assert_eq!(decoded.name, "CloudKit Library");
+        assert_eq!(decoded.name, "CloudKit Store");
         assert!(matches!(decoded.provider, RestoreProvider::CloudKit));
     }
 
@@ -332,9 +331,9 @@ mod tests {
     fn roundtrip_google_drive() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
-            lid: "lib-456".to_string(),
+            sid: "lib-456".to_string(),
             ek: Some("cc".repeat(32)),
-            name: "GDrive Library".to_string(),
+            name: "GDrive Store".to_string(),
             provider: RestoreProvider::GoogleDrive {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
             },
@@ -353,18 +352,18 @@ mod tests {
     fn roundtrip_dropbox() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
-            lid: "lib-789".to_string(),
+            sid: "lib-789".to_string(),
             ek: Some("dd".repeat(32)),
-            name: "Dropbox Library".to_string(),
+            name: "Dropbox Store".to_string(),
             provider: RestoreProvider::Dropbox {
-                folder_path: "/Apps/your-app/My Library".to_string(),
+                folder_path: "/Apps/your-app/My Store".to_string(),
             },
             sk: test_sk(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
             RestoreProvider::Dropbox { folder_path } => {
-                assert_eq!(folder_path, "/Apps/your-app/My Library");
+                assert_eq!(folder_path, "/Apps/your-app/My Store");
             }
             _ => panic!("expected Dropbox provider"),
         }
@@ -374,9 +373,9 @@ mod tests {
     fn roundtrip_onedrive() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
-            lid: "lib-abc".to_string(),
+            sid: "lib-abc".to_string(),
             ek: Some("ee".repeat(32)),
-            name: "OneDrive Library".to_string(),
+            name: "OneDrive Store".to_string(),
             provider: RestoreProvider::OneDrive {
                 drive_id: "drive-id-123".to_string(),
                 folder_id: "folder-id-456".to_string(),
@@ -455,16 +454,16 @@ mod tests {
         let encoded = encode_restore_code(&code);
         let padded = format!("  {encoded}  \n");
         let decoded = decode_restore_code(&padded).unwrap();
-        assert_eq!(decoded.lid, code.lid);
+        assert_eq!(decoded.sid, code.sid);
     }
 
     #[test]
     fn optional_fields_omitted_in_json() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
-            lid: "lib-1".to_string(),
+            sid: "lib-1".to_string(),
             ek: Some("aa".repeat(32)),
-            name: "Test Library".to_string(),
+            name: "Test Store".to_string(),
             provider: RestoreProvider::S3 {
                 bucket: "b".to_string(),
                 region: "r".to_string(),
@@ -489,9 +488,9 @@ mod tests {
     fn browsable_code_omits_ek() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
-            lid: "lib-plain".to_string(),
+            sid: "lib-plain".to_string(),
             ek: None,
-            name: "Plaintext Library".to_string(),
+            name: "Plaintext Store".to_string(),
             provider: RestoreProvider::S3 {
                 bucket: "b".to_string(),
                 region: "r".to_string(),
@@ -624,7 +623,7 @@ mod tests {
 
         assert!(debug.contains("<redacted>"), "{debug}");
         // Non-secret fields are still visible.
-        assert!(debug.contains("Test Library"), "{debug}");
+        assert!(debug.contains("Test Store"), "{debug}");
         assert!(debug.contains("my-bucket"), "{debug}");
         // The encryption keyring and signing key never appear.
         let ek_hex = code.ek.as_deref().expect("sample has ek");

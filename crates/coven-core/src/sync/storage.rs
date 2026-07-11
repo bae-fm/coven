@@ -16,7 +16,7 @@
 /// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, seq}
 /// membership/{author_pubkey}/{seq}{suffix}       -- membership entries
 /// membership/{author_pubkey}/head{suffix}        -- that author's signed head
-/// keys/{owner_pubkey}/{recipient_pubkey}{suffix} -- library key wrapped by an owner for a member
+/// keys/{owner_pubkey}/{recipient_pubkey}{suffix} -- store key wrapped by an owner for a member
 /// ```
 ///
 /// The layout is aligned to one storage-access rule a provider ACL can enforce:
@@ -30,7 +30,7 @@
 /// sweeps absent members' orphans (owners retain bucket-wide delete).
 ///
 /// A read that must span writers dispatches on where the object lives, never a
-/// blind search: a member resolving its rotated library key reads
+/// blind search: a member resolving its rotated store key reads
 /// `keys/{owner}/{self}` across the current owners and adopts the
 /// highest-generation wrap an owner's signature authenticates; a blob read keys
 /// under the uploader recorded in the device-local `blob_uploaders` index (written
@@ -62,7 +62,7 @@
 /// itself; a read resolves the uploader (which may be a peer) and keys under it.
 /// The blob-path scheme is independent of the at-rest cipher below.
 ///
-/// An encrypted home seals every object under the library key before upload and
+/// An encrypted home seals every object under the store key before upload and
 /// opens it after download; a plaintext home stores and serves objects verbatim.
 /// The trait is async and mockable for testing.
 use async_trait::async_trait;
@@ -126,11 +126,11 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
     }
 }
 
-impl From<crate::library_dir::PathTokenError> for StorageError {
+impl From<crate::store_dir::PathTokenError> for StorageError {
     /// A blob id/namespace/cloud_path that can't form a safe object key is bad
     /// data, surfaced so the caller refuses the blob rather than reaching storage
     /// with a key that could escape its prefix.
-    fn from(e: crate::library_dir::PathTokenError) -> Self {
+    fn from(e: crate::store_dir::PathTokenError) -> Self {
         StorageError::Parse(format!("unsafe blob path: {e}"))
     }
 }
@@ -390,7 +390,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// that author has not committed a head yet (its entries are uncommitted).
     async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError>;
 
-    /// Upload a wrapped library key that `owner_pubkey` sealed for `recipient_pubkey`.
+    /// Upload a wrapped store key that `owner_pubkey` sealed for `recipient_pubkey`.
     /// Writes to `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner
     /// wraps only into its own prefix, so a recipient can hold a wrap from each
     /// owner and no two owners contend for one slot. The bytes are already a sealed
@@ -402,7 +402,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         data: Vec<u8>,
     ) -> Result<(), StorageError>;
 
-    /// Download the wrapped library key `owner_pubkey` sealed for `recipient_pubkey`.
+    /// Download the wrapped store key `owner_pubkey` sealed for `recipient_pubkey`.
     /// Reads from `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`.
     /// `create_invitation` reads the inviting owner's existing slot for the invitee
     /// before overwriting it, so a failed invite can restore the exact prior object
@@ -414,7 +414,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         recipient_pubkey: &str,
     ) -> Result<Vec<u8>, StorageError>;
 
-    /// Delete the wrapped library key `owner_pubkey` sealed for `recipient_pubkey`.
+    /// Delete the wrapped store key `owner_pubkey` sealed for `recipient_pubkey`.
     /// Removes `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner
     /// can delete only wraps in its own prefix; a revoked member's wraps under
     /// other owners' prefixes are pre-rotation (they wrap a key the member already

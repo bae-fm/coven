@@ -19,8 +19,8 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
-/// Shared handle to a clock. Held by `Clone` types (`Database`,
-/// `LibraryManager`) so they clone the handle, not the implementation.
+/// Shared handle to a clock. Held by `Clone` types (`CovenHandle`,
+/// `CovenReadHandle`) so they clone the handle, not the implementation.
 pub type ClockRef = Arc<dyn Clock>;
 
 /// Production clock: real wall time.

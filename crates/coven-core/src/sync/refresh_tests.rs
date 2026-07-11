@@ -1,10 +1,10 @@
 //! Per-cycle authorization/decryption refresh.
 //!
-//! `run_single_sync_cycle` re-reads membership and the rotatable library key at
+//! `run_single_sync_cycle` re-reads membership and the rotatable store key at
 //! the top of every cycle, so a running device picks up a membership change or a
 //! key rotation made by another device without a restart. Loaded only once at
 //! init/join, a removed member would keep acting on stale authorization and
-//! a non-rotating device would keep using a dead library key after a rotation it
+//! a non-rotating device would keep using a dead store key after a rotation it
 //! didn't perform, silently diverging.
 //!
 //! Each test proves fail-before/pass-after: the assertion that passes with the
@@ -16,13 +16,13 @@ use std::sync::RwLock;
 use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyPersistence, UserKeypair};
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::invite::{
     revoke_member, signed_wrapped_key_for_test, signed_wrapped_keyring_for_test,
-    unwrap_library_keyring_for_owners_with_activation,
+    unwrap_store_keyring_for_owners_with_activation,
 };
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::{
@@ -30,8 +30,8 @@ use crate::sync::membership_ops::{
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    bootstrap_chain, make_linked_entry, open_test_db, pubkey_hex, temp_library_dir,
-    MockSyncStorage, TestKeyPersistence,
+    bootstrap_chain, make_linked_entry, open_test_db, pubkey_hex, temp_store_dir, MockSyncStorage,
+    TestKeyPersistence,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
@@ -82,7 +82,7 @@ async fn run_cycle(
     cipher: &RwLock<CloudCipher>,
     keypair: &UserKeypair,
     device_id: &str,
-    ld: &LibraryDir,
+    ld: &StoreDir,
     key_persistence: Option<&dyn KeyPersistence>,
 ) -> Result<(), String> {
     let hlc = Hlc::new(device_id.to_string());
@@ -104,7 +104,7 @@ async fn run_cycle(
     .map(|_| ())
 }
 
-/// A non-rotating running device B adopts a rotated library key on its next cycle,
+/// A non-rotating running device B adopts a rotated store key on its next cycle,
 /// with no restart. Device A removes a member, which rotates the key and re-wraps
 /// B's `keys/{A}/{B}` under the new key; B's next `run_single_sync_cycle` re-reads
 /// that wrapped key, authenticates it against the current Owner set, and swaps
@@ -164,7 +164,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let ks_b = TestKeyPersistence::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     // Sanity: before the rotation, B's refresh is a no-op — it already holds the
     // current key, so the cycle leaves the cipher unchanged.
@@ -239,7 +239,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // And the rotated key B now holds is exactly the one the owner re-wrapped for
     // it — i.e. B can independently unwrap keys/{A}/{B} to the same bytes.
     let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
-    let reunwrapped = unwrap_library_keyring_for_owners_with_activation(
+    let reunwrapped = unwrap_store_keyring_for_owners_with_activation(
         &storage,
         &device_b,
         LIB_ID,
@@ -309,7 +309,7 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
     let ks_b = TestKeyPersistence::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     let result = run_cycle(
         &storage,
@@ -380,7 +380,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let ks_b = TestKeyPersistence::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     let new_key = revoke_member(
         &storage,
@@ -484,7 +484,7 @@ async fn same_generation_wrapped_key_is_not_adopted() {
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         current_key,
     )));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     run_cycle(
         &storage,
@@ -549,7 +549,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let ks_b = TestKeyPersistence::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     let new_key = revoke_member(
         &storage,
@@ -647,7 +647,7 @@ async fn removed_owner_key_is_not_adopted() {
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         current_key,
     )));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     let result = run_cycle(
         &storage,
@@ -721,7 +721,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         real_key,
     )));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     // B's cycle aborts (refuses the forged key) rather than adopting it.
     let result = run_cycle(
@@ -752,7 +752,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     );
 }
 
-/// For an owner-pinned library, a chain the refresh can't load must abort the
+/// For an owner-pinned store, a chain the refresh can't load must abort the
 /// cycle, never fall open to "no chain, act anyway". A membership list that fails
 /// aborts B's cycle rather than letting it push or judge under no authorization.
 #[tokio::test]
@@ -784,7 +784,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let ks_b = TestKeyPersistence::default();
     ks_b.set_initial_key(key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     let result = run_cycle(
         &storage,
@@ -855,7 +855,7 @@ async fn one_cycle_lists_membership_once() {
     let ks_b = TestKeyPersistence::default();
     ks_b.set_initial_key(key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
-    let (_tmp_b, ld_b) = temp_library_dir();
+    let (_tmp_b, ld_b) = temp_store_dir();
 
     let before = storage.membership_list_count();
     run_cycle(
@@ -892,7 +892,7 @@ fn cipher_generation(cipher: &RwLock<CloudCipher>) -> u64 {
 
 /// Removing a member commits the cloud key rotation before this device adopts the
 /// rotated key locally. When the local keyring write fails, the removal is durable
-/// — the member is out and the library is rotated for everyone — but this device
+/// — the member is out and the store is rotated for everyone — but this device
 /// keeps sealing under the superseded generation. That half-applied state is its
 /// own typed error, and both remedies it names converge without losing the
 /// rotation: the device's next sync cycle adopts the key from its own
@@ -986,7 +986,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         ks_refresh.set_initial_key(old_key);
         let cipher_refresh =
             RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-        let (_tmp, ld) = temp_library_dir();
+        let (_tmp, ld) = temp_store_dir();
         run_cycle(
             &storage,
             &db,

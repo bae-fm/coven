@@ -4,7 +4,7 @@ Everything coven writes to cloud storage is encrypted before it leaves the
 device and decrypted only after it comes back. The storage provider holds
 ciphertext and a flat set of key paths; it never holds a plaintext row, a
 plaintext file, or a real user identity. This page describes the three
-cryptographic layers, exactly what the provider can observe, where the library
+cryptographic layers, exactly what the provider can observe, where the store
 key lives, and the chunk format that lets a byte range be fetched and decrypted
 without the whole file.
 
@@ -16,7 +16,7 @@ Examples use the todos app; a todo's attachment is the blob being sealed.
 
 coven uses three separate keys, each for a distinct job.
 
-**A symmetric library keyring** encrypts the data itself. Each **generation**
+**A symmetric store keyring** encrypts the data itself. Each **generation**
 in the keyring is one 32-byte key, shared by every member, used with
 XChaCha20-Poly1305 (an authenticated cipher: decryption fails if a byte was
 changed). Every changeset, every snapshot (a full database image), every blob
@@ -38,15 +38,15 @@ comes from
 
 **A per-device Ed25519 identity** signs, it does not encrypt. Each device has one
 [`UserKeypair`](rustdoc:struct:coven::keys::UserKeypair), and its 32-byte public
-key is the member's identity across every library that device joins. The device
+key is the member's identity across every store that device joins. The device
 signs each changeset and each membership chain entry with `UserKeypair::sign`;
 peers check the 64-byte signature with
 [`verify_signature`](rustdoc:fn:coven::keys::verify_signature) against the
-author's public key. This answers "who wrote this", which the library key alone
-cannot: anyone holding the library key could otherwise forge a changeset as
+author's public key. This answers "who wrote this", which the store key alone
+cannot: anyone holding the store key could otherwise forge a changeset as
 anyone else.
 
-**X25519 sealed-box wrapping** hands the library keyring to a new member. The
+**X25519 sealed-box wrapping** hands the store keyring to a new member. The
 keyring is symmetric material, so it cannot travel in the clear; it is
 encrypted to the joiner. Each member's X25519 key is derived deterministically from their Ed25519
 public key
@@ -60,15 +60,15 @@ result at `keys/{member_ed25519_pubkey}.enc`; the joiner downloads it and calls
 secret key. A sealed box is anonymous: it carries an ephemeral sender key, so the
 stored file reveals nothing about who created the invitation.
 
-The three are needed together. The library keyring keeps data secret; the
+The three are needed together. The store keyring keeps data secret; the
 Ed25519 identity proves who authored each change; the sealed box moves the
 keyring to a member without ever exposing it. Losing the Ed25519 secret key also loses
 access to every sealed box wrapped to its derived X25519 key, since that X25519
 key cannot be reconstructed without it.
 
 
-<svg class="flow" viewBox="0 0 500 190" role="img" aria-label="The library keyring holds key generations; scoped keys derive from the current one">
-<text class="hdr" x="130" y="22" text-anchor="middle">LIBRARY KEYRING</text>
+<svg class="flow" viewBox="0 0 500 190" role="img" aria-label="The store keyring holds key generations; scoped keys derive from the current one">
+<text class="hdr" x="130" y="22" text-anchor="middle">STORE KEYRING</text>
 <text class="hdr" x="390" y="22" text-anchor="middle">DERIVED</text>
 <rect class="lane" x="10" y="32" width="240" height="118" rx="10"/>
 <rect class="lane" x="290" y="32" width="200" height="118" rx="10"/>
@@ -90,8 +90,8 @@ key cannot be reconstructed without it.
 The provider (S3, Google Drive, Dropbox, OneDrive, iCloud) is an
 opaque byte store. It sees:
 
-- Ciphertext. Every object is encrypted under the library key (or, for a wrapped
-  library key, under a member's sealed box). Without the library key the bytes
+- Ciphertext. Every object is encrypted under the store key (or, for a wrapped
+  store key, under a member's sealed box). Without the store key the bytes
   are unreadable.
 - Flat key paths, which describe structure, not content:
 
@@ -104,7 +104,7 @@ opaque byte store. It sees:
   snapshot/current.json.enc              signed pointer to the live generation
   membership/{author_pubkey}/{seq}.enc   encrypted membership entries
   membership/{author_pubkey}/head.enc    that author's signed membership head
-  keys/{member_pubkey}.enc               library keyring wrapped to each member
+  keys/{member_pubkey}.enc               store keyring wrapped to each member
   ```
 
   (These are the paths of an opaque home. A browsable home, see below, drops
@@ -122,16 +122,16 @@ The provider never sees a plaintext row (`todos.title`, `lists.shared`), a
 plaintext file (`todo_attachments` contents), or a real identity. Device IDs and
 public keys in the paths are opaque tokens, not user records.
 
-## Where the library key lives
+## Where the store key lives
 
 Every copy of a key is a place it can leak from: a database file rides along
 in backups, an environment variable leaks into logs and child processes. So
-coven does not persist the library key in any database it controls. The key
+coven does not persist the store key in any database it controls. The key
 lives in the operating system keyring, behind the system's own access
 control. There is
 no environment-variable or file fallback: the keyring is the only place coven
 reads it from. [`KeyService`](rustdoc:struct:coven::keys::KeyService) reads and
-writes it, scoped per library so two libraries never share a key.
+writes it, scoped per store so two stores never share a key.
 [`KeyService::new`](rustdoc:method:coven::keys::KeyService::new) does no I/O: keyring
 reads happen lazily inside the getters, because reading the protected keyring can
 trigger a system password prompt. `get_or_create_encryption_key` returns the
@@ -148,9 +148,9 @@ rather than fall back to a shared name.
 
 ## Opaque and browsable homes
 
-Everything above describes an **opaque home**, the default. A library can
+Everything above describes an **opaque home**, the default. A store can
 instead be created as a **browsable home**, which stores every object in the
-clear. This is one per-library choice, `cloud_home.storage`, set when the home is
+clear. This is one per-store choice, `cloud_home.storage`, set when the home is
 created and fixed thereafter (it determines how every object is written).
 
 This choice is about whether what's stored is *legible*, not about who can reach
@@ -160,7 +160,7 @@ not mean open to the world, it means that anyone who already has access to the
 bucket sees the actual files instead of ciphertext.
 
 - An **opaque home** (`storage: opaque`, the default) seals every object under
-  the library key and stores it with the `.enc` suffix, and keys each blob by its
+  the store key and stores it with the `.enc` suffix, and keys each blob by its
   content-addressed shard `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access
   sees only ciphertext under opaque keys.
 - A **browsable home** (`storage: browsable`) stores every object verbatim with
@@ -168,13 +168,13 @@ bucket sees the actual files instead of ciphertext.
   `heads/{device}.json`, `changes/{device}/{seq}`) and stores each blob at the
   consumer's own readable path `{namespace}/{cloud_path}`. Anyone with bucket
   access can open the snapshot or a blob directly without any key, which is the
-  point: it is for a library whose contents are not secret and whose owner wants
+  point: it is for a store whose contents are not secret and whose owner wants
   to read the bucket by name (e.g. inspect it in the storage console).
 
 The one choice drives two mechanisms together, the at-rest cipher and the
 blob-path scheme, both held by a `CloudSyncStorage`:
 
-- `CloudCipher::Encrypted(key)` (opaque) seals every object under the library key
+- `CloudCipher::Encrypted(key)` (opaque) seals every object under the store key
   (the behavior described everywhere above); `CloudCipher::Plaintext` (browsable)
   stores every object verbatim and drops the `.enc` suffix.
 - `BlobPathScheme::Hashed` (opaque) keys a blob by its content-addressed shard;
@@ -188,12 +188,12 @@ protocol, the HLC register, the row-level gate, is unchanged.
 
 Two capabilities exist only on an opaque home:
 
-- **Restore codes** carry the library key (`ek`) so a second device can read the
+- **Restore codes** carry the store key (`ek`) so a second device can read the
   bucket. A browsable home has no key, so its restore code omits `ek` entirely.
   The presence of `ek` *is* the home's storage mode: present ⇒ opaque (rebuilt as
   `CloudCipher::Encrypted` + `BlobPathScheme::Hashed`), absent ⇒ browsable
   (`CloudCipher::Plaintext` + `BlobPathScheme::Plain`).
-- **Sharing** (inviting and removing members) wraps and rotates the library key.
+- **Sharing** (inviting and removing members) wraps and rotates the store key.
   With no key there is nothing to wrap or rotate, so a member operation on a
   browsable home is a clear error ("sharing requires an opaque cloud home")
   rather than a silent no-op. An invite is therefore always for an opaque home,
@@ -247,13 +247,13 @@ It returns exactly the requested plaintext bytes. The base nonce is random per
 `encrypt` call, so encrypting the same plaintext twice produces different
 ciphertext; within one call the index-derived nonces keep each chunk distinct.
 
-A scope can get its own key derived from the library key with
+A scope can get its own key derived from the store key with
 [`derive_scoped`](rustdoc:method:coven::encryption::EncryptionService::derive_scoped),
-which runs HKDF-SHA256 over the library key and a scope label to produce a
-distinct 32-byte key. It is deterministic (same library key and scope always
+which runs HKDF-SHA256 over the store key and a scope label to produce a
+distinct 32-byte key. It is deterministic (same store key and scope always
 yield the same derived key) and one-way (the derived key does not reveal the
-library key), so a blob encrypted under a scoped key cannot be read with the
-library key, only with the same derivation.
+store key), so a blob encrypted under a scoped key cannot be read with the
+store key, only with the same derivation.
 
 ## The key fingerprint
 

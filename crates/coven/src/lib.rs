@@ -84,8 +84,8 @@ pub async fn fetch_account_email(
     result.map_err(|e| oauth::OAuthError::AccountFetch(e.to_string()))
 }
 
-pub(crate) mod library_dir {
-    pub use coven_core::library_dir::*;
+pub(crate) mod store_dir {
+    pub use coven_core::store_dir::*;
 }
 
 mod local_blob_backend;
@@ -373,8 +373,8 @@ pub use coven_core::{
 // Applied-sync change notification.
 pub use coven_core::{ChangeOp, RowChange};
 
-// At-rest crypto the host configures, the library directory, the DB error.
-pub use coven_core::{DbError, EncryptionError, EncryptionService, LibraryDir, CHUNK_SIZE};
+// At-rest crypto the host configures, the store directory, the DB error.
+pub use coven_core::{DbError, EncryptionError, EncryptionService, StoreDir, CHUNK_SIZE};
 
 // The register clock vocabulary carried on every synced row.
 pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};

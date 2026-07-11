@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 
 /// Cloud home provider selection.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -35,12 +35,12 @@ impl CloudProvider {
 /// later (it determines how every object is written). One choice drives two
 /// mechanisms together:
 ///
-/// - `Opaque` (the default): every object is encrypted at rest under the library
+/// - `Opaque` (the default): every object is encrypted at rest under the store
 ///   key (the `.enc` suffix) and blobs use coven's content-addressed path under
 ///   the uploading device, `{namespace}/{uploader}/{ab}/{cd}/{id}`. Anyone with
 ///   bucket access sees only ciphertext
-///   under opaque keys. Sharing a library (inviting members) requires an opaque
-///   home, because it wraps and rotates the library key.
+///   under opaque keys. Sharing a store (inviting members) requires an opaque
+///   home, because it wraps and rotates the store key.
 /// - `Browsable`: every object is stored in the clear (no `.enc` suffix) and
 ///   blobs use the consumer-supplied readable path `{namespace}/{cloud_path}`, so
 ///   anyone with bucket access can read the actual files by name.
@@ -132,14 +132,14 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
 }
 
-/// Sync + storage configuration for one library.
+/// Sync + storage configuration for one store.
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub library_id: String,
+    pub store_id: String,
     /// Unique device identifier for sync changeset namespacing.
     pub device_id: String,
-    pub library_dir: LibraryDir,
-    pub library_name: String,
+    pub store_dir: StoreDir,
+    pub store_name: String,
     /// Whether an encryption key is stored in the keyring (hint flag).
     pub encryption_key_stored: bool,
     /// SHA-256 fingerprint of the encryption key (detects wrong key without decryption).
@@ -149,40 +149,40 @@ pub struct Config {
 }
 
 impl Config {
-    /// Construct a config with defaults for a new or joined library.
+    /// Construct a config with defaults for a new or joined store.
     pub fn with_defaults(
-        library_id: String,
+        store_id: String,
         device_id: String,
-        library_dir: LibraryDir,
-        library_name: String,
+        store_dir: StoreDir,
+        store_name: String,
     ) -> Self {
         Self {
-            library_id,
+            store_id,
             device_id,
-            library_dir,
-            library_name,
+            store_dir,
+            store_name,
             encryption_key_stored: false,
             encryption_key_fingerprint: None,
             cloud_home: CloudHomeConfig::default(),
         }
     }
 
-    /// Persist the sync config to `library_dir/config.yaml`.
+    /// Persist the sync config to `store_dir/config.yaml`.
     pub fn save_to_config_yaml(&self) -> Result<(), ConfigError> {
-        std::fs::create_dir_all(&*self.library_dir)?;
+        std::fs::create_dir_all(&*self.store_dir)?;
         let yaml: ConfigYaml = self.into();
         let text =
             serde_yaml::to_string(&yaml).map_err(|e| ConfigError::Serialization(e.to_string()))?;
-        std::fs::write(self.library_dir.config_path(), text)?;
+        std::fs::write(self.store_dir.config_path(), text)?;
         Ok(())
     }
 }
 
-/// On-disk form of [`Config`] (the runtime `library_dir` is supplied separately).
+/// On-disk form of [`Config`] (the runtime `store_dir` is supplied separately).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigYaml {
-    pub library_id: String,
-    pub library_name: String,
+    pub store_id: String,
+    pub store_name: String,
     #[serde(default)]
     pub device_id: Option<String>,
     #[serde(default)]
@@ -196,8 +196,8 @@ pub struct ConfigYaml {
 impl From<&Config> for ConfigYaml {
     fn from(config: &Config) -> Self {
         Self {
-            library_id: config.library_id.clone(),
-            library_name: config.library_name.clone(),
+            store_id: config.store_id.clone(),
+            store_name: config.store_name.clone(),
             device_id: Some(config.device_id.clone()),
             encryption_key_stored: config.encryption_key_stored,
             encryption_key_fingerprint: config.encryption_key_fingerprint.clone(),

@@ -84,7 +84,7 @@ features:
 
 <div class="story-head" id="how-it-works">
 <p class="kicker">How it works</p>
-<p class="story-title">The life of a library</p>
+<p class="story-title">The life of a store</p>
 </div>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>

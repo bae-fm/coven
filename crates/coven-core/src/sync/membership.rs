@@ -1,4 +1,4 @@
-/// Membership chain: an append-only log of membership changes for shared libraries.
+/// Membership chain: an append-only log of membership changes for shared stores.
 ///
 /// The chain is stored as encrypted files in sync storage and reconstructed
 /// on each sync. It is not stored in the DB.
@@ -32,7 +32,7 @@ pub enum MembershipAction {
 pub enum MemberRole {
     Owner,
     Member,
-    /// Read-only member: holds the library key and is registered in the chain,
+    /// Read-only member: holds the store key and is registered in the chain,
     /// but may not author catalog changesets. The restriction is enforced
     /// acceptance-side: a puller re-derives each author's role from the chain and
     /// rejects a Follower's changesets — there is no proxy. Revocable like any
@@ -47,7 +47,7 @@ impl MemberRole {
     }
 }
 
-/// A current member of the shared library, as returned by `get_members`: the
+/// A current member of the shared store, as returned by `get_members`: the
 /// member's public key, their role, and whether it is the local user.
 #[derive(Debug, Clone)]
 pub struct MemberInfo {
@@ -179,8 +179,8 @@ pub fn entry_hash(entry: &MembershipEntry) -> String {
     ))
 }
 
-/// Build the founder entry of a library's membership chain: a self-signed `Add`
-/// of `owner` with the `Owner` role. Every library is founded by exactly one such
+/// Build the founder entry of a store's membership chain: a self-signed `Add`
+/// of `owner` with the `Owner` role. Every store is founded by exactly one such
 /// entry at creation, and the chain is later anchored to `owner`'s pubkey so no
 /// one can wipe `membership/*` and refound themselves as Owner (issue #95).
 pub fn founder_entry(owner: &UserKeypair, timestamp: &str) -> MembershipEntry {
@@ -295,8 +295,8 @@ impl MembershipChain {
     }
 
     /// The pubkey of the founder (chain entry #1, the self-signed Owner Add), or
-    /// `None` for an empty chain. The library is anchored to this pubkey: a chain
-    /// whose founder is not the library's established owner is a takeover attempt
+    /// `None` for an empty chain. The store is anchored to this pubkey: a chain
+    /// whose founder is not the store's established owner is a takeover attempt
     /// (issue #95), so callers compare this against the pinned owner pubkey.
     pub fn founder_pubkey(&self) -> Option<&str> {
         self.entries.first().map(|e| e.user_pubkey.as_str())
@@ -362,7 +362,7 @@ impl MembershipChain {
         members_can_write(&self.current_members(), pubkey)
     }
 
-    /// Whether `pubkey` is *currently* a library Owner. Owner-only writes
+    /// Whether `pubkey` is *currently* a store Owner. Owner-only writes
     /// (snapshots) authorize against this rather than `can_write_now`.
     pub fn is_owner_now(&self, pubkey: &str) -> bool {
         members_has_owner(&self.current_members(), pubkey)

@@ -96,7 +96,7 @@ no central database); the providers are ordinary consumer clouds and S3; every
 object is encrypted before it leaves the device; concurrent writers across
 devices merge; it is a library a host app embeds, not a product; and multiple
 users and devices are admitted through a signed, append-only membership chain
-that wraps the library key to each member.
+that wraps the store key to each member.
 
 Individually, each trait has strong implementations above. The combination, 
 serverless **and** bring-your-own-consumer-cloud **and** end-to-end encrypted

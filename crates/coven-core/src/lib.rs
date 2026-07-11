@@ -6,7 +6,7 @@
 //! and signed per author, encrypted and pushed/pulled through a pluggable
 //! `CloudHome`, conflict-resolved per row by `_updated_at` arbitration with a
 //! column-level premerge so concurrent edits to different columns of a row survive.
-//! An append-only Ed25519-signed membership chain wraps the per-library
+//! An append-only Ed25519-signed membership chain wraps the per-store
 //! symmetric key to each member.
 //!
 //! Integration contract for the host:
@@ -35,7 +35,7 @@
 //! - When a cloud provider is connected, the host calls
 //!   [`CovenHandle::connect_sync`]. Which rows carry blobs is declared per table
 //!   via [`sync::session::SyncedTable::carries_blob`]; the host also supplies an
-//!   optional [`blob::BlobTransitionObserver`] to the builder. A local-only library
+//!   optional [`blob::BlobTransitionObserver`] to the builder. A local-only store
 //!   that never connects a provider still reads and writes through the handle.
 //!
 //! # Blob storage model
@@ -101,7 +101,7 @@ pub mod join_code;
 #[doc(hidden)]
 pub mod keys;
 #[doc(hidden)]
-pub mod library_dir;
+pub mod store_dir;
 // The host's synced-schema ladder: ordered migrations tracked in `PRAGMA
 // user_version`, which doubles as the wire `schema_version`.
 #[doc(hidden)]
@@ -151,9 +151,9 @@ pub use config::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorag
 pub use keys::{CloudHomeCredentials, KeyError, KeyPersistence, UserKeypair};
 
 // At-rest crypto the host configures (the host sizes cloud stream reads from
-// `CHUNK_SIZE`), and the library directory the host points coven at.
+// `CHUNK_SIZE`), and the store directory the host points coven at.
 pub use encryption::{EncryptionError, EncryptionService, CHUNK_SIZE};
-pub use library_dir::LibraryDir;
+pub use store_dir::StoreDir;
 
 // Sync vocabulary exposed through the native handle.
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};

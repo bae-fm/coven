@@ -38,7 +38,7 @@ The host selects one provider at a time and fills its settings in
 fresh on each operation rather than caching its own copy, so a provider swap or
 disconnect takes effect on the next sync cycle without rebuilding the sync layer.
 
-With no provider selected there is no sync layer at all; the library is
+With no provider selected there is no sync layer at all; the store is
 local-only and complete. At connect time
 [`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
 reads the selected provider's settings from config and its credentials from the
@@ -119,7 +119,7 @@ share by account) and returns a
 variant per provider, carrying exactly what another device needs to reach the
 same cloud home:
 
-- The consumer clouds (Drive, Dropbox, OneDrive) share the library folder with
+- The consumer clouds (Drive, Dropbox, OneDrive) share the store folder with
   the member's provider account and return its folder or drive id.
   `revoke_access` unshares it and reports `RevokeOutcome::Revoked`.
 - S3 returns the bucket, region, endpoint, access key, secret key, and optional
@@ -200,8 +200,8 @@ only places a provider deviates from "write opaque bytes by key".
 
 - **Dropbox**
   ([`DropboxCloudHome`](rustdoc:struct:coven::storage::cloud::dropbox::DropboxCloudHome))
-  uses native Dropbox paths under the library folder (for example
-  `/Apps/your-app/my-library/changes/dev1/42.enc`), so no filename encoding is
+  uses native Dropbox paths under the store folder (for example
+  `/Apps/your-app/my-store/changes/dev1/42.enc`), so no filename encoding is
   needed. Sharing goes through `share_folder` to get a `shared_folder_id`.
 
 - **CloudKit**
@@ -262,7 +262,7 @@ keys blobs (the
 from the home's [storage mode](/docs/encryption#opaque-and-browsable-homes), one
 choice set when the home is created:
 
-- An **opaque** home (the default) encrypts every object under the library key
+- An **opaque** home (the default) encrypts every object under the store key
   and stores it with the `.enc` suffix (`changes/{device}/{seq}.enc`,
   `heads/{device}.json.enc`, `snapshot/{author}/{seq}.db.enc`,
   `snapshot/current.json.enc`, ...), and keys each blob by its content-addressed

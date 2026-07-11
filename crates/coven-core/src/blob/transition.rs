@@ -49,7 +49,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::blob::{cache, BlobRef, Provenance};
 use crate::database::{Database, DbError};
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use crate::sync::gate::Gates;
 use crate::sync::hlc::Hlc;
@@ -420,7 +420,7 @@ pub async fn make_remote(
 /// deliberate, cheaper trade.
 pub async fn cancel_make_remote(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     scheme: BlobPathScheme,
     self_uploader: &str,
     hlc: &Hlc,
@@ -484,7 +484,7 @@ pub async fn cancel_make_remote(
         .await?;
 
     for (id, namespace) in dropped {
-        if let Err(e) = cache::drop_cached_blob(library_dir, &namespace, &id).await {
+        if let Err(e) = cache::drop_cached_blob(store_dir, &namespace, &id).await {
             tracing::warn!(
                 "cancel_make_remote: failed to drop cache copy of {namespace}/{id}: {e}"
             );
@@ -660,7 +660,7 @@ enum WrittenFile {
 pub async fn make_local(
     db: &Database,
     storage: &dyn SyncStorage,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     scheme: BlobPathScheme,
     hlc: &Hlc,
     observer: Option<&dyn BlobTransitionObserver>,
@@ -734,7 +734,7 @@ pub async fn make_local(
     let materialized = match materialize_blobs(
         db,
         storage,
-        library_dir,
+        store_dir,
         scheme,
         observer,
         root_table,
@@ -833,7 +833,7 @@ pub async fn make_local(
     // pure redundancy — drop them. A failure leaves only stray cache space; a read
     // serves the local file. Log and go on.
     for m in &materialized {
-        if let Err(e) = cache::drop_cached_blob(library_dir, &m.blob.namespace, &m.blob.id).await {
+        if let Err(e) = cache::drop_cached_blob(store_dir, &m.blob.namespace, &m.blob.id).await {
             tracing::warn!(
                 "make_local: failed to drop cache copy of {}/{}: {e}",
                 m.blob.namespace,
@@ -859,7 +859,7 @@ pub async fn make_local(
 async fn materialize_blobs(
     db: &Database,
     storage: &dyn SyncStorage,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     scheme: BlobPathScheme,
     observer: Option<&dyn BlobTransitionObserver>,
     root_table: &str,
@@ -906,7 +906,7 @@ async fn materialize_blobs(
                     })?;
                 let size = cache::materialize_remote_blob_to_file(
                     db,
-                    library_dir,
+                    store_dir,
                     Some(storage),
                     blob,
                     &dest_path,
@@ -929,7 +929,7 @@ async fn materialize_blobs(
                 }
             }
             Provenance::HostProvided => {
-                let store_path = library_dir
+                let store_path = store_dir
                     .local_blob_path(&blob.namespace, &blob.id)
                     .map_err(|e| MakeLocalError::Write {
                         blob_id: blob.id.clone(),
@@ -938,7 +938,7 @@ async fn materialize_blobs(
                     })?;
                 let size = cache::materialize_remote_blob_to_file(
                     db,
-                    library_dir,
+                    store_dir,
                     Some(storage),
                     blob,
                     &store_path,

@@ -1,11 +1,11 @@
 # coven two-tab notes (browser harness)
 
-A web page that opens a coven library in the browser and syncs a shared notes
-list between two tabs through an S3 bucket. It uses the `CovenLibrary` wasm
+A web page that opens a coven store in the browser and syncs a shared notes
+list between two tabs through an S3 bucket. It uses the `CovenStore` wasm
 facade: OPFS-backed database, the fetch-based S3 cloud home, and the event-loop
 sync runtime.
 
-The page collects an S3 config, opens the library, and shows a notes list with an
+The page collects an S3 config, opens the store, and shows a notes list with an
 "add note" box and a sync indicator. Open it in two tabs against the same bucket
 and a note added in one tab appears in the other within a sync interval.
 
@@ -72,7 +72,7 @@ form; adapt the syntax for MinIO/R2/etc.):
 
 ## 4. The simplest first config
 
-In the page's form, leave the library **browsable** — that is what the form does
+In the page's form, leave the store **browsable** — that is what the form does
 by default (`storage: "browsable"`). A browsable home is plaintext with readable
 blob paths: every object is stored in the clear under a readable key, so anyone
 with bucket access (you, here) can inspect what coven writes (`heads/`, `changes/`,

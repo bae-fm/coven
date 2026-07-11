@@ -27,7 +27,7 @@ use crate::blob::decl::BlobDecls;
 use crate::blob::{CacheFill, Provenance};
 use crate::changeset::RowChange;
 use crate::database::Database;
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 
 /// Cursor value meaning "we have applied no changesets from this device".
 /// Per the sync protocol, device sequence numbers start at 1 (the first
@@ -79,7 +79,7 @@ pub struct RejectedUnauthorized {
     pub device_id: String,
     pub seq: u64,
     /// Hex-encoded author pubkey, or `None` for an unsigned changeset in a chain
-    /// library (which nothing can authorize).
+    /// store (which nothing can authorize).
     pub author: Option<String>,
 }
 
@@ -198,11 +198,11 @@ struct CompletedChangeset<'a> {
 ///
 /// [`load_anchored_chain`]: super::membership_ops::load_anchored_chain
 pub struct CycleMembership {
-    /// The owner-anchored, committed chain. `None` for a browsable library, which
+    /// The owner-anchored, committed chain. `None` for a browsable store, which
     /// has no chain and is open by design.
     pub chain: Option<MembershipChain>,
-    /// The library's pinned owner (issue #102). `None` for a browsable library.
-    /// An owner-pinned library that fails to produce a valid chain aborts the load,
+    /// The store's pinned owner (issue #102). `None` for a browsable store.
+    /// An owner-pinned store that fails to produce a valid chain aborts the load,
     /// so `Some(owner)` here always travels with `Some(chain)`.
     pub pinned_owner: Option<String>,
     /// The raw membership listing this cycle read (one `list_membership_entries`).
@@ -213,17 +213,17 @@ pub struct CycleMembership {
 }
 
 /// Load and anchor the cycle's membership chain once. Mirrors the fail-closed
-/// stance every authorization site shares: for an owner-pinned (opaque) library a
+/// stance every authorization site shares: for an owner-pinned (opaque) store a
 /// chain that can't be listed, is wiped, or won't anchor to the pinned owner is a
-/// takeover attempt (#95/#104) and aborts the cycle; a browsable library has no
+/// takeover attempt (#95/#104) and aborts the cycle; a browsable store has no
 /// pinned owner, legitimately has no chain, and stays open on any load problem.
 pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
     db: &Database,
 ) -> Result<CycleMembership, PullError> {
-    // The library's established owner, pinned at create/join/restore (issue #102).
-    // `Some` for an opaque (encrypted) library — its membership chain is anchored
-    // to this pubkey; `None` for a browsable library, which has no chain and is
+    // The store's established owner, pinned at create/join/restore (issue #102).
+    // `Some` for an opaque (encrypted) store — its membership chain is anchored
+    // to this pubkey; `None` for a browsable store, which has no chain and is
     // open by design.
     let pinned_owner = db
         .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
@@ -233,7 +233,7 @@ pub async fn load_cycle_membership(
     let (listed_entries, chain) = match storage.list_membership_entries().await {
         Ok(entries) if !entries.is_empty() => {
             // Load + validate the chain and anchor it to the pinned owner. For an
-            // owner-pinned library a chain that won't validate, or one founded by a
+            // owner-pinned store a chain that won't validate, or one founded by a
             // different key, is a refound/tamper: fail closed (refuse the cycle)
             // rather than fall open to "no chain, accept everything". Browsable (no
             // owner) has nothing to anchor, so a load failure there just leaves it
@@ -267,7 +267,7 @@ pub async fn load_cycle_membership(
             (entries, None)
         }
         Err(e) => {
-            // Can't even list membership. For an owner-pinned library we cannot
+            // Can't even list membership. For an owner-pinned store we cannot
             // verify authorship, so fail closed (abort, retry next cycle) rather
             // than apply changesets unvalidated. Browsable stays open.
             if pinned_owner.is_some() {
@@ -305,7 +305,7 @@ pub async fn pull_changes(
     storage: &dyn SyncStorage,
     our_device_id: &str,
     cursors: &HashMap<String, u64>,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     mut membership_chain: Option<MembershipChain>,
     owner_pubkey: Option<String>,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
@@ -323,7 +323,7 @@ pub async fn pull_changes(
     let receiver_wall_ms = db.receive_wall_ms();
     // The membership chain to validate changeset authorship against, loaded and
     // anchored once for the whole cycle by `load_cycle_membership` and handed in
-    // here (with the library's pinned owner). `resolve_membership_authorization`
+    // here (with the store's pinned owner). `resolve_membership_authorization`
     // may still refresh it mid-pull to catch an authorizing entry the cycle-start
     // listing lagged, so it stays mutable.
     let mut membership_members = membership_chain
@@ -335,7 +335,7 @@ pub async fn pull_changes(
     // a current *owner*: a non-owner-signed (or, with a chain present, unsigned)
     // floor is a freeze/downgrade attempt and is ignored. `get_min_schema_version`
     // already verified the signature and surfaced the author; this is the
-    // authorization half. With no chain (a browsable library) we keep the prior
+    // authorization half. With no chain (a browsable store) we keep the prior
     // behavior and honor any floor present.
     if let Some(min) = storage
         .get_min_schema_version()
@@ -540,7 +540,7 @@ pub async fn pull_changes(
                 break;
             }
 
-            // Membership validation: in a chain-enabled library every changeset
+            // Membership validation: in a chain-enabled store every changeset
             // must be signed (its signature is verified above) by a current
             // write-capable member. Coven always signs at creation, so an unsigned
             // or non-member changeset is forged. But an authorized member's
@@ -679,7 +679,7 @@ pub async fn pull_changes(
                 db,
                 cache_eager,
                 storage,
-                library_dir,
+                store_dir,
                 env.author_pubkey.as_deref(),
             )
             .await;
@@ -778,7 +778,7 @@ pub async fn pull_changes(
                 },
                 &blob_decls,
                 db,
-                library_dir,
+                store_dir,
                 &schema,
                 receiver_wall_ms,
             )
@@ -857,7 +857,7 @@ pub async fn pull_changes(
                 },
                 &blob_decls,
                 db,
-                library_dir,
+                store_dir,
                 &schema,
                 receiver_wall_ms,
             )
@@ -880,7 +880,7 @@ async fn finish_applied_changeset(
     applied: CompletedChangeset<'_>,
     blob_decls: &BlobDecls,
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     schema: &TableSchema,
     receiver_wall_ms: u64,
 ) -> bool {
@@ -893,7 +893,7 @@ async fn finish_applied_changeset(
         applied.changes,
         blob_decls,
         db,
-        library_dir,
+        store_dir,
     )
     .await
     {
@@ -973,8 +973,8 @@ enum MembershipJudgment {
 /// coordinate — a keyed GET is strongly consistent, so a `NotFound` is
 /// authoritative — then re-judges against the merged chain.
 ///
-/// `owner_pubkey` is the library's pinned owner (issue #102) when it is an opaque
-/// (owner-anchored) library. Any chain this adopts or merges must still be founded
+/// `owner_pubkey` is the store's pinned owner (issue #102) when it is an opaque
+/// (owner-anchored) store. Any chain this adopts or merges must still be founded
 /// by that owner; a refreshed/merged chain that is not is a takeover attempt and
 /// does not authorize anyone, so it is treated as unauthorized — never adopted.
 async fn resolve_membership_authorization(
@@ -985,7 +985,7 @@ async fn resolve_membership_authorization(
     grant: Option<&MembershipCoord>,
 ) -> MembershipJudgment {
     let Some(author) = author else {
-        // Unsigned changeset in a chain library: nothing can authorize it.
+        // Unsigned changeset in a chain store: nothing can authorize it.
         return MembershipJudgment::Unauthorized;
     };
 
@@ -1024,7 +1024,7 @@ async fn resolve_membership_authorization(
     // Still unauthorized against a fresh chain. Resolve via the coordinate the
     // changeset is signed under.
     let Some(coord) = grant else {
-        // A chain-library changeset must carry its authorizing coordinate; its
+        // A chain-store changeset must carry its authorizing coordinate; its
         // absence means forged or pre-binding — genuinely unauthorized.
         return MembershipJudgment::Unauthorized;
     };
@@ -1098,7 +1098,7 @@ async fn resolve_membership_authorization(
 /// Build a validated chain from `entries` that is also anchored to `owner_pubkey`
 /// when one is pinned (issue #102). Returns `None` if the entries don't form a
 /// valid chain OR the resulting chain's founder isn't the pinned owner — either
-/// way the chain must not be trusted to authorize a write. A library with no
+/// way the chain must not be trusted to authorize a write. A store with no
 /// pinned owner (browsable) skips the anchor check.
 fn build_anchored_chain(
     entries: Vec<MembershipEntry>,
@@ -1304,7 +1304,7 @@ pub(crate) fn cache_eager_blobs(
 /// author of a changeset uploads the blobs its rows introduce, into its own cloud
 /// prefix). A row updated without changing its blob re-references an existing
 /// object and introduces nothing, so it is not recorded here. Empty when the
-/// author is unknown (an unsigned browsable-library changeset carries no uploader
+/// author is unknown (an unsigned browsable-store changeset carries no uploader
 /// segment). Returns `(namespace, blob_id, uploader)` for the local uploader index.
 fn introduced_blob_uploads(
     blob_decls: &BlobDecls,
@@ -1389,7 +1389,7 @@ async fn drop_deleted_blob_local(
     new_changes: &[RowChange],
     blob_decls: &BlobDecls,
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
 ) -> Result<(), crate::blob::cache::BlobCacheError> {
     if old_changes.len() != new_changes.len() {
         return Err(crate::blob::cache::BlobCacheError::ChangesetWalkMismatch {
@@ -1441,15 +1441,14 @@ async fn drop_deleted_blob_local(
             if live_row.is_some() {
                 continue;
             }
-            crate::blob::cache::drop_all_local_copies(library_dir, &blob.namespace, &blob.id)
-                .await?;
+            crate::blob::cache::drop_all_local_copies(store_dir, &blob.namespace, &blob.id).await?;
         }
     }
     Ok(())
 }
 
 /// Download each blob in `blobs` into the evictable cache
-/// `storage/cache/<namespace>/<id>` under `library_dir`, decrypting via storage
+/// `storage/cache/<namespace>/<id>` under `store_dir`, decrypting via storage
 /// (which returns plaintext) and writing the bytes atomically. Returns true if every
 /// blob succeeded. Skips blobs already present in either cache folder (`pinned/` or
 /// `cache/`).
@@ -1476,7 +1475,7 @@ pub(crate) async fn download_blobs(
     db: &Database,
     blobs: Vec<BlobDownload>,
     storage: &dyn SyncStorage,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     known_uploader: Option<&str>,
 ) -> bool {
     let mut all_ok = true;
@@ -1485,24 +1484,24 @@ pub(crate) async fn download_blobs(
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
         // changeset authored by any write-capable member. An id or namespace that is
         // not a single safe path token, or a cloud_path that escapes its prefix,
-        // would write attacker-chosen bytes outside the library or under a forged
+        // would write attacker-chosen bytes outside the store or under a forged
         // cloud key — refuse the blob as bad data before resolving or writing it, the
         // same posture as any other failed blob in this loop. The id check makes
         // local traversal unrepresentable: the destination path below is built from
         // the validated id by coven, so there is no host-supplied local path left to
         // independently re-check.
-        if let Err(e) = crate::library_dir::validate_path_token(&blob.namespace) {
+        if let Err(e) = crate::store_dir::validate_path_token(&blob.namespace) {
             error!(id = %blob.id, namespace = %blob.namespace, "blob namespace is not a safe path token ({e}); refusing");
             all_ok = false;
             continue;
         }
-        if let Err(e) = crate::library_dir::validate_path_token(&blob.id) {
+        if let Err(e) = crate::store_dir::validate_path_token(&blob.id) {
             error!(id = %blob.id, namespace = %blob.namespace, "blob id is not a safe path token ({e}); refusing");
             all_ok = false;
             continue;
         }
         if let Some(cloud_path) = blob.cloud_path.as_deref() {
-            if let Err(e) = crate::library_dir::validate_cloud_path(cloud_path) {
+            if let Err(e) = crate::store_dir::validate_cloud_path(cloud_path) {
                 error!(id = %blob.id, cloud_path = %cloud_path, "blob cloud_path escapes its prefix ({e}); refusing");
                 all_ok = false;
                 continue;
@@ -1515,7 +1514,7 @@ pub(crate) async fn download_blobs(
         // same bad-data refusal as the token check above. A pinned copy (in
         // `pinned/`) is checked for presence below but never written here — a pull
         // populates the evictable cache, never the kept folder.
-        let dest = match library_dir.cache_blob_path(&blob.namespace, &blob.id) {
+        let dest = match store_dir.cache_blob_path(&blob.namespace, &blob.id) {
             Ok(p) => p,
             Err(e) => {
                 error!(id = %blob.id, "cannot build cache blob path ({e}); refusing");
@@ -1523,7 +1522,7 @@ pub(crate) async fn download_blobs(
                 continue;
             }
         };
-        let pinned = match library_dir.pinned_blob_path(&blob.namespace, &blob.id) {
+        let pinned = match store_dir.pinned_blob_path(&blob.namespace, &blob.id) {
             Ok(p) => p,
             Err(e) => {
                 error!(id = %blob.id, "cannot build pinned blob path ({e}); refusing");
@@ -1617,7 +1616,7 @@ pub enum PullError {
         local_version: u32,
         min_version: u32,
     },
-    /// The membership chain is not anchored to the library's pinned owner — it was
+    /// The membership chain is not anchored to the store's pinned owner — it was
     /// wiped and/or refounded under a different key (an owner-takeover attempt,
     /// issue #95). The cycle is refused rather than trusting the tampered chain.
     MembershipTampered(String),
@@ -1633,7 +1632,7 @@ impl std::fmt::Display for PullError {
                 min_version,
             } => write!(
                 f,
-                "Update the app to keep syncing — this library was upgraded by a newer device (schema v{min_version}; you have v{local_version})."
+                "Update the app to keep syncing — this store was upgraded by a newer device (schema v{min_version}; you have v{local_version})."
             ),
             PullError::MembershipTampered(e) => write!(f, "membership chain tampered: {e}"),
         }
@@ -1655,7 +1654,7 @@ mod tests {
         }];
         let new_changes = Vec::new();
         let tmp = tempfile::tempdir().expect("temp dir");
-        let library_dir = LibraryDir::new(tmp.path());
+        let store_dir = StoreDir::new(tmp.path());
         let (db, _stamper) = Database::open(
             std::path::Path::new(":memory:"),
             Vec::new(),
@@ -1667,7 +1666,7 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().expect("db");
         let decls = BlobDecls::from_tables(&conn, &[]).expect("decls");
 
-        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &db, &library_dir)
+        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &db, &store_dir)
             .await
             .expect_err("mismatched changeset walks fail");
 

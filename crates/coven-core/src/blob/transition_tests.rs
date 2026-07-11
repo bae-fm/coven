@@ -28,8 +28,8 @@ use crate::blob::{
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
@@ -37,8 +37,8 @@ use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_library_dir,
-    test_migrations, MockSyncStorage,
+    open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_store_dir, test_migrations,
+    MockSyncStorage,
 };
 
 /// The uploader these browsable-home tests pass to the make_remote/cancel paths.
@@ -156,7 +156,7 @@ async fn run_cycle(
     db: &Database,
     cipher: &RwLock<CloudCipher>,
     kp: &UserKeypair,
-    lib: &LibraryDir,
+    lib: &StoreDir,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> SyncCycleResult {
     run_single_sync_cycle(
@@ -365,7 +365,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let kp_a = UserKeypair::generate();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_blob(photo_decl());
-    let (tmp_a, lib_a) = temp_library_dir();
+    let (tmp_a, lib_a) = temp_store_dir();
     let bytes = b"PHOTO-BYTES-one-file".to_vec();
 
     let src = seed_local_release(
@@ -381,7 +381,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     // A cycle while the note is gated off: nothing reaches a peer.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     let db_b = open_test_db_with_blob(photo_decl());
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
     assert!(
         !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
@@ -470,7 +470,7 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     let kp = UserKeypair::generate();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
 
     seed_local_release(
@@ -539,8 +539,8 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     let hlc_b = Hlc::new("B".to_string());
     let db_a = open_test_db_with_blob(photo_decl());
     let db_b = open_test_db_with_blob(photo_decl());
-    let (tmp_a, lib_a) = temp_library_dir();
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (tmp_a, lib_a) = temp_store_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
 
     seed_remote_release(&storage, &db_a, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
@@ -662,7 +662,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let kp_a = UserKeypair::generate();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (tmp_a, lib_a) = temp_library_dir();
+    let (tmp_a, lib_a) = temp_store_dir();
     let photo = b"PHOTO-BYTES".to_vec();
     let cover = b"RELEASE-COVER".to_vec();
 
@@ -727,7 +727,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 
     // B pulls: the cover (CacheEager) lands in B's cache; the photo (CacheLazy) does not.
     let db_b = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
     assert!(
         lib_b
@@ -831,7 +831,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     let kp_a = UserKeypair::generate();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (_tmp_a, lib_a) = temp_library_dir();
+    let (_tmp_a, lib_a) = temp_store_dir();
     let cover = b"HOST-ONLY-COVER".to_vec();
 
     exec(
@@ -944,7 +944,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     let kp = UserKeypair::generate();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_lazy_decl());
-    let (_tmp, lib) = temp_library_dir();
+    let (_tmp, lib) = temp_store_dir();
     let pin_bytes = b"PINNED-COVER".to_vec();
     let drop_bytes = b"DROPPED-COVER".to_vec();
 
@@ -1082,7 +1082,7 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let kp = UserKeypair::generate();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db();
-    let (_tmp, lib) = temp_library_dir();
+    let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-PINNED".to_vec();
 
     let pinned = lib.pinned_blob_path("covers", "cov-pin").unwrap();
@@ -1113,7 +1113,7 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let kp = UserKeypair::generate();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db();
-    let (_tmp, lib) = temp_library_dir();
+    let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-CACHED".to_vec();
 
     let cached = lib.cache_blob_path("covers", "cov-cache").unwrap();
@@ -1145,7 +1145,7 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let kp = UserKeypair::generate();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db();
-    let (_tmp, lib) = temp_library_dir();
+    let (_tmp, lib) = temp_store_dir();
 
     db.set_sync_state("local_seq", "1").await.unwrap();
     insert_published_drop_intent(&db, 1, "covers", "cov-lost", 7, "pin").await;
@@ -1169,7 +1169,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let kp_a = UserKeypair::generate();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = remote_root_db(cover_decl());
-    let (_tmp_a, lib_a) = temp_library_dir();
+    let (_tmp_a, lib_a) = temp_store_dir();
     let cover = b"REMOTE-ROOT-HOST-BLOB".to_vec();
 
     exec(
@@ -1199,7 +1199,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     );
 
     let db_b = remote_root_db(cover_decl());
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &HashMap::new(), &lib_b).await;
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n-remote-root'").await,
@@ -1227,7 +1227,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
 async fn make_remote_rejects_remote_root() {
     let hlc = Hlc::new("A".to_string());
     let db = remote_root_db(cover_decl());
-    let (_tmp, lib) = temp_library_dir();
+    let (_tmp, lib) = temp_store_dir();
     exec(
         &db,
         "INSERT INTO notes (id, title, _updated_at, created_at) \
@@ -1266,7 +1266,7 @@ async fn make_local_rejects_remote_root() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = remote_root_db(cover_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     exec(
         &db,
         "INSERT INTO notes (id, title, _updated_at, created_at) \
@@ -1317,7 +1317,7 @@ async fn make_local_rejects_remote_root() {
 async fn cancel_make_remote_rejects_remote_root() {
     let hlc = Hlc::new("A".to_string());
     let db = remote_root_db(cover_decl());
-    let (_tmp, lib) = temp_library_dir();
+    let (_tmp, lib) = temp_store_dir();
 
     let err = cancel_make_remote(
         &db,
@@ -1344,7 +1344,7 @@ async fn cancel_make_remote_rejects_remote_root() {
 async fn make_remote_rejects_already_remote_root() {
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (_tmp, _lib) = temp_library_dir();
+    let (_tmp, _lib) = temp_store_dir();
 
     // A host-provided-only root already Remote (gate on): a note plus a cover row.
     exec(
@@ -1402,7 +1402,7 @@ async fn make_local_rejects_already_local_root() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let bytes = b"already-local".to_vec();
 
     // A Local release (gate off) with its blob at a registered external file.
@@ -1468,7 +1468,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     let enc = plaintext();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let user = tmp.path().join("user");
 
     // Two photos under one release.
@@ -1555,7 +1555,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     let enc = plaintext();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
 
     let src = seed_local_release(
         &db,
@@ -1611,7 +1611,7 @@ async fn cancel_make_local_before_commit_stays_remote() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let bytes = b"still-managed".to_vec();
 
     seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
@@ -1656,7 +1656,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let bytes = b"managed-bytes".to_vec();
 
     seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
@@ -1721,7 +1721,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let bytes = b"managed-bytes".to_vec();
 
     seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
@@ -1786,7 +1786,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     let enc = plaintext();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let user = tmp.path().join("user");
 
     seed_local_release(&db, &user, "n1", "photoaaa", "cv/photoaaa.jpg", b"first").await;
@@ -1865,7 +1865,7 @@ async fn make_local_abort_then_retry_converges() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let bytes = b"materialize-me".to_vec();
 
     seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
@@ -1938,7 +1938,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let kp = UserKeypair::generate();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
-    let (tmp, lib) = temp_library_dir();
+    let (tmp, lib) = temp_store_dir();
     let bytes = b"round-trip-photo".to_vec();
 
     // Start Local, make it Remote.

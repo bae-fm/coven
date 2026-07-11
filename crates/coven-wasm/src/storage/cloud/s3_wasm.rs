@@ -6,7 +6,7 @@
 //! SigV4 (via `reqsign-aws-v4`), and sends it through reqwest's `fetch` backend.
 //! Its public semantics mirror `super::s3::S3CloudHome` exactly — the same prefix
 //! handling, object-key layout, path-style addressing, grant metadata, and error
-//! mapping — so a library created on the desktop opens unchanged in the browser.
+//! mapping — so a store created on the desktop opens unchanged in the browser.
 //!
 //! ## Addressing
 //!

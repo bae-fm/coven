@@ -37,8 +37,8 @@ pub mod keys {
     pub use coven_core::keys::*;
 }
 
-pub mod library_dir {
-    pub use coven_core::library_dir::*;
+pub mod store_dir {
+    pub use coven_core::store_dir::*;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -85,7 +85,7 @@ pub mod sync {
 #[cfg(target_arch = "wasm32")]
 pub use wasm::install_browser_storage;
 #[cfg(target_arch = "wasm32")]
-pub use wasm_facade::CovenLibrary;
+pub use wasm_facade::CovenStore;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_keystore::BrowserKeystore;
 
@@ -96,11 +96,11 @@ thread_local! {
     static STANDALONE_HLCS: RefCell<HashMap<String, Arc<Hlc>>> = RefCell::new(HashMap::new());
 }
 
-/// Mint an HLC stamp for callers that do not have an open [`CovenLibrary`].
+/// Mint an HLC stamp for callers that do not have an open [`CovenStore`].
 ///
 /// This process-local clock is monotonic per `device_id`, but it is not seeded
 /// from an open database and is not advanced by pull. Synced-row writes through an
-/// open library use [`CovenLibrary::stamp`].
+/// open store use [`CovenStore::stamp`].
 #[wasm_bindgen]
 pub fn stamp(device_id: String) -> Result<String, JsValue> {
     install_platform();
@@ -113,7 +113,7 @@ pub fn stamp(device_id: String) -> Result<String, JsValue> {
 
 fn standalone_hlc_for_device(
     device_id: String,
-) -> Result<Arc<Hlc>, crate::library_dir::PathTokenError> {
+) -> Result<Arc<Hlc>, crate::store_dir::PathTokenError> {
     STANDALONE_HLCS.with(|hlcs| {
         let mut hlcs = hlcs.borrow_mut();
         match hlcs.entry(device_id.clone()) {

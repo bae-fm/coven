@@ -35,16 +35,16 @@ use crate::sync::test_helpers::*;
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
 
-/// An invite code carrying an attacker-chosen `library_id` is the path-traversal
+/// An invite code carrying an attacker-chosen `store_id` is the path-traversal
 /// vector: the code is unsigned, and the id becomes a directory the joiner creates
 /// and — on a bootstrap failure — recursively deletes. The id is refused the moment
 /// the code is decoded, so a crafted code never reaches the directory step: decode
-/// fails, nothing is created outside the libraries root, and no network or
+/// fails, nothing is created outside the stores root, and no network or
 /// filesystem work runs.
-fn invite_code_with_library_id(library_id: &str) -> InviteCode {
+fn invite_code_with_store_id(store_id: &str) -> InviteCode {
     InviteCode {
-        library_id: library_id.to_string(),
-        library_name: "Evil".to_string(),
+        store_id: store_id.to_string(),
+        store_name: "Evil".to_string(),
         join_info: CloudHomeJoinInfo::S3 {
             bucket: "b".to_string(),
             region: "us-east-1".to_string(),
@@ -79,18 +79,18 @@ async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Co
     .await
 }
 
-/// Every traversal-shaped `library_id` is refused at the decode boundary: `decode`
-/// returns `JoinCodeError::InvalidLibraryId`, so a decoded `InviteCode` never
+/// Every traversal-shaped `store_id` is refused at the decode boundary: `decode`
+/// returns `JoinCodeError::InvalidStoreId`, so a decoded `InviteCode` never
 /// carries a traversal id. Driven end to end, the decode error propagates as
-/// `JoinError::InvalidCode` and the join creates nothing outside the libraries root.
+/// `JoinError::InvalidCode` and the join creates nothing outside the stores root.
 ///
 /// The cases share one mechanism and differ only in the malicious id and the
 /// directory it would escape to, so they run as a table:
-/// - `../escape`: `app_dir/libraries/../escape` resolves to `app_dir/escape`.
-/// - an absolute path: `libraries`.join("/abs") == "/abs" replaces the base.
-/// - `.`: a trailing `.` normalizes away, so `libraries/.` lands on the data dir.
+/// - `../escape`: `app_dir/stores/../escape` resolves to `app_dir/escape`.
+/// - an absolute path: `stores`.join("/abs") == "/abs" replaces the base.
+/// - `.`: a trailing `.` normalizes away, so `stores/.` lands on the data dir.
 #[tokio::test]
-async fn join_rejects_traversal_library_id_at_decode() {
+async fn join_rejects_traversal_store_id_at_decode() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
     // The absolute case escapes to a path *inside* the temp dir, so even a
@@ -105,20 +105,20 @@ async fn join_rejects_traversal_library_id_at_decode() {
         (".", None),
     ];
 
-    for (library_id, escape_target) in cases {
-        let encoded = encode(&invite_code_with_library_id(library_id));
+    for (store_id, escape_target) in cases {
+        let encoded = encode(&invite_code_with_store_id(store_id));
         assert!(
             matches!(
                 crate::join_code::decode(&encoded),
-                Err(JoinCodeError::InvalidLibraryId(_))
+                Err(JoinCodeError::InvalidStoreId(_))
             ),
-            "decode must refuse `{library_id}` with InvalidLibraryId",
+            "decode must refuse `{store_id}` with InvalidStoreId",
         );
 
         let result = join_result_for(&encoded, app_dir).await;
         assert!(
             matches!(result, Err(JoinError::InvalidCode(_))),
-            "`{library_id}` must fail the join with the propagated decode error, got {result:?}",
+            "`{store_id}` must fail the join with the propagated decode error, got {result:?}",
         );
         if let Some(target) = escape_target {
             assert!(
@@ -130,10 +130,10 @@ async fn join_rejects_traversal_library_id_at_decode() {
     }
 }
 
-/// A normal `library_id` decodes and the join reaches the cloud step, where it
+/// A normal `store_id` decodes and the join reaches the cloud step, where it
 /// fails on the unreachable endpoint (`JoinError::Invite`, from the wrapped-key
 /// download) rather than on the id — proving the decoder rejects only unsafe ids
-/// and the directory the join would create sits under `libraries/`.
+/// and the directory the join would create sits under `stores/`.
 ///
 /// Join reads the device's user keypair from the keyring before the cloud download,
 /// so a keypair must exist for execution to reach the cloud. The user keypair is one
@@ -143,10 +143,10 @@ async fn join_rejects_traversal_library_id_at_decode() {
 /// blocking `std` lock never deadlocks against another task on this runtime).
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn join_accepts_a_normal_library_id_past_decode() {
-    let encoded = encode(&invite_code_with_library_id("abc-123"));
+async fn join_accepts_a_normal_store_id_past_decode() {
+    let encoded = encode(&invite_code_with_store_id("abc-123"));
     let decoded = crate::join_code::decode(&encoded).expect("a normal id decodes");
-    assert_eq!(decoded.library_id, "abc-123");
+    assert_eq!(decoded.store_id, "abc-123");
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
@@ -165,16 +165,16 @@ async fn join_accepts_a_normal_library_id_past_decode() {
     );
 }
 
-/// A library already present locally is the data — re-joining it adds nothing, and
+/// A store already present locally is the data — re-joining it adds nothing, and
 /// the old code would delete its database and blobs during the failure-cleanup once
 /// bootstrap failed. The join now refuses up front with a typed error naming the
-/// library and leaves the existing files untouched. The keypair is seeded (and the
+/// store and leaves the existing files untouched. The keypair is seeded (and the
 /// endpoint is unreachable) so that, absent the guard, execution would reach the
 /// cloud read and the destructive cleanup — the guard is what stops it first.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn join_refuses_when_library_exists_and_leaves_it_untouched() {
-    let encoded = encode(&invite_code_with_library_id("abc-123"));
+async fn join_refuses_when_store_exists_and_leaves_it_untouched() {
+    let encoded = encode(&invite_code_with_store_id("abc-123"));
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
@@ -185,19 +185,19 @@ async fn join_refuses_when_library_exists_and_leaves_it_untouched() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
 
-    // A library with this id is already present locally, holding a database file
+    // A store with this id is already present locally, holding a database file
     // and a blob the join must not touch.
-    let library_dir = app_dir.join("libraries").join("abc-123");
-    std::fs::create_dir_all(library_dir.join("storage")).expect("create existing library dir");
-    let db_path = library_dir.join("library.db");
-    let blob_path = library_dir.join("storage").join("cover.blob");
+    let store_dir = app_dir.join("stores").join("abc-123");
+    std::fs::create_dir_all(store_dir.join("storage")).expect("create existing store dir");
+    let db_path = store_dir.join("store.db");
+    let blob_path = store_dir.join("storage").join("cover.blob");
     std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
     std::fs::write(&blob_path, b"existing-blob-bytes").expect("seed existing blob");
 
     let result = join_result_for(&encoded, app_dir).await;
     assert!(
-        matches!(result, Err(JoinError::LibraryExists(ref id)) if id == "abc-123"),
-        "join must refuse a library already present locally, got {result:?}",
+        matches!(result, Err(JoinError::StoreExists(ref id)) if id == "abc-123"),
+        "join must refuse a store already present locally, got {result:?}",
     );
     assert_eq!(
         std::fs::read(&db_path).expect("existing db still present"),
@@ -211,13 +211,13 @@ async fn join_refuses_when_library_exists_and_leaves_it_untouched() {
     );
 }
 
-/// A join for a library not present locally that fails at the cloud read still
+/// A join for a store not present locally that fails at the cloud read still
 /// removes the directory it created — the failure-cleanup keeps working for the
 /// directory this invocation owns.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn fresh_join_failure_cleans_up_its_own_directory() {
-    let encoded = encode(&invite_code_with_library_id("fresh-123"));
+    let encoded = encode(&invite_code_with_store_id("fresh-123"));
 
     crate::keys::test_keyring::install();
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
@@ -227,7 +227,7 @@ async fn fresh_join_failure_cleans_up_its_own_directory() {
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
-    let library_dir = app_dir.join("libraries").join("fresh-123");
+    let store_dir = app_dir.join("stores").join("fresh-123");
 
     let result = join_result_for(&encoded, app_dir).await;
     assert!(
@@ -235,9 +235,9 @@ async fn fresh_join_failure_cleans_up_its_own_directory() {
         "the bogus cloud endpoint must fail the join at the cloud read, got {result:?}",
     );
     assert!(
-        !library_dir.exists(),
+        !store_dir.exists(),
         "a fresh join that fails must remove the directory it created at {}",
-        library_dir.display(),
+        store_dir.display(),
     );
 }
 
@@ -247,8 +247,8 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let storage = MockSyncStorage::new();
     let tables = test_synced_tables();
 
-    // Owner A leaves the cloud in the shape "empty library, then import" produces:
-    // an empty snapshot at seq 0 (the initial-sync snapshot of the empty library),
+    // Owner A leaves the cloud in the shape "empty store, then import" produces:
+    // an empty snapshot at seq 0 (the initial-sync snapshot of the empty store),
     // and the imported row as changeset A/1. `should_create_snapshot` does not
     // refresh the snapshot for a single sub-threshold changeset, so the catalog
     // lives in the changeset — not the snapshot.
@@ -299,7 +299,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 
     // Device B joins through the real path: bootstrap from the snapshot, then
     // pull the changesets published after it.
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
@@ -441,7 +441,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     // which derives `note_photos`'s blob from the declaration. A `CacheEager` blob
     // lands in B's evictable cache folder (`storage/cache/<id>`) on reconciliation,
     // which coven builds from the validated id.
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     let expected_blob = lib_b
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
@@ -475,7 +475,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
 }
 
 /// A blob whose download fails at bootstrap (its object isn't in the cloud yet)
-/// refuses the bootstrap before the library is saved.
+/// refuses the bootstrap before the store is saved.
 #[tokio::test]
 async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     let storage = MockSyncStorage::new();
@@ -530,7 +530,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     // Unlike the happy-path test above, the cover blob is NOT in the cloud yet at
     // bootstrap time (e.g. A's upload of it hadn't landed). So the bootstrap's
     // download attempt fails.
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     // A reconciled `CacheEager` blob lands in B's evictable cache folder.
     let expected_blob = lib_b
         .cache_blob_path("photos", "photo1")

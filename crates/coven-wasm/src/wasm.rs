@@ -14,11 +14,11 @@ use sqlite_wasm_vfs::sahpool::{install as install_opfs_sahpool, OpfsSAHPoolCfgBu
 
 use crate::database::DbError;
 
-/// How many OPFS files the VFS pool may hold. Each open library is one database
+/// How many OPFS files the VFS pool may hold. Each open store is one database
 /// file plus, transiently, its rollback journal, so the pool must seat several
-/// times the number of libraries a page opens at once. The crate default of 6 is
-/// too tight — a handful of libraries exhausts it and the next open fails with
-/// `SQLITE_CANTOPEN` — so reserve headroom for a real multi-library page.
+/// times the number of stores a page opens at once. The crate default of 6 is
+/// too tight — a handful of stores exhausts it and the next open fails with
+/// `SQLITE_CANTOPEN` — so reserve headroom for a real multi-store page.
 const OPFS_POOL_CAPACITY: u32 = 32;
 
 /// Install the opfs-sahpool VFS and make it SQLite's default, so connections

@@ -19,9 +19,9 @@ use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::FixedClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
@@ -70,7 +70,7 @@ async fn gc_tombstones_anchored(
     storage: &dyn crate::sync::storage::SyncStorage,
     cloud_home: &dyn CloudHome,
     cipher: &RwLock<CloudCipher>,
-    library_id: &str,
+    store_id: &str,
     pinned_owner: Option<&str>,
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
@@ -85,7 +85,7 @@ async fn gc_tombstones_anchored(
         storage,
         cloud_home,
         cipher,
-        library_id,
+        store_id,
         pinned_owner,
         clock,
         grace,
@@ -103,7 +103,7 @@ async fn gc_tombstones_as(
     storage: &dyn crate::sync::storage::SyncStorage,
     cloud_home: &dyn CloudHome,
     cipher: &RwLock<CloudCipher>,
-    library_id: &str,
+    store_id: &str,
     pinned_owner: Option<&str>,
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
@@ -120,7 +120,7 @@ async fn gc_tombstones_as(
         db,
         cloud_home,
         cipher,
-        library_id,
+        store_id,
         self_pubkey,
         membership.chain.as_ref(),
         clock,
@@ -133,7 +133,7 @@ async fn gc_tombstones_without_live_refs(
     storage: &dyn crate::sync::storage::SyncStorage,
     cloud_home: &dyn CloudHome,
     cipher: &RwLock<CloudCipher>,
-    library_id: &str,
+    store_id: &str,
     pinned_owner: Option<&str>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<usize, String> {
@@ -143,7 +143,7 @@ async fn gc_tombstones_without_live_refs(
         storage,
         cloud_home,
         cipher,
-        library_id,
+        store_id,
         pinned_owner,
         clock,
         BLOB_TOMBSTONE_GRACE,
@@ -204,7 +204,7 @@ async fn storage_with_chain() -> (MockSyncStorage, UserKeypair, UserKeypair) {
 }
 
 /// Write a tombstone object straight into the cloud at its key, bypassing the
-/// signing drain — so a test can plant a forged or library-mismatched tombstone
+/// signing drain — so a test can plant a forged or store-mismatched tombstone
 /// the GC must reject. Mirrors how `drain_tombstones` lays the object out
 /// (plaintext cipher → verbatim bytes, empty suffix).
 async fn plant_tombstone(cloud: &dyn CloudHome, tombstone: &BlobTombstoneJson) {
@@ -446,7 +446,7 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     );
     assert!(cloud.deletes_seen().is_empty(), "the drain deletes nothing");
 
-    // A signed tombstone landed at the derived key and verifies under the library.
+    // A signed tombstone landed at the derived key and verifies under the store.
     let stored = cloud
         .get("blob_tombstones/blob-key")
         .expect("tombstone object present");
@@ -815,7 +815,7 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = LibraryDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
+    let cloud_key = StoreDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
         .expect("hashed blob key");
 
     exec(
@@ -887,7 +887,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = LibraryDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
+    let cloud_key = StoreDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
         .expect("hashed blob key");
 
     // The peer's still-stale view: the gated root is shared (remote) and the child row
@@ -994,7 +994,7 @@ async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = LibraryDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "orphan")
+    let cloud_key = StoreDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "orphan")
         .expect("hashed blob key");
 
     // An orphaned child: it carries the blob but its parent note is absent, so the FK
@@ -1071,10 +1071,10 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
     // One blob under the member's own prefix, one under the founder's. No live rows
     // reference either (the DB is empty), so both are ripe for reclaim — only the
     // prefix gate decides which the member may delete.
-    let mine = LibraryDir::uploader_hashed_key("photos", &pubkey_hex(&member), "mineblob")
+    let mine = StoreDir::uploader_hashed_key("photos", &pubkey_hex(&member), "mineblob")
         .expect("own hashed key");
-    let foreign = LibraryDir::uploader_hashed_key("photos", &owner, "foreignblob")
-        .expect("foreign hashed key");
+    let foreign =
+        StoreDir::uploader_hashed_key("photos", &owner, "foreignblob").expect("foreign hashed key");
     for key in [&mine, &foreign] {
         storage
             .write(
@@ -1139,7 +1139,7 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
         CacheFill::CacheEager,
     ));
 
-    let foreign = LibraryDir::uploader_hashed_key("photos", &pubkey_hex(&member), "absentblob")
+    let foreign = StoreDir::uploader_hashed_key("photos", &pubkey_hex(&member), "absentblob")
         .expect("member hashed key");
     storage
         .write(
@@ -1418,14 +1418,14 @@ async fn tombstone_by_a_non_member_is_ignored() {
 ///
 /// An attacker who can write the bucket wipes `membership/*`, writes a fresh
 /// self-signed Owner founder under their own key (internally valid — `validate`
-/// only proves consistency, not that the founder is the library's established
+/// only proves consistency, not that the founder is the store's established
 /// owner), then plants a tombstone signed by that forged founder with a backdated
 /// `deleted_at`. Because the device pins the *real* owner, the refounded chain
 /// fails `is_founded_by(pinned_owner)`, the author is never authorized, and the
 /// backdated time never gets a chance to matter.
 #[tokio::test]
 async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
-    // The library's real established owner (the pinned founder). Its chain isn't
+    // The store's real established owner (the pinned founder). Its chain isn't
     // even needed for the test — the device only needs to *pin* this pubkey; the
     // attacker has replaced the on-bucket chain entirely.
     let real_owner = UserKeypair::generate();
@@ -1492,13 +1492,13 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
 }
 
 /// The empty-chain half of the same defense: an *entirely wiped* `membership/*`
-/// (no founder at all) under a pinned owner is a takeover, not an open library, so
+/// (no founder at all) under a pinned owner is a takeover, not an open store, so
 /// a tombstone authored over it is refused and the blob survives. The rule is the
 /// cycle's membership load's: empty + pinned owner = wiped = refuse; empty + no
 /// pin = genuinely open = accept on signature.
 #[tokio::test]
 async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
-    // The library has an established owner (pinned), but `membership/*` is wiped —
+    // The store has an established owner (pinned), but `membership/*` is wiped —
     // the storage holds no membership entries at all.
     let real_owner = UserKeypair::generate();
     let pinned_owner = pubkey_hex(&real_owner);
@@ -1599,14 +1599,14 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
     );
 }
 
-// ----- a tombstone bound to a different library is ignored -----
+// ----- a tombstone bound to a different store is ignored -----
 
-/// A tombstone validly signed for a DIFFERENT library is ignored when GC'd as this
-/// library: the blob survives. A member of two libraries can't replay one
-/// library's deletion against the other's bucket — the signature binds the library
+/// A tombstone validly signed for a DIFFERENT store is ignored when GC'd as this
+/// store: the blob survives. A member of two stores can't replay one
+/// store's deletion against the other's bucket — the signature binds the store
 /// id, so it fails to verify under any other.
 #[tokio::test]
-async fn tombstone_bound_to_a_different_library_is_ignored() {
+async fn tombstone_bound_to_a_different_store_is_ignored() {
     let (storage, founder, member) = storage_with_chain().await;
     let cipher = plaintext_cipher();
     let owner = pubkey_hex(&founder);
@@ -1619,7 +1619,7 @@ async fn tombstone_bound_to_a_different_library_is_ignored() {
         )
         .await
         .unwrap();
-    // Signed for "other-lib" by a real member of THIS library; the GC runs as
+    // Signed for "other-lib" by a real member of THIS store; the GC runs as
     // "test-lib", so the signature (taken over other-lib's id) fails here.
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone = BlobTombstoneJson::signed(
@@ -1630,7 +1630,7 @@ async fn tombstone_bound_to_a_different_library_is_ignored() {
     );
     assert!(
         tombstone.verify("other-lib") && !tombstone.verify("test-lib"),
-        "the tombstone verifies only under the library it was signed for",
+        "the tombstone verifies only under the store it was signed for",
     );
     plant_tombstone(&storage, &tombstone).await;
 
@@ -1645,10 +1645,10 @@ async fn tombstone_bound_to_a_different_library_is_ignored() {
     )
     .await
     .expect("gc");
-    assert_eq!(n, 0, "a foreign-library tombstone reclaims nothing");
+    assert_eq!(n, 0, "a foreign-store tombstone reclaims nothing");
     assert!(
         storage.read("blob-key").await.is_ok(),
-        "the blob survives a tombstone bound to a different library",
+        "the blob survives a tombstone bound to a different store",
     );
 }
 
@@ -1755,7 +1755,7 @@ async fn reupload_through_the_drain_cancels_a_prior_cycle_tombstone() {
         &storage,
         &cipher,
         "test-lib",
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &clock,
         &crate::sync::hlc::Hlc::new("test-device".to_string()),
         None,
@@ -1917,7 +1917,7 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
         &failing,
         &cipher,
         "test-lib",
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &clock,
         &crate::sync::hlc::Hlc::new("test-device".to_string()),
         None,
@@ -2085,7 +2085,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         &storage,
         &cipher,
         "test-lib",
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &clock,
         &crate::sync::hlc::Hlc::new("test-device".to_string()),
         None,

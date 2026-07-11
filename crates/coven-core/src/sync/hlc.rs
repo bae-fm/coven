@@ -129,7 +129,7 @@ pub struct Hlc {
 }
 
 impl Hlc {
-    pub fn try_new(device_id: String) -> Result<Self, crate::library_dir::PathTokenError> {
+    pub fn try_new(device_id: String) -> Result<Self, crate::store_dir::PathTokenError> {
         Self::try_new_with_wall_clock(device_id, wall_clock_ms)
     }
 
@@ -141,8 +141,8 @@ impl Hlc {
     fn try_new_with_wall_clock(
         device_id: String,
         clock: impl Fn() -> u64 + Send + Sync + 'static,
-    ) -> Result<Self, crate::library_dir::PathTokenError> {
-        crate::library_dir::validate_path_token(&device_id)?;
+    ) -> Result<Self, crate::store_dir::PathTokenError> {
+        crate::store_dir::validate_path_token(&device_id)?;
         Ok(Self::new_validated(device_id, Box::new(clock)))
     }
 
@@ -359,7 +359,7 @@ mod tests {
     fn new_rejects_empty_device_id() {
         assert!(matches!(
             Hlc::try_new(String::new()),
-            Err(crate::library_dir::PathTokenError::Empty),
+            Err(crate::store_dir::PathTokenError::Empty),
         ));
     }
 

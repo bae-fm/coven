@@ -16,7 +16,7 @@ use crate::wasm::install_browser_storage;
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 /// Two synced tables — a plain one and a foreign-key child — so a journaled
-/// write's capture session attaches more than one table, as a real library does.
+/// write's capture session attaches more than one table, as a real store does.
 fn synced_tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("items"), SyncedTable::new("item_tags")]
 }

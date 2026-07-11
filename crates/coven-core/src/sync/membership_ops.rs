@@ -37,7 +37,7 @@ pub enum MembershipOpsError {
     #[error("{0}")]
     Invite(#[from] InviteError),
     /// The cloud key rotation a member removal performs is committed — the member
-    /// is out and the library is rotated for every remaining member — but this
+    /// is out and the store is rotated for every remaining member — but this
     /// device could not adopt the rotated key into its own keyring and live cipher.
     /// The removal is durable; this device keeps sealing under the superseded
     /// generation until adoption succeeds. Its two remedies are non-destructive:
@@ -55,12 +55,12 @@ pub enum MembershipOpsError {
     },
     #[error("cannot invite yourself")]
     SelfInvite,
-    /// Inviting into a library whose founder entry is missing (a fresh library
+    /// Inviting into a store whose founder entry is missing (a fresh store
     /// that never founded, or a wiped `membership/*`). Bootstrapping a founder on
     /// the spot is the takeover primitive, so the invite is refused (issue #104).
     #[error(
-        "no membership chain to invite into: the library's founder entry is \
-         missing (it is established at library creation, not on invite)"
+        "no membership chain to invite into: the store's founder entry is \
+         missing (it is established at store creation, not on invite)"
     )]
     NoFounderChain,
     #[error("no membership chain exists")]
@@ -69,7 +69,7 @@ pub enum MembershipOpsError {
     ChainHasNoFounder,
 }
 
-/// `sync_state` key holding the hex Ed25519 pubkey of the library's established
+/// `sync_state` key holding the hex Ed25519 pubkey of the store's established
 /// owner — pinned at create (the creator), join (the invite's owner), or restore.
 /// The membership chain is anchored to it: a chain whose founder differs is a
 /// takeover attempt and is rejected (issue #95).
@@ -105,7 +105,7 @@ pub async fn get_members(
     Ok(members)
 }
 
-/// Invite a member to the shared library.
+/// Invite a member to the shared store.
 ///
 /// Downloads the membership chain (bootstrapping a founder entry if needed),
 /// creates a signed Add entry, wraps the encryption key to the invitee's
@@ -121,8 +121,8 @@ pub async fn invite_member(
     invitee_email: Option<&str>,
     role: MemberRole,
     encryption: &EncryptionService,
-    library_id: &str,
-    library_name: &str,
+    store_id: &str,
+    store_name: &str,
 ) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
     let user_pubkey_hex = hex::encode(user_keypair.public_key());
 
@@ -133,9 +133,9 @@ pub async fn invite_member(
     // Download existing membership entries
     let entry_keys = storage.list_membership_entries().await?;
 
-    // The founder is written once, when a library is created and first connects
+    // The founder is written once, when a store is created and first connects
     // its cloud (issue #102) — never lazily here. An empty listing at invite time
-    // means the chain is missing (a fresh library that never founded, or a wiped
+    // means the chain is missing (a fresh store that never founded, or a wiped
     // `membership/*`); bootstrapping a new founder on the spot is the takeover
     // primitive #104 describes, so refuse instead.
     if entry_keys.is_empty() {
@@ -154,7 +154,7 @@ pub async fn invite_member(
         invitee_email,
         role,
         encryption,
-        library_id,
+        store_id,
         &invite_ts,
     )
     .await?;
@@ -164,7 +164,7 @@ pub async fn invite_member(
         &public_key_hex[..public_key_hex.len().min(16)]
     );
 
-    // The invite anchors the joiner to the library's OWNER — the chain founder,
+    // The invite anchors the joiner to the store's OWNER — the chain founder,
     // not whichever Owner happens to send the invite. A second Owner inviting must
     // still hand the joiner the founder's pubkey, or the joiner would pin the wrong
     // owner and reject the (correctly founder-anchored) chain forever (issue #102).
@@ -175,14 +175,14 @@ pub async fn invite_member(
 
     // Build the invite code
     Ok(crate::join_code::InviteCode {
-        library_id: library_id.to_string(),
-        library_name: library_name.to_string(),
+        store_id: store_id.to_string(),
+        store_name: store_name.to_string(),
         join_info,
         owner_pubkey,
     })
 }
 
-/// Remove a member from the shared library and adopt the rotated key locally.
+/// Remove a member from the shared store and adopt the rotated key locally.
 ///
 /// Downloads the membership chain, creates a signed Remove entry, rotates the
 /// encryption key on the cloud (re-wrapping it for every remaining member), then
@@ -201,7 +201,7 @@ pub async fn remove_member(
     user_keypair: &UserKeypair,
     hlc: &Hlc,
     public_key_hex: &str,
-    library_id: &str,
+    store_id: &str,
     current_encryption: &EncryptionService,
     key_persistence: &dyn KeyPersistence,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
@@ -225,7 +225,7 @@ pub async fn remove_member(
         entry_keys,
         user_keypair,
         public_key_hex,
-        library_id,
+        store_id,
         &revoke_ts,
         current_encryption,
     )
@@ -243,7 +243,7 @@ pub async fn remove_member(
         .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })
 }
 
-/// Why adopting a rotated library key into this device's local state failed. This
+/// Why adopting a rotated store key into this device's local state failed. This
 /// is the local half of a key rotation — serialize the keyring and persist it,
 /// then swap the live cipher — kept distinct from the chain and cloud errors
 /// [`MembershipOpsError`] carries because it runs after a cloud rotation is already
@@ -267,7 +267,7 @@ pub enum AdoptKeyError {
 /// persisting the same keyring and swapping to it again converges — so a caller
 /// that failed here can retry adoption alone.
 ///
-/// A plaintext home has no library key to rotate, so this is an error there:
+/// A plaintext home has no store key to rotate, so this is an error there:
 /// sharing (and hence member removal) requires an encrypted home.
 pub fn apply_key_rotation(
     new_encryption: EncryptionService,
@@ -298,9 +298,9 @@ pub fn apply_key_rotation(
     Ok(new_fingerprint)
 }
 
-/// Write a library's founder entry: chain entry #1, a self-signed Owner `Add` of
+/// Write a store's founder entry: chain entry #1, a self-signed Owner `Add` of
 /// `owner`, uploaded to `membership/{owner_pubkey}/1`. Called once, when a created
-/// library first connects its cloud, so every opaque library has an owner-anchored
+/// store first connects its cloud, so every opaque store has an owner-anchored
 /// chain from the start (issue #102). The caller is responsible for only invoking
 /// this when no chain exists yet; this unconditionally writes seq 1.
 pub(crate) async fn write_founder_entry(
@@ -326,7 +326,7 @@ pub(crate) async fn write_founder_entry(
     publish_membership_head(storage, &chain, owner)
         .await
         .map_err(|e| format!("Failed to upload founder membership head: {e}"))?;
-    info!("Wrote founder Owner entry for the library's membership chain");
+    info!("Wrote founder Owner entry for the store's membership chain");
     Ok(())
 }
 
@@ -441,7 +441,7 @@ pub enum AnchoredChainError {
     /// The entries didn't download, parse, or validate into a well-formed chain.
     #[error("membership chain failed to load/validate: {0}")]
     LoadFailed(String),
-    /// The chain is well-formed but its founder is not the library's pinned owner.
+    /// The chain is well-formed but its founder is not the store's pinned owner.
     #[error("chain founder {founder:?} is not the pinned owner {owner}")]
     FounderMismatch {
         founder: Option<String>,
@@ -479,7 +479,7 @@ impl MembershipAuthorRequirement {
 }
 
 /// Authorize an already-loaded membership chain. `None` is the chain-less open
-/// library case.
+/// store case.
 pub(crate) fn authorize_loaded_membership_author(
     chain: Option<&MembershipChain>,
     author_pubkey: &str,
@@ -489,7 +489,7 @@ pub(crate) fn authorize_loaded_membership_author(
         debug!(
             author = %author_pubkey,
             required_role = ?requirement,
-            "membership author authorization skipped: library is chain-less (no membership, \
+            "membership author authorization skipped: store is chain-less (no membership, \
              no pinned owner), so authorization is not applicable"
         );
         return Ok(());
@@ -513,7 +513,7 @@ pub(crate) enum MembershipAuthorAuthorizationError {
     Unauthorized(String),
 }
 
-/// Load the library membership chain when one exists, anchored to the pinned owner
+/// Load the store membership chain when one exists, anchored to the pinned owner
 /// when known. `watermark_db` threads through to [`load_anchored_chain`]'s
 /// monotonic head guard for readers that re-evaluate authorization each cycle.
 pub(crate) async fn load_membership_chain(
@@ -548,9 +548,9 @@ pub(crate) async fn load_membership_chain(
 ///
 /// The shared load+anchor step the pull cycle and the snapshot authorization both
 /// run: validation proves the chain is well-formed (signatures, owner-only
-/// authorship), and the anchor proves it descends from the library's established
+/// authorship), and the anchor proves it descends from the store's established
 /// owner rather than a wiped-and-refounded chain under an attacker's key. A
-/// library with no pinned owner (browsable) skips the anchor check — it is open by
+/// store with no pinned owner (browsable) skips the anchor check — it is open by
 /// design and has no owner to anchor to.
 ///
 /// `entry_keys` must be non-empty (an empty listing is each caller's own
@@ -698,7 +698,7 @@ mod tests {
     };
     use std::sync::RwLock;
 
-    /// The invite anchors the joiner to the library FOUNDER, regardless of which
+    /// The invite anchors the joiner to the store FOUNDER, regardless of which
     /// Owner sends it. A second Owner inviting must still hand over the founder's
     /// pubkey, or the joiner pins the wrong owner and rejects the founder-anchored
     /// chain forever (issue #102).

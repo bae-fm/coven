@@ -167,7 +167,7 @@ pub struct CloudAccessRevoke {
 /// Shared-credential backends (S3) hand out one static bucket key that cannot be
 /// withdrawn from a single member and report [`RevokeOutcome::Unsupported`].
 /// Removal proceeds either way: revoking chain membership and rotating the
-/// library key — not withdrawing the credential — is what protects post-removal
+/// store key — not withdrawing the credential — is what protects post-removal
 /// content, so `Unsupported` is a truthful outcome, not a failure to paper over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RevokeOutcome {
@@ -478,7 +478,7 @@ async fn write_blob<C: CloudHome + ?Sized>(
     sink.finish().await
 }
 
-/// Low-level cloud storage. Implementations handle a single library.
+/// Low-level cloud storage. Implementations handle a single store.
 ///
 /// All methods deal in raw bytes. No encryption or path layout logic.
 ///
@@ -549,7 +549,7 @@ pub trait CloudHome: crate::MaybeThreadSafe {
     /// Consumer-cloud backends share the folder with the member's account.
     /// Shared-credential backends (S3) return the bucket credentials directly.
     /// Those credentials cannot be withdrawn from one member later, so the
-    /// confidentiality of content written after a removal rests on the library
+    /// confidentiality of content written after a removal rests on the store
     /// key rotation the caller performs when revoking membership, not on making
     /// the removed member's credential stop working.
     async fn grant_access(
@@ -558,7 +558,7 @@ pub trait CloudHome: crate::MaybeThreadSafe {
     ) -> Result<CloudHomeJoinInfo, CloudHomeError>;
 
     /// Revoke a member's provider-level access to the cloud home. Member removal
-    /// always revokes chain membership and rotates the library key; this call is
+    /// always revokes chain membership and rotates the store key; this call is
     /// the additional, provider-dependent step of withdrawing the storage
     /// credential. Consumer clouds unshare the folder and return
     /// [`RevokeOutcome::Revoked`]. Shared-credential backends (S3) cannot

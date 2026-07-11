@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage::cloud::CloudHomeJoinInfo;
 
-/// An invite is always for a private home: sharing wraps and rotates the library
+/// An invite is always for a private home: sharing wraps and rotates the store
 /// key, which a public (plaintext) home has none of, so the joiner always builds
 /// an encrypted, obfuscated home. The invite therefore carries no visibility
 /// flag.
 #[derive(Serialize, Deserialize)]
 pub struct InviteCode {
-    pub library_id: String,
-    pub library_name: String,
+    pub store_id: String,
+    pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
 }
@@ -27,14 +27,13 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
         .map_err(|_| JoinCodeError::InvalidBase64)?;
     let code: InviteCode =
         serde_json::from_slice(&bytes).map_err(|e| JoinCodeError::InvalidJson(e.to_string()))?;
-    // An invite is unsigned, so `library_id` is attacker-controlled. It becomes the
-    // name of a directory the joiner creates under `libraries/` and recursively
+    // An invite is unsigned, so `store_id` is attacker-controlled. It becomes the
+    // name of a directory the joiner creates under `stores/` and recursively
     // deletes on a bootstrap failure, so a value carrying `..`, a separator, or an
-    // absolute path would put that create/delete outside the libraries root. Reject
+    // absolute path would put that create/delete outside the stores root. Reject
     // it the moment the code is parsed: a decoded `InviteCode` always carries a
-    // `library_id` that is a single safe path component.
-    crate::library_dir::validate_path_token(&code.library_id)
-        .map_err(JoinCodeError::InvalidLibraryId)?;
+    // `store_id` that is a single safe path component.
+    crate::store_dir::validate_path_token(&code.store_id).map_err(JoinCodeError::InvalidStoreId)?;
     Ok(code)
 }
 
@@ -73,8 +72,8 @@ pub fn decode_join_request(s: &str) -> Result<JoinRequestCode, JoinCodeError> {
 
 /// UI-ready info from a decoded invite code.
 pub struct InviteCodeInfo {
-    pub library_id: String,
-    pub library_name: String,
+    pub store_id: String,
+    pub store_name: String,
     pub owner_pubkey: String,
     pub cloud_provider: crate::config::CloudProvider,
     /// Whether the joining device must run an OAuth flow before joining, so the
@@ -87,8 +86,8 @@ pub fn decode_invite_code_info(code: &str) -> Result<InviteCodeInfo, JoinCodeErr
     let invite = decode(code)?;
     let cloud_provider = invite.join_info.cloud_provider();
     Ok(InviteCodeInfo {
-        library_id: invite.library_id,
-        library_name: invite.library_name,
+        store_id: invite.store_id,
+        store_name: invite.store_name,
         owner_pubkey: invite.owner_pubkey,
         needs_oauth: cloud_provider.needs_oauth(),
         cloud_provider,
@@ -101,12 +100,12 @@ pub enum JoinCodeError {
     InvalidBase64,
     #[error("invalid invite code payload: {0}")]
     InvalidJson(String),
-    /// The invite's `library_id` is not a safe path component, so it cannot name a
-    /// library directory under `libraries/`. The invite is unsigned and anyone can
+    /// The invite's `store_id` is not a safe path component, so it cannot name a
+    /// store directory under `stores/`. The invite is unsigned and anyone can
     /// craft one, so the id is refused here at decode rather than reaching a path
     /// operation.
-    #[error("invalid library id in invite code: {0}")]
-    InvalidLibraryId(crate::library_dir::PathTokenError),
+    #[error("invalid store id in invite code: {0}")]
+    InvalidStoreId(crate::store_dir::PathTokenError),
 }
 
 #[cfg(test)]
@@ -116,8 +115,8 @@ mod tests {
     #[test]
     fn round_trip_s3() {
         let code = InviteCode {
-            library_id: "lib-123".into(),
-            library_name: "My Library".into(),
+            store_id: "lib-123".into(),
+            store_name: "My Store".into(),
             join_info: CloudHomeJoinInfo::S3 {
                 bucket: "my-bucket".into(),
                 region: "us-east-1".into(),
@@ -130,8 +129,8 @@ mod tests {
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded.library_id, "lib-123");
-        assert_eq!(decoded.library_name, "My Library");
+        assert_eq!(decoded.store_id, "lib-123");
+        assert_eq!(decoded.store_name, "My Store");
         assert_eq!(decoded.owner_pubkey, "deadbeef");
         match decoded.join_info {
             CloudHomeJoinInfo::S3 {
@@ -156,8 +155,8 @@ mod tests {
     #[test]
     fn round_trip_s3_with_endpoint() {
         let code = InviteCode {
-            library_id: "lib-456".into(),
-            library_name: "Shared".into(),
+            store_id: "lib-456".into(),
+            store_name: "Shared".into(),
             join_info: CloudHomeJoinInfo::S3 {
                 bucket: "bucket".into(),
                 region: "eu-west-1".into(),
@@ -170,7 +169,7 @@ mod tests {
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded.library_id, "lib-456");
+        assert_eq!(decoded.store_id, "lib-456");
         match decoded.join_info {
             CloudHomeJoinInfo::S3 { endpoint, .. } => {
                 assert_eq!(endpoint, Some("https://s3.example.com".to_string()));
@@ -182,8 +181,8 @@ mod tests {
     #[test]
     fn round_trip_google_drive() {
         let code = InviteCode {
-            library_id: "lib-789".into(),
-            library_name: "Cloud Shared".into(),
+            store_id: "lib-789".into(),
+            store_name: "Cloud Shared".into(),
             join_info: CloudHomeJoinInfo::GoogleDrive {
                 folder_id: "abc123".into(),
             },
@@ -191,7 +190,7 @@ mod tests {
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded.library_id, "lib-789");
+        assert_eq!(decoded.store_id, "lib-789");
         match decoded.join_info {
             CloudHomeJoinInfo::GoogleDrive { folder_id } => assert_eq!(folder_id, "abc123"),
             _ => panic!("expected GoogleDrive variant"),
@@ -218,32 +217,32 @@ mod tests {
     #[test]
     fn round_trip_cloudkit() {
         let code = InviteCode {
-            library_id: "lib-ck".into(),
-            library_name: "CloudKit Library".into(),
+            store_id: "lib-ck".into(),
+            store_name: "CloudKit Store".into(),
             join_info: CloudHomeJoinInfo::CloudKit,
             owner_pubkey: "aabbccdd".into(),
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded.library_id, "lib-ck");
+        assert_eq!(decoded.store_id, "lib-ck");
         assert!(matches!(decoded.join_info, CloudHomeJoinInfo::CloudKit));
     }
 
     #[test]
     fn round_trip_cloudkit_share() {
         let code = InviteCode {
-            library_id: "lib-ck-share".into(),
-            library_name: "CloudKit Library".into(),
+            store_id: "lib-ck-share".into(),
+            store_name: "CloudKit Store".into(),
             join_info: CloudHomeJoinInfo::CloudKitShare {
                 share_url: "https://www.icloud.com/share/example".into(),
                 owner_name: "_owner".into(),
-                zone_name: "bae-library".into(),
+                zone_name: "bae-store".into(),
             },
             owner_pubkey: "aabbccdd".into(),
         };
         let encoded = encode(&code);
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded.library_id, "lib-ck-share");
+        assert_eq!(decoded.store_id, "lib-ck-share");
         assert!(matches!(
             decoded.join_info,
             CloudHomeJoinInfo::CloudKitShare {
@@ -252,15 +251,15 @@ mod tests {
                 zone_name
             } if share_url == "https://www.icloud.com/share/example"
                 && owner_name == "_owner"
-                && zone_name == "bae-library"
+                && zone_name == "bae-store"
         ));
     }
 
     #[test]
     fn decode_trims_whitespace() {
         let code = InviteCode {
-            library_id: "lib-ws".into(),
-            library_name: "Trimmed".into(),
+            store_id: "lib-ws".into(),
+            store_name: "Trimmed".into(),
             join_info: CloudHomeJoinInfo::Dropbox {
                 shared_folder_id: "sf1".into(),
             },
@@ -268,7 +267,7 @@ mod tests {
         };
         let encoded = format!("  {} \n", encode(&code));
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded.library_id, "lib-ws");
+        assert_eq!(decoded.store_id, "lib-ws");
     }
 
     #[test]

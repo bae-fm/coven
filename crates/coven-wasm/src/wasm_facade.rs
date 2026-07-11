@@ -6,11 +6,11 @@
 //! at-rest and path choices, the fetch-based [`S3WasmCloudHome`](crate::storage::cloud::s3_wasm::S3WasmCloudHome),
 //! the [`CloudSyncStorage`] layer, and the event-loop [`WasmSyncRuntime`]. This
 //! file is the single entry that wires them together for a web page:
-//! [`CovenLibrary::open`] takes a config object, installs the browser storage VFS,
+//! [`CovenStore::open`] takes a config object, installs the browser storage VFS,
 //! opens the database, builds the storage + sync runtime, and hands back a handle
-//! the page drives through [`exec`](CovenLibrary::exec) /
-//! [`query`](CovenLibrary::query) and [`start_sync`](CovenLibrary::start_sync) /
-//! [`stop_sync`](CovenLibrary::stop_sync) / [`sync_now`](CovenLibrary::sync_now).
+//! the page drives through [`exec`](CovenStore::exec) /
+//! [`query`](CovenStore::query) and [`start_sync`](CovenStore::start_sync) /
+//! [`stop_sync`](CovenStore::stop_sync) / [`sync_now`](CovenStore::sync_now).
 //!
 //! ## Worker-only
 //!
@@ -33,10 +33,10 @@ use crate::config::HomeStorage;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::migration::Migration;
 use crate::storage::cloud::s3_wasm::S3WasmCloudHome;
 use crate::storage::cloud::CloudHome;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
@@ -44,16 +44,16 @@ use crate::wasm::install_browser_storage;
 use crate::wasm_keystore::BrowserKeystore;
 
 thread_local! {
-    static OPEN_LIBRARIES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static OPEN_STORES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
-/// The config object JavaScript passes to [`CovenLibrary::open`].
+/// The config object JavaScript passes to [`CovenStore::open`].
 ///
-/// The S3 fields name the bucket the library lives in; `endpoint` is set for an
+/// The S3 fields name the bucket the store lives in; `endpoint` is set for an
 /// S3-compatible service (MinIO, Backblaze, R2, Google Cloud Storage's S3 API)
-/// and left unset for AWS. `library_id` names the library (it feeds the stable
+/// and left unset for AWS. `store_id` names the store (it feeds the stable
 /// SQLite path that the browser VFS hashes into an OPFS storage filename, and
-/// must be distinct per library on one origin). `storage` is
+/// must be distinct per store on one origin). `storage` is
 /// `"opaque"` (end-to-end-encrypted with obfuscated, content-addressed blob keys
 /// — then `encryption_key_hex`, 64 hex chars = a 32-byte key, is required) or
 /// `"browsable"` (a plaintext bucket at readable blob paths). `device_id`
@@ -69,7 +69,7 @@ struct OpenConfig {
     secret_key: String,
     #[serde(default)]
     key_prefix: Option<String>,
-    library_id: String,
+    store_id: String,
     storage: HomeStorage,
     #[serde(default)]
     encryption_key_hex: Option<String>,
@@ -99,48 +99,46 @@ struct JsSyncedTable {
 /// drive app SQL through [`exec`](Self::exec) / [`query`](Self::query) and the
 /// sync loop through [`start_sync`](Self::start_sync) and friends.
 #[wasm_bindgen]
-pub struct CovenLibrary {
+pub struct CovenStore {
     db: Database,
     runtime: WasmSyncRuntime,
-    _open_guard: WasmLibraryOpenGuard,
+    _open_guard: WasmStoreOpenGuard,
 }
 
-struct WasmLibraryOpenGuard {
-    library_id: String,
+struct WasmStoreOpenGuard {
+    store_id: String,
 }
 
-impl WasmLibraryOpenGuard {
-    fn acquire(library_id: &str) -> Result<Self, String> {
-        OPEN_LIBRARIES.with(|libraries| {
-            let mut libraries = libraries.borrow_mut();
-            if !libraries.insert(library_id.to_string()) {
-                return Err(format!(
-                    "library {library_id} is already open in this worker"
-                ));
+impl WasmStoreOpenGuard {
+    fn acquire(store_id: &str) -> Result<Self, String> {
+        OPEN_STORES.with(|stores| {
+            let mut stores = stores.borrow_mut();
+            if !stores.insert(store_id.to_string()) {
+                return Err(format!("store {store_id} is already open in this worker"));
             }
             Ok(Self {
-                library_id: library_id.to_string(),
+                store_id: store_id.to_string(),
             })
         })
     }
 }
 
-impl Drop for WasmLibraryOpenGuard {
+impl Drop for WasmStoreOpenGuard {
     fn drop(&mut self) {
-        OPEN_LIBRARIES.with(|libraries| {
-            libraries.borrow_mut().remove(&self.library_id);
+        OPEN_STORES.with(|stores| {
+            stores.borrow_mut().remove(&self.store_id);
         });
     }
 }
 
 #[wasm_bindgen]
-impl CovenLibrary {
-    /// Open a library against an S3 (or S3-compatible) bucket and return a handle
+impl CovenStore {
+    /// Open a store against an S3 (or S3-compatible) bucket and return a handle
     /// to it.
     ///
     /// Assembles the whole browser stack from `config` (see [`OpenConfig`]):
     /// installs the OPFS storage VFS, opens the [`Database`] at the
-    /// `library_id`-derived SQLite path that the browser VFS hashes into an OPFS
+    /// `store_id`-derived SQLite path that the browser VFS hashes into an OPFS
     /// storage name, builds the at-rest [`CloudCipher`] and the
     /// [`BlobPathScheme`], constructs the fetch-based [`S3WasmCloudHome`], wraps it in
     /// [`CloudSyncStorage`], and starts a [`WasmSyncRuntime`] over it. The sync loop
@@ -153,14 +151,14 @@ impl CovenLibrary {
         config: JsValue,
         migrations: JsValue,
         synced_tables: JsValue,
-    ) -> Result<CovenLibrary, JsValue> {
+    ) -> Result<CovenStore, JsValue> {
         // Surface a Rust panic as a console error with its message + stack, rather
         // than an opaque `unreachable` trap, for anyone running this in a browser.
         console_error_panic_hook::set_once();
 
         let config: OpenConfig = serde_wasm_bindgen::from_value(config)
             .map_err(|e| JsValue::from_str(&format!("invalid open config: {e}")))?;
-        validate_library_id(&config.library_id)
+        validate_store_id(&config.store_id)
             .map_err(|e| JsValue::from_str(&format!("invalid browser config: {e}")))?;
         let migrations = parse_migrations(migrations)
             .map_err(|e| JsValue::from_str(&format!("invalid migrations: {e}")))?;
@@ -196,7 +194,7 @@ impl CovenLibrary {
             home,
             cipher,
             blob_paths,
-            &config.library_id,
+            &config.store_id,
             config.device_id,
             migrations,
             synced_tables,
@@ -213,7 +211,7 @@ impl CovenLibrary {
     /// transaction whose capture session records it into the pending-changeset
     /// journal, so [`start_sync`](Self::start_sync) publishes it. Synced rows must
     /// carry the `_updated_at` register stamp the synced-table contract requires;
-    /// wasm hosts with an open library mint those stamps with [`stamp`](Self::stamp).
+    /// wasm hosts with an open store mint those stamps with [`stamp`](Self::stamp).
     pub fn exec(&self, sql: String) -> Result<(), JsValue> {
         // The wasm `Database::call` runs the closure synchronously on the borrowed
         // connection and returns an already-complete future, so `now_or_never`
@@ -275,22 +273,22 @@ impl CovenLibrary {
     }
 
     /// Mint the next `_updated_at` register stamp for a synced-row write through
-    /// this open library. This stamp uses the database's seeded clock, the same
+    /// this open store. This stamp uses the database's seeded clock, the same
     /// clock the sync runtime records pulled rows on.
     pub fn stamp(&self) -> String {
         self.db.stamper().stamp()
     }
 }
 
-impl CovenLibrary {
-    /// Assemble a [`CovenLibrary`] over an already-built [`CloudHome`], the at-rest
+impl CovenStore {
+    /// Assemble a [`CovenStore`] over an already-built [`CloudHome`], the at-rest
     /// cipher, and the blob-path scheme.
     ///
     /// This is the seam [`open`](Self::open) and the headless facade test share:
     /// `open` builds an [`S3WasmCloudHome`] and passes it here; the test passes an
     /// in-memory home so the full Database + storage + runtime assembly is exercised
     /// without a live, CORS-configured S3 bucket. It installs the OPFS VFS, opens
-    /// the database at the `library_id`-derived SQLite path that the browser VFS
+    /// the database at the `store_id`-derived SQLite path that the browser VFS
     /// hashes into an OPFS storage name, with the demo schema + synced set, and
     /// builds (but does not start) the [`WasmSyncRuntime`] on `schedule`.
     /// `open` passes [`production_schedule`]; the headless test passes a short one
@@ -304,24 +302,24 @@ impl CovenLibrary {
         home: Box<dyn CloudHome>,
         cipher: CloudCipher,
         blob_paths: BlobPathScheme,
-        library_id: &str,
+        store_id: &str,
         device_id: String,
         migrations: Vec<Migration>,
         synced_tables: Vec<SyncedTable>,
         user_keypair: UserKeypair,
         schedule: WasmSyncSchedule,
-    ) -> Result<CovenLibrary, String> {
-        validate_library_id(library_id)?;
-        let open_guard = WasmLibraryOpenGuard::acquire(library_id)?;
+    ) -> Result<CovenStore, String> {
+        validate_store_id(store_id)?;
+        let open_guard = WasmStoreOpenGuard::acquire(store_id)?;
 
         install_browser_storage()
             .await
             .map_err(|e| format!("install browser storage: {e}"))?;
 
         // The browser VFS hashes this SQLite path into a flat OPFS filename
-        // (`coven-<hash>.db`), so distinct library ids produce distinct storage
+        // (`coven-<hash>.db`), so distinct store ids produce distinct storage
         // files on one origin.
-        let path = format!("{library_id}.db");
+        let path = format!("{store_id}.db");
         let (db, _stamper) = Database::open(
             std::path::Path::new(&path),
             synced_tables,
@@ -337,7 +335,7 @@ impl CovenLibrary {
             std::sync::Arc::from(home),
             cipher,
             blob_paths,
-            library_id,
+            store_id,
             user_keypair.clone(),
         );
         // The cycle and the storage must seal/open under the *same* cipher lock so a
@@ -345,15 +343,15 @@ impl CovenLibrary {
         // runtime borrows that one rather than a separate copy.
         let cipher = storage.shared_cipher();
 
-        // A library dir that never touches disk: the browser has none. The
+        // A store dir that never touches disk: the browser has none. The
         // changeset path's only fs touch is best-effort changeset staging, which
         // logs and continues on failure. This demo syncs rows only — its notes
         // schema carries no blobs — so the dir is never read or written.
-        let library_dir = LibraryDir::new(std::path::Path::new("/coven-browser"));
+        let store_dir = StoreDir::new(std::path::Path::new("/coven-browser"));
 
         let runtime = WasmSyncRuntime::new(
             storage,
-            library_id.to_string(),
+            store_id.to_string(),
             device_id.clone(),
             db.hlc(),
             cipher,
@@ -365,7 +363,7 @@ impl CovenLibrary {
             // `Clock` is a plain `Send + Sync` sync trait, so its handle is an
             // `Arc` (`ClockRef`) even on the single-threaded browser runtime.
             std::sync::Arc::new(SystemClock) as ClockRef,
-            library_dir,
+            store_dir,
             // The demo schema declares no blob-bearing tables, so coven derives an
             // empty blob set. A real app declares its blob columns via
             // `SyncedTable::carries_blob` (see `crate::blob::decl::BlobDecls`).
@@ -373,7 +371,7 @@ impl CovenLibrary {
             schedule,
         );
 
-        Ok(CovenLibrary {
+        Ok(CovenStore {
             db,
             runtime,
             _open_guard: open_guard,
@@ -398,13 +396,13 @@ impl CovenLibrary {
     }
 }
 
-fn validate_library_id(library_id: &str) -> Result<(), String> {
-    crate::library_dir::validate_path_token(library_id).map_err(|e| format!("library_id {e}"))
+fn validate_store_id(store_id: &str) -> Result<(), String> {
+    crate::store_dir::validate_path_token(store_id).map_err(|e| format!("store_id {e}"))
 }
 
 /// The sync loop's real cadence: a 3 s startup grace so the loop does not race
 /// page load, a 30 s steady interval between cycles, and a 300 s cap on the
-/// exponential failure backoff. (A [`sync_now`](CovenLibrary::sync_now) wake runs
+/// exponential failure backoff. (A [`sync_now`](CovenStore::sync_now) wake runs
 /// a cycle without waiting out the interval.)
 fn production_schedule() -> WasmSyncSchedule {
     WasmSyncSchedule {
@@ -418,7 +416,7 @@ fn production_schedule() -> WasmSyncSchedule {
 ///
 /// An opaque home requires a 64-hex-char (32-byte) key; its absence or a parse
 /// failure is an error, never a silent fall back to plaintext (which would write
-/// the library's data to the bucket in the clear). A browsable home takes no key.
+/// the store's data to the bucket in the clear). A browsable home takes no key.
 fn build_cipher(storage: HomeStorage, key_hex: Option<&str>) -> Result<CloudCipher, String> {
     if storage.is_opaque() {
         let hex = key_hex.ok_or("opaque home requires `encryption_key_hex`")?;
@@ -476,7 +474,7 @@ fn parse_synced_tables(value: JsValue) -> Result<Vec<SyncedTable>, String> {
 }
 
 /// Run a `SELECT` and collect its rows as `serde_json` values, keyed by column
-/// name, so the facade can hand them to JavaScript. Shared by [`CovenLibrary::query`]
+/// name, so the facade can hand them to JavaScript. Shared by [`CovenStore::query`]
 /// and the headless test.
 fn query_rows(conn: &Connection, sql: &str) -> Result<Vec<serde_json::Value>, DbError> {
     let mut stmt = conn.prepare(sql).map_err(DbError::from)?;

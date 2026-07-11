@@ -239,7 +239,7 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
 /// catalog a joining device adopts wholesale; the `cursors` are control input —
 /// a bootstrapping device starts pulling each peer *past* these, so a forged
 /// `cursors = {device: u64::MAX}` makes it silently skip that device's real
-/// changesets. The at-rest cipher proves only confidentiality (the library key is
+/// changesets. The at-rest cipher proves only confidentiality (the store key is
 /// shared by every member), not authorship, so a bucket writer can overwrite both
 /// objects. So the author signs both halves together: `db_hash` binds the DB
 /// image and `cursors` bind the metadata, under one signature. A tampered DB no
@@ -250,13 +250,13 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
 /// downloaded and compares, with no decryption needed to detect a substituted
 /// image.
 ///
-/// `library_id` binds the meta to its library: it is part of the signed payload
-/// but not stored (the reader supplies its own library id to [`Self::verify`]),
-/// mirroring [`WrappedLibraryKey`]. A member of two libraries cannot take one
-/// library's catalog and re-sign its meta as the other's — re-verifying under the
-/// second library's id fails, because the signature was taken over the first's.
+/// `store_id` binds the meta to its store: it is part of the signed payload
+/// but not stored (the reader supplies its own store id to [`Self::verify`]),
+/// mirroring [`WrappedStoreKey`]. A member of two stores cannot take one
+/// store's catalog and re-sign its meta as the other's — re-verifying under the
+/// second store's id fails, because the signature was taken over the first's.
 ///
-/// Like [`HeadJson`] (and unlike [`WrappedLibraryKey`]), the `author_pubkey` is
+/// Like [`HeadJson`] (and unlike [`WrappedStoreKey`]), the `author_pubkey` is
 /// stored: a snapshot's author varies device to device, so the verifier learns
 /// who signed it and then checks that author against the membership chain (the
 /// authorization step, the caller's job). It is also what lets the
@@ -282,31 +282,31 @@ pub struct SnapshotMetaJson {
 
 /// The snapshot-meta fields the signature covers, in declaration order. Excludes
 /// `author_pubkey`/`signature` (the signature's own outputs). Includes
-/// `library_id` (so a meta can't be replayed into a different library, mirroring
+/// `store_id` (so a meta can't be replayed into a different store, mirroring
 /// [`WrappedKeyFields`]). `cursors` is a `BTreeMap` so its serialization is
 /// order-deterministic — a canonical payload.
 #[derive(Serialize)]
 struct SnapshotMetaFields<'a> {
-    library_id: &'a str,
+    store_id: &'a str,
     cursors: &'a std::collections::BTreeMap<String, u64>,
     db_hash: &'a str,
     schema_version: u32,
 }
 
 impl SnapshotMetaJson {
-    /// Build a snapshot meta for `library_id` signed by `keypair`: fills
+    /// Build a snapshot meta for `store_id` signed by `keypair`: fills
     /// `author_pubkey` with the device's public key and `signature` with the
-    /// detached signature over the canonical payload (which binds `library_id`,
-    /// the cursors, and the DB hash). `library_id` is bound but not stored — the
+    /// detached signature over the canonical payload (which binds `store_id`,
+    /// the cursors, and the DB hash). `store_id` is bound but not stored — the
     /// reader passes its own to [`Self::verify`].
     pub fn signed(
-        library_id: &str,
+        store_id: &str,
         cursors: std::collections::BTreeMap<String, u64>,
         db_hash: String,
         schema_version: u32,
         keypair: &UserKeypair,
     ) -> Self {
-        let payload = snapshot_meta_signing_payload(library_id, &cursors, &db_hash, schema_version);
+        let payload = snapshot_meta_signing_payload(store_id, &cursors, &db_hash, schema_version);
         let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         SnapshotMetaJson {
             cursors,
@@ -318,13 +318,13 @@ impl SnapshotMetaJson {
     }
 
     /// Verify the embedded signature against the embedded `author_pubkey`, bound
-    /// to `library_id`. A meta that fails this is forged, corrupt, tampered
-    /// (cursors or DB hash changed after signing), or a different library's meta
+    /// to `store_id`. A meta that fails this is forged, corrupt, tampered
+    /// (cursors or DB hash changed after signing), or a different store's meta
     /// replayed here, and must not be adopted. Whether the author is *authorized*
     /// (a current member) is a separate check the caller runs.
-    pub fn verify(&self, library_id: &str) -> bool {
+    pub fn verify(&self, store_id: &str) -> bool {
         let payload = snapshot_meta_signing_payload(
-            library_id,
+            store_id,
             &self.cursors,
             &self.db_hash,
             self.schema_version,
@@ -334,13 +334,13 @@ impl SnapshotMetaJson {
 }
 
 fn snapshot_meta_signing_payload(
-    library_id: &str,
+    store_id: &str,
     cursors: &std::collections::BTreeMap<String, u64>,
     db_hash: &str,
     schema_version: u32,
 ) -> Vec<u8> {
     let fields = SnapshotMetaFields {
-        library_id,
+        store_id,
         cursors,
         db_hash,
         schema_version,
@@ -371,11 +371,11 @@ fn snapshot_meta_signing_payload(
 /// commits to the *exact* generation, not merely its number — the verifier checks
 /// the pointer's `db_hash` equals the meta's before adopting the db image.
 ///
-/// `library_id` binds the pointer to its library: it is part of the signed
-/// payload but not stored (the reader supplies its own library id to
-/// [`Self::verify`]), mirroring [`WrappedLibraryKey`]. A member of two libraries
-/// cannot repoint one library's snapshot under the other's — re-verifying under
-/// the second library's id fails.
+/// `store_id` binds the pointer to its store: it is part of the signed
+/// payload but not stored (the reader supplies its own store id to
+/// [`Self::verify`]), mirroring [`WrappedStoreKey`]. A member of two stores
+/// cannot repoint one store's snapshot under the other's — re-verifying under
+/// the second store's id fails.
 ///
 /// Like [`HeadJson`] and [`SnapshotMetaJson`], `author_pubkey` is stored: the
 /// publishing device varies, so the verifier learns who signed and then checks
@@ -401,25 +401,25 @@ pub struct SnapshotPointerJson {
 
 /// The pointer fields the signature covers, in declaration order. Excludes
 /// `author_pubkey`/`signature` (the signature's own outputs). Includes
-/// `library_id` (so a pointer can't be replayed into a different library,
+/// `store_id` (so a pointer can't be replayed into a different store,
 /// mirroring [`WrappedKeyFields`]). Binding both `seq` and `db_hash` means a
 /// pointer cannot be re-stamped to a different generation number, nor have its
 /// number kept while pointed at a substituted image.
 #[derive(Serialize)]
 struct SnapshotPointerFields<'a> {
-    library_id: &'a str,
+    store_id: &'a str,
     seq: u64,
     db_hash: &'a str,
 }
 
 impl SnapshotPointerJson {
-    /// Build a pointer for `library_id` signed by `keypair`: fills `author_pubkey`
+    /// Build a pointer for `store_id` signed by `keypair`: fills `author_pubkey`
     /// with the device's public key and `signature` with the detached signature
-    /// over the canonical payload (which binds `library_id`, the generation `seq`,
-    /// and its DB hash). `library_id` is bound but not stored — the reader passes
+    /// over the canonical payload (which binds `store_id`, the generation `seq`,
+    /// and its DB hash). `store_id` is bound but not stored — the reader passes
     /// its own to [`Self::verify`].
-    pub fn signed(library_id: &str, seq: u64, db_hash: String, keypair: &UserKeypair) -> Self {
-        let payload = snapshot_pointer_signing_payload(library_id, seq, &db_hash);
+    pub fn signed(store_id: &str, seq: u64, db_hash: String, keypair: &UserKeypair) -> Self {
+        let payload = snapshot_pointer_signing_payload(store_id, seq, &db_hash);
         let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         SnapshotPointerJson {
             seq,
@@ -430,34 +430,34 @@ impl SnapshotPointerJson {
     }
 
     /// Verify the embedded signature against the embedded `author_pubkey`, bound
-    /// to `library_id`. A pointer that fails this is forged, corrupt, tampered
-    /// (`seq` or `db_hash` changed after signing), or a different library's pointer
+    /// to `store_id`. A pointer that fails this is forged, corrupt, tampered
+    /// (`seq` or `db_hash` changed after signing), or a different store's pointer
     /// replayed here, and must not be followed. Whether the author is *authorized*
     /// (a current write-capable member) is a separate check the caller runs.
-    pub fn verify(&self, library_id: &str) -> bool {
-        let payload = snapshot_pointer_signing_payload(library_id, self.seq, &self.db_hash);
+    pub fn verify(&self, store_id: &str) -> bool {
+        let payload = snapshot_pointer_signing_payload(store_id, self.seq, &self.db_hash);
         keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
 
-fn snapshot_pointer_signing_payload(library_id: &str, seq: u64, db_hash: &str) -> Vec<u8> {
+fn snapshot_pointer_signing_payload(store_id: &str, seq: u64, db_hash: &str) -> Vec<u8> {
     let fields = SnapshotPointerFields {
-        library_id,
+        store_id,
         seq,
         db_hash,
     };
     serde_json::to_vec(&fields).expect("snapshot pointer fields serialization cannot fail")
 }
 
-/// Serialized form of `keys/{recipient_pubkey}{suffix}`: the library encryption
+/// Serialized form of `keys/{recipient_pubkey}{suffix}`: the store encryption
 /// key sealed to one member, plus the owner signature that authenticates it.
 ///
 /// The sealed box alone proves only that the named recipient can open it — not
 /// who produced it (the sender is an ephemeral key). Anyone who can write the
 /// bucket knows a member's public key and can overwrite this object with a box
 /// wrapping a key of their choosing; the joiner would then adopt an
-/// attacker-chosen library key. So the owner signs the binding
-/// `(library_id, recipient_pubkey, author_pubkey, sealed)`. A fresh joiner
+/// attacker-chosen store key. So the owner signs the binding
+/// `(store_id, recipient_pubkey, author_pubkey, sealed)`. A fresh joiner
 /// verifies that signature against the owner the invite pins (the chain founder);
 /// an existing member verifies against the current Owner set from the anchored
 /// membership chain before adopting a rotated key. A substituted box no longer
@@ -469,26 +469,26 @@ fn snapshot_pointer_signing_payload(library_id: &str, seq: u64, db_hash: &str) -
 /// member's slot, mirroring how [`HeadJson`] binds its `device_id`.
 ///
 #[derive(Serialize, Deserialize)]
-pub struct WrappedLibraryKey {
+pub struct WrappedStoreKey {
     /// Hex-encoded Ed25519 public key of the Owner that signed this wrapped key.
     pub author_pubkey: String,
     /// Membership entry that must be visible before an existing member adopts
     /// this keyring. Invitation keys have no activation coordinate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<MembershipCoord>,
-    /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the library key.
+    /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the store key.
     pub sealed: String,
     /// Hex-encoded detached signature over [`WrappedKeyFields`], produced by the owner.
     pub signature: String,
 }
 
 /// The wrapped-key fields the signature covers, in declaration order. Excludes
-/// `signature` (the signature's own output). Includes `library_id` (so a key
-/// can't be replayed into a different library) and `recipient_pubkey` (the slot,
+/// `signature` (the signature's own output). Includes `store_id` (so a key
+/// can't be replayed into a different store) and `recipient_pubkey` (the slot,
 /// so a key can't be relocated to another member).
 #[derive(Serialize)]
 struct WrappedKeyFields<'a> {
-    library_id: &'a str,
+    store_id: &'a str,
     recipient_pubkey: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     activation: Option<&'a MembershipCoord>,
@@ -496,7 +496,7 @@ struct WrappedKeyFields<'a> {
     sealed: &'a str,
 }
 
-/// Why a [`WrappedLibraryKey`] could not be authenticated and unwrapped. Named
+/// Why a [`WrappedStoreKey`] could not be authenticated and unwrapped. Named
 /// per reason so the caller can surface *why* an adoption was refused — a
 /// substituted/forged key (the signature does not verify against the pinned
 /// owner) is distinct from a corrupt object (the sealed box is not valid hex) —
@@ -504,12 +504,12 @@ struct WrappedKeyFields<'a> {
 #[derive(Debug, thiserror::Error)]
 pub enum WrappedKeyError {
     /// The signature does not verify against an authorized Owner over
-    /// `(library_id, recipient_pubkey, author_pubkey, sealed)`. Covers a box
+    /// `(store_id, recipient_pubkey, author_pubkey, sealed)`. Covers a box
     /// signed by anyone outside the authorized set, a payload tampered after
-    /// signing (different library, slot, author, or sealed bytes), and a
+    /// signing (different store, slot, author, or sealed bytes), and a
     /// malformed signature or owner pubkey — all indistinguishable here and all
     /// meaning "not authentically signed by an authorized Owner".
-    #[error("signature does not verify against an authorized library owner")]
+    #[error("signature does not verify against an authorized store owner")]
     SignatureMismatch,
     /// The signature verified, but the sealed-box field is not valid hex, so
     /// there are no bytes to decrypt — a corrupt object, not an attack.
@@ -517,12 +517,12 @@ pub enum WrappedKeyError {
     MalformedSealed,
 }
 
-impl WrappedLibraryKey {
-    /// Wrap `sealed` (a sealed box of the library key, already encrypted to
+impl WrappedStoreKey {
+    /// Wrap `sealed` (a sealed box of the store key, already encrypted to
     /// `recipient_pubkey`) and sign the binding with `owner`: fills `signature`
     /// with the owner's detached signature over the canonical payload.
     pub fn signed(
-        library_id: &str,
+        store_id: &str,
         recipient_pubkey: &str,
         activation: Option<MembershipCoord>,
         sealed: Vec<u8>,
@@ -531,14 +531,14 @@ impl WrappedLibraryKey {
         let author_pubkey = hex::encode(owner.public_key());
         let sealed_hex = hex::encode(sealed);
         let payload = wrapped_key_signing_payload(
-            library_id,
+            store_id,
             recipient_pubkey,
             activation.as_ref(),
             &author_pubkey,
             &sealed_hex,
         );
         let (_, signature) = keys::sign_hex(owner, &payload);
-        WrappedLibraryKey {
+        WrappedStoreKey {
             author_pubkey,
             activation,
             sealed: sealed_hex,
@@ -547,21 +547,21 @@ impl WrappedLibraryKey {
     }
 
     /// Verify this wrapped key was authentically produced by one of
-    /// `expected_owners` for `recipient_pubkey` in `library_id`, and return the
+    /// `expected_owners` for `recipient_pubkey` in `store_id`, and return the
     /// sealed-box bytes to decrypt. Verifies the signature against the authorized
-    /// Owner set for this context over the binding `(library_id,
+    /// Owner set for this context over the binding `(store_id,
     /// recipient_pubkey, author_pubkey, sealed)`. Fails closed, naming why, if the
     /// signature doesn't verify against that set (a substituted, forged,
     /// replayed, or relocated key) or the sealed box is malformed; neither must
     /// be adopted.
     pub fn verify_and_unwrap<'a>(
         &self,
-        library_id: &str,
+        store_id: &str,
         recipient_pubkey: &str,
         expected_owners: impl IntoIterator<Item = &'a str>,
     ) -> Result<Vec<u8>, WrappedKeyError> {
         let payload = wrapped_key_signing_payload(
-            library_id,
+            store_id,
             recipient_pubkey,
             self.activation.as_ref(),
             &self.author_pubkey,
@@ -583,14 +583,14 @@ impl WrappedLibraryKey {
 }
 
 fn wrapped_key_signing_payload(
-    library_id: &str,
+    store_id: &str,
     recipient_pubkey: &str,
     activation: Option<&MembershipCoord>,
     author_pubkey: &str,
     sealed_hex: &str,
 ) -> Vec<u8> {
     let fields = WrappedKeyFields {
-        library_id,
+        store_id,
         recipient_pubkey,
         activation,
         author_pubkey,
@@ -776,11 +776,11 @@ mod tests {
             "meta verifies after a JSON round-trip"
         );
 
-        // The signature binds the library: a meta re-verified under a different
-        // library id is refused (the cross-library replay defense).
+        // The signature binds the store: a meta re-verified under a different
+        // store id is refused (the cross-store replay defense).
         assert!(
             !meta.verify("other-lib"),
-            "a meta must not verify under a different library id"
+            "a meta must not verify under a different store id"
         );
 
         // The signature binds the DB hash: a meta swapped onto a different DB image
@@ -850,11 +850,11 @@ mod tests {
             "pointer verifies after a JSON round-trip"
         );
 
-        // The signature binds the library: a pointer re-verified under a different
-        // library id is refused (the cross-library replay defense).
+        // The signature binds the store: a pointer re-verified under a different
+        // store id is refused (the cross-store replay defense).
         assert!(
             !pointer.verify("other-lib"),
-            "a pointer must not verify under a different library id"
+            "a pointer must not verify under a different store id"
         );
 
         // The signature binds the seq: repointing to a different generation number
@@ -893,12 +893,11 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![1u8, 2, 3, 4, 5];
-        let wrapped =
-            WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed.clone(), &owner);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed.clone(), &owner);
 
         // Round-trips through JSON and yields the sealed bytes back.
         let json = serde_json::to_vec(&wrapped).expect("serialize wrapped key");
-        let parsed: WrappedLibraryKey = serde_json::from_slice(&json).expect("parse wrapped key");
+        let parsed: WrappedStoreKey = serde_json::from_slice(&json).expect("parse wrapped key");
         assert_eq!(
             parsed
                 .verify_and_unwrap("lib", "recipient-pk", std::iter::once(owner_hex.as_str()))
@@ -917,7 +916,7 @@ mod tests {
         let pinned_owner = UserKeypair::generate();
         let pinned_owner_hex = hex::encode(pinned_owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed, &signer);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed, &signer);
 
         assert!(
             matches!(
@@ -937,10 +936,10 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed, &owner);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed, &owner);
 
-        // The signature binds the library and the recipient slot: changing either
-        // at verify time fails, so a key can't be replayed cross-library or
+        // The signature binds the store and the recipient slot: changing either
+        // at verify time fails, so a key can't be replayed cross-store or
         // relocated to another member's slot.
         assert!(
             matches!(
@@ -951,7 +950,7 @@ mod tests {
                 ),
                 Err(WrappedKeyError::SignatureMismatch),
             ),
-            "must reject a key replayed into a different library",
+            "must reject a key replayed into a different store",
         );
         assert!(
             matches!(
@@ -973,7 +972,7 @@ mod tests {
         let owner_hex = hex::encode(owner.public_key());
         let other_owner_hex = hex::encode(other_owner.public_key());
         let sealed = vec![9u8; 32];
-        let mut wrapped = WrappedLibraryKey::signed("lib", "recipient-pk", None, sealed, &owner);
+        let mut wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed, &owner);
         assert!(
             wrapped
                 .verify_and_unwrap("lib", "recipient-pk", std::iter::once(owner_hex.as_str()))
@@ -1000,7 +999,7 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let mut wrapped =
-            WrappedLibraryKey::signed("lib", "recipient-pk", None, vec![1u8; 4], &owner);
+            WrappedStoreKey::signed("lib", "recipient-pk", None, vec![1u8; 4], &owner);
 
         // A signature that isn't valid hex can't verify against the owner.
         wrapped.signature = "not-hex!!".to_string();
@@ -1019,7 +1018,7 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
 
-        let mut wrapped = WrappedLibraryKey {
+        let mut wrapped = WrappedStoreKey {
             author_pubkey: owner_hex.clone(),
             activation: None,
             sealed: "not-hex!!".to_string(),

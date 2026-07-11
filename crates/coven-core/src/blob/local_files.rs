@@ -10,7 +10,7 @@
 //!   evictable to a size budget, kept-or-dropped per pin. Its bytes are a mirror.
 //! - The local store holds **Local** host-provided blobs — there is no cloud copy
 //!   to re-fetch, so it is **never evicted**: the budget sweep walks only
-//!   [`LibraryDir::cache_dir`], never `storage/local`.
+//!   [`StoreDir::cache_dir`], never `storage/local`.
 //!
 //! (A user-provided Local blob is the user's own file at a path, tracked as an
 //! external ref — see `local_blob_refs` — not in this store.)
@@ -25,7 +25,7 @@
 //! See the [blob concept tree](crate::blob) for where the local store sits in the
 //! whole storage model.
 
-use crate::library_dir::{LibraryDir, PathTokenError};
+use crate::store_dir::{PathTokenError, StoreDir};
 use std::path::PathBuf;
 
 /// Why a local-store operation failed.
@@ -63,12 +63,12 @@ impl From<PathTokenError> for LocalBlobError {
 /// blob while Local, not a re-fetchable cache mirror).
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn store(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     bytes: &[u8],
 ) -> Result<(), LocalBlobError> {
-    let dest = library_dir.local_blob_path(namespace, id)?;
+    let dest = store_dir.local_blob_path(namespace, id)?;
     crate::local_blob::write_atomic(&dest, bytes)
         .await
         .map_err(LocalBlobError::Io)
@@ -80,12 +80,12 @@ pub async fn store(
 /// absence means the upload staging file is gone and the Remote read continues to
 /// cloud.
 pub async fn read(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     expected_size: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    match path_if_present(library_dir, namespace, id, expected_size).await? {
+    match path_if_present(store_dir, namespace, id, expected_size).await? {
         Some(path) => crate::local_blob::read(&path)
             .await
             .map(Some)
@@ -97,12 +97,12 @@ pub async fn read(
 /// Return the local-store file path when a host-provided blob is present and has
 /// exactly `expected_size` bytes.
 pub async fn path_if_present(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     expected_size: u64,
 ) -> Result<Option<PathBuf>, LocalBlobError> {
-    let path = library_dir.local_blob_path(namespace, id)?;
+    let path = store_dir.local_blob_path(namespace, id)?;
     match crate::local_blob::exists(&path).await {
         Ok(true) => {
             ensure_file_len(&path, expected_size).await?;
@@ -118,14 +118,14 @@ pub async fn path_if_present(
 /// caller has bounded against the blob's length reads exactly `len`; a file whose
 /// length differs from the declared size fails before the range read.
 pub async fn read_range(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
     expected_size: u64,
     offset: u64,
     len: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    match path_if_present(library_dir, namespace, id, expected_size).await? {
+    match path_if_present(store_dir, namespace, id, expected_size).await? {
         Some(path) => crate::local_blob::read_range(&path, offset, len)
             .await
             .map(Some)
@@ -151,11 +151,11 @@ async fn ensure_file_len(path: &std::path::Path, expected_size: u64) -> Result<(
 /// was there. An already-absent file is the expected case (the blob became Remote,
 /// or was never Local here), not an error.
 pub async fn drop_blob(
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     namespace: &str,
     id: &str,
 ) -> Result<bool, LocalBlobError> {
-    let path = library_dir.local_blob_path(namespace, id)?;
+    let path = store_dir.local_blob_path(namespace, id)?;
     crate::local_blob::remove_file(&path)
         .await
         .map_err(LocalBlobError::Io)

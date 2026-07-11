@@ -1,10 +1,10 @@
-//! A restore code's `lid` (library id) names a directory the restorer creates.
+//! A restore code's `sid` (store id) names a directory the restorer creates.
 //!
-//! A restore code is unsigned, so its `lid` is attacker-controlled.
-//! `restore_from_cloud` turns it into a directory under `app_dir/libraries/` and,
-//! on a bootstrap failure, recursively deletes that directory. An `lid` like
+//! A restore code is unsigned, so its `sid` is attacker-controlled.
+//! `restore_from_cloud` turns it into a directory under `app_dir/stores/` and,
+//! on a bootstrap failure, recursively deletes that directory. An `sid` like
 //! `../escape` or an absolute path would put that create/delete outside the
-//! libraries root — arbitrary directory creation and recursive deletion. These
+//! stores root — arbitrary directory creation and recursive deletion. These
 //! tests pin that the id is refused the moment the code is decoded, so it never
 //! reaches the directory step: a decoded `RestoreCode` always carries a safe id.
 
@@ -18,13 +18,13 @@ use crate::sync::restore_code::{
 };
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 
-/// A restore code carrying the given `lid`. The provider points at a loopback
+/// A restore code carrying the given `sid`. The provider points at a loopback
 /// endpoint nothing listens on, so if execution ever reached the network it would
-/// fail at once — but a malicious `lid` is refused at decode, well before that.
-fn restore_code_with_lid(lid: &str) -> String {
+/// fail at once — but a malicious `sid` is refused at decode, well before that.
+fn restore_code_with_sid(sid: &str) -> String {
     let code = RestoreCode {
         v: crate::sync::restore_code::RESTORE_CODE_VERSION,
-        lid: lid.to_string(),
+        sid: sid.to_string(),
         ek: Some("aa".repeat(32)),
         name: "Evil".to_string(),
         provider: RestoreProvider::S3 {
@@ -36,8 +36,8 @@ fn restore_code_with_lid(lid: &str) -> String {
             access_key: "ak".to_string(),
             secret_key: "sk".to_string(),
         },
-        // A real Ed25519 keypair's 64 bytes: a malicious `lid` is rejected at decode
-        // before the key is touched, and a valid `lid` rebuilds this keypair and
+        // A real Ed25519 keypair's 64 bytes: a malicious `sid` is rejected at decode
+        // before the key is touched, and a valid `sid` rebuilds this keypair and
         // proceeds to the cloud step (where the loopback endpoint fails it).
         sk: hex::encode(crate::keys::UserKeypair::generate().to_keypair_bytes()),
     };
@@ -45,7 +45,7 @@ fn restore_code_with_lid(lid: &str) -> String {
 }
 
 /// Drive the full restore path for a code string and return its result. A
-/// malicious `lid` fails at decode before any cloud home is built, so the cloud
+/// malicious `sid` fails at decode before any cloud home is built, so the cloud
 /// details never matter.
 async fn restore_result_for(
     code_str: &str,
@@ -66,17 +66,17 @@ async fn restore_result_for(
     .await
 }
 
-/// Every traversal-shaped `lid` is refused at the decode boundary:
-/// `decode_restore_code` returns `RestoreCodeError::InvalidLibraryId`, so a decoded
+/// Every traversal-shaped `sid` is refused at the decode boundary:
+/// `decode_restore_code` returns `RestoreCodeError::InvalidStoreId`, so a decoded
 /// `RestoreCode` never carries a traversal id. Driven end to end, the decode error
 /// propagates as `RestoreError::InvalidCode` and the restore creates nothing outside
-/// the libraries root.
+/// the stores root.
 ///
 /// The cases share one mechanism and differ only in the malicious id and the
 /// directory it would escape to, so they run as a table:
-/// - `../escape`: `app_dir/libraries/../escape` resolves to `app_dir/escape`.
-/// - an absolute path: `libraries`.join("/abs") == "/abs" replaces the base.
-/// - `.`: a trailing `.` normalizes away, so `libraries/.` lands on the data dir.
+/// - `../escape`: `app_dir/stores/../escape` resolves to `app_dir/escape`.
+/// - an absolute path: `stores`.join("/abs") == "/abs" replaces the base.
+/// - `.`: a trailing `.` normalizes away, so `stores/.` lands on the data dir.
 #[tokio::test]
 async fn restore_rejects_traversal_lid_at_decode() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -93,20 +93,20 @@ async fn restore_rejects_traversal_lid_at_decode() {
         (".", None),
     ];
 
-    for (lid, escape_target) in cases {
-        let encoded = restore_code_with_lid(lid);
+    for (sid, escape_target) in cases {
+        let encoded = restore_code_with_sid(sid);
         assert!(
             matches!(
                 decode_restore_code(&encoded),
-                Err(RestoreCodeError::InvalidLibraryId(_))
+                Err(RestoreCodeError::InvalidStoreId(_))
             ),
-            "decode must refuse `{lid}` with InvalidLibraryId",
+            "decode must refuse `{sid}` with InvalidStoreId",
         );
 
         let result = restore_result_for(&encoded, app_dir).await;
         assert!(
             matches!(result, Err(RestoreError::InvalidCode(_))),
-            "`{lid}` must fail the restore with the propagated decode error, got {result:?}",
+            "`{sid}` must fail the restore with the propagated decode error, got {result:?}",
         );
         if let Some(target) = escape_target {
             assert!(
@@ -118,32 +118,32 @@ async fn restore_rejects_traversal_lid_at_decode() {
     }
 }
 
-/// A library already present locally is the data — re-running a restore for it adds
+/// A store already present locally is the data — re-running a restore for it adds
 /// nothing, and the old code would delete its database and blobs during the
 /// failure-cleanup once the snapshot download failed. The restore now refuses up
-/// front with a typed error naming the library and leaves the existing files
+/// front with a typed error naming the store and leaves the existing files
 /// untouched. The endpoint is unreachable so that, absent the guard, execution would
 /// reach the snapshot download and the destructive cleanup — the guard stops it first.
 #[tokio::test]
-async fn restore_refuses_when_library_exists_and_leaves_it_untouched() {
-    let encoded = restore_code_with_lid("abc-123");
+async fn restore_refuses_when_store_exists_and_leaves_it_untouched() {
+    let encoded = restore_code_with_sid("abc-123");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
 
-    // A library with this id is already present locally, holding a database file
+    // A store with this id is already present locally, holding a database file
     // and a blob the restore must not touch.
-    let library_dir = app_dir.join("libraries").join("abc-123");
-    std::fs::create_dir_all(library_dir.join("storage")).expect("create existing library dir");
-    let db_path = library_dir.join("library.db");
-    let blob_path = library_dir.join("storage").join("cover.blob");
+    let store_dir = app_dir.join("stores").join("abc-123");
+    std::fs::create_dir_all(store_dir.join("storage")).expect("create existing store dir");
+    let db_path = store_dir.join("store.db");
+    let blob_path = store_dir.join("storage").join("cover.blob");
     std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
     std::fs::write(&blob_path, b"existing-blob-bytes").expect("seed existing blob");
 
     let result = restore_result_for(&encoded, app_dir).await;
     assert!(
-        matches!(result, Err(RestoreError::LibraryExists(ref id)) if id == "abc-123"),
-        "restore must refuse a library already present locally, got {result:?}",
+        matches!(result, Err(RestoreError::StoreExists(ref id)) if id == "abc-123"),
+        "restore must refuse a store already present locally, got {result:?}",
     );
     assert_eq!(
         std::fs::read(&db_path).expect("existing db still present"),
@@ -157,15 +157,15 @@ async fn restore_refuses_when_library_exists_and_leaves_it_untouched() {
     );
 }
 
-/// A normal `lid` decodes and the restore reaches the cloud step, where it fails on
+/// A normal `sid` decodes and the restore reaches the cloud step, where it fails on
 /// the unreachable endpoint (`RestoreError::Snapshot`) rather than on the id —
 /// proving the decoder rejects only unsafe ids and the directory the restore would
-/// create sits under `libraries/`.
+/// create sits under `stores/`.
 #[tokio::test]
 async fn restore_accepts_a_normal_lid_past_decode() {
-    let encoded = restore_code_with_lid("abc-123");
-    let decoded = decode_restore_code(&encoded).expect("a normal lid decodes");
-    assert_eq!(decoded.lid, "abc-123");
+    let encoded = restore_code_with_sid("abc-123");
+    let decoded = decode_restore_code(&encoded).expect("a normal sid decodes");
+    assert_eq!(decoded.sid, "abc-123");
 
     // End to end the restore still fails — the S3 endpoint above is unreachable —
     // but it fails at the snapshot download past the decode boundary, not at the id.

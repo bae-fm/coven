@@ -1,14 +1,14 @@
 # Sharing
 
-A library can have more than one writer. coven decides who may write by an
+A store can have more than one writer. coven decides who may write by an
 append-only, Ed25519-signed log of membership changes, the membership chain.
 Pull verifies both each changeset's own signature and the chain itself, so the
 cloud provider never has to be trusted with who is allowed to write.
 
-coven shares a library by **membership**: it grants the *whole library* to
+coven shares a store by **membership**: it grants the *whole store* to
 another *writer*, a peer with their own identity in the chain, by sealing the
-library keyring to that member's keypair. The library is the unit of sharing —
-a different set of people is a different library.
+store keyring to that member's keypair. The store is the unit of sharing —
+a different set of people is a different store.
 
 Examples use the todos app; two people both write todos, and the owner
 controls who else can.
@@ -27,7 +27,7 @@ envelope. The key used for encryption (X25519) is computed from the Ed25519
 key by
 [`ed25519_to_x25519_public_key`](rustdoc:fn:coven::keys::ed25519_to_x25519_public_key),
 so anyone holding a member's Ed25519 public key can derive the target to wrap
-the library keyring to (see [The library keyring](#the-library-keyring)).
+the store keyring to (see [The store keyring](#the-store-keyring)).
 
 ## The membership entry
 
@@ -131,7 +131,7 @@ enforces, in order:
 
 1. The first entry must be an `Add` with role `Owner`, self-signed
    (`author_pubkey == user_pubkey`). This is the founder; any other shape is
-   rejected. A chain whose founder is not the library's established owner is a
+   rejected. A chain whose founder is not the store's established owner is a
    takeover attempt and is refused outright.
 2. Every entry must carry a valid signature and a correct `prev_hash` link to
    its author's previous entry.
@@ -150,16 +150,16 @@ forms:
   roles. The founder is an owner, and an owner can promote others. Any current
   owner can invite, not just the founder.
 - **Member** can read and write todos, but cannot touch the chain.
-- **Follower** holds the library keyring and reads everything, but may not
+- **Follower** holds the store keyring and reads everything, but may not
   write. The restriction is enforced acceptance-side: a puller re-derives each
   author's role from the chain and rejects a Follower's changesets.
 
 `MemberRole::can_write` is true for `Owner` and `Member`, false for `Follower`.
 
-## The library keyring
+## The store keyring
 
 Data is only as private as the distribution of its keys: encryption means
-nothing if the key travels carelessly. A library's data is encrypted under a
+nothing if the key travels carelessly. A store's data is encrypted under a
 symmetric key that can
 [rotate](#revocation-is-key-rotation); the keyring is the full set of those key
 generations. Each member gets their own copy of the keyring, sealed to their
@@ -172,7 +172,7 @@ owner's prefix, and the keyring wrapped to that member at `keys/{pubkey}.enc`.
 The wrapped keyring names the membership entry that activates it, so a joiner
 unwraps it only once the entry granting them membership is visible. The new
 member downloads and unwraps their copy when they join
-([`unwrap_library_keyring`](rustdoc:fn:coven::sync::invite::unwrap_library_keyring)).
+([`unwrap_store_keyring`](rustdoc:fn:coven::sync::invite::unwrap_store_keyring)).
 
 If any step of an invite fails partway, the steps already taken are rolled
 back (a previously wrapped keyring is restored, not deleted), so a failed
@@ -186,7 +186,7 @@ For each incoming changeset envelope,
 1. Verifies the envelope's signature against its embedded `author_pubkey`. A
    bad signature holds that device's cursor and stops that stream for the
    cycle (see [Sync](/docs/sync-model#one-bad-object-stops-one-stream)).
-2. If the library has a membership chain, checks the author against the exact
+2. If the store has a membership chain, checks the author against the exact
    membership entry the changeset names. Every changeset carries the
    [`MembershipCoord`](rustdoc:struct:coven::sync::membership::MembershipCoord)
    of the entry that grants its author write access; a puller whose chain
@@ -197,7 +197,7 @@ For each incoming changeset envelope,
    Follower, or forged) is skipped and the cursor advances past it, surfaced
    in `PullResult::rejected_unauthorized`.
 
-A library with no membership entries (one person, no chain established yet)
+A store with no membership entries (one person, no chain established yet)
 accepts unsigned envelopes; the chain check only runs once the chain is
 non-empty.
 
@@ -215,7 +215,7 @@ this author allowed when they claim they wrote this?").
    reports the credential as unrevocable and removal proceeds, because the key
    rotation below, not credential withdrawal, is what protects new content.
 2. Signs and appends a `Remove` entry under the removing owner's prefix.
-3. Appends a **new key generation** to the library keyring.
+3. Appends a **new key generation** to the store keyring.
 4. Re-wraps the updated keyring to every remaining member at their
    `keys/{pubkey}.enc`.
 5. Deletes the removed member's wrapped keyring.
@@ -272,7 +272,7 @@ right direction, and neither side ever types a key by hand.
 <line class="arr" x1="446" y1="150" x2="234" y2="150" marker-end="url(#fa)"/>
 <circle class="numc" cx="330" cy="150" r="8"/>
 <text class="num" x="330" y="153.5" text-anchor="middle">3</text>
-<text class="sub" x="330" y="136" text-anchor="middle">invite code: cloud access + library id</text>
+<text class="sub" x="330" y="136" text-anchor="middle">invite code: cloud access + store id</text>
 <circle class="numc" cx="24" cy="177" r="8"/>
 <text class="num" x="24" y="180.5" text-anchor="middle">4</text>
 <rect class="chip" x="30" y="164" width="180" height="26" rx="7"/>
@@ -288,12 +288,12 @@ The owner calls `handle.invite_member(...)` with that public key and a role.
 Under it, coven:
 
 1. grants the joiner cloud access,
-2. wraps the library keyring to their X25519 key,
+2. wraps the store keyring to their X25519 key,
 3. signs the `Add` entry and validates it against the committed chain,
    *before* writing anything,
 4. uploads the wrapped keyring, the entry, and the owner's updated head.
 
-The cloud connection details come back packed with the library id, name, and
+The cloud connection details come back packed with the store id, name, and
 owner pubkey into an
 [`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner sends
 that back.
@@ -303,12 +303,12 @@ The joiner pastes the invite code into
 which:
 
 1. decodes it and builds the cloud connection (running any OAuth flow inline),
-2. unwraps the library keyring,
+2. unwraps the store keyring,
 3. bootstraps the local database from the latest snapshot,
 4. pulls the changesets created since that snapshot,
-5. saves the new library config.
+5. saves the new store config.
 
-The device is now a writer. A join that fails partway never deletes a library
+The device is now a writer. A join that fails partway never deletes a store
 that already existed on the device.
 
 The invite code carries plaintext cloud credentials (for S3, the access key and
@@ -317,12 +317,12 @@ a private channel.
 
 ## Restore codes
 
-A restore code recovers a library on a *new device of an existing member*,
+A restore code recovers a store on a *new device of an existing member*,
 without anyone re-inviting them. Where an invite code adds a new identity to the
 chain, a restore code re-establishes an identity that is already in it.
 
 `handle.generate_restore_code()` encodes everything needed to reconnect into
-one `coven:`-prefixed base64url string: the library id, the library keyring,
+one `coven:`-prefixed base64url string: the store id, the store keyring,
 the Ed25519 signing key, the cloud provider, and that provider's connection
 details. The
 [`RestoreCode`](rustdoc:struct:coven::sync::restore_code::RestoreCode) is plain
@@ -342,7 +342,7 @@ build) whose `Display` text the host can show verbatim.
 
 A restore code deliberately omits OAuth tokens, since those expire; on a
 consumer cloud the user re-authenticates during restore.
-Because the code contains the library keyring and any stored credentials, it is
+Because the code contains the store keyring and any stored credentials, it is
 the most sensitive string coven produces; anyone holding it has full access to
-the library.
+the store.
 

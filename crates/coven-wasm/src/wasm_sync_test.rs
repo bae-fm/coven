@@ -24,8 +24,8 @@ use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
@@ -72,10 +72,10 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
     db.set_sync_state("snapshot_seq", "0")
         .await
         .expect("seed snapshot floor for changeset-only wasm test");
-    // A library dir that never touches disk: this test pushes/pulls changesets, so
+    // A store dir that never touches disk: this test pushes/pulls changesets, so
     // the only fs touch the cycle attempts is best-effort changeset staging, which
     // logs and continues on failure. No blobs, no snapshot bytes are read back.
-    let library_dir = LibraryDir::new(std::path::Path::new("/coven-wasm-sync-test"));
+    let store_dir = StoreDir::new(std::path::Path::new("/coven-wasm-sync-test"));
 
     run_single_sync_cycle(
         storage,
@@ -87,7 +87,7 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
         &cipher,
         &keypair,
         None,
-        &library_dir,
+        &store_dir,
         None,
         None,
     )

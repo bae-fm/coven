@@ -16,10 +16,10 @@ pub use traits::BlobStore;
 /// Hash-based storage path for a file: `storage/{ab}/{cd}/{file_id}`
 ///
 /// Deterministic from the file_id alone. Used for both local storage
-/// (relative to the library dir) and cloud keys. `Err` if `file_id` is not a safe,
-/// indexable blob token — see [`crate::library_dir::LibraryDir::hashed_path`].
-pub fn storage_path(file_id: &str) -> Result<String, crate::library_dir::PathTokenError> {
-    crate::library_dir::LibraryDir::hashed_path("storage", file_id)
+/// (relative to the store dir) and cloud keys. `Err` if `file_id` is not a safe,
+/// indexable blob token — see [`crate::store_dir::StoreDir::hashed_path`].
+pub fn storage_path(file_id: &str) -> Result<String, crate::store_dir::PathTokenError> {
+    crate::store_dir::StoreDir::hashed_path("storage", file_id)
 }
 
 #[cfg(test)]

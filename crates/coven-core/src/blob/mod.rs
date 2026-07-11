@@ -103,7 +103,7 @@ pub mod local_files;
 pub mod transition;
 pub mod upload;
 
-// The cache's own tests: real `Database` + `MockSyncStorage` over a temp library
+// The cache's own tests: real `Database` + `MockSyncStorage` over a temp store
 // dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
 // Native-only because they drive a real temp directory on the filesystem; the
 // Browser cache storage assembly lives in `coven-wasm`. See [`cache`].
@@ -136,12 +136,12 @@ mod delete_tests;
 
 /// Which key encrypts a blob, as a host names it on a [`BlobRef`].
 ///
-/// The host names *what* a blob is scoped to — the whole library or a derived
+/// The host names *what* a blob is scoped to — the whole store or a derived
 /// per-scope key — never the raw key bytes. Storage and encryption consume this
 /// same type; there is no key material in it to leak.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlobScope {
-    /// The library master key — every member reads it.
+    /// The store master key — every member reads it.
     Master,
     /// A per-scope key derived from the master key (e.g. one key per item).
     Derived(String),
@@ -205,7 +205,7 @@ pub enum Provenance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheFill {
     /// Fetched into the cache on pull, right away, on every device — part of
-    /// "having the library" (e.g. cover art, so the grid renders from local bytes
+    /// "having the store" (e.g. cover art, so the grid renders from local bytes
     /// without a fetch). The cache copy is evictable + re-fetchable, not pinned.
     CacheEager,
     /// Not fetched on pull: a pulling device skips it and fetches it into the cache

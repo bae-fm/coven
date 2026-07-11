@@ -13,11 +13,11 @@ pub enum StorageError {
     #[error("Database error: {0}")]
     Database(String),
     /// The file id does not form a safe content-addressed path (see
-    /// [`crate::library_dir::PathTokenError`]). For local managed storage the id is
+    /// [`crate::store_dir::PathTokenError`]). For local managed storage the id is
     /// device-generated, so this is a programmer error surfaced loudly, never a
     /// silent mis-shard.
     #[error("invalid blob id: {0}")]
-    InvalidId(#[from] crate::library_dir::PathTokenError),
+    InvalidId(#[from] crate::store_dir::PathTokenError),
 }
 
 /// Progress callback type: (bytes_written, total_bytes)
@@ -25,18 +25,18 @@ pub type ProgressCallback = Box<dyn Fn(usize, usize) + Send + Sync>;
 
 /// Storage implementation for managed local storage.
 ///
-/// Writes files to `library_dir/storage/ab/cd/{file_id}` as plaintext.
+/// Writes files to `store_dir/storage/ab/cd/{file_id}` as plaintext.
 /// Local files are never encrypted -- encryption only happens when uploading
 /// to the cloud home.
 #[derive(Clone)]
 pub struct BlobStore {
-    library_dir: crate::library_dir::LibraryDir,
+    store_dir: crate::store_dir::StoreDir,
 }
 
 impl BlobStore {
     /// Create storage for managed local blobs.
-    pub fn new_local(library_dir: crate::library_dir::LibraryDir) -> Self {
-        Self { library_dir }
+    pub fn new_local(store_dir: crate::store_dir::StoreDir) -> Self {
+        Self { store_dir }
     }
 
     /// Write bytes to local storage without creating a DB record.
@@ -54,7 +54,7 @@ impl BlobStore {
         on_progress(0, total_bytes);
 
         let rel_path = storage_path(file_id)?;
-        let path = self.library_dir.join(&rel_path);
+        let path = self.store_dir.join(&rel_path);
 
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -90,7 +90,7 @@ impl BlobStore {
         on_progress(0, total_bytes);
 
         let rel_path = storage_path(file_id)?;
-        let path = self.library_dir.join(&rel_path);
+        let path = self.store_dir.join(&rel_path);
 
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -138,8 +138,8 @@ mod tests {
     #[tokio::test]
     async fn store_from_path_copies_bytes_and_reports_1mib_cadence() {
         let temp = TempDir::new().unwrap();
-        let library_dir = crate::library_dir::LibraryDir::new(temp.path());
-        let storage = BlobStore::new_local(library_dir);
+        let store_dir = crate::store_dir::StoreDir::new(temp.path());
+        let storage = BlobStore::new_local(store_dir);
 
         // 2.5 MiB — two full batches plus a partial tail.
         let total = 2_621_440usize;

@@ -1,13 +1,13 @@
 # Schema evolution
 
-Devices that share a library do not all run the same app version at once. Someone
+Devices that share a store do not all run the same app version at once. Someone
 updates their phone on Monday and their laptop the following week; in between, two
 versions of the schema are live against one cloud home. This page is how coven
 keeps those versions from corrupting each other after release, once `rm -rf` is no
 longer an option.
 
 The examples use the todos app from [Sync](/docs/sync-model): a `list` holds
-`todos`, Alice and Bob share the library.
+`todos`, Alice and Bob share the store.
 
 Three things are in play:
 
@@ -21,7 +21,7 @@ Three things are in play:
 
 A migration fixes *your local database*; it does not rewrite the changesets
 other devices already wrote to the cloud, nor the ones you already published. So
-"can I migrate my data forward" and "can these two app versions share a library"
+"can I migrate my data forward" and "can these two app versions share a store"
 are separate questions, answered by different mechanisms.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
@@ -133,7 +133,7 @@ Worked example. The app ships v5, which adds a `due_date` column to `todos`
 - **Alice updates to v5:** her open runs rung 5, and her next cycle re-pulls
   Bob's changesets from the parked cursor and applies them. She converges fully.
 
-So the two versions coexist on one library. Sync stays live; the only effect is
+So the two versions coexist on one store. Sync stays live; the only effect is
 that the older client lags on the newer schema's rows until it upgrades, then
 catches up. No positional mismatch ever happens, because a device never applies a
 changeset stamped newer than itself.

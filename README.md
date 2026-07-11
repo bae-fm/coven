@@ -16,7 +16,7 @@ Docs: <https://coven.bae.fm>
 
 ## What it looks like
 
-Open a library, declaring the tables that sync and the migration ladder that
+Open a store, declaring the tables that sync and the migration ladder that
 builds your schema. Tables you don't declare stay local to the device.
 
 ```rust
@@ -49,7 +49,7 @@ Pure reads go through `handle.sql_read`, which runs on a read-only companion
 connection: no change capture, and reads run concurrently with the writer
 instead of queuing behind it.
 
-Connect storage when there is somewhere to sync to. A library with no cloud
+Connect storage when there is somewhere to sync to. A store with no cloud
 home is complete on its own. Identity and keys live in the OS keyring: the
 host names its keyring service once at startup with `set_keyring_service`,
 which installs the platform keyring store (apple-native on macOS/iOS,
@@ -79,7 +79,7 @@ handle.sync_now();
   encrypted. Bytes can live locally or in the cloud, with per-namespace cache
   budgets and pinning on each device.
 - **Cryptographic membership.** Members are keypairs; membership changes are
-  signed per-owner streams; the library keyring is sealed to each member, and
+  signed per-owner streams; the store keyring is sealed to each member, and
   removing one appends a key generation the removed member never receives.
 - **Untrusted storage.** The provider holds ciphertext and signed control
   objects; every changeset is verified on pull.

@@ -65,7 +65,7 @@ struct DatabaseState {
     /// threading a separately-passed copy that could diverge.
     blob_tombstone_grace: chrono::Duration,
     /// True for a `SQLITE_OPEN_READONLY` handle opened by
-    /// [`Database::open_read_only`] — a same-library secondary reader. The blob
+    /// [`Database::open_read_only`] — a same-store secondary reader. The blob
     /// read path reads it (via [`Database::is_read_only`]) to skip the
     /// device-local uploader-index writes it would otherwise make; those writes
     /// are a listing-scan-avoidance cache, not read correctness, and a read-only
@@ -169,7 +169,7 @@ impl DatabaseCore {
     /// running no migration ladder and no schema/bookkeeping writes. It refuses a
     /// db a newer binary migrated past this one (the writer's `SchemaTooNew`
     /// policy), since its models must understand the on-disk schema. Backs
-    /// [`Database::open_read_only`]; see it for why a reader takes no library lock.
+    /// [`Database::open_read_only`]; see it for why a reader takes no store lock.
     #[cfg(not(target_arch = "wasm32"))]
     fn open_read_only(
         path: &Path,
@@ -571,7 +571,7 @@ impl Database {
         Ok((database, stamper))
     }
 
-    /// Open the library at `path` read-only for a same-library secondary reader
+    /// Open the store at `path` read-only for a same-store secondary reader
     /// (e.g. a separate process reading while another holds the writer open).
     ///
     /// Distinct from [`Database::open`] in three ways, all so the reader never
@@ -583,7 +583,7 @@ impl Database {
     /// processes because the writer opens the db in WAL mode, so a reader observes
     /// committed rows while the writer commits more.
     ///
-    /// The caller takes no library open-lock for a read-only open: the exclusive
+    /// The caller takes no store open-lock for a read-only open: the exclusive
     /// advisory lock guards against a second *writer*, and a read-only connection
     /// cannot write, so multiple readers and one writer coexist under WAL.
     #[cfg(not(target_arch = "wasm32"))]

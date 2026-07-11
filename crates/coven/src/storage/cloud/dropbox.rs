@@ -30,7 +30,7 @@ const CONTENT_BASE: &str = "https://content.dropboxapi.com/2";
 
 /// Dropbox cloud home backend.
 pub struct DropboxCloudHome {
-    /// Folder path in Dropbox, e.g. "/Apps/your-app/my-library"
+    /// Folder path in Dropbox, e.g. "/Apps/your-app/my-store"
     folder_path: String,
     session: OAuthSession,
 }
@@ -74,7 +74,7 @@ impl DropboxCloudHome {
     }
 
     /// Build the full Dropbox path for a key.
-    /// `changes/dev1/42.enc` -> `/Apps/your-app/my-library/changes/dev1/42.enc`
+    /// `changes/dev1/42.enc` -> `/Apps/your-app/my-store/changes/dev1/42.enc`
     fn full_path(&self, key: &str) -> String {
         format!("{}/{}", self.folder_path, key)
     }
@@ -677,7 +677,7 @@ mod tests {
     use std::sync::Arc;
 
     fn home() -> DropboxCloudHome {
-        home_with_folder("/Apps/your-app/my-library")
+        home_with_folder("/Apps/your-app/my-store")
     }
 
     fn home_with_folder(folder_path: &str) -> DropboxCloudHome {
@@ -699,7 +699,7 @@ mod tests {
     fn full_path_joins_correctly() {
         assert_eq!(
             home().full_path("changes/dev1/42.enc"),
-            "/Apps/your-app/my-library/changes/dev1/42.enc"
+            "/Apps/your-app/my-store/changes/dev1/42.enc"
         );
     }
 

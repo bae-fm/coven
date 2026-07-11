@@ -1,10 +1,10 @@
-//! Headless wasm proof that the facade ([`CovenLibrary`]) correctly assembles the
+//! Headless wasm proof that the facade ([`CovenStore`]) correctly assembles the
 //! whole browser stack: two instances over one shared in-memory cloud converge a
 //! row **through the public facade API** — `exec`, `query`, `start_sync`,
 //! `sync_now` — with no live S3.
 //!
-//! [`CovenLibrary::open`] builds an [`S3WasmCloudHome`] and hands it to the
-//! internal [`from_home`](CovenLibrary::from_home) seam. A live S3 round-trip needs
+//! [`CovenStore::open`] builds an [`S3WasmCloudHome`] and hands it to the
+//! internal [`from_home`](CovenStore::from_home) seam. A live S3 round-trip needs
 //! a CORS-configured bucket, which is not available headlessly, so this test drives
 //! the same seam with a shared [`InMemoryCloudHome`] instead. That exercises
 //! everything `open` does except the S3 wire format itself (covered by
@@ -14,7 +14,7 @@
 //!
 //! Tab A writes a note and triggers a sync; the test waits (bounded) for tab B's
 //! `query` to return the row. That the row crosses with the test only ever calling
-//! the facade's own methods is the proof: the facade assembles a working library,
+//! the facade's own methods is the proof: the facade assembles a working store,
 //! and two of them converge. Drive it with `wasm-pack test --headless --firefox`.
 //!
 //! [`S3WasmCloudHome`]: crate::storage::cloud::s3_wasm::S3WasmCloudHome
@@ -30,27 +30,23 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::hlc::Timestamp;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::WasmSyncSchedule;
-use crate::wasm_facade::CovenLibrary;
+use crate::wasm_facade::CovenStore;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-/// Build a started [`CovenLibrary`] for `device_id` over a clone of the shared
+/// Build a started [`CovenStore`] for `device_id` over a clone of the shared
 /// cloud, plaintext at rest with readable blob paths — the simplest home, and the
-/// one the harness README recommends as a first config. Each `library_id` is
+/// one the harness README recommends as a first config. Each `store_id` is
 /// distinct so the two devices get independent SQLite paths, which the browser
 /// VFS hashes into separate OPFS storage names; they converge only through the
 /// cloud.
-async fn open_library(
-    library_id: &str,
-    device_id: &str,
-    cloud: &InMemoryCloudHome,
-) -> CovenLibrary {
+async fn open_store(store_id: &str, device_id: &str, cloud: &InMemoryCloudHome) -> CovenStore {
     let home: Box<dyn CloudHome> = Box::new(cloud.clone());
-    let lib = CovenLibrary::from_home(
+    let lib = CovenStore::from_home(
         home,
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
-        library_id,
+        store_id,
         device_id.to_string(),
         demo_migrations(),
         demo_synced_tables(),
@@ -67,21 +63,21 @@ async fn open_library(
         },
     )
     .await
-    .expect("assemble CovenLibrary over the shared in-memory cloud");
+    .expect("assemble CovenStore over the shared in-memory cloud");
     lib.start_sync();
     lib
 }
 
-async fn assemble_library(
-    library_id: &str,
+async fn assemble_store(
+    store_id: &str,
     device_id: &str,
     cloud: &InMemoryCloudHome,
-) -> Result<CovenLibrary, String> {
-    CovenLibrary::from_home(
+) -> Result<CovenStore, String> {
+    CovenStore::from_home(
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
-        library_id,
+        store_id,
         device_id.to_string(),
         demo_migrations(),
         demo_synced_tables(),
@@ -117,13 +113,13 @@ fn to_js_value(value: serde_json::Value) -> JsValue {
         .expect("serialize JS value")
 }
 
-fn public_open_config(library_id: &str, device_id: &str) -> JsValue {
+fn public_open_config(store_id: &str, device_id: &str) -> JsValue {
     to_js_value(serde_json::json!({
         "bucket": "test-bucket",
         "region": "us-east-1",
         "access_key": "test-access-key",
         "secret_key": "test-secret-key",
-        "library_id": library_id,
+        "store_id": store_id,
         "storage": "browsable",
         "device_id": device_id,
     }))
@@ -145,9 +141,9 @@ fn public_open_synced_tables() -> JsValue {
     ]))
 }
 
-async fn public_open(library_id: &str, device_id: &str) -> Result<CovenLibrary, JsValue> {
-    CovenLibrary::open(
-        public_open_config(library_id, device_id),
+async fn public_open(store_id: &str, device_id: &str) -> Result<CovenStore, JsValue> {
+    CovenStore::open(
+        public_open_config(store_id, device_id),
         public_open_migrations(),
         public_open_synced_tables(),
     )
@@ -157,16 +153,16 @@ async fn public_open(library_id: &str, device_id: &str) -> Result<CovenLibrary, 
 fn js_error_string(value: &JsValue) -> String {
     value
         .as_string()
-        .expect("CovenLibrary::open errors are strings")
+        .expect("CovenStore::open errors are strings")
 }
 
 async fn assert_public_open_rejects(
-    library_id: &str,
+    store_id: &str,
     device_id: &str,
     expected: &[&str],
     label: &str,
 ) {
-    let result = public_open(library_id, device_id).await;
+    let result = public_open(store_id, device_id).await;
     match result {
         Ok(lib) => {
             drop(lib);
@@ -186,7 +182,7 @@ async fn assert_public_open_rejects(
 
 /// Whether `lib`'s `notes` table holds a row with `id`, read through the facade's
 /// public `query` (which returns the rows as a JSON value the test parses back).
-async fn has_note(lib: &CovenLibrary, id: &str) -> bool {
+async fn has_note(lib: &CovenStore, id: &str) -> bool {
     let rows_js = lib
         .query(format!("SELECT id FROM notes WHERE id = '{id}'"))
         .await
@@ -196,22 +192,22 @@ async fn has_note(lib: &CovenLibrary, id: &str) -> bool {
     !rows.is_empty()
 }
 
-/// Two libraries over one cloud, both syncing: tab A writes a note and triggers a
+/// Two stores over one cloud, both syncing: tab A writes a note and triggers a
 /// sync, and the note converges to tab B — observed entirely through the facade's
 /// public API. No `run_single_sync_cycle`, no direct `Database`: only `from_home`
 /// (the seam `open` uses), `exec`, `query`, `start_sync`, and `sync_now`.
 #[wasm_bindgen_test]
-async fn two_libraries_converge_a_note_through_the_facade() {
+async fn two_stores_converge_a_note_through_the_facade() {
     console_error_panic_hook::set_once();
 
     // A unique suffix per run so the OPFS databases are fresh (OPFS outlives the
-    // test process, and each library_id feeds a persistent SQLite path that is
+    // test process, and each store_id feeds a persistent SQLite path that is
     // hashed into an OPFS storage name).
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
 
-    let lib_a = open_library(&format!("tab-a-{run}"), "device-a", &cloud).await;
-    let lib_b = open_library(&format!("tab-b-{run}"), "device-b", &cloud).await;
+    let lib_a = open_store(&format!("tab-a-{run}"), "device-a", &cloud).await;
+    let lib_b = open_store(&format!("tab-b-{run}"), "device-b", &cloud).await;
 
     // Tab A writes a note through `exec`. The synced `notes` row carries the
     // `_updated_at` register the contract requires (here a literal HLC-shaped stamp
@@ -272,38 +268,38 @@ async fn two_libraries_converge_a_note_through_the_facade() {
 }
 
 #[wasm_bindgen_test]
-async fn second_open_of_one_library_id_is_refused_until_the_first_handle_drops() {
+async fn second_open_of_one_store_id_is_refused_until_the_first_handle_drops() {
     console_error_panic_hook::set_once();
 
     let run = uuid::Uuid::new_v4().simple().to_string();
-    let library_id = format!("double-open-{run}");
+    let store_id = format!("double-open-{run}");
     let cloud = InMemoryCloudHome::new();
 
-    let first = assemble_library(&library_id, "device-a", &cloud)
+    let first = assemble_store(&store_id, "device-a", &cloud)
         .await
         .expect("first open succeeds");
-    let second = assemble_library(&library_id, "device-b", &cloud).await;
+    let second = assemble_store(&store_id, "device-b", &cloud).await;
 
     match second {
-        Ok(_) => panic!("second open of the same library id must fail"),
+        Ok(_) => panic!("second open of the same store id must fail"),
         Err(error) => assert!(
             error.contains("already open"),
-            "second open error names the open library: {error}",
+            "second open error names the open store: {error}",
         ),
     }
 
     drop(first);
 
-    assemble_library(&library_id, "device-c", &cloud)
+    assemble_store(&store_id, "device-c", &cloud)
         .await
         .expect("open succeeds after the first handle drops");
 }
 
 #[wasm_bindgen_test]
-async fn open_rejects_empty_library_id() {
+async fn open_rejects_empty_store_id() {
     console_error_panic_hook::set_once();
 
-    assert_public_open_rejects("", "device-a", &["library_id", "empty"], "empty library_id").await;
+    assert_public_open_rejects("", "device-a", &["store_id", "empty"], "empty store_id").await;
 }
 
 #[wasm_bindgen_test]
@@ -321,20 +317,20 @@ async fn open_rejects_empty_device_id() {
 }
 
 #[wasm_bindgen_test]
-async fn from_home_rejects_empty_library_id() {
+async fn from_home_rejects_empty_store_id() {
     console_error_panic_hook::set_once();
 
     let cloud = InMemoryCloudHome::new();
-    let result = assemble_library("", "device-a", &cloud).await;
+    let result = assemble_store("", "device-a", &cloud).await;
     match result {
         Ok(lib) => {
             drop(lib);
-            panic!("empty library_id must be rejected");
+            panic!("empty store_id must be rejected");
         }
         Err(error) => {
             assert!(
-                error.contains("library_id") && error.contains("empty"),
-                "error names the empty library id: {error}",
+                error.contains("store_id") && error.contains("empty"),
+                "error names the empty store id: {error}",
             );
         }
     }
@@ -346,9 +342,9 @@ async fn runtime_and_open_share_one_clock() {
 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
-    let lib = assemble_library(&format!("shared-clock-{run}"), "device-a", &cloud)
+    let lib = assemble_store(&format!("shared-clock-{run}"), "device-a", &cloud)
         .await
-        .expect("assemble library");
+        .expect("assemble store");
 
     assert!(
         lib.runtime_hlc_is_database_hlc_for_test(),
@@ -357,14 +353,14 @@ async fn runtime_and_open_share_one_clock() {
 }
 
 #[wasm_bindgen_test]
-async fn library_stamp_uses_pull_advanced_clock() {
+async fn store_stamp_uses_pull_advanced_clock() {
     console_error_panic_hook::set_once();
 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
-    let lib = assemble_library(&format!("pull-advanced-stamp-{run}"), "device-a", &cloud)
+    let lib = assemble_store(&format!("pull-advanced-stamp-{run}"), "device-a", &cloud)
         .await
-        .expect("assemble library");
+        .expect("assemble store");
 
     let pulled = Timestamp::new(9_000_000_000_000, 7, "device-b".to_string());
     lib.db_hlc_for_test().advance_past(&pulled);
@@ -372,7 +368,7 @@ async fn library_stamp_uses_pull_advanced_clock() {
     let stamp = lib.stamp();
     assert!(
         stamp > pulled.to_string(),
-        "library stamp {stamp} must sort after pulled stamp {pulled}",
+        "store stamp {stamp} must sort after pulled stamp {pulled}",
     );
 }
 
@@ -382,20 +378,17 @@ async fn free_without_stop_sync_halts_syncing() {
 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
-    let lib = assemble_library(&format!("free-stops-sync-{run}"), "device-a", &cloud)
+    let lib = assemble_store(&format!("free-stops-sync-{run}"), "device-a", &cloud)
         .await
-        .expect("assemble library");
+        .expect("assemble store");
 
     lib.start_sync();
     let token = lib
         .runtime_active_token_for_test()
-        .expect("library runtime has active token after start_sync");
+        .expect("store runtime has active token after start_sync");
     assert!(token.get(), "start_sync marks the loop token running");
 
     drop(lib);
 
-    assert!(
-        !token.get(),
-        "dropping the library stops the sync loop token"
-    );
+    assert!(!token.get(), "dropping the store stops the sync loop token");
 }

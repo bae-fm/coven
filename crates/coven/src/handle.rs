@@ -1,15 +1,15 @@
 //! The native data handle: one object a host constructs once that owns coven's
 //! pieces and exposes the whole data interface as methods.
 //!
-//! coven owns the library's data — SQL rows and blobs, on disk first, cloud
+//! coven owns the store's data — SQL rows and blobs, on disk first, cloud
 //! optional. A host (a desktop/mobile app) talks to coven through this one
 //! handle and never assembles coven's internals by hand or hands them back to
-//! coven on every call. The handle holds the [`Database`], the [`LibraryDir`],
+//! coven on every call. The handle holds the [`Database`], the [`StoreDir`],
 //! the keys, and — once a cloud provider is connected — the [`SyncManager`]; the
 //! caller passes only descriptors (a [`BlobRef`], SQL, a config) and coven does
 //! its own plumbing.
 //!
-//! It is the native counterpart of the browser `CovenLibrary` in `coven-wasm`:
+//! It is the native counterpart of the browser `CovenStore` in `coven-wasm`:
 //! same role, different substrate. The native stack runs on tokio with a
 //! [`SyncManager`], `Send + Sync` throughout.
 //!
@@ -18,12 +18,12 @@
 //! - **Rows** — the [`Database`] (coven already owns the connection). The host
 //!   runs its app SQL through [`sql`](CovenHandle::sql) and row+blob batches
 //!   through [`write`](CovenHandle::write).
-//! - **Blobs** — the [`LibraryDir`] the blob engine reads/writes, plus the
+//! - **Blobs** — the [`StoreDir`] the blob engine reads/writes, plus the
 //!   credentials to build a read [`SyncStorage`] on a cloud miss. Read, ranged
 //!   read, store, register external, pin/unpin, the locality transitions, and the
 //!   upload drain are methods here.
 //! - **Sync** — built lazily by [`connect_sync`](CovenHandle::connect_sync) when a
-//!   cloud provider is connected. A library with no cloud home never builds a
+//!   cloud provider is connected. A store with no cloud home never builds a
 //!   [`SyncManager`] and only ever holds Local blobs.
 
 use std::collections::HashMap;
@@ -39,13 +39,13 @@ use crate::blob::upload::DrainOutcome;
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::ClockRef;
 use crate::config::Config;
-use crate::coven::LibraryOpenGuard;
+use crate::coven::StoreOpenGuard;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::KeyService;
-use crate::library_dir::LibraryDir;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
+use crate::store_dir::StoreDir;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudSyncStorage};
@@ -66,7 +66,7 @@ impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
     }
 }
 
-/// The native handle over one coven library.
+/// The native handle over one coven store.
 ///
 /// Open it once with [`Coven::builder`](crate::Coven::builder), then call methods. Cheap to
 /// [`clone`](Clone) — every field is shared (an `Arc`, a `Clone` handle, or a
@@ -82,7 +82,7 @@ impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
 ///
 /// ```no_run
 /// # use coven::{BlobRef, CovenHandle};
-/// # async fn use_library(handle: &CovenHandle, cover: &BlobRef)
+/// # async fn use_store(handle: &CovenHandle, cover: &BlobRef)
 /// #     -> Result<(), Box<dyn std::error::Error>> {
 /// // Rows: run app SQL on the connection coven owns.
 /// let note_count: i64 = handle
@@ -97,7 +97,7 @@ impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
 /// // its local store, the cache, or a cloud fetch — and hands back plaintext.
 /// let bytes: Vec<u8> = handle.read_blob(cover).await?;
 ///
-/// // Sync is optional. Connect a provider, then drive it; a library with no
+/// // Sync is optional. Connect a provider, then drive it; a store with no
 /// // cloud home never calls these and stays fully usable on-device.
 /// handle.connect_sync(None).await?;
 /// handle.sync_now();
@@ -119,7 +119,7 @@ pub struct CovenHandle {
     /// the last committed state.
     read_db: Database,
     stamper: crate::sync::hlc::UpdatedAtStamper,
-    library_dir: LibraryDir,
+    store_dir: StoreDir,
 
     /// Supplies the host's current config on demand. coven reads it fresh each
     /// call so a host with reactive config sees changes without rebuilding the
@@ -134,14 +134,14 @@ pub struct CovenHandle {
     /// drain. `None` for a host that doesn't surface transition progress.
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
-    /// Holds the native library-directory lock for this handle and every clone,
+    /// Holds the native store-directory lock for this handle and every clone,
     /// and is cloned into each [`SyncManager`] so a running sync loop keeps the
     /// lock alive until its own thread exits — the lock's lifetime tracks the
     /// last writer, not the host's drop timing.
-    open_guard: Arc<LibraryOpenGuard>,
+    open_guard: Arc<StoreOpenGuard>,
 
     /// Built lazily by [`connect_sync`](Self::connect_sync) when a provider is
-    /// connected; `None` for a home-less, all-Local library. Shared behind a lock
+    /// connected; `None` for a home-less, all-Local store. Shared behind a lock
     /// so a connect/disconnect mutates it in place without rebuilding the handle.
     sync: Arc<RwLock<Option<Arc<SyncManager>>>>,
 
@@ -160,8 +160,8 @@ pub struct CovenHandle {
 }
 
 impl CovenHandle {
-    /// Build the handle over an already-open [`Database`] and the library's
-    /// directory. Does no I/O and builds no sync manager — a home-less library is
+    /// Build the handle over an already-open [`Database`] and the store's
+    /// directory. Does no I/O and builds no sync manager — a home-less store is
     /// fully usable (rows + Local blobs) without one. Call
     /// [`connect_sync`](Self::connect_sync) when a cloud provider is connected.
     ///
@@ -173,19 +173,19 @@ impl CovenHandle {
         db: Database,
         read_db: Database,
         stamper: crate::sync::hlc::UpdatedAtStamper,
-        library_dir: LibraryDir,
+        store_dir: StoreDir,
         config_provider: ConfigProvider,
         key_service: KeyService,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
-        open_guard: Arc<LibraryOpenGuard>,
+        open_guard: Arc<StoreOpenGuard>,
     ) -> Self {
         Self {
             db,
             read_db,
             stamper,
-            library_dir,
+            store_dir,
             config_provider,
             key_service,
             clock,
@@ -227,15 +227,15 @@ impl CovenHandle {
         self.stamper.clone()
     }
 
-    pub(crate) fn library_dir(&self) -> LibraryDir {
-        self.library_dir.clone()
+    pub(crate) fn store_dir(&self) -> StoreDir {
+        self.store_dir.clone()
     }
 
     // =========================================================================
     // Sync lifecycle
     // =========================================================================
 
-    /// The connected [`SyncManager`], or `None` for a home-less library or one
+    /// The connected [`SyncManager`], or `None` for a home-less store or one
     /// whose provider has not been connected yet. The host reaches sync-engine
     /// operations not surfaced as handle methods (membership, invite/remove,
     /// status) through this.
@@ -263,7 +263,7 @@ impl CovenHandle {
     /// home fails to build — in which case nothing is installed, so the handle
     /// never holds a manager that reports success with nothing started.
     ///
-    /// `encryption_service` is `Some` for an opaque home (sealed under the library
+    /// `encryption_service` is `Some` for an opaque home (sealed under the store
     /// key) and `None` for a browsable one (stored in the clear). Reconnecting a
     /// provider rebuilds the manager — the [`Database`] keeps the seeded register
     /// clock across the rebuild, so only the cloud home + loop are replaced.
@@ -382,7 +382,7 @@ impl CovenHandle {
     }
 
     /// Start (or restart) the sync loop of the installed [`SyncManager`]. A no-op
-    /// when no provider is connected — a home-less library has nothing to start.
+    /// when no provider is connected — a home-less store has nothing to start.
     /// Errors if the installed manager's cloud home fails to build.
     pub async fn start_sync(&self) -> Result<(), SyncError> {
         let _lifecycle = self.sync_lifecycle.lock().await;
@@ -410,7 +410,7 @@ impl CovenHandle {
     }
 
     /// Disconnect the provider entirely: stop the loop and drop the installed
-    /// [`SyncManager`]. The library becomes home-less until the next
+    /// [`SyncManager`]. The store becomes home-less until the next
     /// [`connect_sync`](Self::connect_sync).
     pub fn disconnect_sync(&self) {
         if let Some(manager) = self.sync_manager() {
@@ -431,7 +431,7 @@ impl CovenHandle {
         }
     }
 
-    /// Whether the sync loop is running. `false` for a home-less library.
+    /// Whether the sync loop is running. `false` for a home-less store.
     pub fn is_syncing(&self) -> bool {
         self.sync_manager()
             .is_some_and(|manager| manager.is_sync_ready())
@@ -446,7 +446,7 @@ impl CovenHandle {
     }
 
     /// The active [`EncryptionService`] for the connected opaque home, or `None`
-    /// for a home-less library or a connected browsable home (stored in the
+    /// for a home-less store or a connected browsable home (stored in the
     /// clear).
     pub fn encryption_service(&self) -> Option<EncryptionService> {
         self.sync_manager().and_then(|m| m.encryption_service())
@@ -457,9 +457,9 @@ impl CovenHandle {
     // =========================================================================
 
     /// The read [`SyncStorage`] for coven's locality-aware read, or `None` for a
-    /// home-less library: `Some(home)` when a provider is connected, `None` when
+    /// home-less store: `Some(home)` when a provider is connected, `None` when
     /// none is. coven reaches storage only on a cloud miss — a Remote blob not yet
-    /// cached. A Local blob (the only kind a home-less library has) is served from
+    /// cached. A Local blob (the only kind a home-less store has) is served from
     /// its external ref or the local store without ever touching storage, so a
     /// home-less read passes `None` and the cache layer surfaces
     /// [`BlobCacheError::NoCloudHome`] only if a Remote blob ever reaches the miss
@@ -476,7 +476,7 @@ impl CovenHandle {
     /// a test home injected via
     /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) is served
     /// from with no separate hook. A manager connected but not yet running its loop
-    /// still wraps the manager's stored home; only a home-less library builds from
+    /// still wraps the manager's stored home; only a home-less store builds from
     /// config when a provider is configured.
     async fn blob_storage(
         &self,
@@ -519,7 +519,7 @@ impl CovenHandle {
     /// [`BlobRef`]; coven holds the database, the directory, and the storage.
     pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::read_blob(&self.db, &self.library_dir, storage.as_deref(), blob).await
+        crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await
     }
 
     /// Serve `len` plaintext bytes of a blob starting at `offset`, for streaming
@@ -536,7 +536,7 @@ impl CovenHandle {
         let storage = self.blob_storage().await?;
         crate::blob::cache::open_blob_stream(
             &self.db,
-            &self.library_dir,
+            &self.store_dir,
             storage.as_deref(),
             blob,
             source_size,
@@ -551,13 +551,13 @@ impl CovenHandle {
     /// the cloud — exempt from the size budget. Idempotent.
     pub async fn pin(&self, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
         let storage = self.blob_storage().await?;
-        crate::blob::cache::pin(&self.db, &self.library_dir, storage.as_deref(), blobs).await
+        crate::blob::cache::pin(&self.db, &self.store_dir, storage.as_deref(), blobs).await
     }
 
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the
     /// evictable `storage/cache/` (still readable, now droppable). No cloud read.
     pub async fn unpin(&self, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
-        crate::blob::cache::unpin(&self.library_dir, blobs).await
+        crate::blob::cache::unpin(&self.store_dir, blobs).await
     }
 
     /// The cloud object key a blob's bytes live at, derived under the connected
@@ -593,7 +593,7 @@ impl CovenHandle {
     /// surfaced, never read as "not pinned".
     pub async fn is_pinned(&self, blobs: &[BlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.library_dir, &blob.namespace, &blob.id).await? {
+            if !crate::blob::cache::is_pinned(&self.store_dir, &blob.namespace, &blob.id).await? {
                 return Ok(false);
             }
         }
@@ -612,8 +612,7 @@ impl CovenHandle {
     /// delete path only — a Remote blob's cloud copy is tombstoned separately via
     /// [`blob_cloud_key`](Self::blob_cloud_key).
     pub async fn evict_blob(&self, blob: &BlobRef) -> Result<(), BlobCacheError> {
-        crate::blob::cache::drop_all_local_copies(&self.library_dir, &blob.namespace, &blob.id)
-            .await
+        crate::blob::cache::drop_all_local_copies(&self.store_dir, &blob.namespace, &blob.id).await
     }
 
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
@@ -690,8 +689,8 @@ impl CovenHandle {
             &self.db,
             storage.cloud_home(),
             cipher.as_ref(),
-            &self.config().library_id,
-            &self.library_dir,
+            &self.config().store_id,
+            &self.store_dir,
             self.clock.as_ref(),
             &hlc,
             self.observer.as_deref(),
@@ -761,7 +760,7 @@ mod tests {
     use crate::storage::cloud::CloudHomeError;
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::sync_manager::{ConfigProvider, SyncError};
-    use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_library_dir};
+    use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_store_dir};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -772,12 +771,12 @@ mod tests {
 
     #[tokio::test]
     async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
-        let (_tmp, library_dir) = temp_library_dir();
+        let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
         let mut config = Config::with_defaults(
             "lib-setup-error".to_string(),
             "device".to_string(),
-            library_dir.clone(),
+            store_dir.clone(),
             "Test".to_string(),
         );
         // A provider is selected but its bucket is unset, so the read path cannot
@@ -793,13 +792,13 @@ mod tests {
             // so the writer clone stands in.
             db.clone(),
             db.stamper(),
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
             KeyService::new("lib-setup-error".to_string()),
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
         let blob = BlobRef {
@@ -820,12 +819,12 @@ mod tests {
         );
     }
 
-    fn test_handle(library_id: &str, library_dir: LibraryDir, db: Database) -> CovenHandle {
+    fn test_handle(store_id: &str, store_dir: StoreDir, db: Database) -> CovenHandle {
         let config = Config::with_defaults(
-            library_id.to_string(),
+            store_id.to_string(),
             "test-device".to_string(),
-            library_dir.clone(),
-            "Test Library".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
         );
         let config_provider: ConfigProvider = Arc::new(move || config.clone());
         CovenHandle::new(
@@ -835,13 +834,13 @@ mod tests {
             // so the writer clone stands in.
             db.clone(),
             db.stamper(),
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
-            KeyService::new(library_id.to_string()),
+            KeyService::new(store_id.to_string()),
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         )
     }
 
@@ -943,7 +942,7 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (tmp, library_dir) = temp_library_dir();
+        let (tmp, store_dir) = temp_store_dir();
         // `note_photos` carries a blob in the `images` namespace so the read path can
         // resolve a planted row up to its gated `notes` root (the gate that decides
         // Local vs Remote).
@@ -954,8 +953,8 @@ mod tests {
         let mut config = Config::with_defaults(
             "lib-test".to_string(),
             "test-device".to_string(),
-            library_dir.clone(),
-            "Test Library".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
         );
         config.cloud_home.storage = HomeStorage::Browsable;
         let config_provider: ConfigProvider = {
@@ -971,13 +970,13 @@ mod tests {
             // stands in.
             db.clone(),
             stamper,
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
             KeyService::new("lib-test".to_string()),
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
         // Inject the mock home; the host hands over only the home + cipher.
@@ -1050,14 +1049,14 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (_tmp, library_dir) = temp_library_dir();
+        let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
 
         let mut config = Config::with_defaults(
             "lib-cloudkit-home-reuse".to_string(),
             "test-device".to_string(),
-            library_dir.clone(),
-            "Test Library".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
         );
         config.cloud_home.provider = Some(CloudProvider::CloudKit);
         config.cloud_home.storage = HomeStorage::Browsable;
@@ -1073,13 +1072,13 @@ mod tests {
             // so the writer clone stands in.
             db.clone(),
             db.stamper(),
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
             KeyService::new("lib-cloudkit-home-reuse".to_string()),
             Arc::new(SystemClock),
             Some(Arc::new(TestCloudKitOps::new())),
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
         handle
@@ -1103,9 +1102,9 @@ mod tests {
 
     #[tokio::test]
     async fn sync_not_configured_is_typed() {
-        let (_tmp, library_dir) = temp_library_dir();
+        let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let handle = test_handle("lib-no-sync", library_dir, db);
+        let handle = test_handle("lib-no-sync", store_dir, db);
 
         let result = handle.get_members().await;
 
@@ -1118,9 +1117,9 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (_tmp, library_dir) = temp_library_dir();
+        let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let handle = test_handle("lib-plaintext-membership", library_dir, db);
+        let handle = test_handle("lib-plaintext-membership", store_dir, db);
         handle
             .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
             .await
@@ -1142,13 +1141,13 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (_tmp, library_dir) = temp_library_dir();
+        let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
         let config = Config::with_defaults(
             "lib-reconnect-loop".to_string(),
             "test-device".to_string(),
-            library_dir.clone(),
-            "Test Library".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
         );
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -1161,13 +1160,13 @@ mod tests {
             // so the writer clone stands in.
             db.clone(),
             db.stamper(),
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
             KeyService::new("lib-reconnect-loop".to_string()),
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
         handle
@@ -1207,13 +1206,13 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (_tmp, library_dir) = temp_library_dir();
+        let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
         let config = Config::with_defaults(
             "lib-stopped-loop-readiness".to_string(),
             "test-device".to_string(),
-            library_dir.clone(),
-            "Test Library".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
         );
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -1226,13 +1225,13 @@ mod tests {
             // so the writer clone stands in.
             db.clone(),
             db.stamper(),
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
             KeyService::new("lib-stopped-loop-readiness".to_string()),
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
         handle
@@ -1264,14 +1263,14 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (tmp, library_dir) = temp_library_dir();
+        let (tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
 
         let config = Config::with_defaults(
             "lib-test".to_string(),
             "test-device".to_string(),
-            library_dir.clone(),
-            "Test Library".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
         );
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -1285,13 +1284,13 @@ mod tests {
             // so the writer clone stands in.
             db.clone(),
             db.stamper(),
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
             KeyService::new("lib-test".to_string()),
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -1333,14 +1332,14 @@ mod tests {
         );
     }
 
-    fn status_test_handle(library_id: &str) -> (tempfile::TempDir, CovenHandle) {
-        let (tmp, library_dir) = temp_library_dir();
+    fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
+        let (tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
         let config = Config::with_defaults(
-            library_id.to_string(),
+            store_id.to_string(),
             "test-device".to_string(),
-            library_dir.clone(),
-            "Test Library".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
         );
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -1353,13 +1352,13 @@ mod tests {
             // so the writer clone stands in.
             db.clone(),
             db.stamper(),
-            library_dir.clone(),
+            store_dir.clone(),
             config_provider,
-            KeyService::new(library_id.to_string()),
+            KeyService::new(store_id.to_string()),
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
         );
         (tmp, handle)
     }

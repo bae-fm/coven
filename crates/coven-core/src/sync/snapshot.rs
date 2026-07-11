@@ -110,8 +110,8 @@ pub enum SnapshotError {
     #[error("snapshot DB hash does not match the signed metadata")]
     DbHashMismatch,
     /// The snapshot's author is not authorized to publish a catalog image: not a
-    /// current Owner of the library's membership chain, or the
-    /// chain itself is not anchored to the library's owner (a wiped/refounded
+    /// current Owner of the store's membership chain, or the
+    /// chain itself is not anchored to the store's owner (a wiped/refounded
     /// chain). The snapshot is refused rather than adopted.
     #[error("snapshot author is not an authorized owner: {0}")]
     UnauthorizedAuthor(String),
@@ -187,7 +187,7 @@ pub struct BootstrapResult {
 /// `snapshot/{author}/{seq}.db{suffix}`, where the cloud key is known and can be
 /// authenticated as AEAD associated data.
 ///
-/// A snapshot is restored byte-for-byte as the joining device's `library.db`
+/// A snapshot is restored byte-for-byte as the joining device's `store.db`
 /// (no migration rebuild), so it must carry only data that is eligible to
 /// cross devices — the host's declared synced tables. Local-only tables
 /// (per-device paths, caches) and per-device sync bookkeeping must not ride
@@ -380,16 +380,16 @@ fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
 /// merely caught.
 ///
 /// Both the metadata and the pointer are signed by `keypair` and bound to
-/// `library_id`. The metadata signs the cursors and the DB hash; the pointer signs
+/// `store_id`. The metadata signs the cursors and the DB hash; the pointer signs
 /// the generation `seq` and the same DB hash. The
 /// bucket is untrusted and the shared at-rest cipher proves only confidentiality,
 /// so signing lets a bootstrapping/GC reader authenticate that a current member
-/// published this generation for *this* library and that the pointer was not
+/// published this generation for *this* store and that the pointer was not
 /// repointed by a non-member.
 #[allow(clippy::too_many_arguments)]
 pub async fn push_snapshot(
     storage: &dyn SyncStorage,
-    library_id: &str,
+    store_id: &str,
     snapshot_db_image: Vec<u8>,
     device_id: &str,
     applied_cursors: HashMap<String, u64>,
@@ -438,13 +438,8 @@ pub async fn push_snapshot(
     // Our own current_seq is included (our head hasn't been updated yet).
     cursors.insert(device_id.to_string(), current_seq);
 
-    let meta = SnapshotMetaJson::signed(
-        library_id,
-        cursors,
-        db_hash.clone(),
-        schema_version,
-        keypair,
-    );
+    let meta =
+        SnapshotMetaJson::signed(store_id, cursors, db_hash.clone(), schema_version, keypair);
     let meta_json = serde_json::to_vec(&meta).map_err(|e| SnapshotError::Parse(e.to_string()))?;
 
     // Write the meta second: this lists the generation under this device's own
@@ -456,7 +451,7 @@ pub async fn push_snapshot(
 
     // Commit: write the pointer last, naming this generation's `{author, seq}`. Only
     // now does a reader resolve it — and the db+meta it names are already whole.
-    let pointer = SnapshotPointerJson::signed(library_id, current_seq, db_hash, keypair);
+    let pointer = SnapshotPointerJson::signed(store_id, current_seq, db_hash, keypair);
     let pointer_json =
         serde_json::to_vec(&pointer).map_err(|e| SnapshotError::Parse(e.to_string()))?;
     storage.put_snapshot_pointer(pointer_json).await?;
@@ -491,7 +486,7 @@ pub async fn push_snapshot(
 #[allow(clippy::too_many_arguments)]
 async fn push_snapshot_without_blob_refs(
     storage: &dyn SyncStorage,
-    library_id: &str,
+    store_id: &str,
     snapshot_db_image: Vec<u8>,
     device_id: &str,
     applied_cursors: HashMap<String, u64>,
@@ -503,7 +498,7 @@ async fn push_snapshot_without_blob_refs(
     let db = crate::sync::test_helpers::open_test_db();
     push_snapshot(
         storage,
-        library_id,
+        store_id,
         snapshot_db_image,
         device_id,
         applied_cursors,
@@ -625,7 +620,7 @@ async fn load_snapshot_membership(
         Ok(Some(chain)) => Ok(SnapshotMembership { chain: Some(chain) }),
         Ok(None) => {
             debug!(
-                "snapshot membership load skipped: library is chain-less (no membership, no pinned owner)"
+                "snapshot membership load skipped: store is chain-less (no membership, no pinned owner)"
             );
             Ok(SnapshotMembership { chain: None })
         }
@@ -663,12 +658,12 @@ struct ResolvedSnapshotMeta {
 /// both bootstrap and GC).
 async fn resolve_current_meta(
     storage: &dyn SyncStorage,
-    library_id: &str,
+    store_id: &str,
     owner_pubkey: Option<&str>,
     watermark_db: Option<&Database>,
 ) -> Result<ResolvedSnapshotMeta, SnapshotError> {
     // The pointer is the entry point. Its absence means no snapshot has been
-    // published (a brand-new library) or the pointer object is missing — either
+    // published (a brand-new store) or the pointer object is missing — either
     // way there is no consistent generation to resolve, surfaced as the bucket's
     // NotFound.
     let pointer_json = storage
@@ -677,11 +672,11 @@ async fn resolve_current_meta(
         .map_err(SnapshotError::Bucket)?;
     let pointer: SnapshotPointerJson =
         serde_json::from_slice(&pointer_json).map_err(|e| SnapshotError::Parse(e.to_string()))?;
-    // Verifying under THIS library's id also refuses a pointer validly signed for a
-    // different library (a member of two libraries replaying one's snapshot as the
-    // other's): the signature was taken over the other library's id, so it fails
+    // Verifying under THIS store's id also refuses a pointer validly signed for a
+    // different store (a member of two stores replaying one's snapshot as the
+    // other's): the signature was taken over the other store's id, so it fails
     // here as `PointerSignatureInvalid`.
-    if !pointer.verify(library_id) {
+    if !pointer.verify(store_id) {
         return Err(SnapshotError::PointerSignatureInvalid);
     }
     let membership = load_snapshot_membership(storage, owner_pubkey, watermark_db).await?;
@@ -690,15 +685,15 @@ async fn resolve_current_meta(
     // Follow the pointer to the named generation's metadata — under the pointer's
     // own `{author_pubkey, seq}` keyspace — and authenticate it on its own terms
     // (the meta and the pointer are independently signed; in a normal publish the
-    // same device authored both). Verifying under this library's id likewise
-    // refuses a cross-library meta replay.
+    // same device authored both). Verifying under this store's id likewise
+    // refuses a cross-store meta replay.
     let meta_json = storage
         .get_snapshot_meta(&pointer.author_pubkey, pointer.seq)
         .await
         .map_err(SnapshotError::Bucket)?;
     let meta: SnapshotMetaJson =
         serde_json::from_slice(&meta_json).map_err(|e| SnapshotError::Parse(e.to_string()))?;
-    if !meta.verify(library_id) {
+    if !meta.verify(store_id) {
         return Err(SnapshotError::MetaSignatureInvalid);
     }
     membership.authorize_owner(&meta.author_pubkey)?;
@@ -761,15 +756,14 @@ struct AckedDevice {
 /// ignored — it contributes cursor 0, which only narrows reclamation.
 pub async fn reclaim_superseded_changesets(
     storage: &dyn SyncStorage,
-    library_id: &str,
+    store_id: &str,
     owner_pubkey: Option<&str>,
     watermark_db: Option<&Database>,
 ) -> Result<GcResult, SnapshotError> {
     // Resolve the live generation's authenticated per-device cursors. No pointer
     // means no snapshot has been published yet -- a joiner replays from 0, so there
     // is nothing to reclaim.
-    let resolved = match resolve_current_meta(storage, library_id, owner_pubkey, watermark_db).await
-    {
+    let resolved = match resolve_current_meta(storage, store_id, owner_pubkey, watermark_db).await {
         Ok(resolved) => resolved,
         Err(SnapshotError::Bucket(StorageError::NotFound(_))) => {
             info!("no snapshot pointer found, skipping changeset reclamation");
@@ -782,7 +776,7 @@ pub async fn reclaim_superseded_changesets(
     };
 
     // The set of current member pubkeys, or `None` for a chain-less (browsable)
-    // library, where there is no membership to authorize against and every verified
+    // store, where there is no membership to authorize against and every verified
     // head is a participant -- the same open-by-design path the pull and snapshot
     // authorization take when no chain exists.
     let members = resolved.membership.current_member_pubkeys();
@@ -912,12 +906,12 @@ pub struct GcResult {
 /// The bucket is untrusted, so a snapshot is held to the same authorship bar as a
 /// changeset before it is adopted:
 ///
-/// - The signed pointer's signature must verify (under this `library_id`, which
-///   also refuses a different library's pointer replayed here) and its author must
+/// - The signed pointer's signature must verify (under this `store_id`, which
+///   also refuses a different store's pointer replayed here) and its author must
 ///   be a current Owner (a non-member cannot repoint the live
 ///   snapshot).
 /// - The named generation's signed metadata must verify (likewise bound to
-///   `library_id`) and its author must be a current Owner (a forged,
+///   `store_id`) and its author must be a current Owner (a forged,
 ///   unsigned, or cursor-poisoned meta is refused), and the pointer and meta must
 ///   agree on the DB hash.
 /// - The downloaded DB's hash must match what that signed meta commits to (a
@@ -939,14 +933,14 @@ pub struct GcResult {
 /// where to start pulling changesets from each device.
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
-    library_id: &str,
+    store_id: &str,
     owner_pubkey: Option<&str>,
     binary_schema_version: u32,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
     // Resolve the pointer to the live generation and authenticate it before
     // touching disk. The pointer absent means no snapshot has been published (a
-    // brand-new library) or its object is missing; either way there is no
+    // brand-new store) or its object is missing; either way there is no
     // consistent generation to adopt and we refuse, writing nothing.
     //
     // Restore is a one-shot, locally-initiated adoption of the snapshot the pointer
@@ -957,7 +951,7 @@ pub async fn bootstrap_from_snapshot(
         seq,
         meta,
         membership: _,
-    } = resolve_current_meta(storage, library_id, owner_pubkey, None).await?;
+    } = resolve_current_meta(storage, store_id, owner_pubkey, None).await?;
 
     // Refuse a generation whose synced-schema version is newer than this binary
     // can apply, before downloading the image: its DB carries columns this binary's
@@ -1009,10 +1003,10 @@ pub async fn bootstrap_from_snapshot(
 /// coven derives the blobs the DB at `db_path` references from the blob
 /// declarations in `tables`, then downloads the `CacheEager` ones via the same
 /// [`crate::sync::pull::download_blobs`] path the incremental pull uses — into the
-/// evictable cache `storage/cache/<namespace>/<id>` under `library_dir`, skipping
+/// evictable cache `storage/cache/<namespace>/<id>` under `store_dir`, skipping
 /// any already present in either cache folder. A failed download is logged there
 /// and reflected in the returned flag; the bootstrap that calls this refuses to
-/// save the library unless the flag is true.
+/// save the store unless the flag is true.
 ///
 /// `refs_in_db` is a read-only enumeration run against a short-lived connection to
 /// the same on-disk DB the `db` actor owns; `db` is still needed because
@@ -1024,7 +1018,7 @@ pub async fn reconcile_snapshot_blobs(
     db: &crate::database::Database,
     db_path: &Path,
     storage: &dyn SyncStorage,
-    library_dir: &crate::library_dir::LibraryDir,
+    store_dir: &crate::store_dir::StoreDir,
     tables: &[SyncedTable],
 ) -> Result<bool, crate::database::DbError> {
     let blobs: Vec<crate::sync::pull::BlobDownload> = {
@@ -1046,11 +1040,11 @@ pub async fn reconcile_snapshot_blobs(
 
     let total = blobs.len();
     // The blobs are `CacheEager`, so `download_blobs` writes each into the
-    // evictable cache `storage/cache/<namespace>/<id>` under `library_dir`.
+    // evictable cache `storage/cache/<namespace>/<id>` under `store_dir`.
     // A snapshot's restored rows carry no per-blob uploader, so each blob's prefix
     // is resolved from the index (empty on a fresh restore) and then a listing
     // scan that records what it finds.
-    let all_ok = crate::sync::pull::download_blobs(db, blobs, storage, library_dir, None).await;
+    let all_ok = crate::sync::pull::download_blobs(db, blobs, storage, store_dir, None).await;
     if all_ok {
         info!(total, "snapshot blob reconciliation complete");
     } else {
@@ -1059,12 +1053,12 @@ pub async fn reconcile_snapshot_blobs(
     Ok(all_ok)
 }
 
-/// The library id the snapshot tests sign their meta/pointer under. The same id is
+/// The store id the snapshot tests sign their meta/pointer under. The same id is
 /// passed to `push_snapshot`/`bootstrap_from_snapshot`/`reclaim_superseded_changesets`,
-/// so the signatures verify; a cross-library binding mismatch is exercised by its own
+/// so the signatures verify; a cross-store binding mismatch is exercised by its own
 /// test. Shared by the `tests`, `authorization_tests`, and `reclaim_tests` modules.
 #[cfg(test)]
-const TEST_LIBRARY_ID: &str = "test-library";
+const TEST_STORE_ID: &str = "test-store";
 
 /// Publish a full snapshot generation directly: the signed meta over `cursors`,
 /// the db image, and the signed pointer naming `{author, seq}`.
@@ -1085,13 +1079,13 @@ async fn publish_signed_generation<I, K>(
         .into_iter()
         .map(|(device_id, seq)| (device_id.into(), seq))
         .collect();
-    let meta = SnapshotMetaJson::signed(TEST_LIBRARY_ID, cursors, db_hash.clone(), 0, keypair);
+    let meta = SnapshotMetaJson::signed(TEST_STORE_ID, cursors, db_hash.clone(), 0, keypair);
     storage
         .put_snapshot_meta(&author, seq, serde_json::to_vec(&meta).unwrap())
         .await
         .unwrap();
     storage.put_snapshot(&author, seq, sealed_db).await.unwrap();
-    let pointer = SnapshotPointerJson::signed(TEST_LIBRARY_ID, seq, db_hash, keypair);
+    let pointer = SnapshotPointerJson::signed(TEST_STORE_ID, seq, db_hash, keypair);
     storage
         .put_snapshot_pointer(serde_json::to_vec(&pointer).unwrap())
         .await
@@ -1106,7 +1100,7 @@ mod tests {
     use crate::sync::apply::resolve_and_apply_changeset;
     use crate::sync::session::BlobDecl;
     use crate::sync::test_helpers::{
-        open_test_db_with_user_and_host_blobs, temp_library_dir,
+        open_test_db_with_user_and_host_blobs, temp_store_dir,
         test_synced_tables_with_user_and_host_blobs, MockSyncStorage,
     };
     use rusqlite::session::Session as RqSession;
@@ -1209,7 +1203,7 @@ mod tests {
     /// The keypair the snapshot tests push and sign with, when they don't care
     /// who the author is (round-trip, cursor-honesty, GC). It is not registered in
     /// any chain, so these tests bootstrap with `owner = None` and an empty
-    /// membership listing — the open-library path that authorizes on the signature
+    /// membership listing — the open-store path that authorizes on the signature
     /// alone. The membership-authorization tests build their own chained mock.
     fn test_keypair() -> UserKeypair {
         UserKeypair::generate()
@@ -1367,7 +1361,7 @@ mod tests {
         let storage = MockSyncStorage::new();
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             encrypted,
             "devA",
             HashMap::new(),
@@ -1380,7 +1374,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1430,7 +1424,7 @@ mod tests {
         let storage = MockSyncStorage::new();
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             encrypted,
             "devA",
             HashMap::new(),
@@ -1445,7 +1439,7 @@ mod tests {
         // A binary topping out at version 1 cannot apply a version-2 image: refused
         // before download, with the SchemaTooNew shape, writing nothing.
         let too_old = temp.path().join("too_old.db");
-        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 1, &too_old)
+        let err = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 1, &too_old)
             .await
             .expect_err("a too-old binary must refuse a newer snapshot");
         assert!(matches!(
@@ -1462,14 +1456,14 @@ mod tests {
 
         // A binary at the writer's version adopts it.
         let same = temp.path().join("same.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 2, &same)
+        bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 2, &same)
             .await
             .expect("a binary at the snapshot's version bootstraps");
         assert!(same.exists());
 
         // A newer binary (version 3) adopts it too.
         let newer = temp.path().join("newer.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 3, &newer)
+        bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 3, &newer)
             .await
             .expect("a newer binary bootstraps an older snapshot");
         assert!(newer.exists());
@@ -1515,7 +1509,7 @@ mod tests {
         let storage = MockSyncStorage::new();
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             encrypted,
             "devA",
             HashMap::new(),
@@ -1528,7 +1522,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1634,7 +1628,7 @@ mod tests {
         let storage = MockSyncStorage::new();
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             encrypted,
             "devA",
             HashMap::new(),
@@ -1647,7 +1641,7 @@ mod tests {
         .expect("push_snapshot");
 
         let target = temp.path().join("device_b.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap_from_snapshot");
         let db_b = open_db_at(&target);
@@ -1694,7 +1688,7 @@ mod tests {
 
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             data.clone(),
             "dev-1",
             applied,
@@ -1768,7 +1762,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_with_local_user_provided_blob_aborts_before_publish_markers() {
         let db = open_test_db_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
-        let (tmp, _ld) = temp_library_dir();
+        let (tmp, _ld) = temp_store_dir();
         let external = tmp.path().join("audio.flac");
         std::fs::write(&external, b"local audio").expect("write external file");
         db.register_external_blob("audio1", "audio", &external, 11)
@@ -1780,7 +1774,7 @@ mod tests {
 
         let err = push_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snapshot.db_image,
             "dev-1",
             HashMap::new(),
@@ -1807,14 +1801,14 @@ mod tests {
     #[tokio::test]
     async fn snapshot_with_missing_remote_user_provided_blob_aborts_before_publish_markers() {
         let db = open_test_db_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
-        let (tmp, _ld) = temp_library_dir();
+        let (tmp, _ld) = temp_store_dir();
         insert_snapshot_blob_rows(&db, false).await;
         let snapshot = snapshot_from_blob_db(&db, tmp.path()).await;
         let storage = MockSyncStorage::new();
 
         let err = push_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snapshot.db_image,
             "dev-1",
             HashMap::new(),
@@ -1841,7 +1835,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_with_remote_user_and_uploaded_host_blobs_publishes() {
         let db = open_test_db_with_user_and_host_blobs(user_blob_decl(), host_blob_decl());
-        let (tmp, ld) = temp_library_dir();
+        let (tmp, ld) = temp_store_dir();
         insert_snapshot_blob_rows(&db, true).await;
         local_files::store(&ld, "covers", "cover1", b"COVER")
             .await
@@ -1880,7 +1874,7 @@ mod tests {
 
         push_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snapshot.db_image.clone(),
             "dev-1",
             HashMap::new(),
@@ -1925,7 +1919,7 @@ mod tests {
         .await;
 
         let target = temp.path().join("bootstrapped.db");
-        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        let result = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap");
 
@@ -1947,7 +1941,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("nope.db");
 
-        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target).await;
+        let result = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target).await;
 
         assert!(result.is_err());
         assert!(!target.exists());
@@ -1975,7 +1969,7 @@ mod tests {
         let encrypted = create_snapshot(&db, temp.path(), &synced_tables()).expect("snapshot");
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             encrypted,
             "dev-1",
             HashMap::new(),
@@ -1988,7 +1982,7 @@ mod tests {
         .expect("push");
 
         let target = temp.path().join("device2.db");
-        let result = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        let result = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap");
         assert_eq!(result.cursors.get("dev-1"), Some(&5));
@@ -2118,7 +2112,7 @@ mod tests {
             .unwrap();
 
         let target = temp.path().join("torn.db");
-        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        let err = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect_err("bootstrap must refuse a generation with no pointer");
         assert!(
@@ -2156,7 +2150,7 @@ mod tests {
         let snap_a = create_snapshot(&db_a, temp.path(), &synced_tables()).expect("snap A");
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snap_a,
             "self",
             HashMap::new(),
@@ -2183,7 +2177,7 @@ mod tests {
         // Bootstrap resolves the pointer (still naming A) and adopts A's consistent
         // generation — the 'old' row, cursor {self: 5} — never B's orphan db.
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap resolves the consistent generation A");
         assert_eq!(
@@ -2241,7 +2235,7 @@ mod tests {
         let db_b = vec![0xBu8];
         let db_hash_b = snapshot_db_hash(&db_b);
         let meta_b = SnapshotMetaJson::signed(
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             std::collections::BTreeMap::<String, u64>::new(),
             db_hash_b,
             0,
@@ -2486,7 +2480,7 @@ mod tests {
         let snap_b = create_snapshot(&db_b, temp.path(), &synced_tables()).expect("snap B");
         let db_hash_b = snapshot_db_hash(&snap_b);
         let meta_b = SnapshotMetaJson::signed(
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             std::collections::BTreeMap::from([("B".to_string(), 7)]),
             db_hash_b,
             0,
@@ -2519,7 +2513,7 @@ mod tests {
         // The pointer names A's generation, so a joiner resolves and adopts A's
         // catalog — A's db image was never aliased by B's same-seq publish.
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap resolves A's live generation");
         assert_eq!(boot.cursors.get("A"), Some(&7));
@@ -2593,7 +2587,7 @@ mod tests {
         let applied = HashMap::from([("M".to_string(), k)]);
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snapshot,
             "B",
             applied,
@@ -2621,7 +2615,7 @@ mod tests {
             .expect("K+1 is above the snapshot cursor and must be preserved");
 
         let target = temp.path().join("device_c.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap");
         let c_cursor = *boot.cursors.get("M").unwrap_or(&0);
@@ -2665,7 +2659,7 @@ mod tests {
         let snap1 = create_snapshot(&db_owner, temp.path(), &synced_tables()).expect("snap1");
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snap1,
             "owner",
             HashMap::new(),
@@ -2679,7 +2673,7 @@ mod tests {
 
         // Device B bootstraps and has the note.
         let b_path = temp.path().join("b.db");
-        let b_boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &b_path)
+        let b_boot = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &b_path)
             .await
             .expect("b bootstrap");
         let db_b = open_db_at(&b_path);
@@ -2724,7 +2718,7 @@ mod tests {
         let snap2 = create_snapshot(&db_b, temp.path(), &synced_tables()).expect("snap2");
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snap2,
             "B",
             b_cursors.clone(),
@@ -2738,7 +2732,7 @@ mod tests {
 
         // Device C bootstraps + pulls and must also have the update.
         let c_path = temp.path().join("c.db");
-        let c_boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &c_path)
+        let c_boot = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &c_path)
             .await
             .expect("c bootstrap");
         let db_c = open_db_at(&c_path);
@@ -2758,7 +2752,7 @@ mod tests {
         );
     }
 
-    /// A single-device library reclaims only seqs <= the snapshot's accurate cursor
+    /// A single-device store reclaims only seqs <= the snapshot's accurate cursor
     /// (no other current device, so the floor is just the snapshot cursor); a
     /// changeset pushed after the snapshot (absent from the snapshot DB) survives.
     #[tokio::test]
@@ -2773,7 +2767,7 @@ mod tests {
         let applied = HashMap::from([("M".to_string(), 2)]);
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             vec![0u8; 4],
             "M",
             applied,
@@ -2785,7 +2779,7 @@ mod tests {
         .await
         .expect("push");
 
-        reclaim_superseded_changesets(&storage, TEST_LIBRARY_ID, None, None)
+        reclaim_superseded_changesets(&storage, TEST_STORE_ID, None, None)
             .await
             .expect("reclaim");
 
@@ -2812,7 +2806,7 @@ mod tests {
         let applied = HashMap::from([("M".to_string(), 7)]);
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             snap,
             "self",
             applied,
@@ -2825,7 +2819,7 @@ mod tests {
         .expect("push");
 
         let target = temp.path().join("boot.db");
-        let boot = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        let boot = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("bootstrap");
         assert_eq!(boot.cursors.get("M"), Some(&7));
@@ -2844,7 +2838,7 @@ mod tests {
         let applied = HashMap::from([("M".to_string(), 4)]);
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             vec![0u8; 4],
             "B",
             applied,
@@ -2912,7 +2906,7 @@ mod authorization_tests {
 
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -2928,7 +2922,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let boot = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -2942,27 +2936,27 @@ mod authorization_tests {
         );
     }
 
-    /// THE cross-library replay. A device that belongs to two libraries takes one
-    /// library's catalog and re-seals it under the other's key, then re-signs the
+    /// THE cross-store replay. A device that belongs to two stores takes one
+    /// store's catalog and re-seals it under the other's key, then re-signs the
     /// meta and pointer with its own (validly a member's) key and publishes them as
-    /// the second library's live snapshot. Everything is internally valid — a real
+    /// the second store's live snapshot. Everything is internally valid — a real
     /// member's signature over a consistent generation — except the binding: the
-    /// meta and pointer were signed for library X, and the joiner reads them as
-    /// library Y. Because the signature covers `library_id`, re-verifying under Y's
+    /// meta and pointer were signed for store X, and the joiner reads them as
+    /// store Y. Because the signature covers `store_id`, re-verifying under Y's
     /// id fails, so the snapshot is refused and nothing is written — a generation
-    /// signed for one library can never be adopted by another.
+    /// signed for one store can never be adopted by another.
     #[tokio::test]
-    async fn bootstrap_refuses_a_snapshot_bound_to_a_different_library() {
+    async fn bootstrap_refuses_a_snapshot_bound_to_a_different_store() {
         let owner = UserKeypair::generate();
         let storage = MockSyncStorage::new();
         found_chain(&storage, &owner).await;
 
         // The owner publishes a generation with valid signatures, db, and pointer —
-        // but bound to library X.
-        let library_x = "library-x";
+        // but bound to store X.
+        let store_x = "store-x";
         push_snapshot_without_blob_refs(
             &storage,
-            library_x,
+            store_x,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -2972,26 +2966,25 @@ mod authorization_tests {
             &crate::clock::SystemClock,
         )
         .await
-        .expect("owner publishes a generation bound to library X");
+        .expect("owner publishes a generation bound to store X");
 
-        // The joiner reads the same bucket as library Y (a different id). The meta
+        // The joiner reads the same bucket as store Y (a different id). The meta
         // and pointer signatures were taken over X's id, so they don't verify under
         // Y — the replay is refused as a binding (signature) failure, even though
         // the author is a real member and the generation is internally consistent.
-        let library_y = "library-y";
+        let store_y = "store-y";
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("boot.db");
-        let err =
-            bootstrap_from_snapshot(&storage, library_y, Some(&pubkey_hex(&owner)), 0, &target)
-                .await
-                .expect_err("a snapshot bound to a different library must be refused");
+        let err = bootstrap_from_snapshot(&storage, store_y, Some(&pubkey_hex(&owner)), 0, &target)
+            .await
+            .expect_err("a snapshot bound to a different store must be refused");
         assert!(
             matches!(err, SnapshotError::PointerSignatureInvalid),
-            "expected PointerSignatureInvalid (the cross-library binding fails), got {err:?}",
+            "expected PointerSignatureInvalid (the cross-store binding fails), got {err:?}",
         );
         assert!(
             !target.exists(),
-            "no DB is written when the snapshot is bound to a different library",
+            "no DB is written when the snapshot is bound to a different store",
         );
     }
 
@@ -3011,7 +3004,7 @@ mod authorization_tests {
         // bucket-write-capable non-member can produce.
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "evil-dev",
             HashMap::from([("victim".to_string(), u64::MAX)]),
@@ -3027,7 +3020,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3062,7 +3055,7 @@ mod authorization_tests {
         // The owner publishes a real, member-signed generation at seq 1.
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -3080,8 +3073,7 @@ mod authorization_tests {
         // still resolves the owner's generation; the outsider only re-signs it.
         let real_db_hash =
             snapshot_db_hash(&storage.get_snapshot(&pubkey_hex(&owner), 1).await.unwrap());
-        let forged_pointer =
-            SnapshotPointerJson::signed(TEST_LIBRARY_ID, 1, real_db_hash, &outsider);
+        let forged_pointer = SnapshotPointerJson::signed(TEST_STORE_ID, 1, real_db_hash, &outsider);
         storage
             .put_snapshot_pointer(serde_json::to_vec(&forged_pointer).unwrap())
             .await
@@ -3091,7 +3083,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3108,7 +3100,7 @@ mod authorization_tests {
         );
     }
 
-    /// A read-only Follower holds the library key (so it can seal a snapshot) but
+    /// A read-only Follower holds the store key (so it can seal a snapshot) but
     /// may not author a catalog image. A snapshot it signs is refused — the same
     /// write/read split the changeset path enforces.
     #[tokio::test]
@@ -3131,7 +3123,7 @@ mod authorization_tests {
 
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "follower-dev",
             HashMap::new(),
@@ -3147,7 +3139,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3188,7 +3180,7 @@ mod authorization_tests {
         // The owner's snapshot is adopted.
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -3204,7 +3196,7 @@ mod authorization_tests {
         let owner_target = temp.path().join("owner.db");
         bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &owner_target,
@@ -3218,7 +3210,7 @@ mod authorization_tests {
         // bootstrap refuses, the pointer's author judged not a current Owner.
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "member-dev",
             HashMap::new(),
@@ -3233,7 +3225,7 @@ mod authorization_tests {
         let member_target = temp.path().join("member.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &member_target,
@@ -3259,7 +3251,7 @@ mod authorization_tests {
 
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -3287,7 +3279,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3318,7 +3310,7 @@ mod authorization_tests {
         // A complete, self-consistent generation at seq 1 (meta + db + pointer agree).
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -3335,7 +3327,7 @@ mod authorization_tests {
         // The bucket now holds a pointer and a meta naming generation 1 but committing
         // to different hashes — a spliced generation a reader must refuse.
         let other_hash = snapshot_db_hash(b"a-different-devices-catalog");
-        let spliced_pointer = SnapshotPointerJson::signed(TEST_LIBRARY_ID, 1, other_hash, &owner);
+        let spliced_pointer = SnapshotPointerJson::signed(TEST_STORE_ID, 1, other_hash, &owner);
         storage
             .put_snapshot_pointer(serde_json::to_vec(&spliced_pointer).unwrap())
             .await
@@ -3345,7 +3337,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3371,7 +3363,7 @@ mod authorization_tests {
 
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::from([("peer".to_string(), 5)]),
@@ -3403,7 +3395,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3431,7 +3423,7 @@ mod authorization_tests {
         // Member-signed snapshot: adopted even with no pinned owner.
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -3445,7 +3437,7 @@ mod authorization_tests {
 
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("restore.db");
-        bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target)
+        bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
             .expect("restore adopts a member-signed snapshot anchored to the chain founder");
         assert!(target.exists());
@@ -3454,7 +3446,7 @@ mod authorization_tests {
         // author is judged against the chain and refused.
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "evil-dev",
             HashMap::new(),
@@ -3467,7 +3459,7 @@ mod authorization_tests {
         .expect("outsider overwrites the snapshot objects");
 
         let target2 = temp.path().join("restore2.db");
-        let err = bootstrap_from_snapshot(&storage, TEST_LIBRARY_ID, None, 0, &target2)
+        let err = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target2)
             .await
             .expect_err("restore must refuse a non-member-signed snapshot");
         assert!(
@@ -3490,7 +3482,7 @@ mod authorization_tests {
 
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "evil-dev",
             HashMap::from([("victim".to_string(), u64::MAX)]),
@@ -3502,21 +3494,17 @@ mod authorization_tests {
         .await
         .expect("outsider writes a forged meta");
 
-        let err = reclaim_superseded_changesets(
-            &storage,
-            TEST_LIBRARY_ID,
-            Some(&pubkey_hex(&owner)),
-            None,
-        )
-        .await
-        .expect_err("reclamation must refuse a non-member-signed meta before deleting");
+        let err =
+            reclaim_superseded_changesets(&storage, TEST_STORE_ID, Some(&pubkey_hex(&owner)), None)
+                .await
+                .expect_err("reclamation must refuse a non-member-signed meta before deleting");
         assert!(
             matches!(err, SnapshotError::UnauthorizedAuthor(_)),
             "expected UnauthorizedAuthor, got {err:?}",
         );
     }
 
-    /// An owner is pinned (an opaque library) but the `membership/*` listing is
+    /// An owner is pinned (an opaque store) but the `membership/*` listing is
     /// empty — a wiped chain under an otherwise-intact bucket. There is no founder
     /// to anchor to, so even a snapshot whose signature verifies cannot be
     /// authorized: bootstrap refuses rather than adopting it. (The chain-less path
@@ -3530,7 +3518,7 @@ mod authorization_tests {
 
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "owner-dev",
             HashMap::new(),
@@ -3546,7 +3534,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3581,7 +3569,7 @@ mod authorization_tests {
         // chain that exists, the strongest forge a takeover can mount.
         push_snapshot_without_blob_refs(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             fake_snapshot(),
             "founder-dev",
             HashMap::new(),
@@ -3598,7 +3586,7 @@ mod authorization_tests {
         // The joiner pins the owner its invite names — a different key.
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&pinned_owner)),
             0,
             &target,
@@ -3633,7 +3621,7 @@ mod authorization_tests {
 
         // A valid owner-signed pointer naming generation 1 (under the owner's
         // keyspace) — the pointer step passes, so the refusal lands on the meta.
-        let pointer = SnapshotPointerJson::signed(TEST_LIBRARY_ID, 1, db_hash, &owner);
+        let pointer = SnapshotPointerJson::signed(TEST_STORE_ID, 1, db_hash, &owner);
         storage
             .put_snapshot_pointer(serde_json::to_vec(&pointer).unwrap())
             .await
@@ -3652,7 +3640,7 @@ mod authorization_tests {
         let target = temp.path().join("boot.db");
         let err = bootstrap_from_snapshot(
             &storage,
-            TEST_LIBRARY_ID,
+            TEST_STORE_ID,
             Some(&pubkey_hex(&owner)),
             0,
             &target,
@@ -3757,7 +3745,7 @@ mod reclaim_tests {
     }
 
     async fn reclaim(storage: &MockSyncStorage, owner: &UserKeypair) -> GcResult {
-        reclaim_superseded_changesets(storage, TEST_LIBRARY_ID, Some(&pubkey_hex(owner)), None)
+        reclaim_superseded_changesets(storage, TEST_STORE_ID, Some(&pubkey_hex(owner)), None)
             .await
             .expect("reclaim")
     }
@@ -3939,7 +3927,7 @@ mod reclaim_tests {
         );
     }
 
-    /// 7. Single-device library: with no other current device the ack term is
+    /// 7. Single-device store: with no other current device the ack term is
     ///    unbounded, so the floor is just the snapshot cursor (3) — 1..=3 reclaimed,
     ///    4..=5 survive.
     #[tokio::test]

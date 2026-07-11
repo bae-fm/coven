@@ -80,20 +80,20 @@ fn delete_keyring(account: &str) -> Result<bool, KeyError> {
 
 #[derive(Clone)]
 pub struct KeyService {
-    library_id: String,
+    store_id: String,
 }
 
 impl KeyService {
-    pub fn new(library_id: String) -> Self {
-        Self { library_id }
+    pub fn new(store_id: String) -> Self {
+        Self { store_id }
     }
 
-    pub fn library_id(&self) -> &str {
-        &self.library_id
+    pub fn store_id(&self) -> &str {
+        &self.store_id
     }
 
     fn account(&self, base: &str) -> String {
-        format!("{}:{}", base, self.library_id)
+        format!("{}:{}", base, self.store_id)
     }
 
     pub fn get_encryption_key(&self) -> Result<Option<String>, KeyError> {
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn get_or_create_encryption_key_does_not_overwrite_a_corrupt_empty_entry() {
         test_keyring::install();
-        let service = KeyService::new("empty-encryption-key-library".to_string());
+        let service = KeyService::new("empty-encryption-key-store".to_string());
         let account = service.account("encryption_master_key");
         let entry =
             keyring_core::Entry::new(keyring_service().expect("service registered"), &account)

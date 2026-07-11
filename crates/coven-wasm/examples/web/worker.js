@@ -1,11 +1,11 @@
-// The dedicated Worker that owns the coven library.
+// The dedicated Worker that owns the coven store.
 //
 // coven's browser database is backed by the OPFS sahpool VFS, whose
 // FileSystemSyncAccessHandles exist only on a dedicated Worker — not the main
-// thread. So the `CovenLibrary` (the wasm facade) and every call into it run
+// thread. So the `CovenStore` (the wasm facade) and every call into it run
 // here, and the page talks to this Worker by message:
 //
-//   page → worker:  { type: "open",     config }   (open the library)
+//   page → worker:  { type: "open",     config }   (open the store)
 //                   { type: "addNote",  id, body }  (insert a note + sync now)
 //                   { type: "list" }                (read all notes)
 //                   { type: "syncNow" }             (force a sync cycle)
@@ -16,9 +16,9 @@
 //
 // The pkg/ directory is the coven-wasm wasm-pack output (see README).
 
-import init, { CovenLibrary } from "../../pkg/coven_wasm.js";
+import init, { CovenStore } from "../../pkg/coven_wasm.js";
 
-let library = null;
+let store = null;
 
 const migrations = [
   {
@@ -39,31 +39,31 @@ async function handle(message) {
   const data = message.data;
   switch (data.type) {
     case "open": {
-      // Initialize the wasm module, then open the library against the config the
-      // page collected. `CovenLibrary.open` installs the OPFS VFS, opens the
+      // Initialize the wasm module, then open the store against the config the
+      // page collected. `CovenStore.open` installs the OPFS VFS, opens the
       // database, and builds the sync runtime; `start_sync` begins the loop.
       await init();
-      library = await CovenLibrary.open(data.config, migrations, syncedTables);
-      library.start_sync();
+      store = await CovenStore.open(data.config, migrations, syncedTables);
+      store.start_sync();
       self.postMessage({ type: "opened" });
-      self.postMessage({ type: "syncing", value: library.is_syncing() });
+      self.postMessage({ type: "syncing", value: store.is_syncing() });
       await sendNotes();
       break;
     }
     case "addNote": {
-      const updatedAt = library.stamp();
+      const updatedAt = store.stamp();
       const createdAt = new Date().toISOString();
       // Parameterized through coven's `exec`. The values are escaped here for the
       // demo's single-quote-free inputs; a real app would pass bound parameters.
       const id = sqlString(data.id);
       const body = sqlString(data.body);
-      library.exec(
+      store.exec(
         `INSERT INTO notes (id, body, _updated_at, created_at) ` +
           `VALUES (${id}, ${body}, ${sqlString(updatedAt)}, ${sqlString(createdAt)}) ` +
           `ON CONFLICT(id) DO UPDATE SET body = excluded.body, _updated_at = excluded._updated_at`,
       );
       // Push this write now rather than waiting out the idle interval.
-      library.sync_now();
+      store.sync_now();
       await sendNotes();
       break;
     }
@@ -72,7 +72,7 @@ async function handle(message) {
       break;
     }
     case "syncNow": {
-      library.sync_now();
+      store.sync_now();
       break;
     }
     default:
@@ -81,7 +81,7 @@ async function handle(message) {
 }
 
 async function sendNotes() {
-  const rows = await library.query(
+  const rows = await store.query(
     "SELECT id, body, _updated_at FROM notes ORDER BY _updated_at DESC",
   );
   self.postMessage({ type: "notes", rows });

@@ -3,7 +3,7 @@
 //! Handles the cloud home path layout (where keys, heads, images, etc. live)
 //! and how objects are protected at rest. The underlying `CloudHome` only deals
 //! in raw bytes and flat keys; this layer applies the [`CloudCipher`] — sealing
-//! every object under the library key for an encrypted home, or storing it
+//! every object under the store key for an encrypted home, or storing it
 //! verbatim for a plaintext one — and drives the object-key suffix off the same
 //! choice (`.enc` for an encrypted home, no suffix for a plaintext one).
 
@@ -23,7 +23,7 @@ const GENERATION_TAG_MAGIC: &[u8; 4] = b"CKG1";
 const GENERATION_TAG_LEN: usize = GENERATION_TAG_MAGIC.len() + std::mem::size_of::<u64>();
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
-/// every object under the library key (the default); a `Plaintext` home stores
+/// every object under the store key (the default); a `Plaintext` home stores
 /// objects in the clear so the bucket is browsable, and drops the `.enc` suffix.
 #[derive(Clone)]
 pub enum CloudCipher {
@@ -58,14 +58,14 @@ impl BlobPathScheme {
 
 impl CloudCipher {
     /// The at-rest cipher a home's storage mode selects: an opaque home seals
-    /// under its library key (`Encrypted`), a browsable home stores in the clear
+    /// under its store key (`Encrypted`), a browsable home stores in the clear
     /// (`Plaintext`). The sibling of [`BlobPathScheme::for_storage`] — together
     /// they map a [`HomeStorage`](crate::config::HomeStorage) to its
     /// (path scheme, at-rest cipher) pair.
     ///
-    /// `encryption` is the library master service; it is required for (and only
+    /// `encryption` is the store master service; it is required for (and only
     /// consulted on) an opaque home. `None` is returned only for an opaque home
-    /// with no service (a locked library) — a browsable home is always
+    /// with no service (a locked store) — a browsable home is always
     /// `Plaintext` regardless. A host streaming a Remote blob via
     /// [`BlobRangeReader`] builds the reader with this cipher so a read applies
     /// the same protection the upload sealed under.
@@ -82,12 +82,12 @@ impl CloudCipher {
 
     /// Protect a control object (heads, changesets, snapshot, snapshot_meta,
     /// min_schema, membership) for storage. Encrypted seals under the current
-    /// library-key generation and prefixes that generation in cleartext;
+    /// store-key generation and prefixes that generation in cleartext;
     /// plaintext returns the bytes unchanged.
     pub fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
         // A control object is always whole-home scoped; only blobs carry a scope.
         // This is exactly the master-scoped blob path: `encryption_for_scope`
-        // maps `Master` to the library key itself.
+        // maps `Master` to the store key itself.
         self.seal_scoped(crate::blob::BlobScope::Master, plaintext, aad_context)
     }
 
@@ -97,7 +97,7 @@ impl CloudCipher {
     }
 
     /// Protect a blob under its scope. Encrypted blobs carry the current
-    /// library-key generation in cleartext, so a later read knows which
+    /// store-key generation in cleartext, so a later read knows which
     /// generation to open with.
     pub(crate) fn seal_scoped(
         &self,
@@ -192,7 +192,7 @@ pub struct CloudSyncStorage {
     /// How blob objects are keyed. Unlike the cipher, the scheme does not rotate
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
-    library_id: String,
+    store_id: String,
     /// The device's signing identity. The control objects this storage writes
     /// (its head, the min_schema floor) are signed with it so a reader can
     /// attribute and verify them; the at-rest cipher proves confidentiality, not
@@ -205,14 +205,14 @@ impl CloudSyncStorage {
         home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
         blob_paths: BlobPathScheme,
-        library_id: impl Into<String>,
+        store_id: impl Into<String>,
         keypair: UserKeypair,
     ) -> Self {
         CloudSyncStorage {
             home,
             cipher: Arc::new(RwLock::new(cipher)),
             blob_paths,
-            library_id: library_id.into(),
+            store_id: store_id.into(),
             keypair,
         }
     }
@@ -276,7 +276,7 @@ impl CloudSyncStorage {
     }
 
     fn aad_context(&self, key: &str) -> Vec<u8> {
-        cloud_aad_context(&self.library_id, key)
+        cloud_aad_context(&self.store_id, key)
     }
 
     async fn write_blob_sealed(
@@ -336,7 +336,7 @@ impl CloudSyncStorage {
                         "an opaque-home blob requires an uploader for {namespace}/{id}"
                     ))
                 })?;
-                Ok(crate::library_dir::LibraryDir::uploader_hashed_key(
+                Ok(crate::store_dir::StoreDir::uploader_hashed_key(
                     namespace, uploader, id,
                 )?)
             }
@@ -346,8 +346,8 @@ impl CloudSyncStorage {
                         "unobfuscated blob-path home requires a cloud_path for blob {namespace}/{id}"
                     ))
                 })?;
-                crate::library_dir::validate_path_token(namespace)?;
-                crate::library_dir::validate_cloud_path(path)?;
+                crate::store_dir::validate_path_token(namespace)?;
+                crate::store_dir::validate_cloud_path(path)?;
                 Ok(format!("{namespace}/{path}"))
             }
         }
@@ -362,7 +362,7 @@ impl CloudSyncStorage {
 /// Every blob `cloud_key` [`CloudSyncStorage::blob_key`] produces is `{namespace}/…`
 /// in BOTH [`BlobPathScheme`] variants (`Hashed` = `{namespace}/{ab}/{cd}/{id}`,
 /// `Plain` = `{namespace}/{cloud_path}`), and a namespace is a single slash-free path
-/// token (validated by [`crate::library_dir::validate_path_token`]). So the namespace
+/// token (validated by [`crate::store_dir::validate_path_token`]). So the namespace
 /// is always recoverable from the key with no second stored copy — the durable
 /// `cloud_outbox` row carries only the key, and the upload drain recovers the
 /// namespace here for the cache copy it places (`storage/cache/<namespace>/…`).
@@ -376,7 +376,7 @@ pub(crate) fn namespace_from_cloud_key(cloud_key: &str) -> &str {
 }
 
 /// The `EncryptionService` a blob's `scope` selects, against `master`: the
-/// library master itself, or a per-scope key derived from it. The blob storage
+/// store master itself, or a per-scope key derived from it. The blob storage
 /// methods and the outbox drain both turn a [`crate::blob::BlobScope`] into a
 /// key the same way, so they share this one mapping. Only an encrypted home has
 /// per-scope keys, so this is reached only from the [`CloudCipher::Encrypted`]
@@ -391,11 +391,11 @@ pub(crate) fn encryption_for_scope(
     }
 }
 
-pub(crate) fn cloud_aad_context(library_id: &str, cloud_key: &str) -> Vec<u8> {
+pub(crate) fn cloud_aad_context(store_id: &str, cloud_key: &str) -> Vec<u8> {
     let mut context =
-        Vec::with_capacity(std::mem::size_of::<u64>() * 2 + library_id.len() + cloud_key.len());
-    context.extend_from_slice(&(library_id.len() as u64).to_le_bytes());
-    context.extend_from_slice(library_id.as_bytes());
+        Vec::with_capacity(std::mem::size_of::<u64>() * 2 + store_id.len() + cloud_key.len());
+    context.extend_from_slice(&(store_id.len() as u64).to_le_bytes());
+    context.extend_from_slice(store_id.as_bytes());
     context.extend_from_slice(&(cloud_key.len() as u64).to_le_bytes());
     context.extend_from_slice(cloud_key.as_bytes());
     context
@@ -428,7 +428,7 @@ fn read_generation_tag(stored: &[u8]) -> Result<(u64, &[u8]), EncryptionError> {
 }
 
 /// The key `scope` seals under plus the cleartext generation-tag prefix every
-/// encrypted object carries (the current library-key generation, so a later
+/// encrypted object carries (the current store-key generation, so a later
 /// read knows which generation to open with).
 fn sealing_encryption_for_scope(
     scope: crate::blob::BlobScope,
@@ -734,10 +734,10 @@ impl SyncStorage for CloudSyncStorage {
             let stored = self.home.read(key).await?;
             // A head we can't open, can't parse, or can't verify is skipped, not
             // fatal. The bucket is untrusted: any member with the credential can
-            // seal garbage into their own head slot under the library key, and a
-            // different library reusing this bucket writes heads under its own
+            // seal garbage into their own head slot under the store key, and a
+            // different store reusing this bucket writes heads under its own
             // key. Aborting on any one of them would wedge every sync cycle for
-            // this library — it would never pull, push its catalog or snapshot,
+            // this store — it would never pull, push its catalog or snapshot,
             // or publish its own head. Skipping excludes the bad head and lets
             // the rest drive the pull; the slot's owner republishes a good head
             // on its next successful cycle. A transient read error above still
@@ -745,7 +745,7 @@ impl SyncStorage for CloudSyncStorage {
             let decoded = match self.open_stored(key, stored, &format!("head {device_id}")) {
                 Ok(d) => d,
                 Err(e) => {
-                    warn!("skipping head {device_id} this library cannot decrypt: {e}");
+                    warn!("skipping head {device_id} this store cannot decrypt: {e}");
                     continue;
                 }
             };
@@ -953,11 +953,11 @@ impl SyncStorage for CloudSyncStorage {
         if !matches!(self.blob_paths, BlobPathScheme::Hashed) {
             return Ok(None);
         }
-        crate::library_dir::validate_path_token(namespace)?;
+        crate::store_dir::validate_path_token(namespace)?;
         // The hashed key is `{namespace}/{uploader}/{ab}/{cd}/{id}`. List the
         // namespace and take the object whose shard matches this id; the single
         // segment between the namespace and the shard is the uploader.
-        let shard = crate::library_dir::LibraryDir::id_shard(id)?;
+        let shard = crate::store_dir::StoreDir::id_shard(id)?;
         let prefix = format!("{namespace}/");
         let suffix = format!("/{shard}");
         let keys = self.home.list(&prefix).await?;
@@ -992,13 +992,13 @@ impl SyncStorage for CloudSyncStorage {
         seq: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        crate::library_dir::validate_path_token(author)?;
+        crate::store_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
         self.write_sealed(&key, data).await
     }
 
     async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        crate::library_dir::validate_path_token(author)?;
+        crate::store_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
         self.read_sealed(&key, &format!("snapshot {author}/{seq}"))
             .await
@@ -1126,11 +1126,11 @@ impl SyncStorage for CloudSyncStorage {
         recipient_pubkey: &str,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        crate::library_dir::validate_path_token(owner_pubkey)?;
+        crate::store_dir::validate_path_token(owner_pubkey)?;
         let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
         // Wrapped keys are already sealed boxes; store as-is. The suffix is kept
         // uniform with the rest of the layout, but the bytes are never sealed by
-        // the home cipher — wrapping a library key is meaningful only for a
+        // the home cipher — wrapping a store key is meaningful only for a
         // shared (encrypted) home.
         self.home
             .write(
@@ -1147,7 +1147,7 @@ impl SyncStorage for CloudSyncStorage {
         owner_pubkey: &str,
         recipient_pubkey: &str,
     ) -> Result<Vec<u8>, StorageError> {
-        crate::library_dir::validate_path_token(owner_pubkey)?;
+        crate::store_dir::validate_path_token(owner_pubkey)?;
         let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
         // Wrapped keys are already sealed boxes; return as-is.
         self.home.read(&key).await.map_err(StorageError::from)
@@ -1158,7 +1158,7 @@ impl SyncStorage for CloudSyncStorage {
         owner_pubkey: &str,
         recipient_pubkey: &str,
     ) -> Result<(), StorageError> {
-        crate::library_dir::validate_path_token(owner_pubkey)?;
+        crate::store_dir::validate_path_token(owner_pubkey)?;
         let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
         self.home.delete(&key).await?;
         Ok(())
@@ -1170,13 +1170,13 @@ impl SyncStorage for CloudSyncStorage {
         seq: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        crate::library_dir::validate_path_token(author)?;
+        crate::store_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
         self.write_sealed(&key, data).await
     }
 
     async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        crate::library_dir::validate_path_token(author)?;
+        crate::store_dir::validate_path_token(author)?;
         let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
         self.read_sealed(&key, &format!("snapshot_meta {author}/{seq}"))
             .await
@@ -1193,7 +1193,7 @@ impl SyncStorage for CloudSyncStorage {
     }
 
     async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
-        crate::library_dir::validate_path_token(author)?;
+        crate::store_dir::validate_path_token(author)?;
         let suffix = self.suffix();
         let prefix = format!("snapshot/{author}/");
         let keys = self.home.list(&prefix).await?;
@@ -1234,7 +1234,7 @@ impl SyncStorage for CloudSyncStorage {
     }
 
     async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError> {
-        crate::library_dir::validate_path_token(author)?;
+        crate::store_dir::validate_path_token(author)?;
         let suffix = self.suffix();
         // Delete the db first, then the meta: the meta object is what
         // `list_own_snapshot_generations` keys a generation by, so removing it last
@@ -1492,9 +1492,9 @@ mod tests {
     }
 
     /// `CloudCipher::for_storage` maps a home's storage mode to its at-rest
-    /// cipher: an opaque home seals under the supplied library key, a browsable
+    /// cipher: an opaque home seals under the supplied store key, a browsable
     /// home is always plaintext (ignoring any key), and an opaque home with no
-    /// key — a locked library — has no cipher. This is the same mapping
+    /// key — a locked store — has no cipher. This is the same mapping
     /// `SyncManager::start_sync` builds the sync loop with, so reads through a
     /// `BlobRangeReader` and writes through the outbox agree on the protection.
     #[test]
@@ -1514,7 +1514,7 @@ mod tests {
             CloudCipher::for_storage(HomeStorage::Browsable, None),
             Some(CloudCipher::Plaintext)
         ));
-        // An opaque home with no key (a locked library) has no cipher.
+        // An opaque home with no key (a locked store) has no cipher.
         assert!(CloudCipher::for_storage(HomeStorage::Opaque, None).is_none());
     }
 
@@ -1630,10 +1630,10 @@ mod tests {
         );
     }
 
-    /// A head this library cannot decrypt — e.g. one a *different* library wrote
+    /// A head this store cannot decrypt — e.g. one a *different* store wrote
     /// when it reused the same bucket (its own encryption key) — must be skipped,
     /// not abort `list_heads`. The sync cycle's pull calls `list_heads`, so an
-    /// abort there wedges every cycle: the library never pulls, never pushes its
+    /// abort there wedges every cycle: the store never pulls, never pushes its
     /// catalog or snapshot, and never publishes its own head.
     #[tokio::test]
     async fn list_heads_skips_a_head_it_cannot_decrypt() {
@@ -1655,7 +1655,7 @@ mod tests {
             .write(
                 "heads/foreign-device.json.enc",
                 BlobBody::from_bytes(
-                    b"a different library's head, encrypted with another key".to_vec(),
+                    b"a different store's head, encrypted with another key".to_vec(),
                 ),
                 &crate::storage::cloud::no_progress(),
             )
@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     /// A stray key under `heads/` that is not shaped like
-    /// `heads/{device_id}.json{suffix}` is not this library's head. A browsable
+    /// `heads/{device_id}.json{suffix}` is not this store's head. A browsable
     /// cloud folder can pick up conflicted-copy and editor files, and those must
     /// not abort every sync cycle for the valid heads beside them.
     #[tokio::test]
@@ -1736,7 +1736,7 @@ mod tests {
             .expect("put our head");
 
         // A forged head for another device: a structurally valid `HeadJson` whose
-        // signature does not match its author. It is sealed under the same library
+        // signature does not match its author. It is sealed under the same store
         // key (so it decrypts fine), proving the rejection is the *signature*
         // check, not the cipher.
         let forged = HeadJson {
@@ -1771,7 +1771,7 @@ mod tests {
         );
     }
 
-    /// A head sealed under the valid library key but carrying a non-JSON payload
+    /// A head sealed under the valid store key but carrying a non-JSON payload
     /// is skipped, not fatal. Parseability of a bucket-writable object is as
     /// externally controlled as its signature, so an unparseable head must not
     /// wedge `list_heads` — and thus every pull — for every member. The other
@@ -1793,7 +1793,7 @@ mod tests {
             .await
             .expect("put our head");
 
-        // A head that decrypts fine (sealed under the library key) but whose
+        // A head that decrypts fine (sealed under the store key) but whose
         // plaintext is not a `HeadJson`.
         let sealed = cipher.seal(
             b"this is not json".to_vec(),

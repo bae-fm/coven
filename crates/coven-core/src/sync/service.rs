@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 use crate::blob::{BlobRef, CacheFill, Provenance};
 use crate::database::Database;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
 use super::envelope;
@@ -66,7 +66,7 @@ pub async fn complete_host_provided_make_remotes(
     tables: &[SyncedTable],
     storage: &dyn SyncStorage,
     timestamp: &str,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     local_seq: u64,
 ) -> Result<bool, SyncCycleError> {
     let roots = ready_host_provided_make_remotes(db, tables).await?;
@@ -88,7 +88,7 @@ pub async fn complete_host_provided_make_remotes(
         // copy. A copy already in the cache (crash-recovery fallback) needs neither.
         let mut drops = Vec::new();
         for blob in &root.host_blobs {
-            let uploaded = upload_host_provided_blob(db, storage, library_dir, blob).await?;
+            let uploaded = upload_host_provided_blob(db, storage, store_dir, blob).await?;
             if let Some(drop) = uploaded
                 .deferred_local_blob_drop(local_blob_disposition(blob, root.intent.retain_pinned))
             {
@@ -106,13 +106,13 @@ pub async fn complete_host_provided_make_remotes(
 pub(super) async fn upload_snapshot_host_blobs(
     db: &Database,
     storage: &dyn SyncStorage,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     blobs: &[BlobRef],
 ) -> Result<(), SyncCycleError> {
     for blob in blobs {
-        let uploaded = upload_host_provided_blob(db, storage, library_dir, blob).await?;
+        let uploaded = upload_host_provided_blob(db, storage, store_dir, blob).await?;
         uploaded
-            .apply_local_store_disposition(db, library_dir, local_blob_disposition(blob, false))
+            .apply_local_store_disposition(db, store_dir, local_blob_disposition(blob, false))
             .await?;
     }
     Ok(())
@@ -136,7 +136,7 @@ pub async fn sync(
     timestamp: &str,
     message: &str,
     keypair: &UserKeypair,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     membership_chain: Option<&MembershipChain>,
     owner_pubkey: Option<&str>,
 ) -> Result<SyncResult, SyncCycleError> {
@@ -194,7 +194,7 @@ pub async fn sync(
         for blob in host_blobs {
             let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
             let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
-            let uploaded = upload_host_provided_blob(db, storage, library_dir, &blob).await?;
+            let uploaded = upload_host_provided_blob(db, storage, store_dir, &blob).await?;
             if let Some(intent) = intent {
                 consumed_intents.insert((intent.root_table.clone(), intent.root_id.clone()));
             }
@@ -259,7 +259,7 @@ pub async fn sync(
         storage,
         device_id,
         cursors,
-        library_dir,
+        store_dir,
         membership_chain.cloned(),
         owner_pubkey.map(str::to_string),
     )
@@ -282,7 +282,7 @@ pub async fn sync(
 }
 
 /// The storage coordinate of the membership entry that authorizes this device
-/// to write, or `None` for a solo/browsable library (no membership chain).
+/// to write, or `None` for a solo/browsable store (no membership chain).
 /// Embedded in the outgoing changeset so a puller can resolve a
 /// membership-propagation gap. Read off the cycle's once-loaded chain, so it
 /// judges the same membership state as the rest of the cycle rather than
@@ -334,13 +334,13 @@ impl UploadedHostBlob {
     async fn apply_local_store_disposition(
         self,
         db: &Database,
-        library_dir: &LibraryDir,
+        store_dir: &StoreDir,
         disposition: DeferredLocalBlobDisposition,
     ) -> Result<(), SyncCycleError> {
         if self.cleanup_local_store_after_publish {
             apply_deferred_local_blob_drop(
                 db,
-                library_dir,
+                store_dir,
                 &DeferredLocalBlobDrop {
                     namespace: self.blob.namespace,
                     id: self.blob.id,
@@ -357,7 +357,7 @@ impl UploadedHostBlob {
 async fn upload_host_provided_blob(
     db: &Database,
     storage: &dyn SyncStorage,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     blob: &BlobRef,
 ) -> Result<UploadedHostBlob, SyncCycleError> {
     let expected_size = expected_blob_size(db, blob).await?;
@@ -367,7 +367,7 @@ async fn upload_host_provided_blob(
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     if exists {
         let local = crate::blob::local_files::path_if_present(
-            library_dir,
+            store_dir,
             &blob.namespace,
             &blob.id,
             expected_size,
@@ -383,7 +383,7 @@ async fn upload_host_provided_blob(
     }
 
     let local = match crate::blob::local_files::path_if_present(
-        library_dir,
+        store_dir,
         &blob.namespace,
         &blob.id,
         expected_size,
@@ -402,7 +402,7 @@ async fn upload_host_provided_blob(
     let source_path = match local {
         Some(path) => path,
         None => match crate::blob::cache::staged_path(
-            library_dir,
+            store_dir,
             &blob.namespace,
             &blob.id,
             expected_size,
@@ -489,11 +489,11 @@ async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCy
 
 pub async fn apply_deferred_local_blob_drop(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     deferred: &DeferredLocalBlobDrop,
 ) -> Result<(), SyncCycleError> {
     let local = crate::blob::local_files::path_if_present(
-        library_dir,
+        store_dir,
         &deferred.namespace,
         &deferred.id,
         deferred.size,
@@ -502,7 +502,7 @@ pub async fn apply_deferred_local_blob_drop(
     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
     match (deferred.disposition, local) {
         (DeferredLocalBlobDisposition::Pin, Some(source)) => {
-            let pinned = library_dir
+            let pinned = store_dir
                 .pinned_blob_path(&deferred.namespace, &deferred.id)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             crate::local_blob::copy_atomic(&source, &pinned)
@@ -512,7 +512,7 @@ pub async fn apply_deferred_local_blob_drop(
         (DeferredLocalBlobDisposition::Cache, Some(source)) => {
             crate::blob::cache::write_blob_from_file(
                 db,
-                library_dir,
+                store_dir,
                 &deferred.namespace,
                 &deferred.id,
                 &source,
@@ -527,19 +527,19 @@ pub async fn apply_deferred_local_blob_drop(
         // still pending. Recognize that finished work by its destination — Ok clears
         // the intent — and fail loud only when the destination is ALSO empty.
         (DeferredLocalBlobDisposition::Pin, None) => {
-            let pinned = library_dir
+            let pinned = store_dir
                 .pinned_blob_path(&deferred.namespace, &deferred.id)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             return recognize_applied_disposition_or_fail(&pinned, deferred).await;
         }
         (DeferredLocalBlobDisposition::Cache, None) => {
-            let cached = library_dir
+            let cached = store_dir
                 .cache_blob_path(&deferred.namespace, &deferred.id)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             return recognize_applied_disposition_or_fail(&cached, deferred).await;
         }
     }
-    crate::blob::local_files::drop_blob(library_dir, &deferred.namespace, &deferred.id)
+    crate::blob::local_files::drop_blob(store_dir, &deferred.namespace, &deferred.id)
         .await
         .map(|_| ())
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))

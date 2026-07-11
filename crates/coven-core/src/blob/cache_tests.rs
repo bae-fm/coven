@@ -1,7 +1,7 @@
 //! Tests for the device-local blob cache.
 //!
 //! These drive the real cache free functions over a real [`Database`] and a real
-//! temp library directory, with a [`MockSyncStorage`] standing in for the cloud, so
+//! temp store directory, with a [`MockSyncStorage`] standing in for the cloud, so
 //! a hit/miss and a folder move are exercised against actual files on disk. The
 //! load-bearing properties: presence is the file (no table), pinned-ness is which
 //! folder (`storage/pinned/` vs `storage/cache/`), and a read serves a local copy
@@ -21,7 +21,7 @@ use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     capture_bytes, open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, plant_blob_row, pull_into, read_test_db,
-    set_blob_remote, temp_library_dir, test_migrations, MockSyncStorage,
+    set_blob_remote, temp_store_dir, test_migrations, MockSyncStorage,
 };
 
 /// The synthetic test db opens with a single migration, so its
@@ -101,7 +101,7 @@ async fn put_cloud_blob(storage: &MockSyncStorage, id: &str, namespace: &str, by
 async fn second_read_is_a_local_hit() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"THE-BLOB-BYTES".to_vec();
@@ -136,7 +136,7 @@ async fn second_read_is_a_local_hit() {
 async fn short_cached_remote_blob_is_a_miss_and_refetches() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-torn", "audio", CacheFill::CacheLazy);
     let bytes = b"complete remote blob bytes".to_vec();
@@ -173,7 +173,7 @@ async fn short_cached_remote_blob_is_a_miss_and_refetches() {
 async fn short_cloud_object_errors_and_caches_nothing() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-shrt", "audio", CacheFill::CacheLazy);
     let declared = b"the full declared blob bytes".to_vec();
@@ -229,7 +229,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     );
 
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = blob_ref("blob-reuse", "audio", CacheFill::CacheLazy);
     let bytes = ramp(4096);
 
@@ -302,9 +302,9 @@ async fn cache_eager_lands_in_cache_on_pull() {
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
     // The puller declares the photo a CacheEager blob; the pull writes it into the
-    // library dir's evictable cache tree.
+    // store dir's evictable cache tree.
     let db2 = open_test_db_with_blob(photo_decl());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
@@ -327,7 +327,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
 async fn pin_survives_clear_cache_and_unpin_demotes() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("ond-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"ON-DEMAND-AUDIO".to_vec();
@@ -422,7 +422,7 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
 async fn pin_downloads_remote_blob_straight_to_pinned_file() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("pin0aaaa", "audio", CacheFill::CacheLazy);
     let bytes: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
@@ -474,7 +474,7 @@ async fn cache_lazy_fetches_on_first_read() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
     // The row applied, but the CacheLazy blob is in neither folder — pull skipped it.
@@ -507,7 +507,7 @@ async fn cache_lazy_fetches_on_first_read() {
 async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("stg-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"CACHED-BYTES".to_vec();
@@ -581,7 +581,7 @@ fn write_external_file(base: &std::path::Path, name: &str, bytes: &[u8]) -> std:
 async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
@@ -647,7 +647,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-bbbb", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
@@ -706,7 +706,7 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
 async fn full_read_blob_still_populates_the_cache() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-cccc", "audio", CacheFill::CacheLazy);
     let bytes = b"WHOLE-FILE-PAYLOAD".to_vec();
@@ -740,7 +740,7 @@ async fn full_read_blob_still_populates_the_cache() {
 async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let full = ramp(1000);
 
@@ -812,7 +812,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
 async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (tmp, ld) = temp_library_dir();
+    let (tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("extr-aaaa", "audio", CacheFill::CacheLazy);
     // Local + user-provided: the gate dispatches to the external file.
@@ -872,7 +872,7 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
 async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (tmp, ld) = temp_library_dir();
+    let (tmp, ld) = temp_store_dir();
 
     let cloud_bytes = b"CLOUD-FALLBACK-BYTES".to_vec();
 
@@ -924,7 +924,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
 async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (tmp, ld) = temp_library_dir();
+    let (tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("extc-aaaa", "audio", CacheFill::CacheLazy);
     // Local + user-provided: serves the user's external file.
@@ -976,7 +976,7 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
 async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (tmp, ld) = temp_library_dir();
+    let (tmp, ld) = temp_store_dir();
 
     // Local + user-provided.
     let blob = blob_ref("extp-aaaa", "audio", CacheFill::CacheLazy);
@@ -1031,7 +1031,7 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
 async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
     let db = read_test_db("photos");
     let storage = MockSyncStorage::new();
-    let (tmp, ld) = temp_library_dir();
+    let (tmp, ld) = temp_store_dir();
 
     // Local + host-provided: its bytes live in the local store, never the cloud.
     let blob = host_blob_ref("res0aaaa", "photos", CacheFill::CacheEager);
@@ -1089,7 +1089,7 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
 async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("rem0cccc", "audio", CacheFill::CacheLazy);
     let cloud_bytes = ramp(2048);
@@ -1138,7 +1138,7 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 #[tokio::test]
 async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_cloud() {
     let db = read_test_db("audio");
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = blob_ref("rem0dddd", "audio", CacheFill::CacheLazy);
 
     plant_blob_row(&db, &blob.id, true, 17).await;
@@ -1171,7 +1171,7 @@ async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
         CacheFill::CacheEager,
     ));
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = host_blob_ref("rrrr0001", "photos", CacheFill::CacheEager);
 
     let cloud_bytes = b"REMOTE-ROOT-CLOUD";
@@ -1209,7 +1209,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
@@ -1239,7 +1239,7 @@ async fn plain_blob_table_without_gate_or_remote_root_fails_locality_resolution(
         CacheFill::CacheEager,
     ));
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = host_blob_ref("plain001", "photos", CacheFill::CacheEager);
 
     let cloud_bytes = b"PLAIN-CLOUD";
@@ -1262,7 +1262,7 @@ async fn plain_blob_table_without_gate_or_remote_root_fails_locality_resolution(
 async fn local_user_provided_blob_without_an_external_ref_errors() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("extn-aaaa", "audio", CacheFill::CacheLazy);
     // Gate Local + the BlobRef's user-provided provenance ⇒ the external arm, but no
@@ -1296,7 +1296,7 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
 async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud() {
     let db = read_test_db("photos");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     let blob = host_blob_ref("res1bbbb", "photos", CacheFill::CacheEager);
     plant_blob_row(&db, &blob.id, false, 11).await;
@@ -1333,7 +1333,7 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
 async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     let db = read_test_db("audio");
     let storage = MockSyncStorage::new();
-    let (tmp, ld) = temp_library_dir();
+    let (tmp, ld) = temp_store_dir();
 
     // Remote + user-provided, with a stale external ref still registered.
     let blob = blob_ref("drft0aaa", "audio", CacheFill::CacheLazy);
@@ -1387,7 +1387,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
         BlobDecl::new("ns_remote", Provenance::HostProvided, CacheFill::CacheEager),
     );
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // One id carried by a row in each table, under different gates: note_photos
     // (ns_local) below a Local note, note_covers (ns_remote) below a Remote note.
@@ -1452,7 +1452,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
 /// ([`crate::local_blob::walk_files`]) over that namespace's cache subtree (which
 /// ignores `pinned/` and every other namespace), so the test measures the cache the
 /// same way eviction does. An absent subtree walks to nothing (0).
-async fn cache_total_bytes(ld: &crate::library_dir::LibraryDir, namespace: &str) -> u64 {
+async fn cache_total_bytes(ld: &crate::store_dir::StoreDir, namespace: &str) -> u64 {
     let dir = ld
         .cache_namespace_dir(namespace)
         .expect("valid namespace token");
@@ -1467,7 +1467,7 @@ async fn cache_total_bytes(ld: &crate::library_dir::LibraryDir, namespace: &str)
 /// Pin a cache file's modification time to a fixed instant so eviction order is
 /// deterministic (the cache evicts oldest-mtime first). `secs` is an offset from
 /// the unix epoch — smaller is older.
-fn set_cache_mtime(ld: &crate::library_dir::LibraryDir, namespace: &str, id: &str, secs: u64) {
+fn set_cache_mtime(ld: &crate::store_dir::StoreDir, namespace: &str, id: &str, secs: u64) {
     let path = ld.cache_blob_path(namespace, id).expect("cache path");
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -1482,7 +1482,7 @@ fn set_cache_mtime(ld: &crate::library_dir::LibraryDir, namespace: &str, id: &st
 /// later eviction test then trims.
 async fn stage_with_mtime(
     db: &Database,
-    ld: &crate::library_dir::LibraryDir,
+    ld: &crate::store_dir::StoreDir,
     namespace: &str,
     id: &str,
     bytes: &[u8],
@@ -1503,7 +1503,7 @@ async fn stage_with_mtime(
 #[tokio::test]
 async fn eviction_drops_oldest_cache_files_until_under_budget() {
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // Four 100-byte files, oldest → newest by mtime. No budget yet, so staging does
     // not evict; the cache holds all 400 bytes.
@@ -1563,7 +1563,7 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
 #[tokio::test]
 async fn release_files_eviction_leaves_covers_intact() {
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // A cover in the small `covers` namespace, plus four audio files in the big
     // `release_files` namespace. No budgets yet.
@@ -1616,7 +1616,7 @@ async fn release_files_eviction_leaves_covers_intact() {
 async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     let db = read_test_db("covers");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // Two 200-byte covers in the cloud, both `CacheEager`. The `covers` budget holds
     // one at a time (250 bytes).
@@ -1690,7 +1690,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
     let db2 = open_test_db_with_blob(photo_decl());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
@@ -1755,7 +1755,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
 #[tokio::test]
 async fn unset_namespace_budget_never_evicts() {
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     stage_with_mtime(&db, &ld, "release_files", "keep1aaa", &[1u8; 5000], 1000).await;
     stage_with_mtime(&db, &ld, "release_files", "keep2bbb", &[2u8; 5000], 2000).await;
@@ -1787,7 +1787,7 @@ async fn unset_namespace_budget_never_evicts() {
 async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
     let db = read_test_db("release_files");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // An older cached file (100 bytes, old mtime), no budget yet.
     stage_with_mtime(&db, &ld, "release_files", "older1aa", &[1u8; 100], 1000).await;
@@ -1834,7 +1834,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
 async fn budget_never_drifts_over_across_repeated_populates() {
     let db = read_test_db("release_files");
     let storage = MockSyncStorage::new();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // Budget of 250 bytes; each blob is 100 bytes, so at most two fit.
     db.set_cache_budget("release_files", 250)
@@ -1892,7 +1892,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
 #[tokio::test]
 async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // Two 100-byte files. The protected one is OLDER (mtime 1000); the other is
     // NEWER (mtime 2000). A naive oldest-first sweep would evict the protected one.
@@ -1934,7 +1934,7 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
 #[tokio::test]
 async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // A 100-byte protected file plus a 100-byte evictable one. The protected file
     // alone (100 bytes) is larger than the 50-byte budget.
@@ -1978,7 +1978,7 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
 #[tokio::test]
 async fn eviction_skips_a_concurrent_populates_temp_file() {
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // A committed 100-byte cache file (newer by mtime), already at the budget.
     stage_with_mtime(&db, &ld, "release_files", "keep0aaa", &[1u8; 100], 2000).await;

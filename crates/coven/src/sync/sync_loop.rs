@@ -21,10 +21,10 @@ use tracing::{debug, error, info};
 
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
-use crate::coven::LibraryOpenGuard;
+use crate::coven::StoreOpenGuard;
 use crate::database::Database;
 use crate::keys::{KeyService, UserKeypair};
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::cycle::SyncComponents;
@@ -78,7 +78,7 @@ pub enum SyncLoopStatus {
 pub struct SyncLoopHandle {
     inner: Arc<SyncLoopInner>,
     clock: ClockRef,
-    library_dir: LibraryDir,
+    store_dir: StoreDir,
     trigger_tx: tokio::sync::mpsc::Sender<()>,
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
@@ -94,7 +94,7 @@ pub struct SyncLoopHandle {
 struct SyncLoopInner {
     storage: Arc<CloudSyncStorage>,
     hlc: Arc<Hlc>,
-    library_id: String,
+    store_id: String,
     device_id: String,
     cipher: Arc<std::sync::RwLock<CloudCipher>>,
     db: Database,
@@ -102,12 +102,12 @@ struct SyncLoopInner {
     key_service: KeyService,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
-    /// The library-directory lock, held so it releases only when the loop's
+    /// The store-directory lock, held so it releases only when the loop's
     /// thread exits. The running thread keeps a clone of this `SyncLoopInner`
     /// alive across its whole cycle, so the last handle dropping never releases
     /// `.coven-lock` while a mid-cycle pull or upload is still writing — a second
-    /// `open()` of the same library stays refused until this writer is gone.
-    _open_guard: Arc<LibraryOpenGuard>,
+    /// `open()` of the same store stays refused until this writer is gone.
+    _open_guard: Arc<StoreOpenGuard>,
 }
 
 impl SyncLoopHandle {
@@ -116,9 +116,9 @@ impl SyncLoopHandle {
         db: Database,
         key_service: KeyService,
         clock: ClockRef,
-        library_dir: LibraryDir,
+        store_dir: StoreDir,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
-        open_guard: Arc<LibraryOpenGuard>,
+        open_guard: Arc<StoreOpenGuard>,
         status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
@@ -128,7 +128,7 @@ impl SyncLoopHandle {
             inner: Arc::new(SyncLoopInner {
                 storage: components.storage,
                 hlc: components.hlc,
-                library_id: components.library_id,
+                store_id: components.store_id,
                 device_id: components.device_id,
                 cipher: components.cipher,
                 db,
@@ -138,7 +138,7 @@ impl SyncLoopHandle {
                 _open_guard: open_guard,
             }),
             clock,
-            library_dir,
+            store_dir,
             trigger_tx,
             trigger_rx: std::sync::Mutex::new(Some(trigger_rx)),
             stop_tx,
@@ -183,7 +183,7 @@ impl SyncLoopHandle {
         let inner = Arc::clone(&self.inner);
         let status_tx = self.status_tx.clone();
         let clock = self.clock.clone();
-        let library_dir = self.library_dir.clone();
+        let store_dir = self.store_dir.clone();
         let running = Arc::clone(&self.running);
 
         let handle = std::thread::Builder::new()
@@ -232,7 +232,7 @@ impl SyncLoopHandle {
                             debug!("sync loop cycle-start status had no subscribers");
                         }
 
-                        let decision = match run_single_cycle(&inner, clock.as_ref(), &library_dir).await {
+                        let decision = match run_single_cycle(&inner, clock.as_ref(), &store_dir).await {
                             Ok(result) => loop_policy::after_success(result),
                             Err(error) => loop_policy::after_failure(error, consecutive_failures, 300),
                         };
@@ -359,14 +359,14 @@ impl Drop for RunningGuard {
 async fn run_single_cycle(
     inner: &SyncLoopInner,
     clock: &dyn crate::clock::Clock,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
 ) -> Result<super::cycle::SyncCycleResult, String> {
     let storage: &dyn SyncStorage = &*inner.storage;
     let cloud_home = inner.storage.cloud_home();
 
     super::cycle::run_single_sync_cycle(
         storage,
-        &inner.library_id,
+        &inner.store_id,
         &inner.device_id,
         &inner.hlc,
         clock,
@@ -374,7 +374,7 @@ async fn run_single_cycle(
         &inner.cipher,
         &inner.user_keypair,
         Some(&inner.key_service),
-        library_dir,
+        store_dir,
         Some(cloud_home),
         inner.observer.as_deref(),
     )

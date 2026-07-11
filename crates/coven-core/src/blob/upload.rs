@@ -36,8 +36,8 @@ use crate::blob::decl::BlobDecls;
 use crate::blob::{BlobScope, BlobTransitionObserver, Provenance};
 use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::{BlobBody, CloudHome, CloudHomeError};
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::gate::Gates;
 use crate::sync::hlc::Hlc;
@@ -159,14 +159,14 @@ async fn record_failure(
 async fn open_scoped_body(
     cipher: &std::sync::RwLock<CloudCipher>,
     file_path: &Path,
-    library_id: &str,
+    store_id: &str,
     cloud_key: &str,
     scope: BlobScope,
 ) -> Result<BlobBody, String> {
     // Snapshot the cipher out of the lock so the (streaming, await-holding) body
     // doesn't keep the guard across the upload.
     let cipher = cipher.read().unwrap().clone();
-    let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, cloud_key);
+    let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, cloud_key);
     cipher.open_body(scope, file_path, &aad_context).await
 }
 
@@ -209,8 +209,8 @@ pub async fn drain_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
-    library_id: &str,
-    library_dir: &LibraryDir,
+    store_id: &str,
+    store_dir: &StoreDir,
     clock: &dyn crate::clock::Clock,
     hlc: &Hlc,
     observer: Option<&dyn BlobTransitionObserver>,
@@ -291,7 +291,7 @@ pub async fn drain_uploads(
         let file_path = match source_path {
             Some(p) => std::path::PathBuf::from(p),
             None => match crate::storage::local::storage_path(file_id) {
-                Ok(rel) => library_dir.join(rel),
+                Ok(rel) => store_dir.join(rel),
                 Err(e) => {
                     // A locally-enqueued upload id that can't form a storage path is
                     // a host bug, not attacker data; record it as this entry's
@@ -312,7 +312,7 @@ pub async fn drain_uploads(
         let body = match open_scoped_body(
             cipher,
             &file_path,
-            library_id,
+            store_id,
             &entry.cloud_key,
             scope.clone(),
         )
@@ -341,10 +341,7 @@ pub async fn drain_uploads(
                 // failing a completed upload.
                 if *retain_pinned {
                     if let Err(e) = crate::blob::cache::populate_pinned(
-                        library_dir,
-                        namespace,
-                        file_id,
-                        &file_path,
+                        store_dir, namespace, file_id, &file_path,
                     )
                     .await
                     {
@@ -410,7 +407,7 @@ pub async fn drain_uploads(
                         // copy too (a `retain_pinned` upload populated `pinned/`,
                         // which is budget-exempt and would otherwise leak).
                         if let Err(e) =
-                            crate::blob::cache::drop_cached_blob(library_dir, namespace, file_id)
+                            crate::blob::cache::drop_cached_blob(store_dir, namespace, file_id)
                                 .await
                         {
                             warn!("failed to drop the cache copy of orphaned blob {namespace}/{file_id}: {e}");

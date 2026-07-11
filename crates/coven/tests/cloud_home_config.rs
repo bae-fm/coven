@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use coven::{
-    create_cloud_home, CloudHomeError, CloudProvider, Config, KeyService, LibraryDir, SystemClock,
+    create_cloud_home, CloudHomeError, CloudProvider, Config, KeyService, StoreDir, SystemClock,
 };
 
 #[tokio::test]
@@ -15,7 +15,7 @@ async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
     let mut config = Config::with_defaults(
         "lib-cfg".to_string(),
         "device-cfg".to_string(),
-        LibraryDir::new(tmp.path()),
+        StoreDir::new(tmp.path()),
         "Cfg".to_string(),
     );
     // A provider is selected but its required bucket is unset: the user has to

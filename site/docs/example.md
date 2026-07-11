@@ -9,7 +9,7 @@ The data model: a `workspaces` table holds `lists`, a `list` holds `todos`, and
 a list has a boolean `shared` column. Lists marked `shared` (and the todos under
 them) reach teammates; the rest stay on the device that wrote them.
 
-## Open the library
+## Open the store
 
 coven owns the connections. The host opens one native handle with
 [`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
@@ -135,11 +135,11 @@ the host names its keyring service once at startup with
 [`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service), then builds
 the [`KeyService`](rustdoc:struct:coven::keys::KeyService) and
 [`EncryptionService`](rustdoc:struct:coven::encryption::EncryptionService) for the
-library.
+store.
 
 ```rust
 coven::keys::set_keyring_service("todos");
-let key_service = coven::keys::KeyService::new(library_id.clone());
+let key_service = coven::keys::KeyService::new(store_id.clone());
 let encryption_key = key_service.get_or_create_encryption_key()?;
 let encryption_service = coven::encryption::EncryptionService::new(&encryption_key)?;
 ```
@@ -230,7 +230,7 @@ layout, and the [Cache](/docs/cache) page covers the device-local read side.
 
 ## Share with a teammate
 
-A library starts with one member, the device that created it. To add a teammate,
+A store starts with one member, the device that created it. To add a teammate,
 the owner calls
 `handle.invite_member(...)` with the teammate's public key and a
 [`MemberRole`](rustdoc:enum:coven::sync::membership::MemberRole) (`Owner`,
@@ -244,9 +244,9 @@ let invite_code = handle
 
 On the teammate's device,
 [`join_from_invite_code`](rustdoc:fn:coven::sync::join::join_from_invite_code)
-decodes the code, runs the provider's auth flow, unwraps the library keyring sealed to
+decodes the code, runs the provider's auth flow, unwraps the store keyring sealed to
 the teammate's key, downloads the snapshot, and pulls the changesets written
-since. It returns a `Config` for the now-local library; from there the teammate
+since. It returns a `Config` for the now-local store; from there the teammate
 opens a `CovenHandle` exactly as above. `handle.remove_member(...)` appends a fresh
 key generation the removed member never receives. The signed membership
 chain, key wrapping, and the join flow are covered in [Sharing](/docs/sharing).

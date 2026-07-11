@@ -1,4 +1,4 @@
-//! Restore an existing library from cloud storage.
+//! Restore an existing store from cloud storage.
 //!
 //! Unlike join (which unwraps the encryption key from an invite), restore takes
 //! the encryption key directly from the user — present for an opaque home,
@@ -12,12 +12,12 @@ use tracing::info;
 use crate::config::{Config, ConfigError, HomeStorage};
 use crate::encryption::{EncryptionError, EncryptionService};
 use crate::keys::{KeyError, KeyService, UserKeypair};
-use crate::library_dir::LibraryDir;
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::join::{bootstrap_and_save_library, BootstrapSaveError, JoinError};
+use crate::sync::join::{bootstrap_and_save_store, BootstrapSaveError, JoinError};
 use crate::sync::pull::PullError;
 use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::SnapshotError;
@@ -72,8 +72,8 @@ pub enum RestoreError {
     Cleanup(String),
     #[error("invalid restore code: {0}")]
     InvalidCode(String),
-    #[error("library already exists locally: {0}")]
-    LibraryExists(String),
+    #[error("store already exists locally: {0}")]
+    StoreExists(String),
     #[error("invalid signing key: {0}")]
     InvalidSigningKey(String),
     #[error("provider: {0}")]
@@ -94,14 +94,14 @@ impl From<BootstrapSaveError> for RestoreError {
 /// Build a `(JoinInfo, Box<dyn CloudHome>)` from a `RestoreSource`.
 async fn build_cloud_home(
     source: RestoreSource,
-    library_id: &str,
+    store_id: &str,
     clock: crate::clock::ClockRef,
 ) -> Result<(CloudHomeJoinInfo, Box<dyn CloudHome>), RestoreError> {
     use crate::storage::cloud::*;
 
     // Consumed only by the oauth provider arms below.
     #[cfg(not(feature = "oauth-providers"))]
-    let _ = (library_id, &clock);
+    let _ = (store_id, &clock);
 
     match source {
         RestoreSource::S3 {
@@ -140,7 +140,7 @@ async fn build_cloud_home(
 
         #[cfg(feature = "oauth-providers")]
         RestoreSource::GoogleDrive { folder_id, tokens } => {
-            let ks = KeyService::new(library_id.to_string());
+            let ks = KeyService::new(store_id.to_string());
             let home =
                 google_drive::GoogleDriveCloudHome::new(folder_id.clone(), tokens, ks, clock)?;
             let info = CloudHomeJoinInfo::GoogleDrive { folder_id };
@@ -152,7 +152,7 @@ async fn build_cloud_home(
             folder_path,
             tokens,
         } => {
-            let ks = KeyService::new(library_id.to_string());
+            let ks = KeyService::new(store_id.to_string());
             let home = dropbox::DropboxCloudHome::new(folder_path.clone(), tokens, ks, clock)?;
             let info = CloudHomeJoinInfo::Dropbox {
                 shared_folder_id: folder_path,
@@ -166,7 +166,7 @@ async fn build_cloud_home(
             folder_id,
             tokens,
         } => {
-            let ks = KeyService::new(library_id.to_string());
+            let ks = KeyService::new(store_id.to_string());
             let home = onedrive::OneDriveCloudHome::new(
                 drive_id.clone(),
                 folder_id.clone(),
@@ -190,18 +190,18 @@ async fn build_cloud_home(
     }
 }
 
-/// Restore a library from cloud storage.
+/// Restore a store from cloud storage.
 ///
 /// Validates inputs, constructs the cloud home from the source, runs the sync
-/// protocol, and sets the library as active. `keypair` is the restored device's
+/// protocol, and sets the store as active. `keypair` is the restored device's
 /// signing identity (recovered from the restore code); the storage signs the
 /// control objects it writes with it, and it is the same key the caller imports
 /// once restore succeeds.
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
-    library_id: &str,
+    store_id: &str,
     encryption_key_hex: Option<&str>,
-    library_name: &str,
+    store_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     source: RestoreSource,
@@ -211,21 +211,21 @@ pub async fn restore_from_cloud(
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
 ) -> Result<Config, RestoreError> {
-    // Guard the destructive `libraries/<id>` create/delete against any direct
+    // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
-    crate::library_dir::validate_path_token(library_id)
-        .map_err(|e| RestoreError::InvalidCode(format!("invalid library id: {e}")))?;
+    crate::store_dir::validate_path_token(store_id)
+        .map_err(|e| RestoreError::InvalidCode(format!("invalid store id: {e}")))?;
 
-    // Refuse a library already present locally before any provider side effect. The
+    // Refuse a store already present locally before any provider side effect. The
     // decode guaranteed the id is a safe single component, so the directory is a
-    // direct child of `libraries/` and cannot escape it. Re-running a restore for a
-    // library you already have adds nothing — the existing library is the data — and
-    // letting it proceed would, on any bootstrap failure below, delete that library's
+    // direct child of `stores/` and cannot escape it. Re-running a restore for a
+    // store you already have adds nothing — the existing store is the data — and
+    // letting it proceed would, on any bootstrap failure below, delete that store's
     // database and blobs during cleanup. Refusing here makes the failure-cleanup only
     // ever remove a directory this invocation created.
-    let library_dir = LibraryDir::for_library(app_dir, library_id);
-    if library_dir.exists() {
-        return Err(RestoreError::LibraryExists(library_id.to_string()));
+    let store_dir = StoreDir::for_store(app_dir, store_id);
+    if store_dir.exists() {
+        return Err(RestoreError::StoreExists(store_id.to_string()));
     }
 
     // The key's presence is the home's storage mode: a key present ⇒ an opaque
@@ -247,35 +247,35 @@ pub async fn restore_from_cloud(
 
     let blob_paths = BlobPathScheme::for_storage(storage);
 
-    let (join_info, cloud_home) = build_cloud_home(source, library_id, clock).await?;
+    let (join_info, cloud_home) = build_cloud_home(source, store_id, clock).await?;
 
     let storage = CloudSyncStorage::new(
         std::sync::Arc::from(cloud_home),
         cipher.clone(),
         blob_paths,
-        library_id.to_string(),
+        store_id.to_string(),
         keypair.clone(),
     );
 
-    // Create the library directory under `libraries/` (its non-existence was checked
+    // Create the store directory under `stores/` (its non-existence was checked
     // up front, so this create and the failure-cleanup below own it entirely).
     let device_id = ids.new_id();
-    std::fs::create_dir_all(&*library_dir)?;
+    std::fs::create_dir_all(&*store_dir)?;
 
-    let key_service = KeyService::new(library_id.to_string());
+    let key_service = KeyService::new(store_id.to_string());
 
-    let result = bootstrap_and_save_library(
+    let result = bootstrap_and_save_store(
         &storage,
         &cipher,
         encryption_key_hex,
-        &library_dir,
-        library_id,
+        &store_dir,
+        store_id,
         &device_id,
         crate::sync::join::BootstrapContext::Restore,
         synced_tables,
         migrations,
         &join_info,
-        library_name,
+        store_name,
         &key_service,
         &on_status,
     )
@@ -283,18 +283,18 @@ pub async fn restore_from_cloud(
 
     match result {
         Ok(config) => {
-            // The host records this as the active library after this returns.
+            // The host records this as the active store after this returns.
             info!(
-                "Cloud restore complete: library at {}",
-                config.library_dir.display()
+                "Cloud restore complete: store at {}",
+                config.store_dir.display()
             );
             Ok(config)
         }
         Err(err) => {
             let restore_error = RestoreError::from(err);
-            if let Err(cleanup_error) = std::fs::remove_dir_all(&*library_dir) {
+            if let Err(cleanup_error) = std::fs::remove_dir_all(&*store_dir) {
                 return Err(RestoreError::Cleanup(format!(
-                    "failed to remove library directory after restore failed: {cleanup_error}; original error: {restore_error}"
+                    "failed to remove store directory after restore failed: {cleanup_error}; original error: {restore_error}"
                 )));
             }
             Err(restore_error)
@@ -302,7 +302,7 @@ pub async fn restore_from_cloud(
     }
 }
 
-/// Restore a library from a restore code string.
+/// Restore a store from a restore code string.
 ///
 /// Decodes the restore code, converts provider → RestoreSource (adding OAuth
 /// tokens for providers that need them), imports the signing key, and
@@ -386,7 +386,7 @@ pub async fn restore_from_code(
     };
 
     let config = restore_from_cloud(
-        &parsed.lid,
+        &parsed.sid,
         parsed.ek.as_deref(),
         &parsed.name,
         synced_tables,

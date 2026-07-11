@@ -14,8 +14,8 @@ use crate::config::Config;
 use crate::database::{Database, DbError, LocalTransactionOutcome, OpenError};
 use crate::handle::CovenHandle;
 use crate::keys::KeyService;
-use crate::library_dir::PathTokenError;
 use crate::migration::{Migration, MigrationError};
+use crate::store_dir::PathTokenError;
 use crate::sync::hlc::UpdatedAtStamper;
 use crate::sync::session::SyncedTable;
 use crate::sync::sync_manager::ConfigProvider;
@@ -44,9 +44,9 @@ pub enum CovenError {
         "a write declared device-local through sql_local wrote a synced table; it was rolled back"
     )]
     LocalWriteTouchedSyncedTable,
-    #[error("synced_tables must be set before opening a coven library")]
+    #[error("synced_tables must be set before opening a coven store")]
     MissingSyncedTables,
-    #[error("migrations must be set before opening a coven library")]
+    #[error("migrations must be set before opening a coven store")]
     MissingMigrations,
     #[error("blob_tombstone_grace must be a positive duration")]
     InvalidBlobTombstoneGrace,
@@ -54,8 +54,8 @@ pub enum CovenError {
     BlobStillReferenced { namespace: String, id: String },
     #[error("blob {namespace}/{id} is already referenced by a row")]
     BlobAlreadyReferenced { namespace: String, id: String },
-    #[error("library is already open: {}", library_dir.display())]
-    AlreadyOpen { library_dir: PathBuf },
+    #[error("store is already open: {}", store_dir.display())]
+    AlreadyOpen { store_dir: PathBuf },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -116,7 +116,7 @@ impl Coven {
             migrations: None,
             blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             clock: Arc::new(SystemClock),
-            key_service: KeyService::new(current.library_id),
+            key_service: KeyService::new(current.store_id),
             cloudkit_ops: None,
             observer: None,
         }
@@ -134,9 +134,9 @@ pub struct CovenBuilder {
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
 
-/// The single-writer library lock: an exclusive advisory lock on
-/// `<library>/.coven-lock`, held for the life of a full [`open`](CovenBuilder::open)
-/// handle (and its running sync loop). A second full open of the same library is
+/// The single-writer store lock: an exclusive advisory lock on
+/// `<store>/.coven-lock`, held for the life of a full [`open`](CovenBuilder::open)
+/// handle (and its running sync loop). A second full open of the same store is
 /// refused with [`CovenError::AlreadyOpen`] while the lock is held — the invariant
 /// that keeps two writers from racing the same db and blob store.
 ///
@@ -152,25 +152,23 @@ pub struct CovenBuilder {
 /// committed rows while the writer commits more), not from this lock; the blob cache
 /// a reader may populate is per-device scratch written atomically (temp + rename), so
 /// a reader and the writer touching the same cache file never tear it. This lets one
-/// writer and any number of read-only readers coexist on one library.
-pub(crate) struct LibraryOpenGuard {
+/// writer and any number of read-only readers coexist on one store.
+pub(crate) struct StoreOpenGuard {
     _file: std::fs::File,
 }
 
-impl LibraryOpenGuard {
+impl StoreOpenGuard {
     /// Acquire the guard for a test, panicking on refusal.
     #[cfg(test)]
-    pub(crate) fn acquire_for_test(
-        library_dir: &crate::library_dir::LibraryDir,
-    ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self::acquire(library_dir).expect("acquire library open guard"))
+    pub(crate) fn acquire_for_test(store_dir: &crate::store_dir::StoreDir) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::acquire(store_dir).expect("acquire store open guard"))
     }
 
-    pub(crate) fn acquire(library_dir: &crate::library_dir::LibraryDir) -> CovenResult<Self> {
-        let db_path = library_dir.db_path();
+    pub(crate) fn acquire(store_dir: &crate::store_dir::StoreDir) -> CovenResult<Self> {
+        let db_path = store_dir.db_path();
         let Some(dir) = db_path.parent() else {
             return Err(CovenError::MalformedPath(format!(
-                "library database path has no parent: {}",
+                "store database path has no parent: {}",
                 db_path.display()
             )));
         };
@@ -184,7 +182,7 @@ impl LibraryOpenGuard {
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(CovenError::AlreadyOpen {
-                library_dir: dir.to_path_buf(),
+                store_dir: dir.to_path_buf(),
             }),
             Err(std::fs::TryLockError::Error(error)) => Err(CovenError::Io(error)),
         }
@@ -254,11 +252,11 @@ impl CovenBuilder {
         if self.blob_tombstone_grace <= chrono::Duration::zero() {
             return Err(CovenError::InvalidBlobTombstoneGrace);
         }
-        let db_path = config.library_dir.db_path();
+        let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
-        let library_dir = config.library_dir.clone();
-        let open_guard = Arc::new(LibraryOpenGuard::acquire(&library_dir)?);
-        remove_orphaned_local_blob_temps(&library_dir, std::time::SystemTime::now())?;
+        let store_dir = config.store_dir.clone();
+        let open_guard = Arc::new(StoreOpenGuard::acquire(&store_dir)?);
+        remove_orphaned_local_blob_temps(&store_dir, std::time::SystemTime::now())?;
         let (db, stamper) = Database::open(
             &db_path,
             tables.clone(),
@@ -283,7 +281,7 @@ impl CovenBuilder {
             db,
             read_db,
             stamper,
-            library_dir,
+            store_dir,
             provider,
             self.key_service,
             self.clock,
@@ -293,14 +291,14 @@ impl CovenBuilder {
         ))
     }
 
-    /// Open the library read-only for a same-library secondary reader: a separate
+    /// Open the store read-only for a same-store secondary reader: a separate
     /// process (or a second handle) that must read rows and blobs while another
     /// handle holds the full [`open`](Self::open). Returns a [`CovenReadHandle`],
     /// whose surface is reads only — SQL queries and blob reads — with no write,
     /// sync, migration, or stamp API by construction.
     ///
-    /// Unlike [`open`](Self::open) this takes no library lock (see
-    /// [`LibraryOpenGuard`]): it succeeds while a writer holds the exclusive lock,
+    /// Unlike [`open`](Self::open) this takes no store lock (see
+    /// [`StoreOpenGuard`]): it succeeds while a writer holds the exclusive lock,
     /// and any number of read-only opens coexist. It opens a `SQLITE_OPEN_READONLY`
     /// connection against the schema on disk, running no migration ladder — but it
     /// refuses a db a newer binary migrated past what this binary supports
@@ -317,11 +315,11 @@ impl CovenBuilder {
         let config = self.config.current();
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
-        let db_path = config.library_dir.db_path();
+        let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
-        let library_dir = config.library_dir.clone();
-        // No LibraryOpenGuard and no orphan-temp cleanup: both are writer concerns
-        // (see LibraryOpenGuard). A reader must not take the exclusive lock the
+        let store_dir = config.store_dir.clone();
+        // No StoreOpenGuard and no orphan-temp cleanup: both are writer concerns
+        // (see StoreOpenGuard). A reader must not take the exclusive lock the
         // writer holds, nor write the filesystem the writer owns.
         let db = Database::open_read_only(
             &db_path,
@@ -332,7 +330,7 @@ impl CovenBuilder {
         )?;
         Ok(crate::read_handle::CovenReadHandle::new(
             db,
-            library_dir,
+            store_dir,
             provider,
             self.key_service,
             self.clock,
@@ -525,17 +523,11 @@ impl CovenHandle {
         let db = self.db().clone();
         let stamper = self.stamper();
         let deleted = batch.deleted_blobs;
-        let library_dir = self.library_dir();
+        let store_dir = self.store_dir();
         let outcome = match db
             .call(move |conn| {
                 Ok(run_write_batch_on_connection(
-                    conn,
-                    stamper,
-                    library_dir,
-                    staged,
-                    deleted,
-                    tables,
-                    sql,
+                    conn, stamper, store_dir, staged, deleted, tables, sql,
                 ))
             })
             .await
@@ -548,8 +540,7 @@ impl CovenHandle {
         };
         match outcome {
             Ok(value) => {
-                if let Err(error) =
-                    drain_local_cleanup_intents(self.db(), &self.library_dir()).await
+                if let Err(error) = drain_local_cleanup_intents(self.db(), &self.store_dir()).await
                 {
                     warn!(
                         error = %error,
@@ -569,7 +560,7 @@ impl CovenHandle {
         let mut staged = Vec::new();
         for blob in blobs {
             let final_path = self
-                .library_dir()
+                .store_dir()
                 .local_blob_path(&blob.namespace, &blob.id)?;
             let staged_path = local_stage_temp_path(&final_path)?;
             if let Err(e) = crate::local_blob::write_atomic(&staged_path, &blob.bytes).await {
@@ -613,13 +604,13 @@ fn local_stage_temp_path(final_path: &Path) -> CovenResult<PathBuf> {
 ///   mid-producing is newer and is left in place so the sweep can never delete a live
 ///   write's rename target.
 /// - `storage/local/` additionally holds write staging (`.coven-stage-<uuid>`). Open
-///   holds the exclusive library lock, so every staging temp here is a crash leftover
+///   holds the exclusive store lock, so every staging temp here is a crash leftover
 ///   — all are removed, no age check.
 fn remove_orphaned_local_blob_temps(
-    library_dir: &crate::library_dir::LibraryDir,
+    store_dir: &crate::store_dir::StoreDir,
     process_start: std::time::SystemTime,
 ) -> CovenResult<()> {
-    let storage = library_dir.storage_dir();
+    let storage = store_dir.storage_dir();
     remove_orphaned_temps_in_dir(&storage.join("local"), &is_local_stage_temp, None)?;
     for folder in ["local", "cache", "pinned"] {
         remove_orphaned_temps_in_dir(
@@ -733,13 +724,13 @@ fn sync_parent_dir(path: &Path) -> CovenResult<()> {
 
 fn record_local_cleanup_intents(
     tx: &rusqlite::Transaction<'_>,
-    library_dir: &crate::library_dir::LibraryDir,
+    store_dir: &crate::store_dir::StoreDir,
     deleted: &[BlobRef],
 ) -> CovenResult<()> {
     for blob in deleted {
-        let _ = library_dir.local_blob_path(&blob.namespace, &blob.id)?;
-        let _ = library_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-        let _ = library_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+        let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
+        let _ = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+        let _ = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
         let pending: Option<i64> = tx
             .query_row(
                 "SELECT 1 FROM local_cleanup_intents WHERE namespace = ?1 AND blob_id = ?2",
@@ -765,7 +756,7 @@ fn record_local_cleanup_intents(
 
 async fn drain_local_cleanup_intents(
     db: &Database,
-    library_dir: &crate::library_dir::LibraryDir,
+    store_dir: &crate::store_dir::StoreDir,
 ) -> CovenResult<()> {
     let intents = db
         .call(|conn| {
@@ -783,7 +774,7 @@ async fn drain_local_cleanup_intents(
         .await?;
 
     for (namespace, id) in intents {
-        match crate::blob::cache::drop_all_local_copies(library_dir, &namespace, &id).await {
+        match crate::blob::cache::drop_all_local_copies(store_dir, &namespace, &id).await {
             Ok(()) => {
                 let delete_namespace = namespace.clone();
                 let delete_id = id.clone();
@@ -822,7 +813,7 @@ async fn drain_local_cleanup_intents(
 fn run_write_batch_on_connection<R>(
     conn: &Connection,
     stamper: UpdatedAtStamper,
-    library_dir: crate::library_dir::LibraryDir,
+    store_dir: crate::store_dir::StoreDir,
     staged: Vec<StagedBlob>,
     deleted: Vec<BlobRef>,
     tables: Vec<SyncedTable>,
@@ -884,7 +875,7 @@ fn run_write_batch_on_connection<R>(
                             Err(e) => return Err(CovenError::Blob(e.to_string())),
                         }
                     }
-                    record_local_cleanup_intents(tx, &library_dir, &deleted)?;
+                    record_local_cleanup_intents(tx, &store_dir, &deleted)?;
                     Ok(value)
                 }
                 Ok(Err(error)) => Err(error),
@@ -919,12 +910,12 @@ mod tests {
     use crate::blob::{BlobScope, CacheFill, Provenance};
     use crate::config::Config;
     use crate::keys::test_keyring;
-    use crate::library_dir::LibraryDir;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
         BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
         CloudHomeJoinInfo, RevokeOutcome,
     };
+    use crate::store_dir::StoreDir;
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::cycle::run_single_sync_cycle;
     use crate::sync::hlc::Hlc;
@@ -940,7 +931,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
 
-    fn config(dir: LibraryDir) -> Config {
+    fn config(dir: StoreDir) -> Config {
         Config::with_defaults(
             "lib-test".to_string(),
             "device-test".to_string(),
@@ -983,7 +974,7 @@ mod tests {
 
     fn open_files_handle() -> (tempfile::TempDir, CovenHandle) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
@@ -1005,7 +996,7 @@ mod tests {
 
     fn open_local_table_handle() -> (tempfile::TempDir, CovenHandle) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration(), playback_state_migration()])
@@ -1015,9 +1006,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_open_of_one_library_is_refused_until_the_first_handle_drops() {
+    async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let first = Coven::builder(config(dir.clone()))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
@@ -1031,7 +1022,7 @@ mod tests {
             .open();
         assert!(matches!(
             second,
-            Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+            Err(CovenError::AlreadyOpen { store_dir }) if store_dir == tmp.path()
         ));
 
         drop(first);
@@ -1042,7 +1033,7 @@ mod tests {
             .open();
         assert!(matches!(
             still_locked,
-            Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+            Err(CovenError::AlreadyOpen { store_dir }) if store_dir == tmp.path()
         ));
 
         drop(clone);
@@ -1058,7 +1049,7 @@ mod tests {
     async fn a_zero_or_negative_blob_tombstone_grace_is_refused_at_open() {
         for grace in [chrono::Duration::zero(), chrono::Duration::seconds(-1)] {
             let tmp = tempfile::tempdir().expect("temp dir");
-            let dir = LibraryDir::new(tmp.path());
+            let dir = StoreDir::new(tmp.path());
             let result = Coven::builder(config(dir))
                 .synced_tables(vec![files_table()])
                 .migrations(vec![files_migration()])
@@ -1074,7 +1065,7 @@ mod tests {
     #[tokio::test]
     async fn a_positive_blob_tombstone_grace_opens() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
@@ -1085,7 +1076,7 @@ mod tests {
 
     fn open_remote_root_files_handle() -> (tempfile::TempDir, CovenHandle) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
             .synced_tables(vec![remote_root_files_table()])
             .migrations(vec![files_migration()])
@@ -1094,7 +1085,7 @@ mod tests {
         (tmp, handle)
     }
 
-    fn open_files_handle_in(dir: LibraryDir) -> CovenHandle {
+    fn open_files_handle_in(dir: StoreDir) -> CovenHandle {
         try_open(&dir).expect("open handle")
     }
 
@@ -1117,7 +1108,7 @@ mod tests {
             &cipher,
             &keypair,
             None,
-            &handle.library_dir(),
+            &handle.store_dir(),
             None,
             None,
         )
@@ -1128,7 +1119,7 @@ mod tests {
     #[tokio::test]
     async fn write_survives_reopen_before_sync_cycle() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
         handle
             .sql(|sql| {
@@ -1153,7 +1144,7 @@ mod tests {
             &storage,
             "peer",
             &HashMap::new(),
-            &peer.library_dir(),
+            &peer.store_dir(),
         )
         .await;
         assert_eq!(
@@ -1169,7 +1160,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_pending_writes_publish_after_reopen() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
         for id in ["file-pending-a", "file-pending-b"] {
             handle
@@ -1195,7 +1186,7 @@ mod tests {
             &storage,
             "peer",
             &HashMap::new(),
-            &peer.library_dir(),
+            &peer.store_dir(),
         )
         .await;
         assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-a'").await);
@@ -1205,7 +1196,7 @@ mod tests {
     #[tokio::test]
     async fn delete_survives_reopen_before_sync_cycle() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
         handle
             .sql(|sql| {
@@ -1227,7 +1218,7 @@ mod tests {
             &storage,
             "peer",
             &HashMap::new(),
-            &peer.library_dir(),
+            &peer.store_dir(),
         )
         .await;
         assert!(
@@ -1254,7 +1245,7 @@ mod tests {
 
         let mut cursors = HashMap::new();
         cursors.insert("device-test".to_string(), 1);
-        pull_into(peer.db(), &storage, "peer", &cursors, &peer.library_dir()).await;
+        pull_into(peer.db(), &storage, "peer", &cursors, &peer.store_dir()).await;
         assert!(
             !row_exists(
                 peer.db(),
@@ -1292,7 +1283,7 @@ mod tests {
             &RwLock::new(CloudCipher::Plaintext),
             &crate::keys::UserKeypair::generate(),
             None,
-            &handle.library_dir(),
+            &handle.store_dir(),
             None,
             None,
         )
@@ -1364,7 +1355,7 @@ mod tests {
     #[tokio::test]
     async fn open_of_a_too_new_db_yields_the_matchable_migration_variant() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
 
         // Open with a two-step ladder so the db lands at synced-schema version 2.
         let ahead = Coven::builder(config(dir.clone()))
@@ -1515,13 +1506,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_on_a_fresh_library_serves_sql_read() {
+    async fn open_on_a_fresh_store_serves_sql_read() {
         // A fresh (empty) directory: `open` runs the writer's migrations, then opens
         // the read connection against the schema they created. A `sql_read` over the
         // host table then succeeds rather than failing on a missing table — proof the
         // read connection opened after, not before, the schema exists.
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
@@ -1533,7 +1524,7 @@ mod tests {
                     .map_err(CovenError::from)
             })
             .await
-            .expect("sql_read on a fresh library");
+            .expect("sql_read on a fresh store");
         assert_eq!(count, 0);
     }
 
@@ -1651,7 +1642,7 @@ mod tests {
     #[tokio::test]
     async fn open_removes_orphaned_local_blob_temps() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let final_path = dir
             .local_blob_path("media-files", "tempaaaa")
             .expect("local path");
@@ -1701,7 +1692,7 @@ mod tests {
             .await
             .expect("write row and blob");
         let path = handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "blobaaaa")
             .expect("local path");
         assert_eq!(
@@ -1714,7 +1705,7 @@ mod tests {
     async fn orphaned_final_blob_is_replaced_by_next_write() {
         let (_tmp, handle) = open_files_handle();
         let path = handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "orphaaaa")
             .expect("local path");
         write_raw_file(&path, b"orphaned bytes").await;
@@ -1786,7 +1777,7 @@ mod tests {
             Err(CovenError::BlobAlreadyReferenced { .. })
         ));
         let path = handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "dupeaaaa")
             .expect("dupe path");
         assert_eq!(
@@ -1883,7 +1874,7 @@ mod tests {
             .expect_err("write fails");
         assert!(err.to_string().contains("sql failed"));
         let path = handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "blobbbbb")
             .expect("local path");
         assert!(!path.exists());
@@ -1925,7 +1916,7 @@ mod tests {
     #[tokio::test]
     async fn replacement_deletes_old_blob_after_sql_drops_reference() {
         let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.library_dir(), "media-files", "oldaaaa", b"old")
+        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldaaaa", b"old")
             .await
             .expect("store old");
         handle
@@ -1964,12 +1955,12 @@ mod tests {
             .await
             .expect("replace blob");
         assert!(!handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "oldaaaa")
             .expect("old path")
             .exists());
         assert!(handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "newaaaa")
             .expect("new path")
             .exists());
@@ -1978,15 +1969,15 @@ mod tests {
     #[tokio::test]
     async fn author_delete_drops_all_local_blob_copies() {
         let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.library_dir(), "media-files", "oldcccc", b"old")
+        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldcccc", b"old")
             .await
             .expect("store old");
         let pinned = handle
-            .library_dir()
+            .store_dir()
             .pinned_blob_path("media-files", "oldcccc")
             .expect("pinned path");
         let cached = handle
-            .library_dir()
+            .store_dir()
             .cache_blob_path("media-files", "oldcccc")
             .expect("cache path");
         write_raw_file(&pinned, b"pinned").await;
@@ -2029,7 +2020,7 @@ mod tests {
             .expect("delete blob");
 
         assert!(!handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "oldcccc")
             .expect("local path")
             .exists());
@@ -2040,11 +2031,11 @@ mod tests {
     #[tokio::test]
     async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
         let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.library_dir(), "media-files", "oldddddd", b"old")
+        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldddddd", b"old")
             .await
             .expect("store old");
         let pinned = handle
-            .library_dir()
+            .store_dir()
             .pinned_blob_path("media-files", "oldddddd")
             .expect("pinned path");
         std::fs::create_dir_all(&pinned).expect("create pinned blocker");
@@ -2090,7 +2081,7 @@ mod tests {
             1
         );
         assert!(handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "oldddddd")
             .expect("local path")
             .exists());
@@ -2116,7 +2107,7 @@ mod tests {
             0
         );
         assert!(!handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "oldddddd")
             .expect("local path")
             .exists());
@@ -2125,7 +2116,7 @@ mod tests {
     #[tokio::test]
     async fn replacement_is_rejected_while_sql_still_references_old_blob() {
         let (_tmp, handle) = open_files_handle();
-        crate::blob::local_files::store(&handle.library_dir(), "media-files", "oldbbbb", b"old")
+        crate::blob::local_files::store(&handle.store_dir(), "media-files", "oldbbbb", b"old")
             .await
             .expect("store old");
         handle
@@ -2167,12 +2158,12 @@ mod tests {
             Err(CovenError::BlobStillReferenced { .. })
         ));
         assert!(handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "oldbbbb")
             .expect("old path")
             .exists());
         assert!(!handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "newbbbb")
             .expect("new path")
             .exists());
@@ -2192,7 +2183,7 @@ mod tests {
             .await;
         assert!(matches!(result, Err(CovenError::WriteClosurePanicked)));
         assert!(!handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "panicccc")
             .expect("panic path")
             .exists());
@@ -2241,7 +2232,7 @@ mod tests {
         assert!(winner_result.is_err() || loser_result.is_err());
 
         let path = handle
-            .library_dir()
+            .store_dir()
             .local_blob_path("media-files", "raceblob")
             .expect("race path");
         assert_eq!(std::fs::read(path).expect("read race blob"), b"committed");
@@ -2264,7 +2255,7 @@ mod tests {
     /// delegates every call to an inner [`InMemoryCloudHome`], but once `armed`,
     /// the first cloud operation of a cycle signals `entered` and parks on
     /// `release` until the test wakes it — holding the loop mid-cycle so the test
-    /// can observe the library-directory lock while a cycle is in flight.
+    /// can observe the store-directory lock while a cycle is in flight.
     ///
     /// Arming happens only after `connect_sync_with_test_home` returns, so the
     /// connect-time bootstrap runs unblocked and only a loop cycle is gated.
@@ -2354,7 +2345,7 @@ mod tests {
         }
     }
 
-    fn try_open(dir: &LibraryDir) -> CovenResult<CovenHandle> {
+    fn try_open(dir: &StoreDir) -> CovenResult<CovenHandle> {
         Coven::builder(config(dir.clone()))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
@@ -2364,7 +2355,7 @@ mod tests {
     /// Reopen `dir`, retrying while a still-running sync loop holds the lock.
     /// Retries only the lock refusal; any other open error fails immediately.
     /// Fails the calling test if the lock is not released within the budget.
-    async fn open_when_lock_released(dir: &LibraryDir) -> CovenHandle {
+    async fn open_when_lock_released(dir: &StoreDir) -> CovenHandle {
         for _ in 0..100 {
             match try_open(dir) {
                 Ok(handle) => return handle,
@@ -2374,7 +2365,7 @@ mod tests {
                 Err(other) => panic!("reopen failed for a reason other than the lock: {other}"),
             }
         }
-        panic!("library lock never released: reopen kept failing");
+        panic!("store lock never released: reopen kept failing");
     }
 
     // The user keypair is one process-wide keyring account, so the guard is held
@@ -2388,7 +2379,7 @@ mod tests {
         let _keyring = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
 
         let armed = Arc::new(AtomicBool::new(false));
@@ -2420,7 +2411,7 @@ mod tests {
         assert!(
             matches!(
                 try_open(&dir),
-                Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+                Err(CovenError::AlreadyOpen { store_dir }) if store_dir == tmp.path()
             ),
             "a concurrent open must be refused while the sync loop is mid-cycle",
         );
@@ -2438,7 +2429,7 @@ mod tests {
         let _keyring = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
         handle
             .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
@@ -2458,7 +2449,7 @@ mod tests {
     #[test]
     fn open_time_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let ld = LibraryDir::new(tmp.path());
+        let ld = StoreDir::new(tmp.path());
 
         let process_start = std::time::SystemTime::now();
         let stale = process_start - Duration::from_secs(3600);
@@ -2558,7 +2549,7 @@ mod tests {
     // Read-only opens (CovenReadHandle)
     // ========================================================================
 
-    fn try_open_read_only(dir: &LibraryDir) -> CovenResult<crate::read_handle::CovenReadHandle> {
+    fn try_open_read_only(dir: &StoreDir) -> CovenResult<crate::read_handle::CovenReadHandle> {
         Coven::builder(config(dir.clone()))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
@@ -2576,21 +2567,21 @@ mod tests {
     }
 
     /// The requirement's failing baseline made to pass: a second FULL open is still
-    /// refused while the first holds the library, but a read-only open succeeds
-    /// against the same held library — it takes no writer lock.
+    /// refused while the first holds the store, but a read-only open succeeds
+    /// against the same held store — it takes no writer lock.
     #[tokio::test]
-    async fn read_only_open_succeeds_while_a_full_open_holds_the_library() {
+    async fn read_only_open_succeeds_while_a_full_open_holds_the_store() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let writer = open_files_handle_in(dir.clone());
 
         // A second full open is refused (the invariant the lock protects).
         assert!(matches!(
             try_open(&dir),
-            Err(CovenError::AlreadyOpen { library_dir }) if library_dir == tmp.path()
+            Err(CovenError::AlreadyOpen { store_dir }) if store_dir == tmp.path()
         ));
 
-        // A read-only open succeeds against the very same held library.
+        // A read-only open succeeds against the very same held store.
         let reader = try_open_read_only(&dir).expect("read-only open succeeds under a full open");
         assert_eq!(read_files_count(&reader).await, 0);
 
@@ -2601,7 +2592,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_read_only_opens_coexist_with_a_writer() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let writer = open_files_handle_in(dir.clone());
 
         let reader_a = try_open_read_only(&dir).expect("first read-only open");
@@ -2617,7 +2608,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_open_sees_committed_writer_data() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let writer = open_files_handle_in(dir.clone());
 
         writer
@@ -2663,11 +2654,11 @@ mod tests {
     /// A read-only handle has no write API at all — writes are absent by
     /// construction. The one place a raw statement could be run is the `sql`
     /// closure's `&Connection`; because the connection is `SQLITE_OPEN_READONLY`,
-    /// SQLite refuses the write there rather than mutating the library.
+    /// SQLite refuses the write there rather than mutating the store.
     #[tokio::test]
     async fn read_only_handle_connection_refuses_writes() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let _writer = open_files_handle_in(dir.clone());
         let reader = try_open_read_only(&dir).expect("read-only open");
 
@@ -2692,7 +2683,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_open_refuses_a_too_new_schema() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
 
         // A newer binary migrates the db to synced-schema version 2.
         let ahead = Coven::builder(config(dir.clone()))
@@ -2727,7 +2718,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_handle_reads_a_host_provided_blob() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let writer = Coven::builder(config(dir.clone()))
             .synced_tables(vec![remote_root_files_table()])
             .migrations(vec![files_migration()])
@@ -2800,7 +2791,7 @@ mod tests {
     async fn concurrent_same_blob_cache_writes_never_tear() {
         crate::install_platform();
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = LibraryDir::new(tmp.path());
+        let dir = StoreDir::new(tmp.path());
         let dest = dir
             .cache_blob_path("media-files", "raceblob")
             .expect("cache path");

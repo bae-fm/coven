@@ -78,7 +78,7 @@ The integration is one builder call and a handful of methods on the handle it
 returns. Two beats give the flavor; the whole tour, from open to invite, is
 the [Example](/docs/example).
 
-**Open the library.** Declare the tables that sync and the migration ladder
+**Open the store.** Declare the tables that sync and the migration ladder
 that builds your schema; `open` runs coven's own bookkeeping migration, then
 your ladder, and returns one handle. Tables you don't list stay local to the
 device.
@@ -157,7 +157,7 @@ You own the app:
 
 In reading order; each page builds on the ones before it:
 
-- [Local data](/docs/local-data): the library on one device: schema
+- [Local data](/docs/local-data): the store on one device: schema
   conventions, which tables sync, which rows share.
 - [Sync](/docs/sync-model): change capture, the cycle, push and pull.
 - [Merge](/docs/merge): the clock, and how concurrent edits land on every

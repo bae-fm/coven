@@ -27,8 +27,8 @@ use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 use crate::clock::{ClockRef, SystemClock};
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
@@ -69,10 +69,10 @@ fn runtime_for_device(device_id: &str, db: Database, cloud: &InMemoryCloudHome) 
     // The runtime shares the storage's cipher lock (the same instance the storage
     // seals/opens with), as the facade and native init do.
     let cipher = storage.shared_cipher();
-    // A library dir that never touches disk: this runs the changeset path, whose
+    // A store dir that never touches disk: this runs the changeset path, whose
     // only fs touch is best-effort changeset staging (logs and continues on
     // failure). No blobs, no snapshot bytes are read back.
-    let library_dir = LibraryDir::new(std::path::Path::new("/coven-wasm-runtime-test"));
+    let store_dir = StoreDir::new(std::path::Path::new("/coven-wasm-runtime-test"));
 
     let runtime = WasmSyncRuntime::new(
         storage,
@@ -83,7 +83,7 @@ fn runtime_for_device(device_id: &str, db: Database, cloud: &InMemoryCloudHome) 
         db,
         keypair,
         Arc::new(SystemClock) as ClockRef,
-        library_dir,
+        store_dir,
         None,
         // Short cadence: a 10 ms startup grace and a 50 ms idle interval keep the
         // test fast while still exercising the timer-driven wait between cycles.

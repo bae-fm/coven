@@ -18,8 +18,8 @@ use crate::changeset::RowChange;
 use crate::config::Config;
 use crate::database::{Database, DbError, PendingChangesetBatch};
 use crate::keys::{KeyPersistence, UserKeypair};
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
+use crate::store_dir::StoreDir;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
@@ -71,30 +71,30 @@ pub struct SyncCycleResult {
 }
 
 /// Path for staging outgoing changeset bytes that survived a push failure.
-pub fn staging_path(library_dir: &LibraryDir) -> PathBuf {
-    library_dir.join("sync_staging.bin")
+pub fn staging_path(store_dir: &StoreDir) -> PathBuf {
+    store_dir.join("sync_staging.bin")
 }
 
 const STAGED_PENDING_CHANGESET_ID_KEY: &str = "staged_pending_changeset_id";
 
 /// Clear the staged changeset after a successful push.
-pub async fn clear_staged_changeset(library_dir: &LibraryDir) {
-    let _ = crate::local_blob::remove_file(&staging_path(library_dir)).await;
+pub async fn clear_staged_changeset(store_dir: &StoreDir) {
+    let _ = crate::local_blob::remove_file(&staging_path(store_dir)).await;
 }
 
 /// Read a previously staged changeset (if any) for retry.
-pub async fn read_staged_changeset(library_dir: &LibraryDir) -> Option<Vec<u8>> {
-    let path = staging_path(library_dir);
+pub async fn read_staged_changeset(store_dir: &StoreDir) -> Option<Vec<u8>> {
+    let path = staging_path(store_dir);
     match crate::local_blob::exists(&path).await {
         Ok(true) => match crate::local_blob::read(&path).await {
             Ok(data) if !data.is_empty() => Some(data),
             Ok(_) => {
-                clear_staged_changeset(library_dir).await;
+                clear_staged_changeset(store_dir).await;
                 None
             }
             Err(e) => {
                 warn!("Failed to read staged changeset: {e}");
-                clear_staged_changeset(library_dir).await;
+                clear_staged_changeset(store_dir).await;
                 None
             }
         },
@@ -177,7 +177,7 @@ pub(crate) async fn push_changeset(
 /// direct-push arms so the ordering can't drift between them.
 async fn commit_push_success(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     seq: u64,
     pending_changeset_max_id: Option<i64>,
     local_seq: &mut u64,
@@ -195,8 +195,8 @@ async fn commit_push_success(
     db.set_sync_state("staged_seq", "")
         .await
         .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
-    clear_staged_changeset(library_dir).await;
-    drain_published_blob_drop_intents(db, library_dir, seq).await?;
+    clear_staged_changeset(store_dir).await;
+    drain_published_blob_drop_intents(db, store_dir, seq).await?;
     Ok(())
 }
 
@@ -241,12 +241,12 @@ struct PublishedBlobDropIntent {
 
 async fn drain_published_blob_drop_intents(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     max_seq: u64,
 ) -> Result<(), String> {
     let intents = load_published_blob_drop_intents(db, max_seq).await?;
     for intent in intents {
-        match apply_published_blob_drop_intent(db, library_dir, &intent).await {
+        match apply_published_blob_drop_intent(db, store_dir, &intent).await {
             Ok(()) => clear_published_blob_drop_intent(db, &intent).await?,
             Err(error) => warn!(
                 seq = intent.seq,
@@ -328,10 +328,10 @@ async fn load_published_blob_drop_intents(
 
 async fn apply_published_blob_drop_intent(
     db: &Database,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     intent: &PublishedBlobDropIntent,
 ) -> Result<(), String> {
-    super::service::apply_deferred_local_blob_drop(db, library_dir, &intent.drop)
+    super::service::apply_deferred_local_blob_drop(db, store_dir, &intent.drop)
         .await
         .map_err(|e| e.to_string())
 }
@@ -420,7 +420,7 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
 pub async fn run_single_sync_cycle(
     storage: &dyn SyncStorage,
-    library_id: &str,
+    store_id: &str,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
@@ -428,7 +428,7 @@ pub async fn run_single_sync_cycle(
     cipher: &std::sync::RwLock<CloudCipher>,
     user_keypair: &UserKeypair,
     key_persistence: Option<&dyn KeyPersistence>,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, String> {
@@ -441,7 +441,7 @@ pub async fn run_single_sync_cycle(
     // the outgoing write-grant binding, the snapshot-author check, and the tombstone
     // GC — judges this one chain state, instead of each re-listing and re-downloading
     // it (which also let two reads disagree mid-cycle). Fail-closed: for an
-    // owner-pinned library a chain that can't be listed, is wiped, or won't anchor
+    // owner-pinned store a chain that can't be listed, is wiped, or won't anchor
     // is a tamper/takeover, so this aborts the cycle and retries next time — never
     // falling open to "no rules apply". A membership change a peer publishes
     // mid-cycle is picked up next cycle, the same convergence model as everything
@@ -451,7 +451,7 @@ pub async fn run_single_sync_cycle(
         .map_err(|e| format!("load membership chain: {e}"))?;
 
     // Refresh authorization/decryption state BEFORE anything this cycle pushes,
-    // judges, or decrypts. Membership and the rotatable library key are
+    // judges, or decrypts. Membership and the rotatable store key are
     // per-cycle preconditions, not init-time bootstraps:
     // re-read them now so a removed member's writes are rejected and a rotated key
     // is adopted on a running device without a restart. Runs before the blob drain
@@ -464,7 +464,7 @@ pub async fn run_single_sync_cycle(
             cipher,
             user_keypair,
             key_persistence,
-            library_id,
+            store_id,
             &membership,
         )
         .await?;
@@ -490,7 +490,7 @@ pub async fn run_single_sync_cycle(
             .filter(|value| !value.is_empty())
             .map(|value| parse_sync_state(STAGED_PENDING_CHANGESET_ID_KEY, &value))
             .transpose()?;
-    drain_published_blob_drop_intents(db, library_dir, local_seq).await?;
+    drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
 
     // One wall-clock reading for this whole cycle. Every head this cycle writes
     // records it as the device's `last_sync` (RFC 3339, per the `put_head`
@@ -510,14 +510,7 @@ pub async fn run_single_sync_cycle(
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
         match crate::blob::upload::drain_uploads(
-            db,
-            ch,
-            cipher,
-            library_id,
-            library_dir,
-            clock,
-            hlc,
-            observer,
+            db, ch, cipher, store_id, store_dir, clock, hlc, observer,
         )
         .await
         {
@@ -553,7 +546,7 @@ pub async fn run_single_sync_cycle(
     // Staging holds the gated, push-ready bytes so a lost push can re-push exactly
     // them next cycle without re-deriving; the span below stages-then-pushes.
     if let Some(seq) = staged_seq {
-        if let Some(staged_data) = read_staged_changeset(library_dir).await {
+        if let Some(staged_data) = read_staged_changeset(store_dir).await {
             info!(seq, "Retrying staged changeset push");
 
             match push_changeset(
@@ -571,7 +564,7 @@ pub async fn run_single_sync_cycle(
                     info!(seq, "Staged changeset push succeeded");
                     commit_push_success(
                         db,
-                        library_dir,
+                        store_dir,
                         seq,
                         staged_pending_changeset_id,
                         &mut local_seq,
@@ -600,12 +593,7 @@ pub async fn run_single_sync_cycle(
     let timestamp = hlc.now().to_string();
 
     if super::service::complete_host_provided_make_remotes(
-        db,
-        tables,
-        storage,
-        &timestamp,
-        library_dir,
-        local_seq,
+        db, tables, storage, &timestamp, store_dir, local_seq,
     )
     .await
     .map_err(|e| format!("Host-provided make_remote completion failed: {e}"))?
@@ -634,7 +622,7 @@ pub async fn run_single_sync_cycle(
         &timestamp,
         "background sync",
         user_keypair,
-        library_dir,
+        store_dir,
         membership.chain.as_ref(),
         membership.pinned_owner.as_deref(),
     )
@@ -652,7 +640,7 @@ pub async fn run_single_sync_cycle(
         let pending_changeset_max_id = pending_changeset_max_id
             .ok_or_else(|| "outgoing changeset without pending journal rows".to_string())?;
 
-        crate::local_blob::write_atomic(&staging_path(library_dir), &outgoing.packed)
+        crate::local_blob::write_atomic(&staging_path(store_dir), &outgoing.packed)
             .await
             .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
         persist_staged_push_state(
@@ -677,7 +665,7 @@ pub async fn run_single_sync_cycle(
             Ok(()) => {
                 commit_push_success(
                     db,
-                    library_dir,
+                    store_dir,
                     seq,
                     Some(pending_changeset_max_id),
                     &mut local_seq,
@@ -760,7 +748,7 @@ pub async fn run_single_sync_cycle(
     // signature stops a non-member forging a deletion. (This is blob-tombstone
     // GC; changeset reclamation runs separately, after a snapshot is published.)
     if let Some(ch) = cloud_home {
-        match crate::blob::delete::drain_tombstones(db, ch, cipher, library_id, user_keypair, clock)
+        match crate::blob::delete::drain_tombstones(db, ch, cipher, store_id, user_keypair, clock)
             .await
         {
             Ok(n) if n > 0 => info!(count = n, "Wrote blob tombstones"),
@@ -792,7 +780,7 @@ pub async fn run_single_sync_cycle(
                 db,
                 ch,
                 cipher,
-                library_id,
+                store_id,
                 &hex::encode(user_keypair.public_key()),
                 membership.chain.as_ref(),
                 clock,
@@ -815,9 +803,9 @@ pub async fn run_single_sync_cycle(
         elapsed.num_hours().max(0) as u64
     });
 
-    // Initial sync: library has data but the pending journal produced no changeset
+    // Initial sync: store has data but the pending journal produced no changeset
     // (data was inserted before the cycle ran — e.g. user connected a provider to
-    // an existing library). Push a snapshot so the existing data reaches the cloud.
+    // an existing store). Push a snapshot so the existing data reaches the cloud.
     let is_initial_sync =
         local_seq == 0 && snapshot_seq.is_none() && sync_result.outgoing.is_none();
 
@@ -838,8 +826,8 @@ pub async fn run_single_sync_cycle(
     let may_snapshot = if snapshot_due {
         // Judge against the cycle's once-loaded chain, the same acceptance-side rule
         // the readers apply: the author must be a current Owner, and an open/browsable
-        // library with no chain is accepted (it has no owner to gate against). The
-        // chain was already listed, anchored, and (for an owner-pinned library)
+        // store with no chain is accepted (it has no owner to gate against). The
+        // chain was already listed, anchored, and (for an owner-pinned store)
         // fail-closed at the top of the cycle, so the only outcome here is
         // authorized-or-not: an unauthorized result skips the snapshot.
         let our_pk = hex::encode(user_keypair.public_key());
@@ -865,16 +853,16 @@ pub async fn run_single_sync_cycle(
 
     if may_snapshot {
         if is_initial_sync {
-            info!("Initial sync: pushing snapshot of existing library data");
+            info!("Initial sync: pushing snapshot of existing store data");
         } else {
             info!("Snapshot policy triggered, creating snapshot");
         }
 
-        // Scratch the snapshot copy in the library dir, not the shared system
+        // Scratch the snapshot copy in the store dir, not the shared system
         // temp dir: create_snapshot writes a fixed `snapshot.db` filename, so two
-        // libraries syncing concurrently (or parallel tests) would otherwise race
-        // on one `/tmp/snapshot.db`. A library's own cycles run serially.
-        let temp_dir = library_dir.as_ref().to_path_buf();
+        // stores syncing concurrently (or parallel tests) would otherwise race
+        // on one `/tmp/snapshot.db`. A store's own cycles run serially.
+        let temp_dir = store_dir.as_ref().to_path_buf();
         let snapshot_result = {
             let tables = tables.to_vec();
             db.call(move |conn| {
@@ -889,7 +877,7 @@ pub async fn run_single_sync_cycle(
                 super::service::upload_snapshot_host_blobs(
                     db,
                     storage,
-                    library_dir,
+                    store_dir,
                     &snapshot.host_blobs,
                 )
                 .await
@@ -897,7 +885,7 @@ pub async fn run_single_sync_cycle(
 
                 match super::snapshot::push_snapshot(
                     storage,
-                    library_id,
+                    store_id,
                     snapshot.db_image,
                     device_id,
                     sync_result.updated_cursors.clone(),
@@ -938,7 +926,7 @@ pub async fn run_single_sync_cycle(
                             Ok(pinned_owner) => {
                                 match super::snapshot::reclaim_superseded_changesets(
                                     storage,
-                                    library_id,
+                                    store_id,
                                     pinned_owner.as_deref(),
                                     Some(db),
                                 )
@@ -990,16 +978,16 @@ pub async fn run_single_sync_cycle(
 
 /// Refresh this device's authorization/decryption state at the top of a cycle:
 /// the membership chain (re-anchored to the pinned owner) and the rotatable
-/// library key. Membership and key state are per-cycle preconditions, not
+/// store key. Membership and key state are per-cycle preconditions, not
 /// init-time bootstraps — without this a running device acts on a stale member
-/// set and keeps a dead library key after a rotation it did not perform,
+/// set and keeps a dead store key after a rotation it did not perform,
 /// recovering only on restart.
 ///
-/// A plaintext (browsable) home has no membership chain and no wrapped library
+/// A plaintext (browsable) home has no membership chain and no wrapped store
 /// key — it is open by design — so the whole refresh is a no-op there, mirroring
 /// how `init_sync` skips the chain for a plaintext home.
 ///
-/// Fail-closed: for an owner-pinned (opaque) library the cycle's shared membership
+/// Fail-closed: for an owner-pinned (opaque) store the cycle's shared membership
 /// load has already aborted the cycle if the chain can't be listed, is wiped, or
 /// won't anchor — so `membership.chain` is present whenever an owner is pinned. The
 /// wrapped-key read below surfaces its own failure as an aborted cycle: a refresh
@@ -1009,23 +997,23 @@ async fn refresh_authorization_state(
     cipher: &std::sync::RwLock<CloudCipher>,
     user_keypair: &UserKeypair,
     key_persistence: Option<&dyn KeyPersistence>,
-    library_id: &str,
+    store_id: &str,
     membership: &super::pull::CycleMembership,
 ) -> Result<(), String> {
-    // A plaintext home is open by design — no chain and no library key to rotate.
+    // A plaintext home is open by design — no chain and no store key to rotate.
     // Nothing to refresh.
     if cipher.read().unwrap().is_plaintext() {
         debug!("refresh: plaintext home, nothing to refresh");
         return Ok(());
     }
 
-    // The library's founder, pinned at create/join/restore, anchors chain identity;
+    // The store's founder, pinned at create/join/restore, anchors chain identity;
     // wrapped-key adoption is authorized against the current Owner set from that
     // anchored chain. Without a pinned owner there is nothing to anchor against — a
-    // production library always has one, since founding precedes any sync cycle — so
+    // production store always has one, since founding precedes any sync cycle — so
     // its absence means there is no shared state to refresh this cycle; skip it. The
     // cycle load couples the pinned owner with its anchored chain (an owner-pinned
-    // library that can't produce a valid chain aborted the load), so an owner here
+    // store that can't produce a valid chain aborted the load), so an owner here
     // always travels with a chain; a pinned owner WITHOUT a chain contradicts that
     // invariant and fails loud rather than reading as "not founded".
     let chain = match (
@@ -1034,7 +1022,7 @@ async fn refresh_authorization_state(
     ) {
         (Some(_), Some(chain)) => chain,
         (None, _) => {
-            debug!("refresh: no owner pinned yet (library not founded); nothing to anchor against");
+            debug!("refresh: no owner pinned yet (store not founded); nothing to anchor against");
             return Ok(());
         }
         (Some(owner), None) => {
@@ -1064,10 +1052,10 @@ async fn refresh_authorization_state(
         })
         .collect::<Vec<_>>();
 
-    // 2. Adopt a rotated library key. Scan the current Owners' prefixes for this
+    // 2. Adopt a rotated store key. Scan the current Owners' prefixes for this
     //    device's re-wrapped key (`keys/{owner}/{self}`), authenticating each
     //    against the owner whose prefix it sits under and taking the highest
-    //    generation. The signature binds (library_id, recipient, author, sealed),
+    //    generation. The signature binds (store_id, recipient, author, sealed),
     //    so a bucket writer can't substitute it, relocate it, or change its signer.
     //    If the decrypted keyring carries a strictly newer generation, swap the
     //    live cipher (and persist to the keyring) via `apply_key_rotation`, so
@@ -1075,15 +1063,13 @@ async fn refresh_authorization_state(
     let (in_use, accepted_generation) = match &*cipher.read().unwrap() {
         CloudCipher::Encrypted(enc) => (enc.keyring_entries(), enc.current_generation()),
         CloudCipher::Plaintext => {
-            return Err(
-                "refresh: encrypted library became plaintext during key refresh".to_string(),
-            )
+            return Err("refresh: encrypted store became plaintext during key refresh".to_string())
         }
     };
-    match super::invite::unwrap_library_keyring_for_owners_with_activation(
+    match super::invite::unwrap_store_keyring_for_owners_with_activation(
         cloud_home,
         user_keypair,
-        library_id,
+        store_id,
         current_owners.iter().map(String::as_str),
         Some(&visible_membership_coords),
     )
@@ -1094,24 +1080,24 @@ async fn refresh_authorization_state(
             if incoming_generation <= accepted_generation {
                 debug!(
                     incoming_generation,
-                    accepted_generation, "refresh: ignored non-newer wrapped library key"
+                    accepted_generation, "refresh: ignored non-newer wrapped store key"
                 );
             } else if in_use != new_encryption.keyring_entries() {
                 let key_persistence = key_persistence.ok_or_else(|| {
-                    "refresh: rotated library key needs platform key persistence".to_string()
+                    "refresh: rotated store key needs platform key persistence".to_string()
                 })?;
                 let fingerprint = super::membership_ops::apply_key_rotation(
                     new_encryption,
                     key_persistence,
                     cipher,
                 )
-                .map_err(|e| format!("refresh: adopt rotated library key: {e}"))?;
-                info!(%fingerprint, "Adopted rotated library key");
+                .map_err(|e| format!("refresh: adopt rotated store key: {e}"))?;
+                info!(%fingerprint, "Adopted rotated store key");
             }
         }
-        // No wrapped key for this device under any current owner: a solo library
-        // that has never shared (its creation key is the library key), or a device
-        // removed from the library (each owner deleted its `keys/{owner}/{self}`).
+        // No wrapped key for this device under any current owner: a solo store
+        // that has never shared (its creation key is the store key), or a device
+        // removed from the store (each owner deleted its `keys/{owner}/{self}`).
         // Nothing to adopt; keep the live key. A *remaining* member always has a
         // `keys/{owner}/{self}` re-wrapped on rotation, so this is never a current
         // member silently stuck on a stale key.
@@ -1122,7 +1108,7 @@ async fn refresh_authorization_state(
         }
         Err(super::invite::InviteError::InactiveWrappedKey { activation }) => {
             return Err(format!(
-                "refresh: wrapped library key activation is not visible: {}/{}",
+                "refresh: wrapped store key activation is not visible: {}/{}",
                 activation.author_pubkey, activation.seq
             ));
         }
@@ -1151,7 +1137,7 @@ pub async fn init_sync_over_storage(
     storage: CloudSyncStorage,
 ) -> Result<SyncComponents, InitSyncError> {
     // Integration guard. The host declared its synced tables on the builder; an
-    // empty set means a synced library would attach nothing, every changeset would
+    // empty set means a synced store would attach nothing, every changeset would
     // come out empty, and sync would silently become snapshot-only. Refuse loudly
     // instead of pretending to sync.
     if db.synced_tables().is_empty() {
@@ -1160,7 +1146,7 @@ pub async fn init_sync_over_storage(
 
     let cipher_lock = storage.shared_cipher();
 
-    // Opaque (encrypted) home: every library has an owner-anchored membership
+    // Opaque (encrypted) home: every store has an owner-anchored membership
     // chain from creation. Establish it on first connect, and on every connect
     // verify the chain is still founded by the pinned owner — refusing a missing
     // or refounded chain as a takeover attempt. A
@@ -1177,14 +1163,14 @@ pub async fn init_sync_over_storage(
     Ok(SyncComponents {
         storage: std::sync::Arc::new(storage),
         hlc,
-        library_id: config.library_id.clone(),
+        store_id: config.store_id.clone(),
         device_id: config.device_id.clone(),
         cipher: cipher_lock,
         user_keypair,
     })
 }
 
-/// Establish or verify the owner-anchored membership chain for an opaque library.
+/// Establish or verify the owner-anchored membership chain for an opaque store.
 /// Returns once the chain is established and verified, or an error to abort sync.
 ///
 /// Founding is two non-atomic writes — the founder entry to cloud storage and the
@@ -1194,7 +1180,7 @@ pub async fn init_sync_over_storage(
 /// pinned: that is the first-connect takeover window. Every legitimate
 /// non-creator pins the owner before this runs — join from the invite's owner,
 /// restore from the chain founder — so an absent pin against a foreign founder is
-/// either an attacker who seeded the bucket or an unestablished library, both of
+/// either an attacker who seeded the bucket or an unestablished store, both of
 /// which we refuse rather than trust.
 pub async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
@@ -1216,14 +1202,14 @@ pub async fn ensure_owner_anchored_chain(
 
     if entries.is_empty() {
         match pinned.as_deref() {
-            // Created library, first connect: we are the owner. Found + pin.
+            // Created store, first connect: we are the owner. Found + pin.
             None => found_and_pin(storage, db, owner_keypair, &our_pk, hlc).await,
             // An owner is pinned but the chain is gone. Founding writes the entry
             // before pinning, so a crash never leaves this state — it means an
             // established chain was wiped. Re-founding would silently drop every
             // member, so refuse and surface it.
             Some(p) => Err(format!(
-                "membership chain is missing but owner {p} is pinned for this library \
+                "membership chain is missing but owner {p} is pinned for this store \
                  — refusing (wiped or tampered membership/*)"
             )),
         }
@@ -1247,7 +1233,7 @@ pub async fn ensure_owner_anchored_chain(
             // fails; this is that same founding operation's idempotent retry.
             // Cross-store atomicity isn't available, so a
             // crash after the founder write but before the pin lands here; the next
-            // connect completes the pin. Refusing instead would brick the library
+            // connect completes the pin. Refusing instead would brick the store
             // forever on a mid-founding crash. Safe: an attacker cannot forge a
             // founder signed by our key.
             None if founder == our_pk => {
@@ -1285,7 +1271,7 @@ async fn found_and_pin(
     db.set_sync_state(OWNER_PUBKEY_STATE_KEY, our_pk)
         .await
         .map_err(|e| format!("pin owner: {e}"))?;
-    info!(owner = %our_pk, "Founded library: wrote owner-anchored founder entry");
+    info!(owner = %our_pk, "Founded store: wrote owner-anchored founder entry");
     Ok(())
 }
 
@@ -1297,10 +1283,10 @@ async fn found_and_pin(
 pub struct SyncComponents {
     pub storage: std::sync::Arc<CloudSyncStorage>,
     pub hlc: std::sync::Arc<Hlc>,
-    /// The library this sync loop is for. Binds the snapshot meta/pointer it
-    /// publishes so a member of two libraries can't replay one's catalog as the
+    /// The store this sync loop is for. Binds the snapshot meta/pointer it
+    /// publishes so a member of two stores can't replay one's catalog as the
     /// other's.
-    pub library_id: String,
+    pub store_id: String,
     pub device_id: String,
     pub cipher: std::sync::Arc<std::sync::RwLock<CloudCipher>>,
     pub user_keypair: UserKeypair,

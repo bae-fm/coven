@@ -1,4 +1,4 @@
-// The page: collect an S3 config, open the library in the Worker, and render the
+// The page: collect an S3 config, open the store in the Worker, and render the
 // shared notes list with an "add note" box and a sync indicator.
 //
 // All coven work happens in worker.js (OPFS is Worker-only); this file only talks
@@ -58,7 +58,7 @@ els.form.addEventListener("submit", (event) => {
     access_key: form.get("access_key").trim(),
     secret_key: form.get("secret_key").trim(),
     key_prefix: form.get("key_prefix").trim() || null,
-    library_id: form.get("library_id").trim(),
+    store_id: form.get("store_id").trim(),
     // The simplest first config: a browsable home — a plaintext bucket with
     // readable blob paths. Switch to `storage: "opaque"` (and supply an
     // `encryption_key_hex`) for an end-to-end encrypted home; see the README.

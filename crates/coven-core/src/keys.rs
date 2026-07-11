@@ -70,8 +70,8 @@ impl std::fmt::Debug for CloudHomeCredentials {
 /// Ed25519 keypair for signing changesets and membership changes.
 /// The same seed can derive an X25519 keypair for key wrapping.
 ///
-/// This is a global identity (not per-library) so attestations accumulate
-/// under one pubkey across all libraries.
+/// This is a global identity (not per-store) so attestations accumulate
+/// under one pubkey across all stores.
 #[derive(Clone)]
 pub struct UserKeypair {
     signing_key: SigningKey,
@@ -334,7 +334,7 @@ mod tests {
         let x_pk = kp.to_x25519_public_key();
         let x_sk = kp.to_x25519_secret_key();
 
-        let plaintext = b"library encryption key material";
+        let plaintext = b"store encryption key material";
         let ciphertext = seal_box_encrypt(plaintext, &x_pk);
 
         assert_eq!(ciphertext.len(), plaintext.len() + SEALBYTES);

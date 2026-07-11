@@ -25,7 +25,7 @@ fn save_oauth_tokens(key_service: &KeyService, tokens: &OAuthTokens) -> Result<(
         .map_err(|e| SetupError(format!("Failed to save OAuth token: {e}")))
 }
 
-/// Google Drive OAuth sign-in: authorize, find/create the library folder, save
+/// Google Drive OAuth sign-in: authorize, find/create the store folder, save
 /// tokens to the keyring. Returns the folder id for the host to persist in its
 /// own config (coven never writes the host's config).
 ///
@@ -35,7 +35,7 @@ fn save_oauth_tokens(key_service: &KeyService, tokens: &OAuthTokens) -> Result<(
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_google_drive(
     key_service: &KeyService,
-    library_name: &str,
+    store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
@@ -48,7 +48,7 @@ pub async fn sign_in_google_drive(
     let client = reqwest::Client::new();
 
     // Create or find the folder
-    let folder_name = format!("your-app - {library_name}");
+    let folder_name = format!("your-app - {store_name}");
 
     let search_query = super::google_drive::folder_search_query(&folder_name);
     let search_resp = client
@@ -117,14 +117,14 @@ pub async fn sign_in_google_drive(
     Ok(folder_id)
 }
 
-/// Dropbox OAuth sign-in: authorize, create the library folder, save tokens to
+/// Dropbox OAuth sign-in: authorize, create the store folder, save tokens to
 /// the keyring. Returns the folder path for the host to persist in its config.
 ///
 /// Native-only (see [`sign_in_google_drive`]); also gated on `oauth-providers`.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 pub async fn sign_in_dropbox(
     key_service: &KeyService,
-    library_name: &str,
+    store_name: &str,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
 ) -> Result<String, SetupError> {
@@ -136,7 +136,7 @@ pub async fn sign_in_dropbox(
 
     let client = reqwest::Client::new();
 
-    let folder_path = format!("/Apps/your-app/{library_name}");
+    let folder_path = format!("/Apps/your-app/{store_name}");
 
     // Create the folder (ignore error if it already exists)
     let create_body = serde_json::json!({
@@ -262,7 +262,7 @@ pub fn generate_restore_code(
         SetupError("No cloud provider configured. Set up sync first.".to_string())
     })?;
 
-    // An opaque home carries its library key in the restore code so a second
+    // An opaque home carries its store key in the restore code so a second
     // device can read the bucket; a browsable home has no key (`ek` is omitted),
     // and the restorer rebuilds the browsable (plaintext, readable) home from its
     // absence.
@@ -352,9 +352,9 @@ pub fn generate_restore_code(
 
     let code = RestoreCode {
         v: RESTORE_CODE_VERSION,
-        lid: config.library_id.clone(),
+        sid: config.store_id.clone(),
         ek,
-        name: config.library_name.clone(),
+        name: config.store_name.clone(),
         provider,
         sk: hex::encode(keypair.to_keypair_bytes()),
     };
@@ -362,11 +362,11 @@ pub fn generate_restore_code(
     Ok(encode_restore_code(&code))
 }
 
-/// Build the [`CloudCipher`] a library's config selects: an opaque home seals
-/// every object under the keyring's library key; a browsable home
+/// Build the [`CloudCipher`] a store's config selects: an opaque home seals
+/// every object under the keyring's store key; a browsable home
 /// (`cloud_home.storage == Browsable`) stores objects in the clear.
 ///
-/// A browsable home has no library key, so it never reads the keyring — the
+/// A browsable home has no store key, so it never reads the keyring — the
 /// absence of a key there is expected, not an error.
 /// Why building the sync storage from config failed. Each arm preserves the
 /// typed error the layer below produced — notably [`CloudHomeError`], so the
@@ -441,7 +441,7 @@ pub fn create_sync_storage_with_home(
         home,
         cipher,
         BlobPathScheme::for_storage(config.cloud_home.storage),
-        config.library_id.clone(),
+        config.store_id.clone(),
         keypair,
     ))
 }

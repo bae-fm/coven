@@ -29,7 +29,7 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::database::Database;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
 use super::hlc::Hlc;
@@ -60,7 +60,7 @@ pub struct WasmSyncSchedule {
 struct CycleInputs {
     storage: CloudSyncStorage,
     hlc: Arc<Hlc>,
-    library_id: String,
+    store_id: String,
     device_id: String,
     /// The at-rest cipher, shared with `storage` (the same `Arc<RwLock<CloudCipher>>`
     /// the [`CloudSyncStorage`] seals/opens with, via its
@@ -73,7 +73,7 @@ struct CycleInputs {
     db: Database,
     user_keypair: UserKeypair,
     clock: ClockRef,
-    library_dir: LibraryDir,
+    store_dir: StoreDir,
     observer: Option<Rc<dyn BlobTransitionObserver>>,
 }
 
@@ -101,14 +101,14 @@ impl WasmSyncRuntime {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         storage: CloudSyncStorage,
-        library_id: String,
+        store_id: String,
         device_id: String,
         hlc: Arc<Hlc>,
         cipher: Arc<RwLock<CloudCipher>>,
         db: Database,
         user_keypair: UserKeypair,
         clock: ClockRef,
-        library_dir: LibraryDir,
+        store_dir: StoreDir,
         observer: Option<Rc<dyn BlobTransitionObserver>>,
         schedule: WasmSyncSchedule,
     ) -> Self {
@@ -116,13 +116,13 @@ impl WasmSyncRuntime {
             inputs: Rc::new(CycleInputs {
                 storage,
                 hlc,
-                library_id,
+                store_id,
                 device_id,
                 cipher,
                 db,
                 user_keypair,
                 clock,
-                library_dir,
+                store_dir,
                 observer,
             }),
             schedule,
@@ -256,7 +256,7 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleRe
 
     let result = super::cycle::run_single_sync_cycle(
         storage,
-        &inputs.library_id,
+        &inputs.store_id,
         &inputs.device_id,
         &inputs.hlc,
         inputs.clock.as_ref(),
@@ -264,7 +264,7 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleRe
         &inputs.cipher,
         &inputs.user_keypair,
         None,
-        &inputs.library_dir,
+        &inputs.store_dir,
         Some(cloud_home),
         inputs.observer.as_deref(),
     )

@@ -1,16 +1,16 @@
 //! Tests for the local store ([`super::local_files`]): coven's own copy of a
-//! host-provided Local blob. Driven over a real temp library directory so the
+//! host-provided Local blob. Driven over a real temp store directory so the
 //! files-on-disk model is exercised directly.
 
 use super::local_files;
 use crate::blob::cache::{evict_to_budget, write_blob};
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
-use crate::sync::test_helpers::{open_test_db, temp_library_dir};
+use crate::sync::test_helpers::{open_test_db, temp_store_dir};
 
 /// Store a host-provided blob, read it back whole and ranged, then drop it.
 #[tokio::test]
 async fn store_read_drop_round_trip() {
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let bytes: Vec<u8> = (0..2000).map(|i| (i % 251) as u8).collect();
 
     local_files::store(&ld, "covers", "cov0aaaa", &bytes)
@@ -72,7 +72,7 @@ async fn store_read_drop_round_trip() {
 #[tokio::test]
 async fn local_store_blob_survives_an_evict_to_budget_sweep() {
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
 
     // A host-provided blob in the local store.
     let store_bytes = vec![7u8; 5000];

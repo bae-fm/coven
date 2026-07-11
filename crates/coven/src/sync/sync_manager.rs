@@ -16,13 +16,13 @@ use crate::blob::transition::{self, MakeLocalError, MakeRemoteError};
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::config::Config;
-use crate::coven::LibraryOpenGuard;
+use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::{KeyError, KeyService};
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::{CloudHome, CloudHomeError};
+use crate::store_dir::StoreDir;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::sync::cloud_storage::CloudSyncStorage;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
@@ -49,7 +49,7 @@ pub enum SyncError {
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
     #[error(
-        "opaque cloud home configured without an encryption service (a locked library, or a browsable/opaque storage mismatch)"
+        "opaque cloud home configured without an encryption service (a locked store, or a browsable/opaque storage mismatch)"
     )]
     OpaqueHomeWithoutEncryption,
     #[error("failed to build cloud home: {0}")]
@@ -70,7 +70,7 @@ pub enum SyncError {
     Loop(SyncLoopError),
 }
 
-/// Refuse a membership operation on a plaintext home. Inviting wraps the library
+/// Refuse a membership operation on a plaintext home. Inviting wraps the store
 /// key to a member and removing rotates it — both meaningless without a key — so
 /// the caller must bail before mutating the membership chain or re-wrapping keys.
 fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<EncryptionService, SyncError> {
@@ -83,7 +83,7 @@ fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<EncryptionServ
 /// High-level sync manager.
 ///
 /// Holds an `EncryptionService` for an opaque home and `None` for a browsable
-/// (plaintext) one — a browsable home has no library key. The at-rest cipher is
+/// (plaintext) one — a browsable home has no store key. The at-rest cipher is
 /// chosen per cycle from the home's [`HomeStorage`](crate::config::HomeStorage),
 /// so the service is consulted only on an opaque home.
 pub struct SyncManager {
@@ -95,11 +95,11 @@ pub struct SyncManager {
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
-    /// The library-directory lock, cloned into every sync loop this manager
+    /// The store-directory lock, cloned into every sync loop this manager
     /// starts so the loop's thread keeps it alive for the whole of its final
     /// cycle. The lock releases when the last writer — a running loop, else the
     /// handle — is gone, never while a detached loop thread is still writing.
-    open_guard: Arc<LibraryOpenGuard>,
+    open_guard: Arc<StoreOpenGuard>,
 
     /// coven's `_updated_at` register, the same `Arc<Hlc>` the owned [`Database`]
     /// holds. The sync loop advances it past pulled rows and stamps envelopes off
@@ -133,7 +133,7 @@ impl SyncManager {
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
-        open_guard: Arc<LibraryOpenGuard>,
+        open_guard: Arc<StoreOpenGuard>,
         status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     ) -> Self {
         let hlc = db.hlc();
@@ -158,7 +158,7 @@ impl SyncManager {
     }
 
     /// The encryption service this manager holds: `Some` for an opaque home
-    /// (sealed under the library key), `None` for a browsable one (no library
+    /// (sealed under the store key), `None` for a browsable one (no store
     /// key, stored in the clear).
     pub fn encryption_service(&self) -> Option<EncryptionService> {
         self.encryption_service.clone()
@@ -176,7 +176,7 @@ impl SyncManager {
     /// Called at startup (if already configured) and after connecting a provider.
     ///
     /// Two outcomes are success: a configured provider whose home builds and whose
-    /// loop starts, and a library with no configured provider that legitimately
+    /// loop starts, and a store with no configured provider that legitimately
     /// starts no loop — the latter is a logged `Ok(())` no-op. A cloud-home build
     /// that *fails* (missing credentials, a bad provider config) is an `Err`, not
     /// "no provider connected": the caller must not install a manager that reports
@@ -186,7 +186,7 @@ impl SyncManager {
 
         if config.cloud_home.provider.is_none() {
             self.stop_sync()?;
-            // Not a failure: a library with no configured provider starts no
+            // Not a failure: a store with no configured provider starts no
             // cloud home or sync loop.
             info!("start_sync: sync not configured; no loop started");
             return Ok(());
@@ -195,8 +195,8 @@ impl SyncManager {
         self.stop_current_connection()?;
 
         // The home's at-rest cipher: an opaque home seals under the manager's
-        // library key, a browsable home stores in the clear. An opaque home with
-        // no library key is a config contradiction (a locked library, or a
+        // store key, a browsable home stores in the clear. An opaque home with
+        // no store key is a config contradiction (a locked store, or a
         // browsable/opaque storage mismatch) — decided from storage mode and the
         // held encryption service alone, so check it before building the home and
         // fail with a typed error rather than deep inside it. Built once here so
@@ -244,7 +244,7 @@ impl SyncManager {
         .await
         .map_err(SyncError::from)?;
 
-        let _handle = self.install_sync_loop(components, config.library_dir.clone())?;
+        let _handle = self.install_sync_loop(components, config.store_dir.clone())?;
         *self.cloud_home.write().unwrap() = Some(cloud_home);
 
         Ok(())
@@ -258,14 +258,14 @@ impl SyncManager {
     fn install_sync_loop(
         &self,
         components: SyncComponents,
-        library_dir: LibraryDir,
+        store_dir: StoreDir,
     ) -> Result<Arc<SyncLoopHandle>, SyncError> {
         let handle = Arc::new(SyncLoopHandle::new(
             components,
             self.db.clone(),
             self.key_service.clone(),
             self.clock.clone(),
-            library_dir,
+            store_dir,
             self.observer.clone(),
             self.open_guard.clone(),
             self.status_tx.clone(),
@@ -310,7 +310,7 @@ impl SyncManager {
             home.clone(),
             cipher.clone(),
             BlobPathScheme::for_storage(config.cloud_home.storage),
-            config.library_id.clone(),
+            config.store_id.clone(),
             keypair.clone(),
         );
 
@@ -325,7 +325,7 @@ impl SyncManager {
         .await
         .map_err(SyncError::from)?;
 
-        let _handle = self.install_sync_loop(components, config.library_dir.clone())?;
+        let _handle = self.install_sync_loop(components, config.store_dir.clone())?;
         *self.cloud_home.write().unwrap() = Some(home);
 
         Ok(())
@@ -454,10 +454,10 @@ impl SyncManager {
         if !self.is_sync_ready() {
             return Err(MakeRemoteError::SyncNotReady);
         }
-        let library_dir = (self.config_provider)().library_dir;
+        let store_dir = (self.config_provider)().store_dir;
         transition::cancel_make_remote(
             &self.db,
-            &library_dir,
+            &store_dir,
             self.blob_path_scheme(),
             &self.self_uploader()?,
             &self.hlc,
@@ -490,12 +490,12 @@ impl SyncManager {
         let sync_loop = self
             .sync_loop_handle()
             .ok_or(MakeLocalError::SyncNotReady)?;
-        let library_dir = (self.config_provider)().library_dir;
+        let store_dir = (self.config_provider)().store_dir;
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         transition::make_local(
             &self.db,
             storage,
-            &library_dir,
+            &store_dir,
             self.blob_path_scheme(),
             &self.hlc,
             self.observer.as_deref(),
@@ -575,13 +575,13 @@ impl SyncManager {
             .clone()
             .ok_or(SyncError::LoopNotRunning)?;
 
-        // Inviting a member wraps the library key to them, which only an encrypted
+        // Inviting a member wraps the store key to them, which only an encrypted
         // home has. Refuse before touching the membership chain.
         let encryption = require_encrypted_home(sync_loop.cipher())?;
 
-        let (library_id, library_name) = {
+        let (store_id, store_name) = {
             let config = (self.config_provider)();
-            (config.library_id.clone(), config.library_name.clone())
+            (config.store_id.clone(), config.store_name.clone())
         };
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
@@ -596,8 +596,8 @@ impl SyncManager {
             invitee_email,
             role,
             &encryption,
-            &library_id,
-            &library_name,
+            &store_id,
+            &store_name,
         )
         .await
         .map_err(SyncError::Membership)?;
@@ -613,12 +613,12 @@ impl SyncManager {
             .clone()
             .ok_or(SyncError::LoopNotRunning)?;
 
-        // Removing a member rotates the library key, which only an encrypted home
+        // Removing a member rotates the store key, which only an encrypted home
         // has. Refuse up front so a plaintext home never mutates the membership
         // chain or re-wraps keys before the rotation fails.
         let current_encryption = require_encrypted_home(sync_loop.cipher())?;
 
-        let library_id = (self.config_provider)().library_id.clone();
+        let store_id = (self.config_provider)().store_id.clone();
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
@@ -634,7 +634,7 @@ impl SyncManager {
             sync_loop.user_keypair(),
             sync_loop.hlc(),
             public_key_hex,
-            &library_id,
+            &store_id,
             &current_encryption,
             &self.key_service,
             sync_loop.cipher(),
@@ -652,20 +652,20 @@ mod tests {
 
     use crate::clock::SystemClock;
     use crate::config::CloudProvider;
-    use crate::coven::LibraryOpenGuard;
+    use crate::coven::StoreOpenGuard;
     use crate::keys::{test_keyring, KeyService};
-    use crate::library_dir::LibraryDir;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeJoinInfo;
+    use crate::store_dir::StoreDir;
     use std::sync::Arc;
 
     #[tokio::test]
     async fn get_members_surfaces_malformed_cloud_credentials() {
         test_keyring::install();
         let tmp = tempfile::tempdir().expect("temp dir");
-        let library_dir = LibraryDir::new(tmp.path());
-        let library_id = "sync-enabled-malformed-credentials";
-        let key_service = KeyService::new(library_id.to_string());
+        let store_dir = StoreDir::new(tmp.path());
+        let store_id = "sync-enabled-malformed-credentials";
+        let key_service = KeyService::new(store_id.to_string());
         key_service
             .cloud_home_credentials_entry_for_test()
             .expect("create credentials entry")
@@ -680,10 +680,10 @@ mod tests {
             key_prefix: None,
         };
         let config = crate::sync::join::build_config(
-            library_id,
+            store_id,
             "device",
-            &library_dir,
-            "library",
+            &store_dir,
+            "store",
             &join_info,
             &CloudCipher::Plaintext,
         );
@@ -695,7 +695,7 @@ mod tests {
             Arc::new(SystemClock),
             None,
             None,
-            LibraryOpenGuard::acquire_for_test(&library_dir),
+            StoreOpenGuard::acquire_for_test(&store_dir),
             tokio::sync::broadcast::channel(16).0,
         );
 
@@ -720,16 +720,16 @@ mod tests {
     #[tokio::test]
     async fn start_sync_rejects_an_opaque_home_without_an_encryption_service() {
         test_keyring::install();
-        let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
-        let open_guard = LibraryOpenGuard::acquire_for_test(&library_dir);
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
         let mut config = Config::with_defaults(
             "lib-opaque-no-encryption".to_string(),
             "test-device".to_string(),
-            library_dir,
-            "Test Library".to_string(),
+            store_dir,
+            "Test Store".to_string(),
         );
         // Opaque storage (the default) with a configured provider but no
-        // encryption service is a locked-library contradiction — the manager
+        // encryption service is a locked-store contradiction — the manager
         // holds `None` for the encryption service.
         config.cloud_home.provider = Some(CloudProvider::S3);
         let manager = SyncManager::new(
@@ -760,13 +760,13 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
-        let open_guard = LibraryOpenGuard::acquire_for_test(&library_dir);
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
         let config = Config::with_defaults(
             "lib-manager-restart".to_string(),
             "test-device".to_string(),
-            library_dir,
-            "Test Library".to_string(),
+            store_dir,
+            "Test Store".to_string(),
         );
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
@@ -813,13 +813,13 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-        let (_tmp, library_dir) = crate::sync::test_helpers::temp_library_dir();
-        let open_guard = LibraryOpenGuard::acquire_for_test(&library_dir);
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
         let config = Arc::new(RwLock::new(Config::with_defaults(
             "lib-manager-failed-restart".to_string(),
             "test-device".to_string(),
-            library_dir,
-            "Test Library".to_string(),
+            store_dir,
+            "Test Store".to_string(),
         )));
         let manager = SyncManager::new(
             {

@@ -1,6 +1,6 @@
 # Sync
 
-coven syncs SQLite row changes between devices that share a library. There is
+coven syncs SQLite row changes between devices that share a store. There is
 no coordinator: each device appends the changesets it produces to its own
 stream in storage and pulls the streams other devices produced. Concurrent
 edits merge column by column, and deletes win over concurrent edits. The unit
@@ -49,7 +49,7 @@ stream, so there is no write contention to coordinate. A puller tracks one
 cursor per stream, the highest sequence it has applied from that device.
 
 Examples use the todos app (workspaces hold lists, lists hold todos, todos
-carry attachments and labels); Alice and Bob share the library.
+carry attachments and labels); Alice and Bob share the store.
 
 This page covers how a local write reaches every device. Row-level gating
 (which rows stay local) has its own page, [Local data](/docs/local-data);
@@ -65,7 +65,7 @@ connections and records changes itself; a host write that skips the recording
 cannot happen, because the only connection that can write is the one capture
 is attached to.
 
-The host opens the library once through
+The host opens the store once through
 `Coven::builder(config).synced_tables(...).migrations(...).open()`, declaring
 its [synced tables](/docs/local-data), and from then on runs all its writes
 through `handle.sql(...)`. The writer connection lives on one dedicated
@@ -95,9 +95,9 @@ cannot bypass capture because it cannot write at all.
   data.
 - **From a second process (or a second handle)**:
   `Coven::builder(config).open_read_only()` returns a
-  [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-library
+  [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-store
   reader for something like a macOS File Provider extension that must serve
-  reads while the app holds the full handle open. It takes no library lock
+  reads while the app holds the full handle open. It takes no store lock
   and runs no migrations (it refuses a schema newer than its binary), and it
   exposes reads only: SQL, and blob reads that may fetch from the cloud into
   the device cache. WAL makes the coexistence safe: many readers, one writer,
@@ -197,7 +197,7 @@ order. For each one it:
   [`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version);
 - verifies the Ed25519 signature
   ([`verify_changeset_signature`](rustdoc:fn:coven::sync::envelope::verify_changeset_signature));
-- if the library has a membership chain, checks the author could write under
+- if the store has a membership chain, checks the author could write under
   the exact membership entry the changeset is signed against;
 - applies the changeset (the [merge](/docs/merge), with capture disabled only
   around this one apply), advancing the clock past its stamps;
@@ -255,7 +255,7 @@ stamps, as it lands during pull.
 ## Schema versioning
 
 Devices upgrade at different times, so two schema versions are routinely live
-against one library; the version stamp is what lets them coexist instead of
+against one store; the version stamp is what lets them coexist instead of
 corrupting each other. Every outgoing changeset carries the device's schema
 version: the top rung of
 the host's [migration ladder](/docs/schema-evolution), reported by

@@ -3,11 +3,11 @@ use std::sync::Arc;
 use crate::config::HomeStorage;
 use crate::encryption::{self, EncryptionService};
 use crate::keys::{self, KeyError, UserKeypair};
-/// Invitation and revocation flow for shared library membership.
+/// Invitation and revocation flow for shared store membership.
 ///
-/// `create_invitation()` is called by the library owner to invite a new member.
-/// `unwrap_library_keyring()` is called by the invitee to join and unwrap the library key.
-/// `revoke_member()` is called by the library owner to remove a member and rotate the key.
+/// `create_invitation()` is called by the store owner to invite a new member.
+/// `unwrap_store_keyring()` is called by the invitee to join and unwrap the store key.
+/// `revoke_member()` is called by the store owner to remove a member and rotate the key.
 use crate::storage::cloud::{
     CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
     RevokeOutcome,
@@ -19,7 +19,7 @@ use super::membership::{
     MembershipEntry, MembershipError,
 };
 use super::membership_ops::{load_anchored_chain, publish_membership_head};
-use super::signed_control::WrappedLibraryKey;
+use super::signed_control::WrappedStoreKey;
 use super::storage::{StorageError, SyncStorage};
 
 #[derive(Debug, thiserror::Error)]
@@ -34,7 +34,7 @@ pub enum InviteError {
     CloudHome(#[from] CloudHomeError),
     #[error("Crypto error: {0}")]
     Crypto(String),
-    #[error("wrapped library key activation is not visible: {activation:?}")]
+    #[error("wrapped store key activation is not visible: {activation:?}")]
     InactiveWrappedKey { activation: MembershipCoord },
     #[error(
         "stale membership head for {author}: committed through seq {committed}, \
@@ -53,7 +53,7 @@ pub enum InviteError {
     },
     #[error("User {0} is not a current member")]
     NotAMember(String),
-    #[error("Cannot revoke the last owner of a library")]
+    #[error("Cannot revoke the last owner of a store")]
     LastOwner,
 }
 
@@ -111,10 +111,10 @@ fn ed25519_hex_to_x25519(
         .map_err(|e| InviteError::Crypto(format!("invalid pubkey: {e}")))
 }
 
-/// Seal the library key to one member and wrap it in an owner-signed
-/// [`WrappedLibraryKey`], serialized to the bytes stored at
+/// Seal the store key to one member and wrap it in an owner-signed
+/// [`WrappedStoreKey`], serialized to the bytes stored at
 /// `keys/{owner_pubkey}/{recipient_pubkey}` (the owner writes into its own
-/// prefix). The signature binds `(library_id, recipient_pubkey, author_pubkey,
+/// prefix). The signature binds `(store_id, recipient_pubkey, author_pubkey,
 /// sealed)` so the joiner can prove the key came from the owner and was meant for
 /// them, not substituted by a bucket writer.
 ///
@@ -129,14 +129,14 @@ fn ed25519_hex_to_x25519(
 /// they reload the anchored chain first and authorize rotated wrapped keys
 /// against the current Owner set.
 fn signed_wrapped_key(
-    library_id: &str,
+    store_id: &str,
     recipient_ed25519_pubkey: &str,
     recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
     encryption: &EncryptionService,
     owner_keypair: &UserKeypair,
 ) -> Result<Vec<u8>, InviteError> {
     signed_wrapped_key_with_activation(
-        library_id,
+        store_id,
         recipient_ed25519_pubkey,
         recipient_x25519_pk,
         encryption,
@@ -146,7 +146,7 @@ fn signed_wrapped_key(
 }
 
 fn signed_wrapped_key_with_activation(
-    library_id: &str,
+    store_id: &str,
     recipient_ed25519_pubkey: &str,
     recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
     encryption: &EncryptionService,
@@ -157,8 +157,8 @@ fn signed_wrapped_key_with_activation(
         .to_keyring_payload()
         .map_err(|e| InviteError::Crypto(format!("serialize keyring payload: {e}")))?;
     let sealed = keys::seal_box_encrypt(&payload, recipient_x25519_pk);
-    let wrapped = WrappedLibraryKey::signed(
-        library_id,
+    let wrapped = WrappedStoreKey::signed(
+        store_id,
         recipient_ed25519_pubkey,
         activation,
         sealed,
@@ -170,14 +170,14 @@ fn signed_wrapped_key_with_activation(
 
 #[cfg(test)]
 pub(crate) fn signed_wrapped_key_for_test(
-    library_id: &str,
+    store_id: &str,
     recipient_ed25519_pubkey: &str,
     recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
     encryption_key: &[u8; 32],
     owner_keypair: &UserKeypair,
 ) -> Vec<u8> {
     signed_wrapped_keyring_for_test(
-        library_id,
+        store_id,
         recipient_ed25519_pubkey,
         recipient_x25519_pk,
         &EncryptionService::from_key(*encryption_key),
@@ -188,7 +188,7 @@ pub(crate) fn signed_wrapped_key_for_test(
 
 #[cfg(test)]
 pub(crate) fn signed_wrapped_keyring_for_test(
-    library_id: &str,
+    store_id: &str,
     recipient_ed25519_pubkey: &str,
     recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
     encryption: &EncryptionService,
@@ -196,7 +196,7 @@ pub(crate) fn signed_wrapped_keyring_for_test(
     activation: Option<MembershipCoord>,
 ) -> Vec<u8> {
     signed_wrapped_key_with_activation(
-        library_id,
+        store_id,
         recipient_ed25519_pubkey,
         recipient_x25519_pk,
         encryption,
@@ -223,7 +223,7 @@ async fn upload_membership_entry(
 
 /// Create an invitation for a new member.
 ///
-/// This grants access on the cloud home, wraps the library encryption key
+/// This grants access on the cloud home, wraps the store encryption key
 /// to the invitee's X25519 public key, creates and signs a membership entry
 /// (Add), validates it against the local chain, and uploads both to the storage.
 /// Returns the JoinInfo so the caller can share connection details with the invitee.
@@ -236,7 +236,7 @@ pub async fn create_invitation(
     invitee_email: Option<&str>,
     role: MemberRole,
     encryption_key: &[u8; 32],
-    library_id: &str,
+    store_id: &str,
     timestamp: &str,
 ) -> Result<CloudHomeJoinInfo, InviteError> {
     let encryption = EncryptionService::from_key(*encryption_key);
@@ -249,7 +249,7 @@ pub async fn create_invitation(
         invitee_email,
         role,
         &encryption,
-        library_id,
+        store_id,
         timestamp,
     )
     .await
@@ -264,19 +264,19 @@ pub async fn create_invitation_with_encryption(
     invitee_email: Option<&str>,
     role: MemberRole,
     encryption: &EncryptionService,
-    library_id: &str,
+    store_id: &str,
     timestamp: &str,
 ) -> Result<CloudHomeJoinInfo, InviteError> {
     // Convert Ed25519 -> X25519 for sealed box encryption.
     let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
 
-    // Seal the library key to the invitee and sign the binding so the joiner can
+    // Seal the store key to the invitee and sign the binding so the joiner can
     // authenticate it on adoption. The joiner verifies this signature against the
     // founder the invite pins, so for the invitee to actually adopt the key
     // `owner_keypair` must be the founder's for a fresh joiner; existing members
     // authorize rotated keys against the current Owner set during refresh.
     let wrapped_key = signed_wrapped_key(
-        library_id,
+        store_id,
         invitee_ed25519_pubkey,
         &invitee_x25519_pk,
         encryption,
@@ -443,11 +443,11 @@ pub async fn create_invitation_with_encryption(
     Ok(join_info)
 }
 
-/// Join a shared library: authenticate and unwrap its encryption key from the
+/// Join a shared store: authenticate and unwrap its encryption key from the
 /// invitee's own wrapped-key slot.
 ///
 /// `founder` is the owner the invite pins (the chain founder). The joiner holds
-/// no membership chain yet — and every chain entry is sealed under the library
+/// no membership chain yet — and every chain entry is sealed under the store
 /// key — so this opens the sealed box to a *candidate* keyring first (a sealed
 /// box authenticates only its recipient, so opening it grants no trust), reads
 /// and anchors the membership chain to `founder` with that candidate, and only
@@ -465,25 +465,25 @@ pub async fn create_invitation_with_encryption(
 /// refused. The bucket is writable by every member and anyone holding the
 /// credential, and a sealed box authenticates only its recipient, so without this
 /// check a bucket writer could substitute a key of its choosing.
-pub async fn unwrap_library_keyring(
+pub async fn unwrap_store_keyring(
     cloud_home: Arc<dyn CloudHome>,
     keypair: &UserKeypair,
-    library_id: &str,
+    store_id: &str,
     founder: &str,
 ) -> Result<EncryptionService, InviteError> {
     // The candidate keyring: enough to read the sealed membership chain, but not
-    // yet trusted to be the real, owner-authorized library key.
-    let candidate = decrypt_wrapped_library_key_unverified(cloud_home.as_ref(), keypair).await?;
+    // yet trusted to be the real, owner-authorized store key.
+    let candidate = decrypt_wrapped_store_key_unverified(cloud_home.as_ref(), keypair).await?;
 
     // Read + anchor the chain to the pinned founder using the candidate key. A
-    // candidate that is not the real library key cannot decrypt the sealed chain,
+    // candidate that is not the real store key cannot decrypt the sealed chain,
     // and a chain not founded by `founder` is a takeover — both fail closed here,
     // before the key is trusted. The joiner reads only, so `watermark_db` is None.
     let storage = CloudSyncStorage::new(
         cloud_home.clone(),
         CloudCipher::Encrypted(candidate),
         BlobPathScheme::for_storage(HomeStorage::Opaque),
-        library_id.to_string(),
+        store_id.to_string(),
         keypair.clone(),
     );
     let entry_keys = storage.list_membership_entries().await?;
@@ -512,10 +512,10 @@ pub async fn unwrap_library_keyring(
     // re-wrapped the slot between invite and join, against the activation's
     // now-visible Remove entry — then decrypt and adopt it.
     let visible = membership_coords(&entry_keys);
-    unwrap_library_keyring_for_owners_with_activation(
+    unwrap_store_keyring_for_owners_with_activation(
         cloud_home.as_ref(),
         keypair,
-        library_id,
+        store_id,
         owners.iter().map(String::as_str),
         Some(&visible),
     )
@@ -524,7 +524,7 @@ pub async fn unwrap_library_keyring(
 
 /// Fetch and parse the wrapped-key object `owner_hex` sealed for `recipient_hex`,
 /// off the cloud home. The `.enc` suffix is hardcoded because reading a wrapped
-/// library key is an encrypted-home-only path — wrapping a key is meaningful only
+/// store key is an encrypted-home-only path — wrapping a key is meaningful only
 /// for a shared (encrypted) home — so `CloudSyncStorage::put_wrapped_key` always
 /// wrote the slot at `keys/{owner}/{recipient}.enc`. Read straight off the home,
 /// not through `CloudSyncStorage`, which the joiner has not built yet.
@@ -532,7 +532,7 @@ async fn fetch_wrapped_key(
     cloud_home: &dyn CloudHome,
     owner_hex: &str,
     recipient_hex: &str,
-) -> Result<WrappedLibraryKey, InviteError> {
+) -> Result<WrappedStoreKey, InviteError> {
     let wrapped_bytes = cloud_home
         .read(&format!("keys/{owner_hex}/{recipient_hex}.enc"))
         .await?;
@@ -566,10 +566,10 @@ async fn wrap_owners_for_recipient(
     Ok(owners)
 }
 
-/// Open a sealed box carrying a library keyring to `keypair` and reconstruct the
+/// Open a sealed box carrying a store keyring to `keypair` and reconstruct the
 /// [`EncryptionService`]. `sealed` is the raw sealed-box bytes — the unverified
 /// candidate takes them straight off the wrapped key, the authenticated path
-/// takes them from [`WrappedLibraryKey::verify_and_unwrap`].
+/// takes them from [`WrappedStoreKey::verify_and_unwrap`].
 fn open_sealed_keyring(
     sealed: &[u8],
     keypair: &UserKeypair,
@@ -582,10 +582,10 @@ fn open_sealed_keyring(
 /// Open the joiner's own wrapped-key sealed box to a candidate keyring *without*
 /// authenticating who signed it. A sealed box authenticates only its recipient,
 /// so this proves nothing about authorship — the candidate is only enough to read
-/// the membership chain, every entry of which is sealed under the library key.
+/// the membership chain, every entry of which is sealed under the store key.
 /// Never adopt the returned keyring without the founder-anchored Owner-set check
-/// [`unwrap_library_keyring`] runs; it exists solely to bootstrap that check.
-async fn decrypt_wrapped_library_key_unverified(
+/// [`unwrap_store_keyring`] runs; it exists solely to bootstrap that check.
+async fn decrypt_wrapped_store_key_unverified(
     cloud_home: &dyn CloudHome,
     keypair: &UserKeypair,
 ) -> Result<EncryptionService, InviteError> {
@@ -642,10 +642,10 @@ async fn decrypt_wrapped_library_key_unverified(
     })
 }
 
-pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
+pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
     cloud_home: &dyn CloudHome,
     keypair: &UserKeypair,
-    library_id: &str,
+    store_id: &str,
     expected_owners: impl IntoIterator<Item = &'a str>,
     visible_membership_entries: Option<&[MembershipCoord]>,
 ) -> Result<EncryptionService, InviteError> {
@@ -695,7 +695,7 @@ pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
         // owner and is skipped, so it can neither be adopted nor block a valid wrap
         // under another owner.
         let sealed =
-            match wrapped.verify_and_unwrap(library_id, &recipient_hex, std::iter::once(owner)) {
+            match wrapped.verify_and_unwrap(store_id, &recipient_hex, std::iter::once(owner)) {
                 Ok(sealed) => sealed,
                 Err(e) => {
                     tracing::warn!(
@@ -729,7 +729,7 @@ pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
     }
     if saw_unauthentic {
         return Err(InviteError::Crypto(format!(
-            "no authentic wrapped library key for {recipient_hex} under any current owner"
+            "no authentic wrapped store key for {recipient_hex} under any current owner"
         )));
     }
     Err(InviteError::CloudHome(CloudHomeError::NotFound(format!(
@@ -737,9 +737,9 @@ pub(crate) async fn unwrap_library_keyring_for_owners_with_activation<'a>(
     ))))
 }
 
-/// Revoke a member from the library. This:
+/// Revoke a member from the store. This:
 /// 1. Revokes access on the cloud home
-/// 2. Re-wraps a new library key to all remaining members
+/// 2. Re-wraps a new store key to all remaining members
 /// 3. Deletes the revoked member's wrapped key
 /// 4. Publishes the signed Remove membership entry as the visible commit point
 ///
@@ -751,7 +751,7 @@ pub async fn revoke_member(
     entry_keys: Vec<(String, u64)>,
     owner_keypair: &UserKeypair,
     revokee_pubkey: &str,
-    library_id: &str,
+    store_id: &str,
     timestamp: &str,
     current_encryption: &EncryptionService,
 ) -> Result<EncryptionService, InviteError> {
@@ -792,7 +792,7 @@ pub async fn revoke_member(
         RevokeOutcome::Unsupported => {
             tracing::info!(
                 member = %revokee_pubkey,
-                "cloud provider offers no per-member credential revocation; removal proceeds — chain revocation and library key rotation are the protection",
+                "cloud provider offers no per-member credential revocation; removal proceeds — chain revocation and store key rotation are the protection",
             );
         }
     }
@@ -805,10 +805,10 @@ pub async fn revoke_member(
 
     if !revokee_is_current {
         let visible_coords = membership_coords(&entry_keys);
-        let keyring = unwrap_library_keyring_for_owners_with_activation(
+        let keyring = unwrap_store_keyring_for_owners_with_activation(
             cloud_home,
             owner_keypair,
-            library_id,
+            store_id,
             current_owners.iter().map(String::as_str),
             Some(&visible_coords),
         )
@@ -859,7 +859,7 @@ pub async fn revoke_member(
         .collect::<Result<Vec<_>, _>>()?;
     for (member_pubkey, x25519_pk) in remaining_member_keys {
         let wrapped = signed_wrapped_key_with_activation(
-            library_id,
+            store_id,
             member_pubkey,
             &x25519_pk,
             &new_keyring,
@@ -1059,7 +1059,7 @@ mod tests {
         UserKeypair::generate()
     }
 
-    /// The library id every invite test wraps keys under. The wrapped-key
+    /// The store id every invite test wraps keys under. The wrapped-key
     /// signature binds it, so the same id must be passed at unwrap time.
     const LIB_ID: &str = "lib-test";
 
@@ -1067,14 +1067,14 @@ mod tests {
     /// existing member does when adopting a rotated key. The invite/revoke
     /// mechanics tests use this to assert a wrapped key landed and decrypts under
     /// the right signer, without standing up the sealed, founder-anchored chain
-    /// the full joiner path ([`unwrap_library_keyring`]) reads — that path has its
+    /// the full joiner path ([`unwrap_store_keyring`]) reads — that path has its
     /// own `InMemoryCloudHome` tests below.
     async fn unwrap_bytes_for_owner(
         cloud_home: &dyn CloudHome,
         keypair: &UserKeypair,
         owner: &str,
     ) -> Result<[u8; 32], InviteError> {
-        unwrap_library_keyring_for_owners_with_activation(
+        unwrap_store_keyring_for_owners_with_activation(
             cloud_home,
             keypair,
             LIB_ID,
@@ -1120,7 +1120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_and_unwrap_library_key() {
+    async fn create_and_unwrap_store_key() {
         let owner = gen_keypair();
         let invitee = gen_keypair();
         let encryption_key: [u8; 32] = [42u8; 32];
@@ -1182,7 +1182,7 @@ mod tests {
             .unwrap();
 
         let owners = [pubkey_hex(&owner_a), pubkey_hex(&owner_b)];
-        let unwrapped = unwrap_library_keyring_for_owners_with_activation(
+        let unwrapped = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &recipient,
             LIB_ID,
@@ -1235,7 +1235,7 @@ mod tests {
             .unwrap();
 
         let owners = [pubkey_hex(&owner_a), pubkey_hex(&owner_b)];
-        let keyring = unwrap_library_keyring_for_owners_with_activation(
+        let keyring = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &recipient,
             LIB_ID,
@@ -1316,7 +1316,7 @@ mod tests {
         );
     }
 
-    /// A joiner adopts only a library key the owner it pins signed; a key signed
+    /// A joiner adopts only a store key the owner it pins signed; a key signed
     /// by anyone else is refused. A bucket writer who is not the owner can seal a
     /// key of their choosing to the joiner's public key (which is public), sign it
     /// with their own identity, and overwrite the invite's wrapped-key object — a
@@ -1397,7 +1397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unwrap_library_key_wrong_key_fails() {
+    async fn unwrap_store_key_wrong_key_fails() {
         let owner = gen_keypair();
         let invitee = gen_keypair();
         let wrong_keypair = gen_keypair();
@@ -1626,7 +1626,7 @@ mod tests {
         // Owner can still unwrap the new key.
         let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
         let owner_pk = pubkey_hex(&owner);
-        let owner_unwrapped = unwrap_library_keyring_for_owners_with_activation(
+        let owner_unwrapped = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &owner,
             LIB_ID,
@@ -1707,7 +1707,7 @@ mod tests {
         // Both remaining members (owner + member2) can unwrap the new key.
         let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
         let owner_pk = pubkey_hex(&owner);
-        let owner_key = unwrap_library_keyring_for_owners_with_activation(
+        let owner_key = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &owner,
             LIB_ID,
@@ -1719,7 +1719,7 @@ mod tests {
         .key_bytes();
         assert_eq!(owner_key, new_key.key_bytes());
 
-        let member2_key = unwrap_library_keyring_for_owners_with_activation(
+        let member2_key = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &member2,
             LIB_ID,
@@ -1780,7 +1780,7 @@ mod tests {
             .unwrap();
 
         let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
-        let result = unwrap_library_keyring_for_owners_with_activation(
+        let result = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &member,
             LIB_ID,
@@ -1815,7 +1815,7 @@ mod tests {
 
     /// A member invited but not yet joined is a current member, so revoking a
     /// third member re-wraps the pending invitee's slot with an activation naming
-    /// the Remove entry. When the invitee finally joins, `unwrap_library_keyring`
+    /// the Remove entry. When the invitee finally joins, `unwrap_store_keyring`
     /// lists the now-visible membership entries and the activation resolves, so
     /// the join succeeds and the invitee adopts the post-rotation key generation.
     #[tokio::test]
@@ -1829,7 +1829,7 @@ mod tests {
 
         let home = Arc::new(InMemoryCloudHome::new());
         let storage = opaque_storage(home.clone(), old_key, &owner);
-        // The founder entry lives on the home in production (written at library
+        // The founder entry lives on the home in production (written at store
         // creation); the joiner reads and anchors the chain to it, so found there.
         write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
             .await
@@ -1883,14 +1883,14 @@ mod tests {
 
         // The pending invitee joins now, resolving the activation against the
         // listed Remove entry rather than being refused for lack of one.
-        let joined = unwrap_library_keyring(home.clone(), &pending, LIB_ID, &pubkey_hex(&owner))
+        let joined = unwrap_store_keyring(home.clone(), &pending, LIB_ID, &pubkey_hex(&owner))
             .await
             .unwrap();
 
         assert_eq!(
             joined.key_bytes(),
             new_keyring.key_bytes(),
-            "the joiner adopts the post-rotation library key"
+            "the joiner adopts the post-rotation store key"
         );
         assert_eq!(
             joined.current_generation(),
@@ -1961,7 +1961,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = unwrap_library_keyring(home.clone(), &member, LIB_ID, &owner_pk).await;
+        let result = unwrap_store_keyring(home.clone(), &member, LIB_ID, &owner_pk).await;
         assert!(
             matches!(
                 &result,
@@ -2028,7 +2028,7 @@ mod tests {
         // C joins, pinning the founder. B is still a current Owner, so B's wrapped
         // key verifies against the current Owner set ({founder, B}) and the join
         // succeeds.
-        let joined = unwrap_library_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder))
+        let joined = unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder))
             .await
             .expect("a non-founder owner's invite is joinable");
         assert_eq!(joined.key_bytes(), key);
@@ -2124,7 +2124,7 @@ mod tests {
         // C joins: B is no longer a current Owner, so its prefix is not scanned and
         // C's wrap (only ever under B) is unreachable — no current owner vouches for
         // C, so the join finds no adoptable key.
-        let result = unwrap_library_keyring(home.clone(), &joiner, LIB_ID, &founder_pk).await;
+        let result = unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &founder_pk).await;
         assert!(
             matches!(
                 result,
@@ -2135,7 +2135,7 @@ mod tests {
     }
 
     /// A wrapped key signed by a member who is not an Owner is refused: the member
-    /// holds the library key, so it can seal the real key to the joiner, but it is
+    /// holds the store key, so it can seal the real key to the joiner, but it is
     /// not in the Owner set derived from the founder-anchored chain, so the joiner
     /// will not adopt what it wrapped.
     #[tokio::test]
@@ -2184,7 +2184,7 @@ mod tests {
         .await
         .unwrap();
 
-        // The member (not an Owner) seals the real library key to the joiner and
+        // The member (not an Owner) seals the real store key to the joiner and
         // signs it, overwriting the founder-signed slot.
         let joiner_x25519 = joiner.to_x25519_public_key();
         let forged = signed_wrapped_key(
@@ -2201,7 +2201,7 @@ mod tests {
             .unwrap();
 
         let result =
-            unwrap_library_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder)).await;
+            unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder)).await;
         assert!(
             matches!(result, Err(InviteError::Crypto(_))),
             "a key signed by a non-Owner member must be refused, got {result:?}",
@@ -2229,7 +2229,7 @@ mod tests {
             .unwrap();
         let mut chain = bootstrap_chain(&founder);
 
-        // The founder adds `rogue` as a plain Member (so it holds the library key)
+        // The founder adds `rogue` as a plain Member (so it holds the store key)
         // and the joiner.
         create_invitation(
             &storage,
@@ -2290,7 +2290,7 @@ mod tests {
             .unwrap();
 
         let result =
-            unwrap_library_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder)).await;
+            unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder)).await;
         assert!(
             matches!(result, Err(InviteError::Crypto(_))),
             "a key signed by an uncommitted self-promoted Owner must be refused, got {result:?}",
@@ -2534,7 +2534,7 @@ mod tests {
         let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
         let owner_pk = pubkey_hex(&owner);
         for member in [&owner, &remaining_a, &remaining_b] {
-            let unwrapped = unwrap_library_keyring_for_owners_with_activation(
+            let unwrapped = unwrap_store_keyring_for_owners_with_activation(
                 &storage as &dyn CloudHome,
                 member,
                 LIB_ID,
@@ -2609,7 +2609,7 @@ mod tests {
 
         let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
         let owner_pk = pubkey_hex(&owner);
-        let remaining_key = unwrap_library_keyring_for_owners_with_activation(
+        let remaining_key = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &remaining,
             LIB_ID,

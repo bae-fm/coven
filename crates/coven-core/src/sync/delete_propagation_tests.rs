@@ -14,7 +14,7 @@ use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
+use crate::store_dir::StoreDir;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
@@ -37,7 +37,7 @@ async fn run_cycle(
     db: &Database,
     cipher: &RwLock<CloudCipher>,
     kp: &UserKeypair,
-    lib: &LibraryDir,
+    lib: &StoreDir,
 ) -> Result<SyncCycleResult, String> {
     run_single_sync_cycle(
         storage,
@@ -71,12 +71,12 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
     let kp_a = UserKeypair::generate();
     let kp_b = UserKeypair::generate();
 
-    // Owner A, with its own db + library dir, driven through the real cycle.
+    // Owner A, with its own db + store dir, driven through the real cycle.
     let db_a = open_test_db();
-    let (_tmp_a, lib_a) = temp_library_dir();
+    let (_tmp_a, lib_a) = temp_store_dir();
     let hlc_a = Hlc::new("A".to_string());
 
-    // A's first cycle on an empty library pushes the initial snapshot (so B can
+    // A's first cycle on an empty store pushes the initial snapshot (so B can
     // join from it). Nothing local yet, so no changeset.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc_a, &kp_a, &lib_a)
         .await
@@ -94,7 +94,7 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
         .expect("A push n1");
 
     // Device B joins: bootstrap from A's snapshot, then pull A/1.
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
@@ -199,8 +199,8 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
     let past_grace = crate::clock::FixedClock(
         chrono::Utc::now() + crate::blob::delete::BLOB_TOMBSTONE_GRACE + chrono::Duration::days(1),
     );
-    // This library is chain-less (no `membership/*` founded in this test), so the
-    // GC authorizes on the verified signature alone — the open-library path, with no
+    // This store is chain-less (no `membership/*` founded in this test), so the
+    // GC authorizes on the verified signature alone — the open-store path, with no
     // pinned owner. The test below exercises the owner-anchored path.
     let reclaimed = crate::blob::delete::gc_tombstones(
         &db_a,
@@ -275,7 +275,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
     db_a.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .expect("pin owner");
-    let (_tmp_a, lib_a) = temp_library_dir();
+    let (_tmp_a, lib_a) = temp_store_dir();
     let hlc_a = Hlc::new("A".to_string());
 
     // A's initial snapshot cycle, then import a note (A is the authorized Owner, so
@@ -392,7 +392,7 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
         .expect("plant forged founder");
 
     // The attacker signs a tombstone for the victim blob, backdated past the grace,
-    // and seals it under the library cipher exactly as the drain would so the GC can
+    // and seals it under the store cipher exactly as the drain would so the GC can
     // open it.
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let forged_tombstone = crate::blob::delete::BlobTombstoneJson::signed(
@@ -435,8 +435,8 @@ async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_c
     );
 }
 
-/// A plaintext home round-trips a real library through the real cycle: device A,
-/// over a `CloudCipher::Plaintext` home, runs a cycle on a small library; the
+/// A plaintext home round-trips a real store through the real cycle: device A,
+/// over a `CloudCipher::Plaintext` home, runs a cycle on a small store; the
 /// snapshot it pushes is stored in the clear (a valid SQLite image, not
 /// ciphertext). Device B, also plaintext, bootstraps from that snapshot and reads
 /// A's rows, then pulls A's later changeset and sees the update — proving the
@@ -450,10 +450,10 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
     let kp_a = UserKeypair::generate();
     let kp_b = UserKeypair::generate();
 
-    // Owner A imports a shared note, then runs a cycle. A library with data but no
+    // Owner A imports a shared note, then runs a cycle. A store with data but no
     // changeset yet trips the initial-sync path, so the cycle pushes a snapshot.
     let db_a = open_test_db();
-    let (_tmp_a, lib_a) = temp_library_dir();
+    let (_tmp_a, lib_a) = temp_store_dir();
     let hlc_a = Hlc::new("A".to_string());
     exec(
         &db_a,
@@ -477,7 +477,7 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
 
     // Device B bootstraps from the plaintext snapshot — `CloudCipher::Plaintext`
     // opens it verbatim — and reads A's row.
-    let (_tmp_b, lib_b) = temp_library_dir();
+    let (_tmp_b, lib_b) = temp_store_dir();
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
@@ -526,7 +526,7 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
         .expect("A push update changeset");
 
     // The update changeset is stored in the clear too. It is A's seq 2: the seq-1
-    // insert was covered by the initial snapshot (a single-device library, so the
+    // insert was covered by the initial snapshot (a single-device store, so the
     // floor is the snapshot cursor) and reclaimed, while this post-snapshot update
     // is above the snapshot cursor and persists for B to pull.
     let cs_at_rest = storage

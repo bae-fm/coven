@@ -11,9 +11,9 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::database::{Database, DbError, PendingChangesetBatch};
 use crate::keys::{KeyError, KeyPersistence, UserKeypair};
-use crate::library_dir::LibraryDir;
 use crate::migration::Migration;
 use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
+use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::membership::{
@@ -396,11 +396,11 @@ pub async fn apply_to_db(db: &Database, bytes: &[u8], tables: &[SyncedTable]) {
     .expect("apply changeset");
 }
 
-/// A temp dir plus a [`LibraryDir`] rooted at it. The returned `TempDir` must be
+/// A temp dir plus a [`StoreDir`] rooted at it. The returned `TempDir` must be
 /// held for the directory to outlive the test.
-pub fn temp_library_dir() -> (tempfile::TempDir, LibraryDir) {
+pub fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = LibraryDir::new(tmp.path());
+    let dir = StoreDir::new(tmp.path());
     (tmp, dir)
 }
 
@@ -1559,7 +1559,7 @@ pub async fn pull_into(
     storage: &dyn SyncStorage,
     device_id: &str,
     cursors: &HashMap<String, u64>,
-    library_dir: &crate::library_dir::LibraryDir,
+    store_dir: &crate::store_dir::StoreDir,
 ) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
     let membership = crate::sync::pull::load_cycle_membership(storage, db)
         .await
@@ -1570,7 +1570,7 @@ pub async fn pull_into(
         storage,
         device_id,
         cursors,
-        library_dir,
+        store_dir,
         membership.chain,
         membership.pinned_owner,
     )
@@ -1586,7 +1586,7 @@ pub async fn pull_into_result(
     storage: &dyn SyncStorage,
     device_id: &str,
     cursors: &HashMap<String, u64>,
-    library_dir: &crate::library_dir::LibraryDir,
+    store_dir: &crate::store_dir::StoreDir,
 ) -> Result<(HashMap<String, u64>, crate::sync::pull::PullResult), crate::sync::pull::PullError> {
     let membership = crate::sync::pull::load_cycle_membership(storage, db).await?;
     pull_changes(
@@ -1595,7 +1595,7 @@ pub async fn pull_into_result(
         storage,
         device_id,
         cursors,
-        library_dir,
+        store_dir,
         membership.chain,
         membership.pinned_owner,
     )

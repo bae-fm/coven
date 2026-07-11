@@ -26,8 +26,8 @@ use crate::blob::{local_files, BlobRef, BlobScope, CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
@@ -64,7 +64,7 @@ async fn run_cycle(
     storage: &CloudSyncStorage,
     db: &Database,
     device_id: &str,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
 ) {
     let cipher = RwLock::new(CloudCipher::Plaintext);
     let keypair = UserKeypair::generate();
@@ -83,7 +83,7 @@ async fn run_cycle(
         &cipher,
         &keypair,
         None,
-        library_dir,
+        store_dir,
         None,
         None,
     )
@@ -164,10 +164,10 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     console_error_panic_hook::set_once();
 
     let cloud = InMemoryCloudHome::new();
-    // Each device's own library dir; B's pull writes the blob into its pinned cache
+    // Each device's own store dir; B's pull writes the blob into its pinned cache
     // (`storage/pinned/<id>`), which coven owns and builds from the validated id.
-    let lib_a = LibraryDir::new(std::path::Path::new("/coven-blob-test/lib-a"));
-    let lib_b = LibraryDir::new(std::path::Path::new("/coven-blob-test/lib-b"));
+    let lib_a = StoreDir::new(std::path::Path::new("/coven-blob-test/lib-a"));
+    let lib_b = StoreDir::new(std::path::Path::new("/coven-blob-test/lib-b"));
 
     let db_a = open_device("device-a");
     let db_b = open_device("device-b");
@@ -252,7 +252,7 @@ async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
     console_error_panic_hook::set_once();
 
     let cloud = InMemoryCloudHome::new();
-    let lib_b = LibraryDir::new(std::path::Path::new("/coven-blob-torn/lib-b"));
+    let lib_b = StoreDir::new(std::path::Path::new("/coven-blob-torn/lib-b"));
     let db_b = open_device("device-b-torn");
     let photo_bytes = b"complete opfs cache payload".to_vec();
 

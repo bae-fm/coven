@@ -7,7 +7,7 @@
 //! asynchronous and single-thread-bound, and there is no synchronous secure
 //! storage in a browser at all. So the trait can't wrap them. coven keeps browser
 //! keys a different way instead: this async keystore, which the facade awaits at
-//! [`open`](crate::wasm_facade::CovenLibrary::open) to materialize the keypair
+//! [`open`](crate::wasm_facade::CovenStore::open) to materialize the keypair
 //! before the sync runtime starts. Everything coven needs the keypair for happens
 //! after that point, so nothing downstream needs the synchronous trait.
 //!

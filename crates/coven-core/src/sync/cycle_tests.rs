@@ -18,8 +18,8 @@ use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::CloudHome;
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
@@ -41,7 +41,7 @@ async fn run_cycle_m(
     cipher: &RwLock<CloudCipher>,
     keypair: &UserKeypair,
     hlc: &Hlc,
-    ld: &LibraryDir,
+    ld: &StoreDir,
 ) {
     run_single_sync_cycle(
         storage,
@@ -96,7 +96,7 @@ async fn seed_pending_upload(db: &Database) {
 async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [5u8; 32],
     )));
@@ -108,7 +108,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 
     // The cycle below pushes a changeset and then snapshots it, and changeset
     // reclamation runs after the snapshot. Seed a peer that has not acked so the
-    // library is multi-device with an un-acked member: its missing ack pins the
+    // store is multi-device with an un-acked member: its missing ack pins the
     // reclaim floor at 0, so the freshly pushed changeset is kept (a peer might
     // still need it), exactly as a real fleet behaves until everyone acks. Without
     // this peer M would be the only device and the snapshot-covered changeset would
@@ -161,7 +161,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 async fn gated_false_row_propagates_once_its_gate_flips() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [8u8; 32],
     )));
@@ -212,7 +212,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
 async fn snapshot_is_not_withheld_by_pending_uploads() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [9u8; 32],
     )));
@@ -248,7 +248,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
         ],
         test_migrations(),
     );
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [11u8; 32],
     )));
@@ -302,7 +302,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         ],
         test_migrations(),
     );
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [12u8; 32],
     )));
@@ -365,7 +365,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
 // completes, with another root's blob left queued.
 
 /// Founder-at-creation + owner anchoring (issue #102): the first cloud connect of
-/// a created library writes the founder Owner entry and pins the owner; later
+/// a created store writes the founder Owner entry and pins the owner; later
 /// connects anchor the chain to that pinned owner; and a wiped or refounded chain
 /// is refused as a takeover attempt.
 #[tokio::test]
@@ -383,7 +383,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     let storage = MockSyncStorage::new();
     ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
         .await
-        .expect("first connect founds the library");
+        .expect("first connect founds the store");
     assert_eq!(
         db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         Some(owner_pk.clone()),
@@ -418,7 +418,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         ensure_owner_anchored_chain(&wiped, &db, &owner, &hlc)
             .await
             .is_err(),
-        "an empty chain with a pinned owner is tampering, not a fresh library",
+        "an empty chain with a pinned owner is tampering, not a fresh store",
     );
 
     // Refounded under an attacker's key with the owner pinned → refuse.
@@ -802,7 +802,7 @@ impl SyncStorage for HostWriteInjector {
 async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [4u8; 32],
     )));
@@ -868,7 +868,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
 async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [6u8; 32],
     )));
@@ -914,7 +914,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
 async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [8u8; 32],
     )));
@@ -993,7 +993,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
 async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_failed() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [18u8; 32],
     )));
@@ -1078,7 +1078,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [19u8; 32],
     )));
@@ -1127,7 +1127,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
 async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [20u8; 32],
     )));
@@ -1214,7 +1214,7 @@ fn assert_own_head_timestamps_are_rfc3339(storage: &MockSyncStorage, device_id: 
 async fn push_cycle_writes_rfc3339_head_timestamps() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [21u8; 32],
     )));
@@ -1248,7 +1248,7 @@ async fn push_cycle_writes_rfc3339_head_timestamps() {
 async fn snapshot_cycle_writes_rfc3339_head_timestamp() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [22u8; 32],
     )));
@@ -1273,7 +1273,7 @@ async fn snapshot_cycle_writes_rfc3339_head_timestamp() {
 async fn staged_retry_writes_rfc3339_head_timestamp() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [23u8; 32],
     )));
@@ -1315,7 +1315,7 @@ async fn staged_retry_writes_rfc3339_head_timestamp() {
 async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [10u8; 32],
     )));
@@ -1403,7 +1403,7 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
 async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [9u8; 32],
     )));
@@ -1421,13 +1421,13 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     )
     .await;
 
-    let library_root = ld.as_ref().to_path_buf();
-    let writable_permissions = std::fs::metadata(&library_root)
-        .expect("library dir metadata")
+    let store_root = ld.as_ref().to_path_buf();
+    let writable_permissions = std::fs::metadata(&store_root)
+        .expect("store dir metadata")
         .permissions();
     let mut readonly_permissions = writable_permissions.clone();
     readonly_permissions.set_readonly(true);
-    std::fs::set_permissions(&library_root, readonly_permissions).expect("block staging writes");
+    std::fs::set_permissions(&store_root, readonly_permissions).expect("block staging writes");
     let failed = match run_single_sync_cycle(
         &storage,
         "test-lib",
@@ -1461,7 +1461,7 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
         "the unstaged changeset is not published"
     );
 
-    std::fs::set_permissions(&library_root, writable_permissions).expect("unblock staging writes");
+    std::fs::set_permissions(&store_root, writable_permissions).expect("unblock staging writes");
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         storage.get_changeset("M", 1).await.is_ok(),
@@ -1483,7 +1483,7 @@ async fn run_cycle_m_storage(
     cipher: &RwLock<CloudCipher>,
     keypair: &UserKeypair,
     hlc: &Hlc,
-    ld: &LibraryDir,
+    ld: &StoreDir,
 ) {
     run_single_sync_cycle(
         storage,
@@ -1518,7 +1518,7 @@ async fn cycle_reclaims_a_fully_acked_changeset() {
     let keypair = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db_m = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [11u8; 32],
     )));
@@ -1555,7 +1555,7 @@ async fn cycle_keeps_a_behind_peers_changeset() {
     let keypair = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db_m = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [12u8; 32],
     )));
@@ -1630,7 +1630,7 @@ async fn member_device_does_not_create_a_snapshot() {
 
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [5u8; 32],
     )));
@@ -1655,7 +1655,7 @@ async fn member_device_does_not_create_a_snapshot() {
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
-    // This device pins the owner (set on join in production) — an opaque library.
+    // This device pins the owner (set on join in production) — an opaque store.
     db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
         .expect("pin owner");
@@ -1691,7 +1691,7 @@ async fn member_device_does_not_create_a_snapshot() {
 
 /// The mirror of the above: an Owner device with local data and itself pinned as the
 /// owner DOES author the snapshot — the founder/initial-sync path a freshly-founded
-/// library bootstraps from is preserved by the gate's owner branch.
+/// store bootstraps from is preserved by the gate's owner branch.
 #[tokio::test]
 async fn owner_device_creates_a_snapshot() {
     use crate::sync::membership::MembershipChain;
@@ -1699,7 +1699,7 @@ async fn owner_device_creates_a_snapshot() {
 
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    let (_tmp, ld) = temp_library_dir();
+    let (_tmp, ld) = temp_store_dir();
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [6u8; 32],
     )));

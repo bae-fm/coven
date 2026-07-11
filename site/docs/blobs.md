@@ -92,7 +92,7 @@ how a device gets the bytes once the blob is Remote, declared per blob and read 
 same way on every device:
 
 - `CacheEager`: fetched into the cache on pull, on every device, part of "having
-  the library". A todo's photo, an album's cover art.
+  the store". A todo's photo, an album's cover art.
 - `CacheLazy`: skipped on pull; a device fetches it into the cache on first read
   instead of up front. Large blobs a device may never open, audio being the case it
   exists for.
@@ -155,7 +155,7 @@ The declaration's [`BlobScope`](rustdoc:enum:coven::blob::BlobScope) selects the
 key the blob is encrypted under. The host names *what* a blob is scoped to,
 never the raw key bytes:
 
-- `Master` encrypts with the library master key. Every member holds it, so every
+- `Master` encrypts with the store master key. Every member holds it, so every
   member can decrypt the blob. The common case, with no key management at all.
 - `Derived(scope_id)` encrypts with a key derived from the master via
   [`derive_scoped`](rustdoc:method:coven::encryption::EncryptionService::derive_scoped),
@@ -259,7 +259,7 @@ The pull has no inbox table. It is inline:
 [`pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes) downloads the blobs an
 incoming changeset references (derived from the declarations) *before* applying it,
 so a row is never applied before its blobs are durable. A downloaded blob lands in
-the [cache](/docs/cache), at `storage/cache/<namespace>/<id>` under the library
+the [cache](/docs/cache), at `storage/cache/<namespace>/<id>` under the store
 directory, decrypted under its scope. A download is skipped when the file is already
 present, which makes the step idempotent.
 
@@ -337,8 +337,8 @@ Under an opaque home (the default) a blob is stored at a content-addressed key:
 ```
 
 `ab` and `cd` are the first two byte-pairs of the dash-stripped `id`, built by
-[`LibraryDir::hashed_path`](rustdoc:method:coven::library_dir::LibraryDir::hashed_path).
-The two levels of fan-out keep a library with many blobs off a single flat prefix
+[`StoreDir::hashed_path`](rustdoc:method:coven::store_dir::StoreDir::hashed_path).
+The two levels of fan-out keep a store with many blobs off a single flat prefix
 the storage layer would have to list in one call. The provider sees this key and
 the encrypted bytes, never the plaintext file or its name.
 

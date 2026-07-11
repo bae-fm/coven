@@ -25,7 +25,7 @@
 //! ## Why it is signed
 //!
 //! The bucket is untrusted: the at-rest cipher proves only confidentiality (the
-//! library key is shared by every member), not authorship, so anyone who can write
+//! store key is shared by every member), not authorship, so anyone who can write
 //! the bucket could otherwise drop a tombstone that deletes a blob they were never
 //! authorized to remove. The tombstone is therefore signed by its author (like
 //! every other control object — heads, the snapshot meta/pointer), and the GC
@@ -94,7 +94,7 @@ fn tombstone_key(cloud_key: &str, suffix: &str) -> String {
 /// uploader and no per-member prefix. The rebuild guard confirms the key really is
 /// a hashed key rather than a plain path that happens to have five segments.
 fn blob_key_uploader(cloud_key: &str) -> Option<String> {
-    crate::library_dir::LibraryDir::parse_uploader_hashed_key(cloud_key)
+    crate::store_dir::StoreDir::parse_uploader_hashed_key(cloud_key)
         .map(|(_namespace, uploader, _id)| uploader)
 }
 
@@ -117,10 +117,10 @@ enum ExistingTombstone {
 /// GC verifies this signature and authorizes the author against the membership
 /// chain before deleting anything.
 ///
-/// `library_id` is part of the signed payload but not stored: the reader supplies
-/// its own library id to [`Self::verify`], mirroring the snapshot meta/pointer.
-/// A member of two libraries cannot take one library's tombstone and replay it as
-/// the other's — re-verifying under the second library's id fails, because the
+/// `store_id` is part of the signed payload but not stored: the reader supplies
+/// its own store id to [`Self::verify`], mirroring the snapshot meta/pointer.
+/// A member of two stores cannot take one store's tombstone and replay it as
+/// the other's — re-verifying under the second store's id fails, because the
 /// signature was taken over the first's.
 ///
 /// `author_pubkey` *is* stored (like `HeadJson` / the snapshot meta): a tombstone's
@@ -142,29 +142,29 @@ pub struct BlobTombstoneJson {
 
 /// The tombstone fields the signature covers, in declaration order. Excludes
 /// `author_pubkey`/`signature` (the signature's own outputs). Includes
-/// `library_id` (so a tombstone can't be replayed into a different library,
+/// `store_id` (so a tombstone can't be replayed into a different store,
 /// mirroring the snapshot payloads) and `cloud_key` (the slot, so a valid
 /// tombstone can't be relocated to delete another blob).
 #[derive(Serialize)]
 struct BlobTombstoneFields<'a> {
-    library_id: &'a str,
+    store_id: &'a str,
     cloud_key: &'a str,
     deleted_at: &'a str,
 }
 
 impl BlobTombstoneJson {
-    /// Build a tombstone for `cloud_key` in `library_id` signed by `keypair`:
+    /// Build a tombstone for `cloud_key` in `store_id` signed by `keypair`:
     /// fills `author_pubkey` with the device's public key and `signature` with the
-    /// detached signature over the canonical payload (which binds `library_id`,
-    /// the `cloud_key` slot, and the deletion time). `library_id` is bound but not
+    /// detached signature over the canonical payload (which binds `store_id`,
+    /// the `cloud_key` slot, and the deletion time). `store_id` is bound but not
     /// stored — the reader passes its own to [`Self::verify`].
     pub fn signed(
-        library_id: &str,
+        store_id: &str,
         cloud_key: String,
         deleted_at: String,
         keypair: &UserKeypair,
     ) -> Self {
-        let payload = tombstone_signing_payload(library_id, &cloud_key, &deleted_at);
+        let payload = tombstone_signing_payload(store_id, &cloud_key, &deleted_at);
         let sig = keypair.sign(&payload);
         BlobTombstoneJson {
             cloud_key,
@@ -175,20 +175,20 @@ impl BlobTombstoneJson {
     }
 
     /// Verify the embedded signature against the embedded `author_pubkey`, bound to
-    /// `library_id`. A tombstone that fails this is forged, corrupt, tampered (its
-    /// `cloud_key` or `deleted_at` changed after signing), or a different library's
+    /// `store_id`. A tombstone that fails this is forged, corrupt, tampered (its
+    /// `cloud_key` or `deleted_at` changed after signing), or a different store's
     /// tombstone replayed here, and must not be acted on. Whether the author is
     /// *authorized* (a current write-capable member) is a separate check the GC
     /// runs after this.
-    pub fn verify(&self, library_id: &str) -> bool {
-        let payload = tombstone_signing_payload(library_id, &self.cloud_key, &self.deleted_at);
+    pub fn verify(&self, store_id: &str) -> bool {
+        let payload = tombstone_signing_payload(store_id, &self.cloud_key, &self.deleted_at);
         keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
 
-fn tombstone_signing_payload(library_id: &str, cloud_key: &str, deleted_at: &str) -> Vec<u8> {
+fn tombstone_signing_payload(store_id: &str, cloud_key: &str, deleted_at: &str) -> Vec<u8> {
     let fields = BlobTombstoneFields {
-        library_id,
+        store_id,
         cloud_key,
         deleted_at,
     };
@@ -198,7 +198,7 @@ fn tombstone_signing_payload(library_id: &str, cloud_key: &str, deleted_at: &str
 async fn existing_tombstone_state(
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
-    library_id: &str,
+    store_id: &str,
     key: &str,
     expected_cloud_key: &str,
 ) -> Result<ExistingTombstone, String> {
@@ -209,7 +209,7 @@ async fn existing_tombstone_state(
         }
         Err(e) => return Err(format!("tombstone read failed: {e}")),
     };
-    let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, key);
+    let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, key);
     let decoded = match cipher.read().unwrap().open(stored, &aad_context) {
         Ok(decoded) => decoded,
         Err(e) => return Ok(ExistingTombstone::Invalid(format!("open failed: {e}"))),
@@ -224,7 +224,7 @@ async fn existing_tombstone_state(
             tombstone.cloud_key
         )));
     }
-    if !tombstone.verify(library_id) {
+    if !tombstone.verify(store_id) {
         return Ok(ExistingTombstone::Invalid(
             "signature verification failed".to_string(),
         ));
@@ -235,21 +235,21 @@ async fn existing_tombstone_state(
 async fn write_signed_tombstone(
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
-    library_id: &str,
+    store_id: &str,
     key: &str,
     cloud_key: &str,
     deleted_at: &str,
     keypair: &UserKeypair,
 ) -> Result<(), String> {
     let tombstone = BlobTombstoneJson::signed(
-        library_id,
+        store_id,
         cloud_key.to_string(),
         deleted_at.to_string(),
         keypair,
     );
     let bytes = serde_json::to_vec(&tombstone)
         .map_err(|e| format!("tombstone serialization failed: {e}"))?;
-    let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, key);
+    let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, key);
     let sealed = cipher.read().unwrap().seal(bytes, &aad_context);
     cloud_home
         .write(
@@ -286,7 +286,7 @@ pub async fn drain_tombstones(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
-    library_id: &str,
+    store_id: &str,
     keypair: &UserKeypair,
     clock: &dyn crate::clock::Clock,
 ) -> Result<usize, String> {
@@ -324,8 +324,7 @@ pub async fn drain_tombstones(
         // at the key carries the original `deleted_at` that the grace is measured
         // from; overwriting it with a fresh `now` would reset the grace, so a row
         // that re-drains (its prior row-removal failed) must not move the deadline.
-        match existing_tombstone_state(cloud_home, cipher, library_id, &key, &entry.cloud_key).await
-        {
+        match existing_tombstone_state(cloud_home, cipher, store_id, &key, &entry.cloud_key).await {
             Ok(ExistingTombstone::Valid) => {
                 debug!(
                     cloud_key = %entry.cloud_key,
@@ -336,7 +335,7 @@ pub async fn drain_tombstones(
                 if let Err(e) = write_signed_tombstone(
                     cloud_home,
                     cipher,
-                    library_id,
+                    store_id,
                     &key,
                     &entry.cloud_key,
                     &now_rfc,
@@ -359,7 +358,7 @@ pub async fn drain_tombstones(
                 if let Err(e) = write_signed_tombstone(
                     cloud_home,
                     cipher,
-                    library_id,
+                    store_id,
                     &key,
                     &entry.cloud_key,
                     &now_rfc,
@@ -435,10 +434,10 @@ enum RowReference {
 ///
 /// For each tombstone under [`TOMBSTONE_PREFIX`], in order:
 /// 1. Open it under the cipher and parse it. An object we can't open or parse is a
-///    foreign library's (a shared bucket) or corrupt — skip it.
-/// 2. Verify its signature under *this* library's id (binds the author, the
-///    `cloud_key` slot, the deletion time, and the library — a forged, tampered,
-///    relocated, or cross-library tombstone fails) and that the signed `cloud_key`
+///    foreign store's (a shared bucket) or corrupt — skip it.
+/// 2. Verify its signature under *this* store's id (binds the author, the
+///    `cloud_key` slot, the deletion time, and the store — a forged, tampered,
+///    relocated, or cross-store tombstone fails) and that the signed `cloud_key`
 ///    matches the key the object is stored under. Fail → skip, never act.
 /// 3. Authorize the author against the membership chain, anchored to the device's
 ///    *pinned owner* — a current write-capable member of the chain founded by the
@@ -469,7 +468,7 @@ enum RowReference {
 /// trust-on-first-use: this GC runs in production and deletes user blobs, so it
 /// must refuse a wiped-and-refounded chain exactly like the snapshot restore path.
 /// The signature has already proven *who* authored the tombstone; the owner-anchored
-/// chain proves they *may* delete. `None` is the chain-less (browsable) library,
+/// chain proves they *may* delete. `None` is the chain-less (browsable) store,
 /// which has no membership to gate against.
 ///
 /// Returns the number of blobs deleted this pass. A per-tombstone error is logged
@@ -478,7 +477,7 @@ pub async fn gc_tombstones(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
-    library_id: &str,
+    store_id: &str,
     self_pubkey: &str,
     membership_chain: Option<&MembershipChain>,
     clock: &dyn crate::clock::Clock,
@@ -521,13 +520,13 @@ pub async fn gc_tombstones(
                 continue;
             }
         };
-        let aad_context = crate::sync::cloud_storage::cloud_aad_context(library_id, &key);
+        let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, &key);
         let decoded = match cipher.read().unwrap().open(stored, &aad_context) {
             Ok(d) => d,
             Err(e) => {
-                // A tombstone we can't decrypt is a foreign library's object in a
+                // A tombstone we can't decrypt is a foreign store's object in a
                 // shared bucket — skip it rather than abort the whole GC pass.
-                debug!("skipping tombstone {key} this library cannot decrypt: {e}");
+                debug!("skipping tombstone {key} this store cannot decrypt: {e}");
                 continue;
             }
         };
@@ -552,9 +551,9 @@ pub async fn gc_tombstones(
         }
 
         // Verify the signature (binds author, cloud_key, deleted_at, and this
-        // library). A tombstone that fails is forged, corrupt, tampered, or a
-        // different library's — skip it, the blob survives.
-        if !tombstone.verify(library_id) {
+        // store). A tombstone that fails is forged, corrupt, tampered, or a
+        // different store's — skip it, the blob survives.
+        if !tombstone.verify(store_id) {
             warn!("skipping tombstone {key} with an invalid signature");
             continue;
         }
@@ -564,7 +563,7 @@ pub async fn gc_tombstones(
         // of the pinned-owner-founded chain may delete a blob. A non-member tombstone
         // (a bucket writer forging a deletion), or one authored by the forged founder
         // of a wiped/refounded chain, fails here and is skipped. A chain-less
-        // (browsable) library has nothing to gate against, so the object stands on
+        // (browsable) store has nothing to gate against, so the object stands on
         // its verified signature alone.
         match authorize_loaded_membership_author(
             membership_chain,

@@ -16,9 +16,9 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
-use crate::library_dir::LibraryDir;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::hlc::Hlc;
 use rusqlite::OptionalExtension;
@@ -31,20 +31,13 @@ async fn run_drain(
     db: &Database,
     cloud: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
-    library_dir: &LibraryDir,
+    store_dir: &StoreDir,
     clock: &dyn Clock,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, crate::database::DbError> {
     let hlc = Hlc::new("test-device".to_string());
     drain_uploads(
-        db,
-        cloud,
-        cipher,
-        "test-lib",
-        library_dir,
-        clock,
-        &hlc,
-        observer,
+        db, cloud, cipher, "test-lib", store_dir, clock, &hlc, observer,
     )
     .await
 }
@@ -379,7 +372,7 @@ async fn bad_item_does_not_block_good_later_item() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &clock,
         Some(&observer),
     )
@@ -414,7 +407,7 @@ async fn failure_persists_attempt_count_and_last_error() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &fixed_clock(T0),
         None,
     )
@@ -429,7 +422,7 @@ async fn failure_persists_attempt_count_and_last_error() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &fixed_clock("2024-06-01T00:00:31Z"),
         None,
     )
@@ -456,7 +449,7 @@ async fn backoff_skips_item_inside_window() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &fixed_clock("2024-06-01T00:00:10Z"),
         Some(&observer),
     )
@@ -484,7 +477,7 @@ async fn backoff_skips_item_inside_window() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &fixed_clock("2024-06-01T00:00:31Z"),
         Some(&observer),
     )
@@ -511,7 +504,7 @@ async fn observer_fires_started_then_uploaded_on_success() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &fixed_clock(T0),
         Some(&observer),
     )
@@ -548,7 +541,7 @@ async fn observer_fires_started_then_failed_on_failure() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &fixed_clock(T0),
         Some(&observer),
     )
@@ -587,7 +580,7 @@ async fn observer_receives_advancing_midfile_progress() {
         &db,
         &cloud,
         &enc(),
-        &LibraryDir::new(tmp.path()),
+        &StoreDir::new(tmp.path()),
         &fixed_clock(T0),
         Some(&observer),
     )
@@ -691,7 +684,7 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
     let tmp = tempfile::tempdir().unwrap();
     let plaintext = b"PINNED-AUDIO-BYTES";
     let source = write_temp_file(tmp.path(), "track.flac", plaintext);
-    let ld = LibraryDir::new(tmp.path());
+    let ld = StoreDir::new(tmp.path());
 
     let db = open_outbox_db();
     let file_id = "pinaaaa1";
@@ -749,7 +742,7 @@ async fn unpinned_upload_populates_nothing_on_write() {
     let tmp = tempfile::tempdir().unwrap();
     let plaintext = b"UNPINNED-AUDIO-BYTES";
     let source = write_temp_file(tmp.path(), "track.flac", plaintext);
-    let ld = LibraryDir::new(tmp.path());
+    let ld = StoreDir::new(tmp.path());
 
     let db = open_outbox_db();
     let file_id = "unpaaaa1";
@@ -797,7 +790,7 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     let tmp = tempfile::tempdir().unwrap();
     let plaintext = b"PIN-FAILS-BUT-UPLOAD-OK";
     let source = write_temp_file(tmp.path(), "track.flac", plaintext);
-    let ld = LibraryDir::new(tmp.path());
+    let ld = StoreDir::new(tmp.path());
 
     let db = open_outbox_db();
     let file_id = "pinfail1";

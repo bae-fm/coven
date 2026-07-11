@@ -1,8 +1,8 @@
 # Bootstrap
 
-A device that joins a library, or restores one on new hardware, needs the whole
+A device that joins a store, or restores one on new hardware, needs the whole
 current state of every synced table. Replaying the full changeset history would
-work but grows without bound: a library that has run for a year holds a year of
+work but grows without bound: a store that has run for a year holds a year of
 changesets. Instead, coven keeps a full snapshot of the database in the cloud and
 lets a fresh device download that, then pull only the changesets created after it.
 
@@ -35,7 +35,7 @@ one pass:
    [`Gates`](rustdoc:struct:coven::sync::gate::Gates) model the outbound changeset
    filter uses, so the snapshot carries the exact same set of rows the changeset
    path would have sent. See [Local data](/docs/local-data) for the gate.
-4. The bytes are read and sealed by the home's cipher: encrypted with the library
+4. The bytes are read and sealed by the home's cipher: encrypted with the store
    key on an opaque home, stored verbatim on a
    [browsable home](/docs/encryption#opaque-and-browsable-homes).
 
@@ -103,15 +103,15 @@ pass to repair a wrong state.
 ## Signing and authorization
 
 The bucket is untrusted: the at-rest cipher proves only confidentiality (the
-library key is shared by every member), not authorship. So the metadata and the
-pointer are each **signed** by the publishing device and bound to the library id.
+store key is shared by every member), not authorship. So the metadata and the
+pointer are each **signed** by the publishing device and bound to the store id.
 The metadata signs the per-device cursors and a hash of the database image; the
 pointer signs the generation seq and the same database hash.
 
 A reader (bootstrap or GC) authenticates a generation before trusting it:
 
-- the pointer's signature must verify (under this library id, which also refuses a
-  different library's pointer replayed here) and its author must be a current
+- the pointer's signature must verify (under this store id, which also refuses a
+  different store's pointer replayed here) and its author must be a current
   write-capable member, so a non-member cannot repoint the live snapshot;
 - the named generation's metadata signature must verify and its author must be a
   current write-capable member, so a forged or cursor-poisoned meta is refused;
@@ -119,7 +119,7 @@ A reader (bootstrap or GC) authenticates a generation before trusting it:
   database's hash must match what the meta commits to, so a substituted image is
   refused.
 
-Membership is anchored to the library's owner when the owner is pinned (on join,
+Membership is anchored to the store's owner when the owner is pinned (on join,
 the invite pins the founder), so a wiped-and-refounded chain under an attacker's
 key fails authorization. On restore there is no pinned owner yet, so the chain is
 anchored to its own founder and the owner is adopted trust-on-first-use after the
@@ -147,7 +147,7 @@ pub fn should_create_snapshot(
 ```
 
 The cycle adds one trigger the policy function does not cover: the *initial sync*
-of an existing library. When a host connects a cloud provider to a database that
+of an existing store. When a host connects a cloud provider to a database that
 already holds rows, the session produces no changeset (the data was written before
 sync started). The cycle detects `local_seq == 0`, no prior snapshot, and no
 outgoing changeset, and pushes a snapshot so that existing data reaches the cloud
@@ -177,7 +177,7 @@ in `sync_state`, which feed the next policy check.
 </svg>
 
 Bootstrapping happens inside the join flow (a new member added by an owner) and
-the restore flow (the owner recovering the library on new hardware). Both call
+the restore flow (the owner recovering the store on new hardware). Both call
 [`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot):
 
 1. Resolve the `current.json` pointer to the live generation, authenticating the
@@ -208,12 +208,12 @@ there is no separate migration path. The device then pulls every changeset
 newer than the bootstrap cursors, so it catches up on anything written between
 the snapshot and now.
 
-Capture stays enabled through the bootstrap pull. A just-bootstrapped library has
+Capture stays enabled through the bootstrap pull. A just-bootstrapped store has
 no local writer, so there is no whole-cycle suspend to manage; the pull disables
 capture only around each apply, exactly as a steady-state cycle does.
 
 ```rust
-let _bootstrap = bootstrap_from_snapshot(storage, library_id, &cipher, owner_pubkey, &db_path).await?;
+let _bootstrap = bootstrap_from_snapshot(storage, store_id, &cipher, owner_pubkey, &db_path).await?;
 let handle = Coven::builder(config)
     .synced_tables(synced_tables.to_vec())
     .migrations(migrations)   // the same ladder every open passes
@@ -242,7 +242,7 @@ bootstrapped database and downloads the `CacheEager` ones into the [cache](/docs
 left for first read, the same as in a steady-state pull. The bootstrap records a pending
 flag in `sync_state`; each later cycle re-runs the reconciliation until every
 referenced `CacheEager` blob is on disk, so a blob whose object was not yet in the
-cloud at bootstrap is fetched on a later cycle rather than lost. A caught-up library
+cloud at bootstrap is fetched on a later cycle rather than lost. A caught-up store
 clears the flag and pays nothing.
 
 ## Cursors
