@@ -1,8 +1,10 @@
 //! Sync + storage configuration.
 //!
-//! `Config` is a plain runtime struct the host populates from its own config.
-//! coven never persists it — the host owns its config file and maps the
-//! sync-relevant fields into `Config` when constructing the sync manager.
+//! `Config` is the runtime struct the sync manager reads. coven persists the
+//! sync-relevant fields to `config.yaml` in the store directory
+//! ([`Config::save_to_config_yaml`]) and reads them back
+//! ([`Config::load_from_config_yaml`]); the store directory itself is not
+//! part of the file — the caller supplies it at both save and load.
 
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +70,7 @@ impl HomeStorage {
 /// The cloud home: which provider backs sync and its per-provider settings.
 /// One cohesive unit — connecting picks a provider and fills its fields;
 /// disconnecting resets the whole thing to default.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CloudHomeConfig {
     /// Selected provider. None = not configured.
     #[serde(default)]
@@ -133,7 +135,7 @@ pub enum ConfigError {
 }
 
 /// Sync + storage configuration for one store.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub store_id: String,
     /// Unique device identifier for sync changeset namespacing.
@@ -176,6 +178,19 @@ impl Config {
         std::fs::write(self.store_dir.config_path(), text)?;
         Ok(())
     }
+
+    /// Read `store_dir/config.yaml` back into a runtime `Config`; `store_dir`
+    /// is supplied by the caller, since it is not itself persisted (see the
+    /// module doc). A missing or unparseable file is a loud [`ConfigError`]
+    /// naming the path — there is no legacy shape to tolerate.
+    pub fn load_from_config_yaml(store_dir: StoreDir) -> Result<Config, ConfigError> {
+        let path = store_dir.config_path();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| ConfigError::Config(format!("failed to read {}: {e}", path.display())))?;
+        let yaml: ConfigYaml = serde_yaml::from_str(&text)
+            .map_err(|e| ConfigError::Config(format!("failed to parse {}: {e}", path.display())))?;
+        Ok(yaml.into_config(store_dir))
+    }
 }
 
 /// On-disk form of [`Config`] (the runtime `store_dir` is supplied separately).
@@ -183,8 +198,7 @@ impl Config {
 pub struct ConfigYaml {
     pub store_id: String,
     pub store_name: String,
-    #[serde(default)]
-    pub device_id: Option<String>,
+    pub device_id: String,
     #[serde(default)]
     pub encryption_key_stored: bool,
     #[serde(default)]
@@ -198,10 +212,121 @@ impl From<&Config> for ConfigYaml {
         Self {
             store_id: config.store_id.clone(),
             store_name: config.store_name.clone(),
-            device_id: Some(config.device_id.clone()),
+            device_id: config.device_id.clone(),
             encryption_key_stored: config.encryption_key_stored,
             encryption_key_fingerprint: config.encryption_key_fingerprint.clone(),
             cloud_home: config.cloud_home.clone(),
         }
+    }
+}
+
+impl ConfigYaml {
+    /// Pair to [`From<&Config> for ConfigYaml`]: rebuild a runtime `Config`
+    /// from its on-disk form plus the `store_dir` the file doesn't carry.
+    fn into_config(self, store_dir: StoreDir) -> Config {
+        Config {
+            store_id: self.store_id,
+            device_id: self.device_id,
+            store_dir,
+            store_name: self.store_name,
+            encryption_key_stored: self.encryption_key_stored,
+            encryption_key_fingerprint: self.encryption_key_fingerprint,
+            cloud_home: self.cloud_home,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saving a `Config` and loading it back must reproduce every field,
+    /// including `store_dir` — the caller supplies the same `store_dir` to
+    /// both `save_to_config_yaml` (via `self`) and `load_from_config_yaml`,
+    /// so it must come back unchanged along with everything the file does
+    /// carry.
+    #[test]
+    fn round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(dir.path());
+        let mut config = Config::with_defaults(
+            "store-1".to_string(),
+            "device-1".to_string(),
+            store_dir.clone(),
+            "My Store".to_string(),
+        );
+        config.encryption_key_stored = true;
+        config.encryption_key_fingerprint = Some("abc123".to_string());
+        config.cloud_home = CloudHomeConfig {
+            provider: Some(CloudProvider::S3),
+            s3_bucket: Some("bucket".to_string()),
+            s3_region: Some("us-east-1".to_string()),
+            storage: HomeStorage::Opaque,
+            ..CloudHomeConfig::default()
+        };
+
+        config.save_to_config_yaml().expect("save");
+        let loaded = Config::load_from_config_yaml(store_dir).expect("load");
+
+        assert_eq!(loaded, config);
+    }
+
+    /// A file that omits every field with a designed default
+    /// (`encryption_key_stored`, `encryption_key_fingerprint`, the flattened
+    /// `cloud_home`) still loads — those absences are real inputs, not bugs.
+    /// `storage` has no default (the host must pick opaque vs. browsable when
+    /// it creates the home), so it is the one `cloud_home` field still spelled
+    /// out.
+    #[test]
+    fn load_with_absent_optional_fields_uses_defaults() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(dir.path());
+        std::fs::write(
+            store_dir.config_path(),
+            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nstorage: opaque\n",
+        )
+        .expect("write config.yaml");
+
+        let loaded = Config::load_from_config_yaml(store_dir.clone()).expect("load");
+
+        assert_eq!(loaded.store_id, "store-1");
+        assert_eq!(loaded.store_name, "My Store");
+        assert_eq!(loaded.device_id, "device-1");
+        assert!(!loaded.encryption_key_stored);
+        assert_eq!(loaded.encryption_key_fingerprint, None);
+        assert_eq!(loaded.cloud_home, CloudHomeConfig::default());
+        assert_eq!(loaded.store_dir, store_dir);
+    }
+
+    /// `device_id` is a required field on the wire, unlike the designed-default
+    /// ones above: the save side always writes it, so a file without one is bad
+    /// data, not an absence to tolerate — it must fail loudly, not default.
+    #[test]
+    fn load_with_missing_device_id_errors() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(dir.path());
+        std::fs::write(
+            store_dir.config_path(),
+            "store_id: store-1\nstore_name: My Store\n",
+        )
+        .expect("write config.yaml");
+
+        let err = Config::load_from_config_yaml(store_dir).expect_err("missing device_id");
+        assert!(matches!(err, ConfigError::Config(_)));
+    }
+
+    /// No `config.yaml` at all names the path in the error rather than
+    /// failing opaquely.
+    #[test]
+    fn load_with_no_file_errors_naming_the_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(dir.path());
+
+        let err = Config::load_from_config_yaml(store_dir.clone()).expect_err("no file");
+        let message = err.to_string();
+        assert!(
+            message.contains(&store_dir.config_path().display().to_string()),
+            "error should name the missing path, got: {message}",
+        );
     }
 }

@@ -131,7 +131,7 @@ pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
 ///
 /// Centralizes the on-disk layout so callers use methods instead of
 /// ad-hoc `path.join("images")` etc.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StoreDir {
     path: PathBuf,
 }
