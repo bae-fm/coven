@@ -80,7 +80,7 @@ nothing and produces empty changesets forever, so
 [`init_sync_over_storage`](rustdoc:fn:coven::sync::cycle::init_sync_over_storage)
 treats an empty set as a hard error and refuses to start.
 
-## Reads and local writes
+## Reads
 
 Reads don't need capture, and they don't get it. Two read paths exist, and
 both hold the invariant above the same way: they run on read-only SQLite
@@ -103,25 +103,10 @@ cannot bypass capture because it cannot write at all.
   the device cache. WAL makes the coexistence safe: many readers, one writer,
   each read seeing the last committed state.
 
-A write to a device-local (undeclared) table is not a read, but it captures
-nothing either — those tables aren't in the session. `handle.sql_local(...)`
-is that path: it attaches the same capture session and runs in the same
-journaled transaction as `sql`, so a synced write still cannot slip past
-capture, but it *expects* an empty capture and commits silently on one. It
-also verifies the declaration — if the closure did touch a synced table, the
-capture is non-empty, and `sql_local` rolls the whole transaction back and
-returns an error at the call site rather than committing a write the host
-mislabeled as local. bae uses it for the playback position it writes once a
-second to a local table; without it, that write would fire the empty-capture
-warning below every second.
-
 The write path polices itself: a `handle.sql(...)` transaction that captures
-an empty changeset logs a warning. Once pure reads route through `sql_read`
-and device-local writes through `sql_local`, the only empty capture left on
-`sql` is a conditional write to a *synced* table that no-op'd this cycle (an
-idempotent `INSERT OR IGNORE` re-run) — legitimate, so it stays on `sql` and
-the warning is tolerated. The other two empty-capture causes each have their
-own home: a read belongs on `sql_read`, a local-only write on `sql_local`.
+an empty changeset logs a warning, because it means either a pure read is
+still on the write path (move it to `sql_read`) or a conditional write
+no-op'd this time (legitimate; it stays on `sql`).
 
 ## The sync cycle
 
