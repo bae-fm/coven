@@ -43,7 +43,8 @@ fn s3_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// Run an S3 interaction on the big-stack runtime, flattening the `JoinError`.
+/// Run an S3 interaction on the big-stack runtime, flattening the join-handle
+/// result into the future's own `Result<T, CloudHomeError>`.
 /// The future must be `Send + 'static` (owned args, a cloned `Client`).
 async fn on_s3_rt<T: Send + 'static>(
     fut: impl std::future::Future<Output = Result<T, CloudHomeError>> + Send + 'static,

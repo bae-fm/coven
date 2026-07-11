@@ -23,8 +23,13 @@ use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
 use crate::sync::storage::SyncStorage;
 
+/// Why joining or restoring a store failed. Both are the same operation —
+/// bootstrap a store from the cloud — differing only in their entry data (an
+/// invite that wraps the store key vs a restore code that carries the bucket
+/// credentials), so they share one error shape rather than two that duplicate
+/// most of their variants and then have to map between each other.
 #[derive(Debug, thiserror::Error)]
-pub enum JoinError {
+pub enum BootstrapError {
     #[error("cloud home: {0}")]
     CloudHome(#[from] CloudHomeError),
     #[error("encryption: {0}")]
@@ -41,7 +46,7 @@ pub enum JoinError {
     Key(#[from] KeyError),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid invite code: {0}")]
+    #[error("invalid code: {0}")]
     InvalidCode(String),
     #[error("store already exists locally: {0}")]
     StoreExists(String),
@@ -51,28 +56,35 @@ pub enum JoinError {
     Membership(String),
     #[error("database: {0}")]
     Database(String),
+    #[error("invalid signing key: {0}")]
+    InvalidSigningKey(String),
+    /// Bootstrap failed AND removing the partly-created store directory also
+    /// failed. Both are carried: `cause` is the original bootstrap failure that
+    /// triggered the cleanup, `cleanup` is why the removal itself failed — the
+    /// cause is preserved as a value, not flattened into a string.
+    #[error("could not clean up the partial store after bootstrap failed: {cleanup} (bootstrap error: {cause})")]
+    Cleanup {
+        cleanup: String,
+        cause: Box<BootstrapError>,
+    },
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum BootstrapSaveError {
-    #[error("snapshot: {0}")]
-    Snapshot(#[from] SnapshotError),
-    #[error("join: {0}")]
-    Join(#[from] JoinError),
-    #[error("config: {0}")]
-    Config(#[from] ConfigError),
-    #[error("keyring: {0}")]
-    Key(#[from] KeyError),
-}
-
-impl From<BootstrapSaveError> for JoinError {
-    fn from(error: BootstrapSaveError) -> Self {
-        match error {
-            BootstrapSaveError::Snapshot(error) => JoinError::Snapshot(error),
-            BootstrapSaveError::Join(error) => error,
-            BootstrapSaveError::Config(error) => JoinError::Config(error),
-            BootstrapSaveError::Key(error) => JoinError::Key(error),
-        }
+/// Remove the partly-created store directory after a bootstrap failure and
+/// return the error to propagate. On a clean removal the original `cause` is
+/// returned unchanged; if the removal itself fails, both failures are carried
+/// in a [`BootstrapError::Cleanup`] so neither is lost. Shared by join and
+/// restore — both create a `stores/<id>` directory this invocation owns and
+/// must undo it on any bootstrap failure below.
+pub(crate) fn cleanup_after_bootstrap_failure(
+    store_dir: &StoreDir,
+    cause: BootstrapError,
+) -> BootstrapError {
+    match std::fs::remove_dir_all(&**store_dir) {
+        Ok(()) => cause,
+        Err(cleanup) => BootstrapError::Cleanup {
+            cleanup: cleanup.to_string(),
+            cause: Box::new(cause),
+        },
     }
 }
 
@@ -96,9 +108,10 @@ impl BootstrapContext<'_> {
 fn require_join_oauth(
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     provider_name: &str,
-) -> Result<crate::oauth::OAuthTokens, JoinError> {
-    oauth_tokens
-        .ok_or_else(|| JoinError::Provider(format!("{provider_name} join requires an OAuth token")))
+) -> Result<crate::oauth::OAuthTokens, BootstrapError> {
+    oauth_tokens.ok_or_else(|| {
+        BootstrapError::Provider(format!("{provider_name} join requires an OAuth token"))
+    })
 }
 
 /// Persist the caller-supplied OAuth tokens for the store `ks` is scoped to, so
@@ -126,7 +139,7 @@ async fn build_cloud_home_for_join(
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
-) -> Result<Box<dyn CloudHome>, JoinError> {
+) -> Result<Box<dyn CloudHome>, BootstrapError> {
     use crate::storage::cloud::*;
 
     // Consumed only by the oauth provider arms below.
@@ -197,12 +210,13 @@ async fn build_cloud_home_for_join(
         #[cfg(not(feature = "oauth-providers"))]
         CloudHomeJoinInfo::GoogleDrive { .. }
         | CloudHomeJoinInfo::Dropbox { .. }
-        | CloudHomeJoinInfo::OneDrive { .. } => Err(JoinError::Provider(
+        | CloudHomeJoinInfo::OneDrive { .. } => Err(BootstrapError::Provider(
             "OAuth cloud providers are not supported in this build".to_string(),
         )),
         CloudHomeJoinInfo::CloudKit => {
-            let ops = cloudkit_ops
-                .ok_or_else(|| JoinError::Provider("CloudKit driver not provided".to_string()))?;
+            let ops = cloudkit_ops.ok_or_else(|| {
+                BootstrapError::Provider("CloudKit driver not provided".to_string())
+            })?;
             Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(ops)))
         }
         CloudHomeJoinInfo::CloudKitShare {
@@ -210,11 +224,12 @@ async fn build_cloud_home_for_join(
             owner_name,
             zone_name,
         } => {
-            let ops = cloudkit_ops
-                .ok_or_else(|| JoinError::Provider("CloudKit driver not provided".to_string()))?;
+            let ops = cloudkit_ops.ok_or_else(|| {
+                BootstrapError::Provider("CloudKit driver not provided".to_string())
+            })?;
             let accepted = cloudkit::accept_share(ops.clone(), share_url.clone()).await?;
             if accepted.owner_name != *owner_name || accepted.zone_name != *zone_name {
-                return Err(JoinError::Provider(format!(
+                return Err(BootstrapError::Provider(format!(
                     "CloudKit accepted share zone mismatch: invite owner/zone {owner_name}/{zone_name}, accepted {}/{}",
                     accepted.owner_name, accepted.zone_name
                 )));
@@ -244,11 +259,11 @@ pub async fn join_from_invite_code(
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
-) -> Result<Config, JoinError> {
+) -> Result<Config, BootstrapError> {
     crate::install_platform();
 
     let code = crate::join_code::decode(invite_code_str)
-        .map_err(|e| JoinError::InvalidCode(e.to_string()))?;
+        .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
 
     // Refuse a store already present locally before any keyring or provider side
     // effect. Re-joining a store you already have adds nothing — the existing
@@ -257,7 +272,7 @@ pub async fn join_from_invite_code(
     // leaves no residue from `build_cloud_home_for_join`, which runs first and
     // saves OAuth tokens to the keyring and can accept a CloudKit share.
     if layout.store_dir(&code.store_id).exists() {
-        return Err(JoinError::StoreExists(code.store_id));
+        return Err(BootstrapError::StoreExists(code.store_id));
     }
 
     let store_keys = StoreKeys::new(code.store_id.clone());
@@ -301,13 +316,13 @@ pub async fn join_store(
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
-) -> Result<Config, JoinError> {
+) -> Result<Config, BootstrapError> {
     crate::install_platform();
 
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::store_dir::validate_path_token(&code.store_id)
-        .map_err(|e| JoinError::InvalidCode(format!("invalid store id: {e}")))?;
+        .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
 
     // Refuse a store already present locally before any keyring or filesystem
     // side effect, independent of whatever `join_from_invite_code` (or any
@@ -319,7 +334,7 @@ pub async fn join_store(
     // created.
     let store_dir = layout.store_dir(&code.store_id);
     if store_dir.exists() {
-        return Err(JoinError::StoreExists(code.store_id));
+        return Err(BootstrapError::StoreExists(code.store_id));
     }
 
     // Load the device signing keypair (must already exist — the inviter wrapped
@@ -394,15 +409,7 @@ pub async fn join_store(
             info!("Joined store {} at {}", store_id, store_dir.display());
             Ok(config)
         }
-        Err(err) => {
-            let join_error = JoinError::from(err);
-            if let Err(cleanup_error) = std::fs::remove_dir_all(&*store_dir) {
-                return Err(JoinError::Database(format!(
-                    "failed to remove store directory after join failed: {cleanup_error}; original error: {join_error}"
-                )));
-            }
-            Err(join_error)
-        }
+        Err(err) => Err(cleanup_after_bootstrap_failure(&store_dir, err)),
     }
 }
 
@@ -423,7 +430,7 @@ pub(crate) async fn bootstrap_and_save_store(
     store_name: &str,
     key_service: &StoreKeys,
     on_status: &impl Fn(&str),
-) -> Result<Config, BootstrapSaveError> {
+) -> Result<Config, BootstrapError> {
     // Join pins the store owner from the invite. Restore adopts the owner
     // from the chain founder during `open_db_and_pull`, because the restore code
     // carries the bucket credentials rather than an inviter assertion.
@@ -501,7 +508,7 @@ pub(crate) async fn open_db_and_pull(
     storage: &dyn SyncStorage,
     cursors: &HashMap<String, u64>,
     store_dir: &StoreDir,
-) -> Result<u64, JoinError> {
+) -> Result<u64, BootstrapError> {
     let (db, _stamper) = Database::open(
         db_path,
         synced_tables.to_vec(),
@@ -512,7 +519,7 @@ pub(crate) async fn open_db_and_pull(
         migrations,
     )
     .map_err(|e| {
-        JoinError::Database(format!("Failed to open database for changeset apply: {e}"))
+        BootstrapError::Database(format!("Failed to open database for changeset apply: {e}"))
     })?;
 
     // Pin the store owner from the invite BEFORE the pull below loads and anchors
@@ -523,7 +530,7 @@ pub(crate) async fn open_db_and_pull(
     if let Some(owner) = owner_pubkey {
         db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner)
             .await
-            .map_err(|e| JoinError::Database(format!("Failed to pin store owner: {e}")))?;
+            .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
     }
 
     // Download the blob files the snapshot's rows reference: the snapshot carried
@@ -538,9 +545,9 @@ pub(crate) async fn open_db_and_pull(
         db.synced_tables(),
     )
     .await
-    .map_err(|e| JoinError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?
+    .map_err(|e| BootstrapError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?
     {
-        return Err(JoinError::Database(
+        return Err(BootstrapError::Database(
             "Snapshot blob reconciliation did not land every required eager blob".to_string(),
         ));
     }
@@ -552,7 +559,7 @@ pub(crate) async fn open_db_and_pull(
     // best-effort and pins from the founder below.
     let membership = crate::sync::pull::load_cycle_membership(storage, &db)
         .await
-        .map_err(JoinError::Pull)?;
+        .map_err(BootstrapError::Pull)?;
     let (updated_cursors, pull_result) = pull_changes(
         &db,
         db.synced_tables(),
@@ -564,7 +571,7 @@ pub(crate) async fn open_db_and_pull(
         membership.pinned_owner,
     )
     .await
-    .map_err(JoinError::Pull)?;
+    .map_err(BootstrapError::Pull)?;
 
     // Restore passes no owner (it recovers an existing store this device may not
     // have founded): adopt the owner from the chain's founder now, before the first
@@ -575,7 +582,7 @@ pub(crate) async fn open_db_and_pull(
     // Join already pinned its owner from the invite, so it skips this.
     if owner_pubkey.is_none() {
         let entries = storage.list_membership_entries().await.map_err(|e| {
-            JoinError::Membership(format!(
+            BootstrapError::Membership(format!(
                 "restore: failed to list membership to pin owner: {e}"
             ))
         })?;
@@ -587,18 +594,20 @@ pub(crate) async fn open_db_and_pull(
             let chain = crate::sync::membership_ops::download_chain(storage, &entries)
                 .await
                 .map_err(|e| {
-                    JoinError::Membership(format!(
+                    BootstrapError::Membership(format!(
                         "restore: failed to load chain to pin owner: {e}"
                     ))
                 })?;
             // A validated chain always has a founder (validation rejects an empty
             // chain), so this is defensive — but fail loud rather than skip the pin.
             let founder = chain.founder_pubkey().ok_or_else(|| {
-                JoinError::Membership("restore: loaded chain has no founder to pin".to_string())
+                BootstrapError::Membership(
+                    "restore: loaded chain has no founder to pin".to_string(),
+                )
             })?;
             db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
                 .await
-                .map_err(|e| JoinError::Database(format!("Failed to pin store owner: {e}")))?;
+                .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
         }
     }
 
@@ -618,7 +627,7 @@ pub(crate) async fn open_db_and_pull(
     persisted_cursors.extend(updated_cursors);
     for (cursor_device, seq) in &persisted_cursors {
         db.set_sync_cursor(cursor_device, *seq).await.map_err(|e| {
-            JoinError::Database(format!(
+            BootstrapError::Database(format!(
                 "Failed to persist sync cursor for {cursor_device}: {e}"
             ))
         })?;
@@ -629,7 +638,7 @@ pub(crate) async fn open_db_and_pull(
     // what keeps the first cycle's initial-sync path from firing.
     db.set_sync_state("snapshot_seq", "0")
         .await
-        .map_err(|e| JoinError::Database(format!("Failed to persist snapshot_seq: {e}")))?;
+        .map_err(|e| BootstrapError::Database(format!("Failed to persist snapshot_seq: {e}")))?;
 
     Ok(pull_result.changesets_applied)
 }
@@ -735,6 +744,55 @@ pub(crate) fn build_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// When the post-failure directory cleanup itself fails, both failures are
+    /// carried: `cleanup` records why the removal failed and `cause` preserves
+    /// the ORIGINAL bootstrap error as a value — not flattened into a string.
+    /// Join and restore both route their failure path through this one helper,
+    /// so exercising it covers both flows' cleanup behavior.
+    #[test]
+    fn cleanup_failure_carries_the_original_bootstrap_cause() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        // A directory that was never created: `remove_dir_all` fails, standing
+        // in for any cleanup failure the real flows can hit.
+        let missing = StoreDir::new(tmp.path().join("never-created"));
+
+        let wrapped = cleanup_after_bootstrap_failure(
+            &missing,
+            BootstrapError::Database("bootstrap boom".to_string()),
+        );
+
+        match wrapped {
+            BootstrapError::Cleanup { cleanup, cause } => {
+                assert!(!cleanup.is_empty(), "the removal failure is recorded");
+                assert!(
+                    matches!(*cause, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+                    "the original bootstrap cause is preserved as a value, got {cause:?}",
+                );
+            }
+            other => panic!("a failed cleanup must yield Cleanup, got {other:?}"),
+        }
+    }
+
+    /// When the cleanup succeeds, the original bootstrap error propagates
+    /// unchanged — no `Cleanup` wrapper — and the partial store dir is gone.
+    #[test]
+    fn successful_cleanup_returns_the_cause_unchanged() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(tmp.path().join("to-remove"));
+        std::fs::create_dir_all(&*store_dir).expect("create store dir");
+
+        let returned = cleanup_after_bootstrap_failure(
+            &store_dir,
+            BootstrapError::Database("bootstrap boom".to_string()),
+        );
+
+        assert!(
+            matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+            "a clean removal returns the cause unchanged, got {returned:?}",
+        );
+        assert!(!store_dir.exists(), "the partial store dir was removed");
+    }
 
     /// Only S3 maps to a stored value; every other provider returns `None` so
     /// the join never overwrites an already-saved OAuth token (or a CloudKit

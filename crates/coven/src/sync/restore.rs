@@ -8,18 +8,16 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::config::{Config, ConfigError, HomeStorage};
-use crate::encryption::{EncryptionError, EncryptionService};
-use crate::keys::{DeviceKeys, KeyError, StoreKeys, UserKeypair};
+use crate::config::{Config, HomeStorage};
+use crate::encryption::EncryptionService;
+use crate::keys::{DeviceKeys, StoreKeys, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
-use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-use crate::sync::join::{bootstrap_and_save_store, BootstrapSaveError, JoinError};
-use crate::sync::pull::PullError;
+use crate::sync::join::{bootstrap_and_save_store, BootstrapError};
 use crate::sync::session::SyncedTable;
-use crate::sync::snapshot::SnapshotError;
 
 /// Cloud provider source for restore: the join info a restore code carries
 /// plus the extras it can't (`RestoreCode` omits OAuth tokens because they
@@ -31,47 +29,6 @@ pub struct RestoreSource {
     pub cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum RestoreError {
-    #[error("encryption: {0}")]
-    Encryption(#[from] EncryptionError),
-    #[error("snapshot: {0}")]
-    Snapshot(#[from] SnapshotError),
-    #[error("pull: {0}")]
-    Pull(#[from] PullError),
-    #[error("config: {0}")]
-    Config(#[from] ConfigError),
-    #[error("keyring: {0}")]
-    Key(#[from] KeyError),
-    #[error("I/O: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("join: {0}")]
-    Join(#[from] JoinError),
-    #[error("cloud home: {0}")]
-    CloudHome(#[from] CloudHomeError),
-    #[error("cleanup: {0}")]
-    Cleanup(String),
-    #[error("invalid restore code: {0}")]
-    InvalidCode(String),
-    #[error("store already exists locally: {0}")]
-    StoreExists(String),
-    #[error("invalid signing key: {0}")]
-    InvalidSigningKey(String),
-    #[error("provider: {0}")]
-    Provider(String),
-}
-
-impl From<BootstrapSaveError> for RestoreError {
-    fn from(error: BootstrapSaveError) -> Self {
-        match error {
-            BootstrapSaveError::Snapshot(error) => RestoreError::Snapshot(error),
-            BootstrapSaveError::Join(error) => RestoreError::Join(error),
-            BootstrapSaveError::Config(error) => RestoreError::Config(error),
-            BootstrapSaveError::Key(error) => RestoreError::Key(error),
-        }
-    }
-}
-
 /// Require OAuth tokens for a provider that needs them and persist them to the
 /// store-scoped keyring, the same way join's parallel arms do, so the next
 /// launch's home construction (`parse_oauth_tokens` in `storage::cloud`) can
@@ -81,9 +38,9 @@ fn require_and_persist_oauth(
     oauth_tokens: Option<OAuthTokens>,
     store_id: &str,
     provider_name: &str,
-) -> Result<(OAuthTokens, StoreKeys), RestoreError> {
+) -> Result<(OAuthTokens, StoreKeys), BootstrapError> {
     let tokens = oauth_tokens.ok_or_else(|| {
-        RestoreError::Provider(format!("{provider_name} restore requires OAuth token"))
+        BootstrapError::Provider(format!("{provider_name} restore requires OAuth token"))
     })?;
     let ks = StoreKeys::new(store_id.to_string());
     crate::sync::join::persist_oauth_tokens(&ks, &tokens)?;
@@ -95,7 +52,7 @@ async fn build_cloud_home(
     source: RestoreSource,
     store_id: &str,
     clock: crate::clock::ClockRef,
-) -> Result<(CloudHomeJoinInfo, Box<dyn CloudHome>), RestoreError> {
+) -> Result<(CloudHomeJoinInfo, Box<dyn CloudHome>), BootstrapError> {
     use crate::storage::cloud::*;
 
     let RestoreSource {
@@ -130,7 +87,7 @@ async fn build_cloud_home(
 
         CloudHomeJoinInfo::CloudKit => {
             let ops = cloudkit_ops.ok_or_else(|| {
-                RestoreError::Provider("CloudKit driver not provided".to_string())
+                BootstrapError::Provider("CloudKit driver not provided".to_string())
             })?;
             Box::new(cloudkit::CloudKitCloudHome::new_private(ops)) as Box<dyn CloudHome>
         }
@@ -140,7 +97,7 @@ async fn build_cloud_home(
         // `RestoreSource` is public API another caller could construct
         // directly, so this guard is independent of that decode-time check.
         CloudHomeJoinInfo::CloudKitShare { .. } => {
-            return Err(RestoreError::Provider(
+            return Err(BootstrapError::Provider(
                 "restoring from a CloudKit share is not supported — restore recovers your own zone, not a shared one".to_string(),
             ));
         }
@@ -186,7 +143,7 @@ async fn build_cloud_home(
         CloudHomeJoinInfo::GoogleDrive { .. }
         | CloudHomeJoinInfo::Dropbox { .. }
         | CloudHomeJoinInfo::OneDrive { .. } => {
-            return Err(RestoreError::Provider(
+            return Err(BootstrapError::Provider(
                 "OAuth cloud providers are not supported in this build".to_string(),
             ));
         }
@@ -215,13 +172,13 @@ pub async fn restore_from_cloud(
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
-) -> Result<Config, RestoreError> {
+) -> Result<Config, BootstrapError> {
     crate::install_platform();
 
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::store_dir::validate_path_token(store_id)
-        .map_err(|e| RestoreError::InvalidCode(format!("invalid store id: {e}")))?;
+        .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
 
     // Refuse a store already present locally before any provider side effect. The
     // decode guaranteed the id is a safe single component, so the directory is a
@@ -232,7 +189,7 @@ pub async fn restore_from_cloud(
     // the failure-cleanup only ever remove a directory this invocation created.
     let store_dir = layout.store_dir(store_id);
     if store_dir.exists() {
-        return Err(RestoreError::StoreExists(store_id.to_string()));
+        return Err(BootstrapError::StoreExists(store_id.to_string()));
     }
 
     on_status("Preparing restore...");
@@ -299,15 +256,9 @@ pub async fn restore_from_cloud(
             );
             Ok(config)
         }
-        Err(err) => {
-            let restore_error = RestoreError::from(err);
-            if let Err(cleanup_error) = std::fs::remove_dir_all(&*store_dir) {
-                return Err(RestoreError::Cleanup(format!(
-                    "failed to remove store directory after restore failed: {cleanup_error}; original error: {restore_error}"
-                )));
-            }
-            Err(restore_error)
-        }
+        Err(err) => Err(crate::sync::join::cleanup_after_bootstrap_failure(
+            &store_dir, err,
+        )),
     }
 }
 
@@ -327,29 +278,29 @@ pub async fn restore_from_code(
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
-) -> Result<Config, RestoreError> {
+) -> Result<Config, BootstrapError> {
     use crate::sync::restore_code;
 
     crate::install_platform();
 
     let parsed = restore_code::decode_restore_code(code)
-        .map_err(|e| RestoreError::InvalidCode(e.to_string()))?;
+        .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
 
     // `decode_restore_code` already validated the field; convert it to bytes so
     // restore can rebuild and later import the signing identity.
     let signing_key_bytes = hex::decode(&parsed.sk)
-        .map_err(|e| RestoreError::InvalidSigningKey(format!("invalid encoding: {e}")))?;
+        .map_err(|e| BootstrapError::InvalidSigningKey(format!("invalid encoding: {e}")))?;
     // The restored device's identity. Rebuilt here (not imported yet) so the
     // storage can sign its control objects during restore, while the keyring
     // import still happens only after restore succeeds.
     let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
         signing_key_bytes.clone().try_into().map_err(|_| {
-            RestoreError::InvalidSigningKey(format!(
+            BootstrapError::InvalidSigningKey(format!(
                 "Signing key must be {} bytes",
                 crate::keys::SIGN_SECRETKEYBYTES
             ))
         })?;
-    let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(RestoreError::Key)?;
+    let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(BootstrapError::Key)?;
 
     // `parsed.provider` is already the shared `CloudHomeJoinInfo`; `build_cloud_home`
     // (via `restore_from_cloud`) matches on it and pulls in these extras, so there's
@@ -377,7 +328,7 @@ pub async fn restore_from_code(
 
     // Import the device signing key after restore succeeds so we don't overwrite
     // an existing keypair if the restore fails.
-    DeviceKeys::import_user_keypair(&signing_key_bytes).map_err(RestoreError::Key)?;
+    DeviceKeys::import_user_keypair(&signing_key_bytes).map_err(BootstrapError::Key)?;
 
     Ok(config)
 }
@@ -498,7 +449,7 @@ mod build_cloud_home_tests {
             build_cloud_home(source, "store-id", Arc::new(crate::clock::SystemClock)).await;
 
         match result {
-            Err(RestoreError::Provider(_)) => {}
+            Err(BootstrapError::Provider(_)) => {}
             Ok(_) => panic!("expected a Provider error rejecting the CloudKit share, got Ok"),
             Err(other) => {
                 panic!("expected a Provider error rejecting the CloudKit share, got {other:?}")

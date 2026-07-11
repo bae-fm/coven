@@ -23,7 +23,7 @@ use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
-use crate::sync::join::{join_from_invite_code, open_db_and_pull, JoinError};
+use crate::sync::join::{join_from_invite_code, open_db_and_pull, BootstrapError};
 use crate::sync::session::BlobDecl;
 use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
@@ -64,7 +64,10 @@ fn invite_code_with_store_id(store_id: &str) -> InviteCode {
 /// Drive the full join path for an invite code string and return its result. Uses
 /// an app dir under `tmp` and no-op blob source; a malicious id fails at decode
 /// before any cloud home is built, so the cloud details never matter.
-async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Config, JoinError> {
+async fn join_result_for(
+    code_str: &str,
+    app_dir: &std::path::Path,
+) -> Result<Config, BootstrapError> {
     let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
     join_from_invite_code(
         code_str,
@@ -83,7 +86,7 @@ async fn join_result_for(code_str: &str, app_dir: &std::path::Path) -> Result<Co
 /// Every traversal-shaped `store_id` is refused at the decode boundary: `decode`
 /// returns `JoinCodeError::InvalidStoreId`, so a decoded `InviteCode` never
 /// carries a traversal id. Driven end to end, the decode error propagates as
-/// `JoinError::InvalidCode` and the join creates nothing outside the stores root.
+/// `BootstrapError::InvalidCode` and the join creates nothing outside the stores root.
 ///
 /// The cases share one mechanism and differ only in the malicious id and the
 /// directory it would escape to, so they run as a table:
@@ -118,7 +121,7 @@ async fn join_rejects_traversal_store_id_at_decode() {
 
         let result = join_result_for(&encoded, app_dir).await;
         assert!(
-            matches!(result, Err(JoinError::InvalidCode(_))),
+            matches!(result, Err(BootstrapError::InvalidCode(_))),
             "`{store_id}` must fail the join with the propagated decode error, got {result:?}",
         );
         if let Some(target) = escape_target {
@@ -132,7 +135,7 @@ async fn join_rejects_traversal_store_id_at_decode() {
 }
 
 /// A normal `store_id` decodes and the join reaches the cloud step, where it
-/// fails on the unreachable endpoint (`JoinError::Invite`, from the wrapped-key
+/// fails on the unreachable endpoint (`BootstrapError::Invite`, from the wrapped-key
 /// download) rather than on the id — proving the decoder rejects only unsafe ids
 /// and the directory the join would create sits under `stores/`.
 ///
@@ -159,7 +162,7 @@ async fn join_accepts_a_normal_store_id_past_decode() {
     let app_dir = tmp.path();
     let result = join_result_for(&encoded, app_dir).await;
     assert!(
-        matches!(result, Err(JoinError::Invite(_))),
+        matches!(result, Err(BootstrapError::Invite(_))),
         "the bogus cloud endpoint must fail the join at the cloud read, got {result:?}",
     );
 }
@@ -193,7 +196,7 @@ async fn join_refuses_when_store_exists_and_leaves_it_untouched() {
 
     let result = join_result_for(&encoded, app_dir).await;
     assert!(
-        matches!(result, Err(JoinError::StoreExists(ref id)) if id == "abc-123"),
+        matches!(result, Err(BootstrapError::StoreExists(ref id)) if id == "abc-123"),
         "join must refuse a store already present locally, got {result:?}",
     );
     assert_eq!(
@@ -226,7 +229,7 @@ async fn fresh_join_failure_cleans_up_its_own_directory() {
 
     let result = join_result_for(&encoded, app_dir).await;
     assert!(
-        matches!(result, Err(JoinError::Invite(_))),
+        matches!(result, Err(BootstrapError::Invite(_))),
         "the bogus cloud endpoint must fail the join at the cloud read, got {result:?}",
     );
     assert!(
@@ -293,7 +296,7 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
     .await;
 
     assert!(
-        matches!(result, Err(JoinError::StoreExists(ref id)) if id == "abc-123"),
+        matches!(result, Err(BootstrapError::StoreExists(ref id)) if id == "abc-123"),
         "join_store must refuse a store already present locally, got {result:?}",
     );
     assert_eq!(

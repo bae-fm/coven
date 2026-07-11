@@ -431,7 +431,7 @@ pub use storage::cloud::{
     s3::S3CloudHome,
 };
 pub use storage::local::BlobStore;
-pub use sync::join::join_from_invite_code;
+pub use sync::join::{join_from_invite_code, BootstrapError};
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};
 pub use sync::sync_manager::SyncError;
 

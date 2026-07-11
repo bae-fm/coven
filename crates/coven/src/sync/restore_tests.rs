@@ -13,7 +13,8 @@ use std::sync::Arc;
 use crate::clock::SystemClock;
 use crate::id_provider::SequentialIdProvider;
 use crate::storage::cloud::CloudHomeJoinInfo;
-use crate::sync::restore::{restore_from_code, RestoreError};
+use crate::sync::join::BootstrapError;
+use crate::sync::restore::restore_from_code;
 use crate::sync::restore_code::{
     decode_restore_code, encode_restore_code, RestoreCode, RestoreCodeError,
 };
@@ -51,7 +52,7 @@ fn restore_code_with_sid(sid: &str) -> String {
 async fn restore_result_for(
     code_str: &str,
     app_dir: &std::path::Path,
-) -> Result<crate::config::Config, RestoreError> {
+) -> Result<crate::config::Config, BootstrapError> {
     let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
     restore_from_code(
         code_str,
@@ -70,7 +71,7 @@ async fn restore_result_for(
 /// Every traversal-shaped `sid` is refused at the decode boundary:
 /// `decode_restore_code` returns `RestoreCodeError::InvalidStoreId`, so a decoded
 /// `RestoreCode` never carries a traversal id. Driven end to end, the decode error
-/// propagates as `RestoreError::InvalidCode` and the restore creates nothing outside
+/// propagates as `BootstrapError::InvalidCode` and the restore creates nothing outside
 /// the stores root.
 ///
 /// The cases share one mechanism and differ only in the malicious id and the
@@ -106,7 +107,7 @@ async fn restore_rejects_traversal_lid_at_decode() {
 
         let result = restore_result_for(&encoded, app_dir).await;
         assert!(
-            matches!(result, Err(RestoreError::InvalidCode(_))),
+            matches!(result, Err(BootstrapError::InvalidCode(_))),
             "`{sid}` must fail the restore with the propagated decode error, got {result:?}",
         );
         if let Some(target) = escape_target {
@@ -143,7 +144,7 @@ async fn restore_refuses_when_store_exists_and_leaves_it_untouched() {
 
     let result = restore_result_for(&encoded, app_dir).await;
     assert!(
-        matches!(result, Err(RestoreError::StoreExists(ref id)) if id == "abc-123"),
+        matches!(result, Err(BootstrapError::StoreExists(ref id)) if id == "abc-123"),
         "restore must refuse a store already present locally, got {result:?}",
     );
     assert_eq!(
@@ -159,7 +160,7 @@ async fn restore_refuses_when_store_exists_and_leaves_it_untouched() {
 }
 
 /// A normal `sid` decodes and the restore reaches the cloud step, where it fails on
-/// the unreachable endpoint (`RestoreError::Snapshot`) rather than on the id —
+/// the unreachable endpoint (`BootstrapError::Snapshot`) rather than on the id —
 /// proving the decoder rejects only unsafe ids and the directory the restore would
 /// create sits under `stores/`.
 #[tokio::test]
@@ -174,7 +175,7 @@ async fn restore_accepts_a_normal_lid_past_decode() {
     let app_dir = tmp.path();
     let result = restore_result_for(&encoded, app_dir).await;
     assert!(
-        matches!(result, Err(RestoreError::Snapshot(_))),
+        matches!(result, Err(BootstrapError::Snapshot(_))),
         "the unreachable cloud endpoint must fail the restore at the snapshot download, got {result:?}",
     );
 }
