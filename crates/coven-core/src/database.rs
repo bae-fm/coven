@@ -1240,6 +1240,33 @@ impl Database {
         .await
     }
 
+    /// Record a failed delete/cancel attempt (bumps `attempt_count`, stores the
+    /// error and the time), scoped to `operation` so an id collision with the
+    /// other kind of row cannot mutate it. Shared by
+    /// [`record_cloud_delete_failure`](Self::record_cloud_delete_failure) and
+    /// [`record_cloud_cancel_failure`](Self::record_cloud_cancel_failure), which
+    /// differ only in which operation they're scoped to.
+    async fn record_cloud_outbox_failure(
+        &self,
+        id: i64,
+        operation: &'static str,
+        error: &str,
+        attempted_at: &str,
+    ) -> Result<(), DbError> {
+        let (error, attempted_at) = (error.to_string(), attempted_at.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE cloud_outbox \
+                 SET attempt_count = attempt_count + 1, last_error = ?1, last_attempt_at = ?2 \
+                 WHERE id = ?3 AND operation = ?4",
+                (error, attempted_at, id, operation),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
     /// Record a failed delete/tombstone attempt (bumps `attempt_count`, stores the
     /// error and the time). Scoped to delete rows so an id collision with another
     /// operation cannot mutate the wrong kind of outbox entry.
@@ -1249,18 +1276,21 @@ impl Database {
         error: &str,
         attempted_at: &str,
     ) -> Result<(), DbError> {
-        let (error, attempted_at) = (error.to_string(), attempted_at.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "UPDATE cloud_outbox \
-                 SET attempt_count = attempt_count + 1, last_error = ?1, last_attempt_at = ?2 \
-                 WHERE id = ?3 AND operation = 'delete'",
-                (error, attempted_at, id),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
+        self.record_cloud_outbox_failure(id, "delete", error, attempted_at)
+            .await
+    }
+
+    /// Record a failed tombstone-cancel retry (bumps `attempt_count`, stores the
+    /// error and the time). Scoped to cancel rows so an id collision with another
+    /// operation cannot mutate the wrong kind of outbox entry.
+    pub async fn record_cloud_cancel_failure(
+        &self,
+        id: i64,
+        error: &str,
+        attempted_at: &str,
+    ) -> Result<(), DbError> {
+        self.record_cloud_outbox_failure(id, "cancel", error, attempted_at)
+            .await
     }
 
     // ---- Local blob refs (external user files) ----

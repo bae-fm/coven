@@ -168,6 +168,41 @@ async fn get_delete(db: &Database, id: i64) -> Option<(i64, Option<String>, Opti
     .expect("query delete outbox entry")
 }
 
+/// Insert a fully-specified `cloud_outbox` cancel row directly, so a backoff test
+/// can seed a stalled retry state without draining a real upload through to a
+/// failed inline cancel first.
+async fn insert_cancel(db: &Database, id: i64, cloud_key: &str, attempt_count: i64) {
+    let cloud_key = cloud_key.to_string();
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO cloud_outbox (id, operation, cloud_key, created_at, attempt_count) \
+             VALUES (?1, 'cancel', ?2, '2024-01-01T00:00:00Z', ?3)",
+            rusqlite::params![id, cloud_key, attempt_count],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("insert cancel row");
+}
+
+/// Read back `(attempt_count, last_error, last_attempt_at)` for a cancel entry, or
+/// `None` if it was removed.
+async fn get_cancel(db: &Database, id: i64) -> Option<(i64, Option<String>, Option<String>)> {
+    db.call(move |conn| {
+        conn.query_row(
+            "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox \
+             WHERE id = ?1 AND operation = 'cancel'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("query cancel outbox entry")
+}
+
 /// A plaintext cipher (tests don't encrypt) behind the lock the drain/GC take.
 fn plaintext_cipher() -> RwLock<CloudCipher> {
     RwLock::new(CloudCipher::Plaintext)
@@ -1944,7 +1979,7 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
 
     // The tombstone-cancel drain retries (the injected failure is spent), removing
     // the tombstone and clearing the cancel row.
-    let done = drain_tombstone_cancels(&db, &failing, &cipher)
+    let done = drain_tombstone_cancels(&db, &failing, &cipher, &clock)
         .await
         .expect("cancel drain");
     assert_eq!(done, 1, "the retried cancel completes");
@@ -1976,6 +2011,74 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
     assert!(
         storage.read("blob-key").await.is_ok(),
         "the re-uploaded blob survives across the cancel failure and its retry",
+    );
+}
+
+/// A failed tombstone-cancel retry records durable retry state (bumping
+/// `attempt_count`, `last_error`, `last_attempt_at`) exactly like the delete
+/// drain's failure accounting, and the cancel drain then skips the row while it
+/// is inside its backoff window instead of re-attempting it every cycle —
+/// mirroring `drain_tombstones`' shape so a persistently-failing cancel is
+/// neither retried every cycle nor invisible in the outbox row.
+#[tokio::test]
+async fn cancel_retry_failure_backs_off_then_retries() {
+    let db = open_outbox_db();
+    let inner = InMemoryCloudHome::new();
+    let cloud = FailCloudOpOnKey::new(
+        &inner,
+        FailingCloudOp::Delete,
+        "blob_tombstones/blob-key",
+        1,
+    );
+    let cipher = plaintext_cipher();
+
+    insert_cancel(&db, 1, "blob-key", 0).await;
+
+    let first = FixedClock(at("2024-06-01T00:00:00Z"));
+    let n = drain_tombstone_cancels(&db, &cloud, &cipher, &first)
+        .await
+        .expect("first cancel drain");
+    assert_eq!(n, 0, "the failed cancel completes nothing");
+    assert_eq!(cloud.matching_calls(), 1);
+
+    let first_row = get_cancel(&db, 1).await.expect("cancel row remains");
+    assert_eq!(first_row.0, 1, "the failed attempt is counted");
+    assert!(
+        first_row
+            .1
+            .as_deref()
+            .unwrap()
+            .contains("injected delete failure"),
+        "the failure reason is recorded",
+    );
+    let recorded = chrono::DateTime::parse_from_rfc3339(first_row.2.as_deref().unwrap()).unwrap();
+    assert_eq!(recorded.with_timezone(&chrono::Utc), first.0);
+
+    let inside = FixedClock(at("2024-06-01T00:00:10Z"));
+    let n = drain_tombstone_cancels(&db, &cloud, &cipher, &inside)
+        .await
+        .expect("inside backoff drain");
+    assert_eq!(n, 0, "inside the backoff window nothing is attempted");
+    assert_eq!(
+        cloud.matching_calls(),
+        1,
+        "inside the backoff window no cloud delete runs",
+    );
+    assert_eq!(
+        get_cancel(&db, 1).await.expect("cancel row remains"),
+        first_row,
+        "the skipped row is unchanged",
+    );
+
+    let after = FixedClock(at("2024-06-01T00:00:31Z"));
+    let n = drain_tombstone_cancels(&db, &cloud, &cipher, &after)
+        .await
+        .expect("after backoff drain");
+    assert_eq!(n, 1, "the elapsed backoff allows the retry");
+    assert_eq!(cloud.matching_calls(), 2);
+    assert!(
+        get_cancel(&db, 1).await.is_none(),
+        "the successful retry clears the cancel row",
     );
 }
 

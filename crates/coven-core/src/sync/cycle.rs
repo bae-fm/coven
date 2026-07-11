@@ -527,8 +527,9 @@ pub async fn run_single_sync_cycle(
         // Runs right after the upload drain (and before the tombstone GC below), so
         // a blob re-uploaded this cycle has its tombstone removed before the GC
         // could reclaim it. A cancel that still fails stays queued for the next
-        // cycle — the live re-uploaded blob must never lose its tombstone-cancel.
-        match crate::blob::delete::drain_tombstone_cancels(db, ch, cipher).await {
+        // cycle, backed off like the delete drain — the live re-uploaded blob must
+        // never lose its tombstone-cancel.
+        match crate::blob::delete::drain_tombstone_cancels(db, ch, cipher, clock).await {
             Ok(n) if n > 0 => info!(count = n, "Completed pending tombstone cancels"),
             Err(e) => warn!("Tombstone cancel drain error: {e}"),
             _ => {}

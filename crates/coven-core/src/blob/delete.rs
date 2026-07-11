@@ -395,6 +395,22 @@ pub async fn drain_tombstones(
     Ok(count)
 }
 
+/// Await an operation-scoped outbox failure-recording call and warn if the
+/// recording itself fails. `record` is `record_cloud_delete_failure` or
+/// `record_cloud_cancel_failure` — each scoped to its own operation, so an id
+/// collision with the other kind can't mutate the wrong kind of row; `kind`
+/// names which for the warning.
+async fn record_outbox_failure(
+    record: impl std::future::Future<Output = Result<(), crate::database::DbError>>,
+    kind: &str,
+    cloud_key: &str,
+    entry_id: i64,
+) {
+    if let Err(e) = record.await {
+        warn!("Failed to record {kind} failure for {cloud_key} (entry {entry_id}): {e}");
+    }
+}
+
 async fn record_delete_failure(
     db: &Database,
     entry_id: i64,
@@ -402,12 +418,29 @@ async fn record_delete_failure(
     error: &str,
     attempted_at: &str,
 ) {
-    if let Err(e) = db
-        .record_cloud_delete_failure(entry_id, error, attempted_at)
-        .await
-    {
-        warn!("Failed to record delete failure for {cloud_key} (entry {entry_id}): {e}");
-    }
+    record_outbox_failure(
+        db.record_cloud_delete_failure(entry_id, error, attempted_at),
+        "delete",
+        cloud_key,
+        entry_id,
+    )
+    .await;
+}
+
+async fn record_cancel_failure(
+    db: &Database,
+    entry_id: i64,
+    cloud_key: &str,
+    error: &str,
+    attempted_at: &str,
+) {
+    record_outbox_failure(
+        db.record_cloud_cancel_failure(entry_id, error, attempted_at),
+        "cancel",
+        cloud_key,
+        entry_id,
+    )
+    .await;
 }
 
 /// GC's live-row check for a tombstoned blob's `cloud_key`: whether a live row
@@ -778,27 +811,57 @@ pub async fn cancel_tombstone(
 /// failures and restarts, so a later GC never reclaims the live re-uploaded blob.
 ///
 /// A failed cancel leaves the row queued (it is removed only after the tombstone
-/// delete succeeds), so the next cycle retries. The delete is a no-op if the
-/// tombstone is already gone, so a cancel that races the inline one — or a peer's
-/// GC that already reclaimed and removed it — still completes cleanly. Returns the
-/// number of cancels completed this pass.
+/// delete succeeds) and records `attempt_count`/`last_attempt_at`/`last_error` on
+/// the row, exactly like [`drain_tombstones`]'s failure accounting, with the same
+/// per-row [`crate::blob::upload::backoff_window`] before the next retry — so a
+/// persistently-failing cancel neither retries every cycle nor sits invisible in
+/// the outbox row. The delete is a no-op if the tombstone is already gone, so a
+/// cancel that races the inline one — or a peer's GC that already reclaimed and
+/// removed it — still completes cleanly. Returns the number of cancels completed
+/// this pass.
 pub async fn drain_tombstone_cancels(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
+    clock: &dyn crate::clock::Clock,
 ) -> Result<usize, String> {
     let cancels = db
         .get_pending_cloud_cancels()
         .await
         .map_err(|e| format!("Failed to get pending tombstone cancels: {e}"))?;
 
+    let now = clock.now();
+    let now_rfc = now.to_rfc3339();
     let suffix = cipher.read().unwrap().suffix();
     let mut count = 0;
     for entry in cancels {
+        // Per-row backoff, exactly like the delete drain: skip an entry still
+        // inside its retry window so a persistently-failing cancel isn't
+        // re-attempted every cycle.
+        if let Some(last) = entry.last_attempt_at.as_deref() {
+            match chrono::DateTime::parse_from_rfc3339(last) {
+                Ok(last_dt) => {
+                    let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
+                    if elapsed < crate::blob::upload::backoff_window(entry.attempt_count) {
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    // Don't strand a cancel on a corrupt timestamp; log and retry.
+                    warn!(
+                        "Cancel outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
+                        entry.id
+                    );
+                }
+            }
+        }
+
         if let Err(e) = cancel_tombstone(cloud_home, suffix, &entry.cloud_key).await {
             // Leave the row queued; the cancel must outlive a transient cloud
-            // error so the tombstone is removed before the grace passes.
+            // error so the tombstone is removed before the grace passes. Record
+            // the attempt so the row backs off instead of retrying every cycle.
             warn!("Tombstone cancel retry failed for {}: {e}", entry.cloud_key);
+            record_cancel_failure(db, entry.id, &entry.cloud_key, &e, &now_rfc).await;
             continue;
         }
         if let Err(e) = db.remove_cloud_outbox_entry(entry.id).await {
