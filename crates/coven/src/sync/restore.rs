@@ -231,6 +231,8 @@ pub async fn restore_from_cloud(
         return Err(RestoreError::StoreExists(store_id.to_string()));
     }
 
+    on_status("Preparing restore...");
+
     // The key's presence is the home's storage mode: a key present ⇒ an opaque
     // home (encrypted, obfuscated blob paths); a key absent ⇒ a browsable home
     // (plaintext, readable blob paths). The cipher and the blob-path scheme both
