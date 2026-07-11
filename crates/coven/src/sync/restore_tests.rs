@@ -64,6 +64,7 @@ async fn restore_result_for(
         Arc::new(SystemClock),
         ids,
         |_| {},
+        &tokio::sync::watch::channel(false).1,
     )
     .await
 }
@@ -177,5 +178,101 @@ async fn restore_accepts_a_normal_lid_past_decode() {
     assert!(
         matches!(result, Err(BootstrapError::Snapshot(_))),
         "the unreachable cloud endpoint must fail the restore at the snapshot download, got {result:?}",
+    );
+}
+
+/// Drive `restore_from_code` with a caller-supplied cancel signal and status
+/// callback. Returns the restore result; the caller inspects the store directory
+/// and keyring afterward.
+async fn restore_with_cancel(
+    code: &str,
+    app_dir: &std::path::Path,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    on_status: impl Fn(&str),
+) -> Result<crate::config::Config, BootstrapError> {
+    restore_from_code(
+        code,
+        &test_synced_tables(),
+        &test_migrations(),
+        None,
+        None,
+        &crate::store_dir::StoreLayout::new(app_dir),
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("dev")),
+        on_status,
+        cancel,
+    )
+    .await
+}
+
+/// A restore whose cancel signal is already set never reaches the network: the
+/// first phase-boundary check returns `Cancelled`, the shared failure-cleanup
+/// removes the store directory it created, and the keyring is never written — a
+/// cancelled restore leaves no residue, the same guarantee a failed one gives.
+#[tokio::test]
+async fn restore_cancelled_before_snapshot_leaves_no_residue() {
+    crate::keys::test_keyring::install();
+    let encoded = restore_code_with_sid("cancel-preset");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+
+    let (tx, cancel) = tokio::sync::watch::channel(false);
+    tx.send(true).expect("prime cancel before restore starts");
+
+    let result = restore_with_cancel(&encoded, app_dir, &cancel, |_| {}).await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::Cancelled)),
+        "a pre-set cancel must stop the restore with Cancelled, got {result:?}",
+    );
+    let store_dir = app_dir.join("stores").join("cancel-preset");
+    assert!(
+        !store_dir.exists(),
+        "a cancelled restore must leave no store directory at {}",
+        store_dir.display(),
+    );
+    assert_eq!(
+        crate::keys::StoreKeys::new("cancel-preset".to_string())
+            .get_encryption_key()
+            .expect("read keyring"),
+        None,
+        "a cancelled restore must not write the store's encryption key",
+    );
+}
+
+/// A cancel delivered through the status callback while the restore runs — not
+/// pre-set — is honored at the next phase boundary, with the same no-residue
+/// guarantee: the store directory is created and then removed by the
+/// failure-cleanup.
+#[tokio::test]
+async fn restore_cancelled_via_status_callback_leaves_no_residue() {
+    crate::keys::test_keyring::install();
+    let encoded = restore_code_with_sid("cancel-status");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+
+    let (tx, cancel) = tokio::sync::watch::channel(false);
+    // The cancel fires from inside the status callback the moment the restore
+    // reports its first progress: a cancel arriving mid-flow via the host's
+    // reporting channel, the shape a real UI cancel takes.
+    let on_status = move |status: &str| {
+        if status.contains("Preparing restore") {
+            tx.send(true).expect("deliver cancel via status callback");
+        }
+    };
+
+    let result = restore_with_cancel(&encoded, app_dir, &cancel, on_status).await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::Cancelled)),
+        "a cancel delivered via the status callback must stop the restore with Cancelled, got {result:?}",
+    );
+    let store_dir = app_dir.join("stores").join("cancel-status");
+    assert!(
+        !store_dir.exists(),
+        "a cancelled restore must leave no store directory at {}",
+        store_dir.display(),
     );
 }

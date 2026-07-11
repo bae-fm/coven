@@ -35,6 +35,13 @@ use crate::sync::test_helpers::*;
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
 
+/// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
+/// initial `false` forever, so the join/restore flows run to completion exactly
+/// as an uncancelled caller's would.
+fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
+    tokio::sync::watch::channel(false).1
+}
+
 /// An invite code carrying an attacker-chosen `store_id` is the path-traversal
 /// vector: the code is unsigned, and the id becomes a directory the joiner creates
 /// and — on a bootstrap failure — recursively deletes. The id is refused the moment
@@ -79,6 +86,7 @@ async fn join_result_for(
         Arc::new(SystemClock),
         ids,
         |_| {},
+        &never_cancelled(),
     )
     .await
 }
@@ -292,6 +300,7 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
         cloud_home,
         &ids,
         |_| {},
+        &never_cancelled(),
     )
     .await;
 
@@ -382,6 +391,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &storage,
         &boot.cursors,
         &lib_b,
+        &never_cancelled(),
     )
     .await
     .expect("B open_db_and_pull");
@@ -528,6 +538,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         &storage,
         &boot.cursors,
         &lib_b,
+        &never_cancelled(),
     )
     .await
     .expect("B open_db_and_pull");
@@ -618,6 +629,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         &storage,
         &boot.cursors,
         &lib_b,
+        &never_cancelled(),
     )
     .await
     .expect_err("B open_db_and_pull must fail when snapshot eager blob is missing");
@@ -625,6 +637,102 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     assert!(
         !expected_blob.exists(),
         "the missing cover blob must not be materialized at {}",
+        expected_blob.display(),
+    );
+}
+
+/// The per-blob cancel check inside snapshot blob reconciliation is load-bearing:
+/// with an eager blob to download and the cancel signal already set, the check
+/// fires *before* the download, so `open_db_and_pull` returns `Cancelled` — not
+/// the missing-blob `Database` error the identical setup produces uncancelled
+/// (`snapshot_blob_backfill_failure_aborts_bootstrap_pull`). The blob is never
+/// materialized.
+#[tokio::test]
+async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+
+    // Owner A: a shared note with a cover photo, both captured into the snapshot.
+    // The cover blob is deliberately never uploaded, so an uncancelled bootstrap
+    // would fail trying to download it — making the `Cancelled` outcome below
+    // attributable to the cancel check, not to the blob happening to be present.
+    let db_a = open_test_db();
+    exec(
+        &db_a,
+        "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Album', 1, '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db_a,
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_a
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &storage,
+        "test-lib",
+        snapshot,
+        "A",
+        HashMap::new(),
+        1,
+        db_a.schema_version(),
+        &UserKeypair::generate(),
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_a,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push snapshot");
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let expected_blob = lib_b
+        .cache_blob_path("photos", "photo1")
+        .expect("cache blob path");
+
+    let (tx, cancel) = tokio::sync::watch::channel(false);
+    tx.send(true)
+        .expect("prime cancel before the reconcile loop");
+
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
+        .await
+        .expect("B bootstrap");
+    let result = open_db_and_pull(
+        &lib_b.db_path(),
+        &tables,
+        &test_migrations(),
+        "B",
+        None,
+        &storage,
+        &boot.cursors,
+        &lib_b,
+        &cancel,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::Cancelled)),
+        "the per-blob cancel check must return Cancelled before the download, got {result:?}",
+    );
+    assert!(
+        !expected_blob.exists(),
+        "a cancelled reconcile must not materialize the blob at {}",
         expected_blob.display(),
     );
 }

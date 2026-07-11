@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use tokio::sync::watch;
 use tracing::info;
 
 use crate::config::{Config, HomeStorage};
@@ -172,6 +173,7 @@ pub async fn restore_from_cloud(
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     crate::install_platform();
 
@@ -244,6 +246,7 @@ pub async fn restore_from_cloud(
         store_name,
         &store_keys,
         &on_status,
+        cancel,
     )
     .await;
 
@@ -278,6 +281,7 @@ pub async fn restore_from_code(
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     use crate::sync::restore_code;
 
@@ -323,6 +327,7 @@ pub async fn restore_from_code(
         clock,
         ids,
         on_status,
+        cancel,
     )
     .await?;
 

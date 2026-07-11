@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use tokio::sync::watch;
 use tracing::info;
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
@@ -58,6 +59,12 @@ pub enum BootstrapError {
     Database(String),
     #[error("invalid signing key: {0}")]
     InvalidSigningKey(String),
+    /// The caller's cancel signal fired at a phase boundary, so the join or
+    /// restore stopped before saving the store. The partly-created store
+    /// directory is removed on this path exactly as on a failure, so a cancelled
+    /// bootstrap leaves no residue.
+    #[error("the operation was cancelled")]
+    Cancelled,
     /// Bootstrap failed AND removing the partly-created store directory also
     /// failed. Both are carried: `cause` is the original bootstrap failure that
     /// triggered the cleanup, `cleanup` is why the removal itself failed — the
@@ -85,6 +92,18 @@ pub(crate) fn cleanup_after_bootstrap_failure(
             cleanup: cleanup.to_string(),
             cause: Box::new(cause),
         },
+    }
+}
+
+/// Fail with [`BootstrapError::Cancelled`] if the caller's cancel signal has
+/// fired. Called only at phase boundaries — never mid-download or mid-write —
+/// so a cancellation returns through the same failure-cleanup path a real error
+/// takes, mirroring `make_local`'s cooperative cancellation.
+fn error_if_cancelled(cancel: &watch::Receiver<bool>) -> Result<(), BootstrapError> {
+    if *cancel.borrow() {
+        Err(BootstrapError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -259,6 +278,7 @@ pub async fn join_from_invite_code(
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
     on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     crate::install_platform();
 
@@ -294,6 +314,7 @@ pub async fn join_from_invite_code(
         cloud_home,
         ids.as_ref(),
         &on_status,
+        cancel,
     )
     .await?;
 
@@ -316,6 +337,7 @@ pub async fn join_store(
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     crate::install_platform();
 
@@ -401,6 +423,7 @@ pub async fn join_store(
         &code.store_name,
         &store_keys,
         &on_status,
+        cancel,
     )
     .await;
 
@@ -430,10 +453,17 @@ pub(crate) async fn bootstrap_and_save_store(
     store_name: &str,
     key_service: &StoreKeys,
     on_status: &impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     // Join pins the store owner from the invite. Restore adopts the owner
     // from the chain founder during `open_db_and_pull`, because the restore code
     // carries the bucket credentials rather than an inviter assertion.
+    //
+    // Cancellation is checked between phases (before the snapshot download here,
+    // before the pull inside `open_db_and_pull`, and per-blob during blob
+    // reconciliation), never inside a download. A cancel returns through the same
+    // failure-cleanup the caller runs, so the store directory is removed.
+    error_if_cancelled(cancel)?;
     on_status("Downloading store snapshot...");
     let db_path = store_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
@@ -454,6 +484,7 @@ pub(crate) async fn bootstrap_and_save_store(
     );
 
     // Step 6: Pull changesets since the snapshot.
+    error_if_cancelled(cancel)?;
     on_status("Applying recent changes...");
     let cursors = bootstrap_result.cursors;
 
@@ -466,6 +497,7 @@ pub(crate) async fn bootstrap_and_save_store(
         bucket_dyn,
         &cursors,
         store_dir,
+        cancel,
     )
     .await?;
 
@@ -508,6 +540,7 @@ pub(crate) async fn open_db_and_pull(
     storage: &dyn SyncStorage,
     cursors: &HashMap<String, u64>,
     store_dir: &StoreDir,
+    cancel: &watch::Receiver<bool>,
 ) -> Result<u64, BootstrapError> {
     let (db, _stamper) = Database::open(
         db_path,
@@ -536,21 +569,34 @@ pub(crate) async fn open_db_and_pull(
     // Download the blob files the snapshot's rows reference: the snapshot carried
     // the catalog rows but no blob files, and the pull starts past its cursors so
     // it never re-walks the INSERTs that first carried them. Missing eager blobs
-    // abort the bootstrap before the store is saved.
-    if !crate::sync::snapshot::reconcile_snapshot_blobs(
+    // abort the bootstrap before the store is saved. Cancellation is checked
+    // between blobs inside the reconcile, surfacing as `Cancelled` here.
+    match crate::sync::snapshot::reconcile_snapshot_blobs(
         &db,
         db_path,
         storage,
         store_dir,
         db.synced_tables(),
+        cancel,
     )
     .await
     .map_err(|e| BootstrapError::Database(format!("Failed to reconcile snapshot blobs: {e}")))?
     {
-        return Err(BootstrapError::Database(
-            "Snapshot blob reconciliation did not land every required eager blob".to_string(),
-        ));
+        crate::sync::snapshot::SnapshotBlobReconcile::Complete => {}
+        crate::sync::snapshot::SnapshotBlobReconcile::Incomplete => {
+            return Err(BootstrapError::Database(
+                "Snapshot blob reconciliation did not land every required eager blob".to_string(),
+            ));
+        }
+        crate::sync::snapshot::SnapshotBlobReconcile::Cancelled => {
+            return Err(BootstrapError::Cancelled);
+        }
     }
+
+    // The pull downloads every changeset published since the snapshot — the last
+    // heavy phase. Check cancellation before entering it; the pull itself is a
+    // single phase here (per-changeset cancel is the sync loop's own concern).
+    error_if_cancelled(cancel)?;
 
     // Pull over the synced set coven owns, not the raw host list — one source of
     // truth. Load and anchor the

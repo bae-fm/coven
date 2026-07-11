@@ -30,6 +30,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use super::membership::MembershipChain;
@@ -1020,7 +1021,8 @@ pub async fn reconcile_snapshot_blobs(
     storage: &dyn SyncStorage,
     store_dir: &crate::store_dir::StoreDir,
     tables: &[SyncedTable],
-) -> Result<bool, crate::database::DbError> {
+    cancel: &watch::Receiver<bool>,
+) -> Result<SnapshotBlobReconcile, crate::database::DbError> {
     let blobs: Vec<crate::sync::pull::BlobDownload> = {
         let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
         let decls = crate::blob::decl::BlobDecls::from_tables(&conn, tables)
@@ -1035,7 +1037,7 @@ pub async fn reconcile_snapshot_blobs(
     };
 
     if blobs.is_empty() {
-        return Ok(true);
+        return Ok(SnapshotBlobReconcile::Complete);
     }
 
     let total = blobs.len();
@@ -1044,13 +1046,40 @@ pub async fn reconcile_snapshot_blobs(
     // A snapshot's restored rows carry no per-blob uploader, so each blob's prefix
     // is resolved from the index (empty on a fresh restore) and then a listing
     // scan that records what it finds.
-    let all_ok = crate::sync::pull::download_blobs(db, blobs, storage, store_dir, None).await;
+    //
+    // The loop lives here (rather than handing the whole batch to `download_blobs`)
+    // so cancellation is checked between blobs — never mid-download — the same
+    // phase-boundary discipline `make_local` uses. `download_blobs` stays a single
+    // batch primitive the sync cycle can call without a cancel concern.
+    let mut all_ok = true;
+    for blob in blobs {
+        if *cancel.borrow() {
+            info!(total, "snapshot blob reconciliation cancelled");
+            return Ok(SnapshotBlobReconcile::Cancelled);
+        }
+        if !crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, None).await {
+            all_ok = false;
+        }
+    }
     if all_ok {
         info!(total, "snapshot blob reconciliation complete");
+        Ok(SnapshotBlobReconcile::Complete)
     } else {
         warn!(total, "some snapshot blob files are not local");
+        Ok(SnapshotBlobReconcile::Incomplete)
     }
-    Ok(all_ok)
+}
+
+/// The outcome of [`reconcile_snapshot_blobs`]: every required eager blob is
+/// local, at least one could not be downloaded, or the caller's cancel signal
+/// fired between blobs and the reconcile stopped early. A three-way result, not
+/// a `bool` plus an out-param, so the bootstrap can map each outcome to its own
+/// error (or none) at one match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotBlobReconcile {
+    Complete,
+    Incomplete,
+    Cancelled,
 }
 
 /// The store id the snapshot tests sign their meta/pointer under. The same id is
