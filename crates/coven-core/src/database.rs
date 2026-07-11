@@ -393,11 +393,21 @@ struct ColumnInfo {
 }
 
 /// Enforce the synced-table contract ([`crate::sync::session::SyncedTable`]) on
-/// `table`'s live schema: a single primary key column, named `id`, declared TEXT,
-/// at column 0; and an `_updated_at` column declared TEXT NOT NULL. A violation is
-/// an open error naming the table and the requirement it broke, so the integrator
-/// learns it on their own device instead of a peer's pull failing on the row.
+/// `table`'s live schema: the table declared STRICT; a single primary key
+/// column, named `id`, declared TEXT, at column 0; and an `_updated_at` column
+/// declared TEXT NOT NULL. A violation is an open error naming the table and the
+/// requirement it broke, so the integrator learns it on their own device instead
+/// of a peer's pull failing on the row.
 fn validate_synced_table_contract(conn: &Connection, table: &str) -> Result<(), DbError> {
+    if !table_is_strict(conn, table)? {
+        return Err(DbError(format!(
+            "synced table {table:?} is not declared STRICT; the sync contract assumes typed \
+             columns (apply preserves storage classes peer-to-peer, LWW arbitration renders \
+             values to strings for comparison), which STRICT enforces at the insert — declare \
+             it STRICT: `CREATE TABLE {table} (...) STRICT`"
+        )));
+    }
+
     let sql = format!(
         "PRAGMA table_info({})",
         crate::sync::session::quote_ident(table)
@@ -489,6 +499,30 @@ fn validate_synced_table_contract(conn: &Connection, table: &str) -> Result<(), 
 /// any other declared type (or none) does not.
 fn declared_as_text(declared_type: &str) -> bool {
     declared_type.eq_ignore_ascii_case("TEXT")
+}
+
+/// Whether `table` (in the `main` schema) is declared STRICT, via `PRAGMA
+/// table_list`'s `strict` column (SQLite 3.37+) — the schema-level flag itself,
+/// not `sqlite_master.sql` text, which a hand-formatted `CREATE TABLE` could spell
+/// many ways.
+fn table_is_strict(conn: &Connection, table: &str) -> Result<bool, DbError> {
+    let sql = format!(
+        "PRAGMA table_list({})",
+        crate::sync::session::quote_ident(table)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(5)?))
+        })
+        .map_err(DbError::from)?;
+    for row in rows {
+        let (schema, strict) = row.map_err(DbError::from)?;
+        if schema == "main" {
+            return Ok(strict != 0);
+        }
+    }
+    Ok(false)
 }
 
 impl Database {
@@ -1731,7 +1765,7 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 body TEXT NOT NULL,
                 _updated_at TEXT NOT NULL
-            );",
+            ) STRICT;",
         )
     }
 
@@ -1942,7 +1976,7 @@ mod tests {
     #[tokio::test]
     async fn database_open_rejects_integer_primary_key() {
         let error = open_contract_error(
-            "CREATE TABLE things (id INTEGER PRIMARY KEY, _updated_at TEXT NOT NULL);",
+            "CREATE TABLE things (id INTEGER PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
             vec![SyncedTable::new("things")],
             "integer-pk",
         );
@@ -1956,7 +1990,7 @@ mod tests {
     async fn database_open_rejects_primary_key_not_at_column_zero() {
         let error = open_contract_error(
             "CREATE TABLE things (body TEXT NOT NULL, id TEXT PRIMARY KEY, \
-             _updated_at TEXT NOT NULL);",
+             _updated_at TEXT NOT NULL) STRICT;",
             vec![SyncedTable::new("things")],
             "pk-not-first",
         );
@@ -1969,7 +2003,7 @@ mod tests {
     #[tokio::test]
     async fn database_open_rejects_primary_key_named_other_than_id() {
         let error = open_contract_error(
-            "CREATE TABLE things (thing_id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL);",
+            "CREATE TABLE things (thing_id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
             vec![SyncedTable::new("things")],
             "pk-misnamed",
         );
@@ -1983,7 +2017,7 @@ mod tests {
     async fn database_open_rejects_composite_primary_key() {
         let error = open_contract_error(
             "CREATE TABLE things (id TEXT NOT NULL, part TEXT NOT NULL, \
-             _updated_at TEXT NOT NULL, PRIMARY KEY (id, part));",
+             _updated_at TEXT NOT NULL, PRIMARY KEY (id, part)) STRICT;",
             vec![SyncedTable::new("things")],
             "composite-pk",
         );
@@ -1996,7 +2030,7 @@ mod tests {
     #[tokio::test]
     async fn database_open_rejects_nullable_updated_at() {
         let error = open_contract_error(
-            "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT);",
+            "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT) STRICT;",
             vec![SyncedTable::new("things")],
             "nullable-updated-at",
         );
@@ -2004,6 +2038,55 @@ mod tests {
             error.contains("things") && error.contains("_updated_at"),
             "error names the table and the `_updated_at` requirement: {error}",
         );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_non_strict_synced_table() {
+        let error = open_contract_error(
+            "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL);",
+            vec![SyncedTable::new("things")],
+            "non-strict",
+        );
+        assert!(
+            error.contains("things") && error.contains("STRICT"),
+            "error names the table and the STRICT requirement: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_accepts_strict_synced_table() {
+        Database::open(
+            Path::new(":memory:"),
+            vec![SyncedTable::new("things")],
+            BLOB_TOMBSTONE_GRACE,
+            "strict-synced-table".to_string(),
+            &[Migration::sql(
+                1,
+                "contract",
+                "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
+            )],
+        )
+        .expect("a STRICT synced table satisfying the rest of the contract opens");
+    }
+
+    #[tokio::test]
+    async fn database_open_ignores_undeclared_non_strict_local_table() {
+        // `things` is declared and STRICT; `scratch` is a host-local table never
+        // passed to `synced_tables` — its own business, not coven's, so it stays
+        // non-strict with no open error.
+        Database::open(
+            Path::new(":memory:"),
+            vec![SyncedTable::new("things")],
+            BLOB_TOMBSTONE_GRACE,
+            "undeclared-local-table".to_string(),
+            &[Migration::sql(
+                1,
+                "contract",
+                "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT; \
+                 CREATE TABLE scratch (id INTEGER PRIMARY KEY, note TEXT);",
+            )],
+        )
+        .expect("an undeclared non-strict local table is not coven's business");
     }
 
     #[tokio::test]
@@ -2017,9 +2100,9 @@ mod tests {
         };
         let error = open_contract_error(
             "CREATE TABLE covers (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
-             _updated_at TEXT NOT NULL);\
+             _updated_at TEXT NOT NULL) STRICT;\
              CREATE TABLE thumbs (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
-             _updated_at TEXT NOT NULL);",
+             _updated_at TEXT NOT NULL) STRICT;",
             vec![
                 SyncedTable::new("covers").carries_blob(blob("images")),
                 SyncedTable::new("thumbs").carries_blob(blob("images")),

@@ -211,7 +211,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             shared INTEGER NOT NULL DEFAULT 0,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL
-        );
+        ) STRICT;
         CREATE TABLE note_tags (
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
@@ -219,7 +219,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-        );
+        ) STRICT;
         CREATE TABLE note_photos (
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
@@ -229,7 +229,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             created_at TEXT NOT NULL,
             cloud_path TEXT,
             FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-        );
+        ) STRICT;
         CREATE TABLE note_covers (
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
@@ -238,7 +238,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             created_at TEXT NOT NULL,
             cloud_path TEXT,
             FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-        );",
+        ) STRICT;",
     )
     .map_err(DbError::from)
 }

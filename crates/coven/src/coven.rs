@@ -918,7 +918,7 @@ mod tests {
                 blob_id TEXT,
                 size INTEGER NOT NULL,
                 _updated_at TEXT NOT NULL
-            );",
+            ) STRICT;",
         )
     }
 

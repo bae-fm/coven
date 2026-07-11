@@ -1165,17 +1165,17 @@ mod tests {
                 id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT,
                 shared INTEGER NOT NULL DEFAULT 0,
                 _updated_at TEXT NOT NULL, created_at TEXT NOT NULL
-            );
+            ) STRICT;
             CREATE TABLE note_tags (
                 id TEXT PRIMARY KEY, note_id TEXT NOT NULL, tag TEXT NOT NULL,
                 _updated_at TEXT NOT NULL, created_at TEXT NOT NULL,
                 FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-            );
+            ) STRICT;
             CREATE TABLE note_photos (
                 id TEXT PRIMARY KEY, note_id TEXT NOT NULL, kind TEXT NOT NULL,
                 _updated_at TEXT NOT NULL, created_at TEXT NOT NULL,
                 FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-            );",
+            ) STRICT;",
         )
         .expect("create schema");
         c

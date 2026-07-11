@@ -28,21 +28,21 @@ CREATE TABLE workspaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     _updated_at TEXT NOT NULL
-);
+) STRICT;
 CREATE TABLE lists (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
     name TEXT NOT NULL,
     shared INTEGER NOT NULL DEFAULT 0,
     _updated_at TEXT NOT NULL
-);
+) STRICT;
 CREATE TABLE todos (
     id TEXT PRIMARY KEY,
     list_id TEXT NOT NULL REFERENCES lists(id),
     title TEXT NOT NULL,
     done INTEGER NOT NULL DEFAULT 0,
     _updated_at TEXT NOT NULL
-);
+) STRICT;
 ";
 
 let handle = Coven::builder(config)
@@ -55,8 +55,8 @@ let handle = Coven::builder(config)
     .open()?;
 ```
 
-Every synced table carries an `id` text primary key at column 0 and an
-`_updated_at TEXT NOT NULL` column. The
+Every synced table is declared `STRICT`, carries an `id` text primary key at
+column 0, and has an `_updated_at TEXT NOT NULL` column. The
 [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values declare how
 each table is gated:
 [`new`](rustdoc:method:coven::sync::session::SyncedTable::new) syncs every row,

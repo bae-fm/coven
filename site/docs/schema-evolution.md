@@ -101,6 +101,10 @@ it knows and ignores the rest. A **structural** change (reordering, removing, or
 renaming a column, splitting a table) breaks that positional alignment: an older
 reader would map a changeset's values onto the wrong columns.
 
+A table added in a later migration is still a synced table, so it is still
+checked at open: declare it `STRICT` along with the rest of the [synced-table
+contract](/docs/local-data).
+
 Both are valid *local* migrations. The difference is only whether a device on the
 other version can still read the changesets, which is what the two version
 numbers below gate.

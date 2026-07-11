@@ -12,9 +12,12 @@ on one device even inside a synced table.
 
 For a row to travel, every device needs two things it can rely on: a stable
 way to say *which* row this is, and a value that orders concurrent edits to
-it. Those are the only two conventions a synced table carries, checked at
-open:
+it. Both ride on typed columns, so a third convention pins the types
+themselves. These are the conventions a synced table carries, checked at open:
 
+- declared `STRICT`: SQLite refuses an insert or update whose value doesn't
+  match a column's declared type, so a synced table can never hold a value off
+  the type every peer's apply and coven's own conflict-resolution code expect
 - a `TEXT` primary key named `id`, at column position 0: how devices address
   the row
 - an `_updated_at TEXT NOT NULL` column, stamped through

@@ -1,11 +1,11 @@
 //! coven's bookkeeping schema and the cloud-outbox row types.
 //!
-//! coven owns eight device-local bookkeeping tables — `sync_cursors`,
+//! coven owns nine device-local bookkeeping tables — `sync_cursors`,
 //! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
-//! `local_cleanup_intents`, `published_blob_drop_intents`,
-//! `pending_changesets` — all created by [`apply_coven_schema`], which coven runs
-//! against the connection it owns during open. The host does not implement any of
-//! this; native app SQL goes through [`crate::CovenHandle::sql`] or
+//! `local_cleanup_intents`, `published_blob_drop_intents`, `pending_changesets`,
+//! `blob_uploaders` — all created STRICT by [`apply_coven_schema`], which coven
+//! runs against the connection it owns during open. The host does not implement
+//! any of this; native app SQL goes through [`crate::CovenHandle::sql`] or
 //! [`crate::CovenHandle::write`].
 
 macro_rules! coven_tables {
@@ -113,7 +113,9 @@ macro_rules! coven_tables {
 }
 
 /// Creates coven's bookkeeping tables before the host's own migrations.
-/// Idempotent (`IF NOT EXISTS`).
+/// Idempotent (`IF NOT EXISTS`). STRICT: every column here is already
+/// TEXT/INTEGER/BLOB, so STRICT only forecloses a future column drifting off
+/// its declared affinity.
 pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
         ($name:ident, $columns:literal) => {
@@ -122,7 +124,7 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
                 stringify!($name),
                 " (",
                 $columns,
-                ");"
+                ") STRICT;"
             ))?;
         };
     }
@@ -144,6 +146,48 @@ pub(crate) fn is_reserved_table_name(name: &str) -> bool {
 
     coven_tables!(matches_table);
     false
+}
+
+/// The name of every table [`apply_coven_schema`] creates, for a test to assert a
+/// schema property (STRICT) holds across all of them without re-listing the set
+/// by hand.
+#[cfg(test)]
+pub(crate) fn table_names() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    macro_rules! collect_name {
+        ($name:ident, $columns:literal) => {
+            names.push(stringify!($name));
+        };
+    }
+
+    coven_tables!(collect_name);
+    names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every bookkeeping table [`apply_coven_schema`] creates is declared STRICT
+    /// — the same guarantee the synced-table contract now requires of the host's
+    /// own tables, so coven does not exempt itself from the invariant it enforces
+    /// on the host.
+    #[test]
+    fn every_bookkeeping_table_is_strict() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        for name in table_names() {
+            let sql = format!(
+                "PRAGMA table_list({})",
+                crate::sync::session::quote_ident(name)
+            );
+            let mut stmt = conn.prepare(&sql).expect("prepare table_list");
+            let strict: i64 = stmt
+                .query_row([], |row| row.get(5))
+                .unwrap_or_else(|e| panic!("PRAGMA table_list({name}): {e}"));
+            assert_eq!(strict, 1, "{name} must be STRICT");
+        }
+    }
 }
 
 /// An external user-owned file a blob id resolves to, read back from a

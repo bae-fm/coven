@@ -87,7 +87,7 @@ fn unique_note_db() -> crate::database::Database {
                     title TEXT NOT NULL,
                     _updated_at TEXT NOT NULL,
                     created_at TEXT NOT NULL
-                );",
+                ) STRICT;",
             )
             .map_err(crate::database::DbError::from)
         })],

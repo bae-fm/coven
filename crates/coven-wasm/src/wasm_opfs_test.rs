@@ -34,14 +34,14 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), DbError> {
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             _updated_at TEXT NOT NULL
-        );
+        ) STRICT;
         CREATE TABLE IF NOT EXISTS item_tags (
             id TEXT PRIMARY KEY,
             item_id TEXT NOT NULL,
             tag TEXT NOT NULL,
             _updated_at TEXT NOT NULL,
             FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE CASCADE
-        );",
+        ) STRICT;",
     )
     .map_err(DbError::from)
 }

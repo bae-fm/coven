@@ -106,7 +106,7 @@ const DEMO_NOTES_SQL: &str = "CREATE TABLE IF NOT EXISTS notes (
     body TEXT NOT NULL,
     _updated_at TEXT NOT NULL,
     created_at TEXT NOT NULL
-);";
+) STRICT;";
 
 fn to_js_value(value: serde_json::Value) -> JsValue {
     serde::Serialize::serialize(&value, &serde_wasm_bindgen::Serializer::json_compatible())

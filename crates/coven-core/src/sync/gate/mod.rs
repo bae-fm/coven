@@ -274,7 +274,7 @@ mod tests {
                 shared INTEGER NOT NULL DEFAULT 0,
                 _updated_at TEXT NOT NULL,
                 created_at TEXT NOT NULL
-            );
+            ) STRICT;
             CREATE TABLE note_tags (
                 id TEXT PRIMARY KEY,
                 note_id TEXT NOT NULL,
@@ -282,7 +282,7 @@ mod tests {
                 _updated_at TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-            );
+            ) STRICT;
             CREATE TABLE note_photos (
                 id TEXT PRIMARY KEY,
                 note_id TEXT NOT NULL,
@@ -290,7 +290,7 @@ mod tests {
                 _updated_at TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-            );",
+            ) STRICT;",
         );
     }
 
@@ -301,13 +301,13 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 _updated_at TEXT NOT NULL
-            );
+            ) STRICT;
             CREATE TABLE note_photos (
                 id TEXT PRIMARY KEY,
                 note_id TEXT NOT NULL,
                 _updated_at TEXT NOT NULL,
                 FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
-            );",
+            ) STRICT;",
         );
     }
 
@@ -411,11 +411,11 @@ mod tests {
         exec(
             &c,
             "CREATE TABLE notes (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
-             _updated_at TEXT NOT NULL)",
+             _updated_at TEXT NOT NULL) STRICT",
         );
         exec(
             &c,
-            "CREATE TABLE settings (id TEXT PRIMARY KEY, val TEXT, _updated_at TEXT NOT NULL)",
+            "CREATE TABLE settings (id TEXT PRIMARY KEY, val TEXT, _updated_at TEXT NOT NULL) STRICT",
         );
         let tables = vec![
             SyncedTable::new("notes").gated_by("shared"),
@@ -505,14 +505,14 @@ mod tests {
             "CREATE TABLE albums (
                 id TEXT PRIMARY KEY,
                 _updated_at TEXT NOT NULL
-            );
+            ) STRICT;
             CREATE TABLE releases (
                 id TEXT PRIMARY KEY,
                 album_id TEXT NOT NULL,
                 managed INTEGER NOT NULL DEFAULT 0,
                 _updated_at TEXT NOT NULL,
                 FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE
-            );
+            ) STRICT;
             INSERT INTO albums (id, _updated_at)
             VALUES ('a1', '0000000001000-0000-dev1');
             INSERT INTO releases (id, album_id, managed, _updated_at)
@@ -548,7 +548,7 @@ mod tests {
             "CREATE TABLE notes (
                 id TEXT PRIMARY KEY,
                 _updated_at TEXT NOT NULL
-            );",
+            ) STRICT;",
         );
         let gates =
             Gates::from_tables(&c, &[SyncedTable::new("notes").remote_root()]).expect("gates");
@@ -647,7 +647,7 @@ mod tests {
                 shared INTEGER NOT NULL DEFAULT 0,
                 _updated_at TEXT NOT NULL,
                 FOREIGN KEY (parent_id) REFERENCES \"nodes\" (id)
-            );",
+            ) STRICT;",
         );
         let tables = vec![SyncedTable::new("nodes").gated_by("shared")];
 
@@ -712,19 +712,19 @@ mod tests {
         exec(
             &c,
             "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
-             _updated_at TEXT NOT NULL)",
+             _updated_at TEXT NOT NULL) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
+             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE)",
+             FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE) STRICT",
         );
         let tables = vec![
             SyncedTable::new("albums").gated_by("shared"),
@@ -771,23 +771,23 @@ mod tests {
         exec(
             &c,
             "CREATE TABLE albums (id TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, \
-             _updated_at TEXT NOT NULL)",
+             _updated_at TEXT NOT NULL) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE photos (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
+             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE comments (id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE)",
+             FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE) STRICT",
         );
         exec(
             &c,
-            "CREATE TABLE settings (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
+            "CREATE TABLE settings (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
         );
         let tables = vec![
             SyncedTable::new("albums").gated_by("shared"),
@@ -837,32 +837,32 @@ mod tests {
     fn create_album_schema(c: &Connection) {
         exec(
             c,
-            "CREATE TABLE artists (id TEXT PRIMARY KEY, name TEXT, _updated_at TEXT NOT NULL)",
+            "CREATE TABLE artists (id TEXT PRIMARY KEY, name TEXT, _updated_at TEXT NOT NULL) STRICT",
         );
         exec(
             c,
             "CREATE TABLE albums (id TEXT PRIMARY KEY, artist_id TEXT, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (artist_id) REFERENCES artists (id))",
+             FOREIGN KEY (artist_id) REFERENCES artists (id)) STRICT",
         );
         exec(
             c,
             "CREATE TABLE album_artists (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              artist_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE, \
-             FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE)",
+             FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE) STRICT",
         );
         exec(
             c,
             "CREATE TABLE releases (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              managed INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE)",
+             FOREIGN KEY (album_id) REFERENCES albums (id) ON DELETE CASCADE) STRICT",
         );
         exec(
             c,
             "CREATE TABLE tracks (id TEXT PRIMARY KEY, release_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE)",
+             FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE) STRICT",
         );
     }
 
@@ -930,26 +930,26 @@ mod tests {
         let c = conn();
         exec(
             &c,
-            "CREATE TABLE aouter (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
+            "CREATE TABLE aouter (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE zinner (id TEXT PRIMARY KEY, aouter_id TEXT, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (aouter_id) REFERENCES aouter (id))",
+             FOREIGN KEY (aouter_id) REFERENCES aouter (id)) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE zgated (id TEXT PRIMARY KEY, zinner_id TEXT NOT NULL, \
              shared INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (zinner_id) REFERENCES zinner (id))",
+             FOREIGN KEY (zinner_id) REFERENCES zinner (id)) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE joiner (id TEXT PRIMARY KEY, aouter_id TEXT NOT NULL, \
              zinner_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (aouter_id) REFERENCES aouter (id), \
-             FOREIGN KEY (zinner_id) REFERENCES zinner (id))",
+             FOREIGN KEY (zinner_id) REFERENCES zinner (id)) STRICT",
         );
         let tables = vec![
             SyncedTable::new("aouter").gated_by_descendants(),
@@ -1962,13 +1962,13 @@ mod tests {
             c,
             "CREATE TABLE covers (id TEXT PRIMARY KEY, release_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE)",
+             FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE) STRICT",
         );
         exec(
             c,
             "CREATE TABLE artist_images (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE)",
+             FOREIGN KEY (artist_id) REFERENCES artists (id) ON DELETE CASCADE) STRICT",
         );
     }
 
@@ -2209,19 +2209,19 @@ mod tests {
         let c = conn();
         exec(
             &c,
-            "CREATE TABLE artists (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL)",
+            "CREATE TABLE artists (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE albums (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (artist_id) REFERENCES artists (id))",
+             FOREIGN KEY (artist_id) REFERENCES artists (id)) STRICT",
         );
         exec(
             &c,
             "CREATE TABLE releases (id TEXT PRIMARY KEY, album_id TEXT NOT NULL, \
              managed INTEGER NOT NULL DEFAULT 0, _updated_at TEXT NOT NULL, \
-             FOREIGN KEY (album_id) REFERENCES albums (id))",
+             FOREIGN KEY (album_id) REFERENCES albums (id)) STRICT",
         );
         // An asset that references BOTH ancestors; its chosen downward parent is
         // the deeper one (albums), so the back-edge only excludes it from albums,
@@ -2231,7 +2231,7 @@ mod tests {
             "CREATE TABLE artist_images (id TEXT PRIMARY KEY, artist_id TEXT NOT NULL, \
              album_id TEXT NOT NULL, _updated_at TEXT NOT NULL, \
              FOREIGN KEY (artist_id) REFERENCES artists (id), \
-             FOREIGN KEY (album_id) REFERENCES albums (id))",
+             FOREIGN KEY (album_id) REFERENCES albums (id)) STRICT",
         );
 
         let base = |asset: bool| {
