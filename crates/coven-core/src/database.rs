@@ -757,15 +757,22 @@ impl Database {
     fn insert_pending_changeset_on(
         tx: &rusqlite::Transaction<'_>,
         changeset: &[u8],
+        rows_changed: u64,
     ) -> Result<(), DbError> {
         if changeset.is_empty() {
-            // A tripwire, not a routine event. Two ways it fires, once hosts route
-            // pure reads through the journal-free read path (native
-            // `CovenHandle::sql_read`, the wasm facade's `query`): a read still on the
-            // write path — move it off — or a conditional write that happened to
-            // no-op this cycle (an idempotent INSERT OR IGNORE re-run), which is
-            // legitimate and stays on `sql()`. Warn so the first case is visible.
-            warn!("journaled sql transaction produced no synced changes; pure reads belong on sql_read");
+            // A tripwire, not a routine event. An empty capture from a transaction
+            // that also CHANGED NO ROWS is a pure read left on the write path —
+            // warn so it gets moved to the journal-free read path (native
+            // `CovenHandle::sql_read`, the wasm facade's `query`). An empty capture
+            // from a transaction that DID change rows is a device-local-table
+            // write (those tables aren't in the session) — a supported, routine
+            // pattern that stays on `sql()` silently. The one case this misses:
+            // a conditional write to a synced table that no-op'd this cycle (an
+            // idempotent INSERT OR IGNORE re-run) also changed no rows and warns;
+            // legitimate but rare, tolerated.
+            if rows_changed == 0 {
+                warn!("journaled sql transaction changed nothing; pure reads belong on sql_read");
+            }
             return Ok(());
         }
         tx.execute(
@@ -786,13 +793,15 @@ impl Database {
     {
         let mut journal =
             Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
+        let changes_before = conn.total_changes();
         let tx = conn
             .unchecked_transaction()
             .map_err(DbError::from)
             .map_err(E::from)?;
         let value = f(&tx)?;
         let changeset = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
-        Self::insert_pending_changeset_on(&tx, &changeset).map_err(E::from)?;
+        let rows_changed = conn.total_changes().saturating_sub(changes_before);
+        Self::insert_pending_changeset_on(&tx, &changeset, rows_changed).map_err(E::from)?;
         tx.commit().map_err(DbError::from).map_err(E::from)?;
         Ok(value)
     }

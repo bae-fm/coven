@@ -103,10 +103,10 @@ cannot bypass capture because it cannot write at all.
   the device cache. WAL makes the coexistence safe: many readers, one writer,
   each read seeing the last committed state.
 
-The write path polices itself: a `handle.sql(...)` transaction that captures
-an empty changeset logs a warning, because it means either a pure read is
-still on the write path (move it to `sql_read`) or a conditional write
-no-op'd this time (legitimate; it stays on `sql`).
+The write path polices itself: a `handle.sql(...)` transaction that changed
+no rows at all logs a warning — that is a pure read left on the write path;
+move it to `sql_read`. A write to a device-local (undeclared) table changes
+rows while capturing nothing, which is routine and silent.
 
 ## The sync cycle
 
