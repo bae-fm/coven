@@ -6,6 +6,15 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.rust]
+# Every `pub` not reachable from the crate's own root must be `pub(crate)` (or
+# narrower). This re-arms `dead_code` on internal items — `pub` silences that
+# lint unconditionally, so an unreachable `pub` item can rot unused and
+# unnoticed. Fix by narrowing visibility, never by widening it to route around
+# the lint.
+unreachable_pub = "deny"
+dead_code = "deny"
+
 [workspace.lints.clippy]
 too_many_arguments = "allow"
 new_without_default = "allow"
