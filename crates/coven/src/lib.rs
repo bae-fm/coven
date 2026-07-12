@@ -633,8 +633,8 @@ pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
 // --- Native additions and native-only re-exports. ---
 
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
-pub use custody::{KeyCustody, Passphrase};
-pub use identity_custody::IdentityCustody;
+pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
+pub use identity_custody::{rewrap_passphrase_identity_custody, IdentityCustody};
 pub use join_code::{abandon_join_request, generate_join_request};
 pub use keys::{
     keyring_service, set_keyring_service, CloudHomeCredentials, DeviceIdentityCustody,

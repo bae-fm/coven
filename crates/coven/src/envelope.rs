@@ -17,7 +17,7 @@ use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::keys::KeyError;
 
@@ -182,6 +182,73 @@ impl PassphraseVault {
     /// Wrap and store `plaintext`, replacing whatever is stored. Idempotent.
     pub(crate) fn persist(&self, plaintext: &[u8]) -> Result<(), KeyError> {
         let derivation = self.derived_key()?;
+        self.seal_and_write(&derivation, plaintext)
+    }
+
+    /// Re-wrap the established payload under `new_passphrase`. The current
+    /// (this instance's) passphrase unlocks the file; the same plaintext is
+    /// then sealed under a wrapping key derived for `new_passphrase` with a
+    /// *fresh* random salt and this module's current default params (never the
+    /// old envelope's salt — that would tie the new derivation to the old
+    /// one), and written atomically over `self.path`.
+    ///
+    /// Nothing established at `self.path` is an error, not a no-op: re-wrapping
+    /// a custody that was never established is a caller bug, and silent success
+    /// would mask it. A wrong current passphrase surfaces from `unlock` as
+    /// [`KeyError::Crypto`]; because the write only follows a successful
+    /// unlock-and-reseal, the existing file is left untouched on that failure.
+    ///
+    /// After a successful re-wrap this instance is stale — its `passphrase`
+    /// field still holds the *old* secret, so it can no longer unlock the file
+    /// it just wrote. The cached derivation is cleared to keep nothing reusing
+    /// a stale wrapping key; the caller re-opens custody under `new_passphrase`
+    /// for any further operation.
+    pub(crate) fn rewrap(&self, new_passphrase: &Passphrase) -> Result<(), KeyError> {
+        let Some(mut plaintext) = self.unlock()? else {
+            return Err(KeyError::Persistence(format!(
+                "nothing established at {}; cannot re-wrap a custody that was never established",
+                self.path.display()
+            )));
+        };
+
+        // Mirror the fresh-file branch of `derived_key`: a new random salt and
+        // the current default params, derived under the new passphrase. Held
+        // as a `CachedDerivation` so its wrapping key zeroizes on drop.
+        let mut salt = vec![0u8; SALT_LEN];
+        rand::rng().fill_bytes(&mut salt);
+        let key = derive_wrapping_key(
+            new_passphrase.expose(),
+            &salt,
+            ARGON2_M_COST_KIB,
+            ARGON2_T_COST,
+            ARGON2_P_COST,
+        )?;
+        let derivation = CachedDerivation {
+            salt,
+            m_cost: ARGON2_M_COST_KIB,
+            t_cost: ARGON2_T_COST,
+            p_cost: ARGON2_P_COST,
+            key,
+        };
+
+        let result = self.seal_and_write(&derivation, &plaintext);
+        plaintext.zeroize();
+        result?;
+
+        *self.derived.lock().unwrap() = None;
+        Ok(())
+    }
+
+    /// Seal `plaintext` under `derivation` (a fresh AEAD nonce) and write the
+    /// resulting envelope atomically over `self.path`. The shared tail of
+    /// [`persist`](Self::persist) and [`rewrap`](Self::rewrap) — they differ
+    /// only in where the derivation comes from (this instance's cached one, or
+    /// a fresh one under a new passphrase).
+    fn seal_and_write(
+        &self,
+        derivation: &CachedDerivation,
+        plaintext: &[u8],
+    ) -> Result<(), KeyError> {
         let (nonce, ciphertext) = seal(&derivation.key, plaintext);
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
@@ -654,5 +721,124 @@ mod tests {
             .unlock()
             .expect_err("an unrecognized KDF algo must be refused");
         assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
+    }
+
+    /// Re-wrapping under a new passphrase moves custody: the old passphrase can
+    /// no longer unlock the file, the new one can, and the plaintext survives
+    /// the move byte-for-byte.
+    #[test]
+    fn rewrap_makes_the_old_passphrase_stop_unlocking_and_the_new_one_start() {
+        let (tmp, vault) = temp_vault("old passphrase");
+        // Non-UTF-8 payload: re-wrap must not assume a string, same as persist.
+        let payload: Vec<u8> = (0u8..=255).collect();
+        vault
+            .persist(&payload)
+            .expect("establish under the old passphrase");
+
+        vault
+            .rewrap(&Passphrase::new("new passphrase".to_string()))
+            .expect("re-wrap under the new passphrase");
+
+        let path = tmp.path().join("payload.envelope");
+        let with_old =
+            PassphraseVault::new(Passphrase::new("old passphrase".to_string()), path.clone());
+        let old_error = with_old
+            .unlock()
+            .expect_err("the old passphrase must no longer unlock after a re-wrap");
+        assert!(
+            matches!(old_error, KeyError::Crypto(_)),
+            "got {old_error:?}"
+        );
+
+        let with_new = PassphraseVault::new(Passphrase::new("new passphrase".to_string()), path);
+        let unlocked = with_new
+            .unlock()
+            .expect("the new passphrase unlocks")
+            .expect("payload present");
+        assert_eq!(unlocked, payload);
+    }
+
+    /// The re-wrapped envelope derives under a fresh random salt — never the
+    /// old envelope's, which would tie the new passphrase's derivation to the
+    /// old one's.
+    #[test]
+    fn rewrap_seals_under_a_fresh_salt_not_the_old_envelopes() {
+        let (_tmp, vault) = temp_vault("old passphrase");
+        vault.persist(b"payload").expect("establish");
+        let salt_before = read_envelope_from_disk(vault.path()).kdf.salt_b64;
+
+        vault
+            .rewrap(&Passphrase::new("new passphrase".to_string()))
+            .expect("re-wrap");
+        let salt_after = read_envelope_from_disk(vault.path()).kdf.salt_b64;
+
+        assert_ne!(
+            salt_before, salt_after,
+            "re-wrap must derive under a fresh random salt, never reuse the old envelope's",
+        );
+    }
+
+    /// A wrong current passphrase surfaces from the unlock as `Crypto`, and
+    /// because the write only follows a successful unlock-and-reseal, the
+    /// established file is left byte-for-byte intact — the right passphrase
+    /// still unlocks it.
+    #[test]
+    fn rewrap_with_a_wrong_current_passphrase_is_crypto_and_leaves_the_file_intact() {
+        let (tmp, vault) = temp_vault("right passphrase");
+        vault.persist(b"the real secret").expect("establish");
+        let before = std::fs::read(vault.path()).expect("read established file");
+
+        let path = tmp.path().join("payload.envelope");
+        let wrong = PassphraseVault::new(
+            Passphrase::new("wrong passphrase".to_string()),
+            path.clone(),
+        );
+        let error = wrong
+            .rewrap(&Passphrase::new("new passphrase".to_string()))
+            .expect_err("a wrong current passphrase must not re-wrap");
+        assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}");
+
+        let after = std::fs::read(&path).expect("read file after failed re-wrap");
+        assert_eq!(before, after, "a failed re-wrap must not touch the file");
+        let reopened = PassphraseVault::new(Passphrase::new("right passphrase".to_string()), path);
+        assert_eq!(reopened.unlock().unwrap().unwrap(), b"the real secret");
+    }
+
+    /// Re-wrapping a custody that was never established is a caller bug, not a
+    /// no-op: it is an error, and no file is created.
+    #[test]
+    fn rewrap_on_a_never_established_path_is_an_error_not_silent_success() {
+        let (_tmp, vault) = temp_vault("passphrase");
+        let error = vault
+            .rewrap(&Passphrase::new("new passphrase".to_string()))
+            .expect_err("re-wrapping a custody that was never established must be an error");
+        assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
+        assert!(
+            !vault.path().exists(),
+            "a failed re-wrap must not create a file",
+        );
+    }
+
+    /// Re-wrap is safe to retry after a partial failure: a caller that crashed
+    /// between the write and its own bookkeeping re-opens custody under the new
+    /// passphrase and re-wraps to that same passphrase again — which succeeds
+    /// and still unlocks, rather than being stranded.
+    #[test]
+    fn rewrap_to_a_target_passphrase_can_be_retried_after_a_partial_failure() {
+        let (tmp, vault) = temp_vault("old passphrase");
+        vault.persist(b"payload").expect("establish");
+        vault
+            .rewrap(&Passphrase::new("new passphrase".to_string()))
+            .expect("first re-wrap to the new passphrase");
+
+        let path = tmp.path().join("payload.envelope");
+        let again =
+            PassphraseVault::new(Passphrase::new("new passphrase".to_string()), path.clone());
+        again
+            .rewrap(&Passphrase::new("new passphrase".to_string()))
+            .expect("re-wrap under the same passphrase is safe to repeat");
+
+        let reopened = PassphraseVault::new(Passphrase::new("new passphrase".to_string()), path);
+        assert_eq!(reopened.unlock().unwrap().unwrap(), b"payload");
     }
 }
