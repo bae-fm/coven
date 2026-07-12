@@ -210,13 +210,10 @@ mod tests {
         crate::keys::test_keyring::install();
         let store_id = "custody-keyring-corrupt-empty".to_string();
         let account = crate::keys::KeyringSlot::EncryptionMasterKey(store_id.clone()).account();
-        keyring_core::Entry::new(
-            crate::keys::keyring_service().expect("service registered"),
-            &account,
-        )
-        .expect("create entry")
-        .set_password("")
-        .expect("write empty entry");
+        crate::keys::entry_for(&account)
+            .expect("create entry")
+            .set_password("")
+            .expect("write empty entry");
 
         let custody = KeyringCustody::new(store_id);
         let error = custody.unlock().expect_err("empty entry is corrupt");

@@ -269,11 +269,7 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
     let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
     // Prime a one-shot error on the device signing-key account's next read.
-    let entry = keyring_core::Entry::new(
-        crate::keys::keyring_service().expect("keyring service registered"),
-        "coven_user_signing_key",
-    )
-    .expect("create signing-key entry");
+    let entry = crate::keys::entry_for("coven_user_signing_key").expect("create signing-key entry");
     let mock: &keyring_core::mock::Cred = entry
         .as_any()
         .downcast_ref()
