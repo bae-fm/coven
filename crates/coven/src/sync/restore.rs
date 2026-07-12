@@ -21,6 +21,7 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::join::{
     bootstrap_and_save_store, cleanup_after_bootstrap_failure, BootstrapError,
 };
+use crate::sync::membership::MembershipCoord;
 use crate::sync::session::SyncedTable;
 
 /// Cloud provider source for restore: the join info a restore code carries
@@ -172,6 +173,7 @@ pub async fn restore_from_cloud(
     migrations: &[Migration],
     custody: Arc<dyn MasterKeyCustody>,
     source: RestoreSource,
+    membership_floor: &[MembershipCoord],
     keypair: &UserKeypair,
     layout: &StoreLayout,
     clock: crate::clock::ClockRef,
@@ -257,6 +259,7 @@ pub async fn restore_from_cloud(
             store_id,
             &device_id,
             crate::sync::join::BootstrapContext::Restore,
+            membership_floor,
             synced_tables,
             migrations,
             &join_info,
@@ -348,6 +351,7 @@ pub async fn restore_from_code(
         migrations,
         custody.clone(),
         source,
+        &parsed.membership_floor,
         &keypair,
         layout,
         clock,

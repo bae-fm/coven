@@ -62,6 +62,8 @@ pub enum SyncError {
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
     Membership(crate::sync::membership_ops::MembershipOpsError),
+    #[error("{0}")]
+    Database(#[from] DbError),
     #[error("blob upload drain failed: {0}")]
     BlobUpload(DbError),
     #[error("sync loop error: {0}")]
@@ -586,6 +588,70 @@ impl SyncManager {
         )
         .await
         .map_err(SyncError::Membership)
+    }
+
+    /// Build a restore code for this store: fetch the current membership-head
+    /// floor from the cloud (empty for a chain-less/browsable store) and mint
+    /// the code from it, so the restorer can seed its watermark from mint-time
+    /// state rather than accepting any signed head as a fresh device would
+    /// otherwise have to. Requires a connected provider — unlike the old,
+    /// storage-free `generate_restore_code`, minting a trustworthy floor is a
+    /// network read, not a pure function of local config and keyring state.
+    pub(crate) async fn generate_restore_code(&self) -> Result<String, SyncError> {
+        let config = (self.config_provider)();
+        if config.cloud_home.provider.is_none() {
+            return Err(SyncError::NotConfigured);
+        }
+
+        let loop_storage = self
+            .sync_loop_handle()
+            .map(|handle| handle.storage().clone());
+        let owned_storage;
+        let storage: &dyn SyncStorage = if let Some(storage) = loop_storage.as_deref() {
+            storage
+        } else {
+            owned_storage = match self.cloud_home() {
+                Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
+                    &config,
+                    self.custody.as_ref(),
+                    home,
+                    None,
+                ),
+                None => {
+                    crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
+                        &config,
+                        &self.key_service,
+                        self.custody.as_ref(),
+                        None,
+                        self.clock.clone(),
+                        self.cloudkit_ops.clone(),
+                    )
+                    .await
+                }
+            }
+            .map_err(SyncError::StorageSetup)?;
+            &owned_storage
+        };
+
+        let pinned_owner = self
+            .db
+            .get_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
+            .await?;
+        let membership_floor = crate::sync::membership_ops::current_membership_floor(
+            storage,
+            pinned_owner.as_deref(),
+            Some(&self.db),
+        )
+        .await
+        .map_err(SyncError::Membership)?;
+
+        crate::storage::cloud::setup::generate_restore_code(
+            &config,
+            &self.key_service,
+            self.custody.as_ref(),
+            membership_floor,
+        )
+        .map_err(SyncError::from)
     }
 
     pub(crate) async fn invite_member(

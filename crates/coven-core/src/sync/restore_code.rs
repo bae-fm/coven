@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::code_envelope::{self, EnvelopeError};
 use crate::storage::cloud::CloudHomeJoinInfo;
+use crate::sync::membership::MembershipCoord;
 
 pub const RESTORE_CODE_VERSION: u8 = 2;
 
@@ -46,6 +47,16 @@ pub struct RestoreCode {
     pub provider: CloudHomeJoinInfo,
     /// Ed25519 signing key, hex-encoded, 64 bytes. Required.
     pub sk: String,
+    /// Every author's membership-head coordinate at mint time
+    /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
+    /// empty for a chain-less (browsable) store. The restorer seeds its
+    /// per-author head watermark from this before its first sync cycle, so a
+    /// storage provider serving an older, otherwise validly signed membership
+    /// state is refused as a regression rather than accepted for having no
+    /// watermark yet. Required, not optional: a code minted without this floor
+    /// carries no protection, so it is refused at decode rather than silently
+    /// treated as "no floor."
+    pub membership_floor: Vec<MembershipCoord>,
 }
 
 impl std::fmt::Debug for RestoreCode {
@@ -59,6 +70,7 @@ impl std::fmt::Debug for RestoreCode {
             .field("name", &self.name)
             .field("provider", &self.provider)
             .field("sk", &"<redacted>")
+            .field("membership_floor", &self.membership_floor)
             .finish()
     }
 }
@@ -213,6 +225,13 @@ mod tests {
         hex::encode([0xAB_u8; 64])
     }
 
+    fn test_membership_floor() -> Vec<MembershipCoord> {
+        vec![MembershipCoord {
+            author_pubkey: hex::encode([0xCDu8; 32]),
+            seq: 1,
+        }]
+    }
+
     fn sample_s3_code() -> RestoreCode {
         RestoreCode {
             v: RESTORE_CODE_VERSION,
@@ -228,6 +247,7 @@ mod tests {
                 secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             },
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         }
     }
 
@@ -243,6 +263,7 @@ mod tests {
         assert_eq!(decoded.ek, code.ek);
         assert_eq!(decoded.sk, code.sk);
         assert_eq!(decoded.name, "Test Store");
+        assert_eq!(decoded.membership_floor, code.membership_floor);
         match &decoded.provider {
             CloudHomeJoinInfo::S3 {
                 bucket,
@@ -272,6 +293,7 @@ mod tests {
             name: "CloudKit Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKit,
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         };
         let encoded = encode_restore_code(&code);
         let decoded = decode_restore_code(&encoded).unwrap();
@@ -290,6 +312,7 @@ mod tests {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
             },
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
@@ -311,6 +334,7 @@ mod tests {
                 folder_path: "/Apps/your-app/My Store".to_string(),
             },
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
@@ -333,6 +357,7 @@ mod tests {
                 folder_id: "folder-id-456".to_string(),
             },
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
         match &decoded.provider {
@@ -362,6 +387,7 @@ mod tests {
                 zone_name: "zone".to_string(),
             },
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         };
         let encoded = encode_restore_code(&code);
         assert!(matches!(
@@ -448,6 +474,7 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         };
         let json = serde_json::to_string(&code).unwrap();
         // None fields should not appear in the JSON
@@ -475,6 +502,7 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
+            membership_floor: test_membership_floor(),
         };
         let json = serde_json::to_string(&code).unwrap();
         assert!(
@@ -588,6 +616,22 @@ mod tests {
         assert!(matches!(
             decode_restore_code(&encoded),
             Err(RestoreCodeError::InvalidSigningKey(_))
+        ));
+    }
+
+    /// `membership_floor` is required, not merely present-when-known: a code
+    /// serialized without it (an older minter, or a hand-crafted attack code)
+    /// must be refused at decode rather than silently read as "no floor" — the
+    /// exact masking this field exists to remove.
+    #[test]
+    fn missing_membership_floor_is_refused_at_decode() {
+        let mut json = serde_json::to_value(sample_s3_code()).unwrap();
+        json.as_object_mut().unwrap().remove("membership_floor");
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let encoded = format!("coven:{}", URL_SAFE_NO_PAD.encode(bytes));
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::InvalidJson(_))
         ));
     }
 

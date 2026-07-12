@@ -250,10 +250,19 @@ pub async fn sign_in_onedrive(
 }
 
 /// Build a RestoreCode from config and custody, then encode it.
+///
+/// `membership_floor` is the per-author membership-head floor at mint time
+/// ([`crate::sync::membership_ops::current_membership_floor`]) — the caller's
+/// responsibility to fetch, since this function itself never touches the
+/// network. The restorer seeds its watermark from it before its first sync
+/// cycle, so this must be the CURRENT chain state, not a stale or empty
+/// placeholder — an empty floor is only correct for a chain-less (browsable)
+/// store, which has no membership to protect.
 pub fn generate_restore_code(
     config: &Config,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
+    membership_floor: Vec<crate::sync::membership::MembershipCoord>,
 ) -> Result<String, SetupError> {
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::sync::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
@@ -377,6 +386,7 @@ pub fn generate_restore_code(
         name: config.store_name.clone(),
         provider,
         sk: hex::encode(keypair.to_keypair_bytes()),
+        membership_floor,
     };
 
     Ok(encode_restore_code(&code))
@@ -519,7 +529,7 @@ mod tests {
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
 
-        let err = generate_restore_code(&config, &key_service, custody.as_ref())
+        let err = generate_restore_code(&config, &key_service, custody.as_ref(), Vec::new())
             .expect_err("a share-joined CloudKit config must not generate a restore code");
         let message = err.to_string();
         assert!(
@@ -540,7 +550,7 @@ mod tests {
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
 
-        let code = generate_restore_code(&config, &key_service, custody.as_ref())
+        let code = generate_restore_code(&config, &key_service, custody.as_ref(), Vec::new())
             .expect("a private CloudKit config generates a restore code");
         let decoded = decode_restore_code(&code).expect("generated code decodes");
         assert!(

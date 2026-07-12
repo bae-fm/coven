@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::code_envelope::{self, EnvelopeError};
 use crate::storage::cloud::CloudHomeJoinInfo;
+use crate::sync::membership::MembershipCoord;
 
 pub const INVITE_CODE_VERSION: u8 = 1;
 
@@ -20,6 +21,18 @@ pub struct InviteCode {
     pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
+    /// Every author's membership-head coordinate at mint time
+    /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
+    /// empty only for a chain-less store (an invite is always for a private
+    /// home, which always has a founder, so this is never empty in practice).
+    /// The joiner seeds its per-author head watermark from this before its
+    /// first sync cycle, so a storage provider serving an older, otherwise
+    /// validly signed membership state — e.g. from before a removal this floor
+    /// already reflects — is refused as a regression rather than accepted for
+    /// having no watermark yet. Required, not optional: a code minted without
+    /// this floor carries no protection, so it is refused at decode rather than
+    /// silently treated as "no floor."
+    pub membership_floor: Vec<MembershipCoord>,
 }
 
 /// Encode an `InviteCode` into a prefixed base64url string.
@@ -161,6 +174,13 @@ mod tests {
         hex::encode([0xAB_u8; 32])
     }
 
+    fn test_membership_floor() -> Vec<MembershipCoord> {
+        vec![MembershipCoord {
+            author_pubkey: test_owner_pubkey(),
+            seq: 1,
+        }]
+    }
+
     fn sample_s3_code(store_id: &str) -> InviteCode {
         InviteCode {
             v: INVITE_CODE_VERSION,
@@ -175,6 +195,7 @@ mod tests {
                 key_prefix: None,
             },
             owner_pubkey: test_owner_pubkey(),
+            membership_floor: test_membership_floor(),
         }
     }
 
@@ -188,6 +209,7 @@ mod tests {
         assert_eq!(decoded.store_id, "lib-123");
         assert_eq!(decoded.store_name, "My Store");
         assert_eq!(decoded.owner_pubkey, test_owner_pubkey());
+        assert_eq!(decoded.membership_floor, test_membership_floor());
         match decoded.join_info {
             CloudHomeJoinInfo::S3 {
                 bucket,
@@ -313,6 +335,22 @@ mod tests {
         assert!(matches!(
             decode(&encoded),
             Err(JoinCodeError::NewerVersion(99))
+        ));
+    }
+
+    /// `membership_floor` is required, not merely present-when-known: a code
+    /// serialized without it (an older minter, or a hand-crafted attack code)
+    /// must be refused at decode rather than silently read as "no floor" — the
+    /// exact masking this field exists to remove.
+    #[test]
+    fn decode_missing_membership_floor_is_refused() {
+        let mut json = serde_json::to_value(sample_s3_code("lib-no-floor")).unwrap();
+        json.as_object_mut().unwrap().remove("membership_floor");
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let encoded = format!("{}{}", code_envelope::PREFIX, URL_SAFE_NO_PAD.encode(bytes));
+        assert!(matches!(
+            decode(&encoded),
+            Err(JoinCodeError::InvalidJson(_))
         ));
     }
 

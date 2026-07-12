@@ -65,6 +65,7 @@ fn invite_code_with_store_id(store_id: &str) -> InviteCode {
             key_prefix: None,
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
+        membership_floor: Vec::new(),
     }
 }
 
@@ -288,6 +289,7 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
             folder_path: "/Apps/coven/oauth-cleanup-test".to_string(),
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
+        membership_floor: Vec::new(),
     });
     let oauth_tokens = crate::oauth::OAuthTokens {
         access_token: "access-token".to_string(),
@@ -541,6 +543,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &owner_pk,
         },
+        &chain.author_heads(),
         &tables,
         &test_migrations(),
         &join_info,
@@ -676,6 +679,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &test_migrations(),
         "B",
         None,
+        &[],
         &storage,
         &boot.cursors,
         &lib_b,
@@ -730,6 +734,265 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     assert_eq!(
         snapshot_after, snapshot_before,
         "a just-joined device's first cycle must not republish/clobber the shared snapshot",
+    );
+}
+
+/// The per-reader membership-head watermark is the only defense against a
+/// storage provider replaying an older, otherwise validly signed membership
+/// state — but a high-water mark only defends state a reader has already seen.
+/// A fresh joiner has no watermark yet, so without seeding it from the invite's
+/// floor, a provider serving the pre-removal head (and its still-present
+/// entries — internally consistent, correctly signed) would be accepted, and
+/// the removed member would read as current.
+#[tokio::test]
+async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
+    use crate::sync::membership::{
+        entry_hash, AuthorHead, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
+    };
+    use crate::sync::test_helpers::{
+        append_membership_entry, founder_entry, make_linked_entry, pubkey_hex,
+        publish_membership_chain_head,
+    };
+
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+    let owner = UserKeypair::generate();
+    let member = UserKeypair::generate();
+    let invitee = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+
+    // Build the chain: found, add a member, then remove them — head at seq 3.
+    let mut chain = MembershipChain::new();
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "0000000002000-0000-owner",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member.clone()).await;
+    let remove_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Remove,
+        &member,
+        MemberRole::Member,
+        "0000000003000-0000-owner",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    // Mint an invite AFTER the removal: its floor reflects the post-removal,
+    // post-invite chain state (the invitee's own Add lands at seq 4).
+    let hlc = crate::sync::hlc::Hlc::new("owner".to_string());
+    let encryption = EncryptionService::from_key([7u8; 32]);
+    let invite = crate::sync::membership_ops::invite_member(
+        &storage,
+        &storage,
+        &owner,
+        &hlc,
+        &pubkey_hex(&invitee),
+        None,
+        MemberRole::Member,
+        &encryption,
+        "test-lib",
+        "Test Lib",
+    )
+    .await
+    .expect("mint invite");
+    assert_eq!(
+        invite.membership_floor,
+        vec![MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 4,
+        }],
+        "the invite's floor must reflect the post-removal, post-invite chain state",
+    );
+
+    // The owner publishes a snapshot so bootstrap has something to adopt.
+    let db_owner = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_owner
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &storage,
+        "test-lib",
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db_owner.schema_version(),
+        &owner,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_owner,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    // The provider now serves the PRE-removal head — seq 2, before the member
+    // was removed. Entries 1-2 really exist and the head is correctly signed;
+    // this is a rollback of the true chain's current state, not a forgery.
+    let stale_head = AuthorHead::signed(2, entry_hash(&add_member), &owner);
+    storage
+        .put_membership_head(&owner_pk, serde_json::to_vec(&stale_head).unwrap())
+        .await
+        .expect("provider serves the rolled-back head");
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", Some(&owner_pk), 1, &lib_b.db_path())
+        .await
+        .expect("B bootstrap");
+    let result = open_db_and_pull(
+        &lib_b.db_path(),
+        &tables,
+        &test_migrations(),
+        "B",
+        Some(&owner_pk),
+        &invite.membership_floor,
+        &storage,
+        &boot.cursors,
+        &lib_b,
+        &never_cancelled(),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::Pull(_))),
+        "a fresh joiner seeded from the invite's floor must refuse a membership \
+         head that regresses below it, got {result:?}",
+    );
+}
+
+/// The seeded floor is exactly that — a floor, not a ceiling. A joiner seeded
+/// at the invite's mint-time seq must still accept a LATER head: the ordinary
+/// case where the chain kept moving between mint and this device's first sync.
+#[tokio::test]
+async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() {
+    use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+    use crate::sync::test_helpers::{
+        append_membership_entry, founder_entry, make_linked_entry, pubkey_hex,
+        publish_membership_chain_head,
+    };
+
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+    let owner = UserKeypair::generate();
+    let invitee = UserKeypair::generate();
+    let second_member = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+
+    let mut chain = MembershipChain::new();
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    // Mint the invite right after founding: floor lands at seq 2 (the
+    // invitee's own Add).
+    let hlc = crate::sync::hlc::Hlc::new("owner".to_string());
+    let encryption = EncryptionService::from_key([7u8; 32]);
+    let invite = crate::sync::membership_ops::invite_member(
+        &storage,
+        &storage,
+        &owner,
+        &hlc,
+        &pubkey_hex(&invitee),
+        None,
+        MemberRole::Member,
+        &encryption,
+        "test-lib",
+        "Test Lib",
+    )
+    .await
+    .expect("mint invite");
+    assert_eq!(
+        invite.membership_floor[0].seq, 2,
+        "floor lands at the invitee's Add"
+    );
+
+    // `invite_member` appended the invitee's Add straight to storage, so the
+    // `chain` built above (founder only) is stale; re-derive it from storage
+    // before appending further, so the next entry's `prev_hash` links to the
+    // invitee's Add rather than skipping over it.
+    let visible = storage.list_membership_entries().await.unwrap();
+    let mut chain = crate::sync::membership_ops::download_chain(&storage, &visible)
+        .await
+        .expect("chain including the invite's own Add");
+
+    // Between mint and this device's first sync, the chain moved forward
+    // further: the owner adds a second member, advancing the real head to
+    // seq 3.
+    let add_second_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &second_member,
+        MemberRole::Member,
+        "0000000004000-0000-owner",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 3, add_second_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    let db_owner = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_owner
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &storage,
+        "test-lib",
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db_owner.schema_version(),
+        &owner,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_owner,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", Some(&owner_pk), 1, &lib_b.db_path())
+        .await
+        .expect("B bootstrap");
+    let result = open_db_and_pull(
+        &lib_b.db_path(),
+        &tables,
+        &test_migrations(),
+        "B",
+        Some(&owner_pk),
+        &invite.membership_floor,
+        &storage,
+        &boot.cursors,
+        &lib_b,
+        &never_cancelled(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a head later than the seeded floor must be accepted normally, got {result:?}",
     );
 }
 
@@ -824,6 +1087,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         &test_migrations(),
         "B",
         None,
+        &[],
         &storage,
         &boot.cursors,
         &lib_b,
@@ -915,6 +1179,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         &test_migrations(),
         "B",
         None,
+        &[],
         &storage,
         &boot.cursors,
         &lib_b,
@@ -1008,6 +1273,7 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         &test_migrations(),
         "B",
         None,
+        &[],
         &storage,
         &boot.cursors,
         &lib_b,

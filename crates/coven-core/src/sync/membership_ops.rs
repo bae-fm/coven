@@ -75,6 +75,30 @@ pub enum MembershipOpsError {
 /// takeover attempt and is rejected (issue #95).
 pub const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
 
+/// The per-author membership-head floor at the chain's current committed state:
+/// empty for a chain-less (browsable) store, otherwise every author's highest
+/// committed seq ([`MembershipChain::author_heads`]). Minted into an invite or
+/// restore code so the joiner or restorer can seed its watermark
+/// ([`seed_head_watermark`]) before its first sync cycle.
+///
+/// `watermark_db`, when present, makes this read monotonic the same way every
+/// other chain load is: the minting device's own view of the chain never
+/// regresses either. Shares [`load_anchored_chain`]'s fail-closed stance — for a
+/// `pinned_owner` a chain that won't validate or anchor is a takeover attempt,
+/// not silently treated as absent.
+pub async fn current_membership_floor(
+    storage: &dyn SyncStorage,
+    pinned_owner: Option<&str>,
+    watermark_db: Option<&Database>,
+) -> Result<Vec<super::membership::MembershipCoord>, MembershipOpsError> {
+    let entries = storage.list_membership_entries().await?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let chain = load_anchored_chain(storage, &entries, pinned_owner, watermark_db).await?;
+    Ok(chain.author_heads())
+}
+
 /// Read the membership chain from the sync storage and return the current members.
 pub async fn get_members(
     storage: &dyn SyncStorage,
@@ -173,6 +197,12 @@ pub async fn invite_member(
         .ok_or(MembershipOpsError::ChainHasNoFounder)?
         .to_string();
 
+    // The chain as it stands after this invite is committed (including the
+    // invitee's own Add and the head just published for it): its per-author
+    // heads are the floor the joiner seeds its watermark from, so a provider
+    // can never roll the joiner back to a state before this invite.
+    let membership_floor = chain.author_heads();
+
     // Build the invite code
     Ok(crate::join_code::InviteCode {
         v: crate::join_code::INVITE_CODE_VERSION,
@@ -180,6 +210,7 @@ pub async fn invite_member(
         store_name: store_name.to_string(),
         join_info,
         owner_pubkey,
+        membership_floor,
     })
 }
 
@@ -689,6 +720,26 @@ async fn persist_head_watermark(db: &Database, author: &str, seq: u64) -> Result
     db.set_sync_state(&head_watermark_key(author), &seq.to_string())
         .await
         .map_err(|e| format!("persist membership head watermark for {author}: {e}"))
+}
+
+/// Seed this reader's per-author membership-head watermark from `floor` — the
+/// `(author_pubkey, seq)` pairs an invite or restore code carries from mint time
+/// ([`current_membership_floor`]). Persists through the exact `sync_state`
+/// entries [`load_anchored_chain`]'s monotonic guard reads, so from this
+/// device's first sync cycle on, any head at or below the seeded floor is
+/// refused as a regression — exactly as if this reader had already accepted it.
+///
+/// Called once, before a join or restore's first sync cycle, on a `db` whose
+/// `sync_state` has no membership watermark yet, so there is nothing to
+/// regress: this is a plain write, not a max-with-existing merge.
+pub async fn seed_head_watermark(
+    db: &Database,
+    floor: &[super::membership::MembershipCoord],
+) -> Result<(), String> {
+    for coord in floor {
+        persist_head_watermark(db, &coord.author_pubkey, coord.seq).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

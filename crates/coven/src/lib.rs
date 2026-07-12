@@ -576,7 +576,11 @@ pub use coven_core::EncryptionService;
 // The register clock vocabulary carried on every synced row.
 pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
 
-// Membership.
+// Membership. `MembershipCoord` (an author's membership-head coordinate) is
+// exposed only because `generate_restore_code` takes a caller-supplied
+// membership floor made of them; a host driving that free function directly
+// (bypassing `CovenHandle`) must be able to name the type.
+pub use coven_core::sync::membership::MembershipCoord;
 pub use coven_core::{MemberInfo, MemberRole};
 
 // Clock / id abstractions the host injects, plus the deterministic test fakes.

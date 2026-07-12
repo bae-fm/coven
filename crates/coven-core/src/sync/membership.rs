@@ -453,6 +453,29 @@ impl MembershipChain {
         self.author_tip(author_pubkey).map(|(_, hash)| hash)
     }
 
+    /// Every distinct author's committed head coordinate in this chain — one
+    /// `(author_pubkey, seq)` per author who has authored at least one entry, at
+    /// that author's highest committed seq. Empty for a chain-less (browsable)
+    /// store, which has no membership at all.
+    ///
+    /// This is the floor an invite or restore code carries from mint time: the
+    /// joiner or restorer seeds its per-author head watermark from it before its
+    /// first sync cycle, so a storage provider serving a head at or below this
+    /// floor — an older, otherwise validly signed state, e.g. from before a
+    /// removal this floor already reflects — is refused as a regression exactly
+    /// as if this reader had already seen the current state.
+    pub fn author_heads(&self) -> Vec<MembershipCoord> {
+        let mut heads: BTreeMap<String, u64> = BTreeMap::new();
+        for (_, coord, _) in self.entries_with_effective_coords() {
+            let seq = heads.entry(coord.author_pubkey.clone()).or_insert(0);
+            *seq = (*seq).max(coord.seq);
+        }
+        heads
+            .into_iter()
+            .map(|(author_pubkey, seq)| MembershipCoord { author_pubkey, seq })
+            .collect()
+    }
+
     /// Build `signer`'s signed head from this chain's current tip for that author,
     /// or `None` if the author has authored no entries (nothing to certify).
     pub fn signed_head(&self, signer: &UserKeypair) -> Option<AuthorHead> {

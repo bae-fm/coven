@@ -863,13 +863,16 @@ impl CovenHandle {
             .map_err(SyncError::from)
     }
 
-    pub fn generate_restore_code(&self) -> Result<String, SyncError> {
-        crate::storage::cloud::setup::generate_restore_code(
-            &self.config(),
-            &self.key_service,
-            self.key_custody.as_ref(),
-        )
-        .map_err(SyncError::from)
+    /// Generate a restore code, seeded with the store's current membership-head
+    /// floor read from the cloud. Requires a connected provider: unlike the old,
+    /// storage-free version of this call, minting a trustworthy floor is a
+    /// network read, not a pure function of local config and keyring state — a
+    /// restore code minted without one would carry no protection against a
+    /// storage provider replaying an older, otherwise validly signed membership
+    /// state to the device that redeems it.
+    pub async fn generate_restore_code(&self) -> Result<String, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        manager.generate_restore_code().await
     }
 
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {

@@ -19,6 +19,7 @@ use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::invite::{unwrap_store_keyring, InviteError};
+use crate::sync::membership::MembershipCoord;
 use crate::sync::pull::{pull_changes, PullError};
 use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
@@ -474,6 +475,7 @@ pub(crate) async fn join_store(
             BootstrapContext::Join {
                 owner_pubkey: &code.owner_pubkey,
             },
+            &code.membership_floor,
             synced_tables,
             migrations,
             &code.join_info,
@@ -512,6 +514,7 @@ pub(crate) async fn bootstrap_and_save_store(
     store_id: &str,
     device_id: &str,
     context: BootstrapContext<'_>,
+    membership_floor: &[MembershipCoord],
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     join_info: &CloudHomeJoinInfo,
@@ -560,6 +563,7 @@ pub(crate) async fn bootstrap_and_save_store(
         migrations,
         device_id,
         owner_pubkey,
+        membership_floor,
         bucket_dyn,
         &cursors,
         store_dir,
@@ -603,6 +607,7 @@ pub(crate) async fn open_db_and_pull(
     migrations: &[Migration],
     device_id: &str,
     owner_pubkey: Option<&str>,
+    membership_floor: &[MembershipCoord],
     storage: &dyn SyncStorage,
     cursors: &HashMap<String, u64>,
     store_dir: &StoreDir,
@@ -620,6 +625,19 @@ pub(crate) async fn open_db_and_pull(
     .map_err(|e| {
         BootstrapError::Database(format!("Failed to open database for changeset apply: {e}"))
     })?;
+
+    // Seed this device's per-author membership-head watermark from the invite
+    // or restore code's floor BEFORE the pull below loads and anchors the
+    // membership chain for the first time. A fresh joiner or restorer has no
+    // watermark yet, so without this, the first load would accept any signed
+    // head — including an older one a storage provider chooses to serve, e.g.
+    // from before a removal the floor already reflects. Seeding it here makes
+    // that first load monotonic from the start, exactly like every later cycle.
+    crate::sync::membership_ops::seed_head_watermark(&db, membership_floor)
+        .await
+        .map_err(|e| {
+            BootstrapError::Database(format!("Failed to seed membership head watermark: {e}"))
+        })?;
 
     // Pin the store owner from the invite BEFORE the pull below loads and anchors
     // the membership chain (issue #102). The pull then refuses a chain whose founder

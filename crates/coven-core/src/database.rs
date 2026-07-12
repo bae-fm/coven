@@ -908,7 +908,7 @@ impl Database {
 
     // ---- Bookkeeping: sync_state ----
 
-    pub(crate) async fn get_sync_state(&self, key: &str) -> Result<Option<String>, DbError> {
+    pub async fn get_sync_state(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
         self.call(move |conn| {
             conn.query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| {

@@ -65,6 +65,7 @@ fn restore_code_with_sid(sid: &str) -> String {
         // before the key is touched, and a valid `sid` rebuilds this keypair and
         // proceeds to the cloud step (where the loopback endpoint fails it).
         sk: hex::encode(crate::keys::UserKeypair::generate().to_keypair_bytes()),
+        membership_floor: Vec::new(),
     };
     encode_restore_code(&code)
 }
@@ -431,6 +432,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         store_id,
         "device-late",
         BootstrapContext::Restore,
+        &[],
         &tables,
         &test_migrations(),
         &join_info,
@@ -588,6 +590,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         store_id,
         "device-b",
         BootstrapContext::Restore,
+        &[],
         &tables,
         &test_migrations(),
         &join_info,
@@ -701,6 +704,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         &test_migrations(),
         "B",
         None,
+        &chain.author_heads(),
         &storage,
         &boot.cursors,
         &lib_b,
@@ -726,6 +730,162 @@ async fn restore_pins_the_chain_founder_as_owner() {
         crate::sync::test_helpers::query_text(&db_b, &pinned_owner_sql).await,
         owner_pk,
         "restore must pin the chain founder's pubkey as the store owner",
+    );
+}
+
+/// Mirrors join_tests.rs's `a_fresh_joiner_refuses_a_rolled_back_membership_head`:
+/// a restore code seeds the same per-author watermark from its own floor.
+///
+/// Unlike join, restore's very first bootstrap pull (`open_db_and_pull`) itself
+/// still succeeds even against the rolled-back head: restore has no owner
+/// pinned yet at that point (`restore_pins_the_chain_founder_as_owner` above —
+/// it adopts the founder only *after* this first pull), so
+/// `load_cycle_membership` treats a failed chain load as the legitimate
+/// chain-less case and falls open for that one bootstrap cycle, the same
+/// trust-on-first-use the snapshot phase already documents. The seeded
+/// watermark still closes the window that matters: this bootstrap pins the
+/// founder from the raw listing (unaffected by which head the provider
+/// serves), so the very next sync cycle runs with a pinned owner and a seeded
+/// watermark, and refuses the still-rolled-back head — instead of silently
+/// treating the removed member as current forever, which is what an unseeded
+/// device would do.
+#[tokio::test]
+async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_from_its_next_sync_cycle() {
+    use crate::sync::membership::{entry_hash, AuthorHead, MemberRole, MembershipAction};
+
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+
+    let owner = UserKeypair::generate();
+    let member = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+
+    // Build the chain: found, add a member, then remove them — head at seq 3.
+    let mut chain = MembershipChain::new();
+    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = crate::sync::test_helpers::make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "0000000002000-0000-owner",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member.clone()).await;
+    let remove_member = crate::sync::test_helpers::make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Remove,
+        &member,
+        MemberRole::Member,
+        "0000000003000-0000-owner",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    // The restore code is minted right after the removal: its floor is the
+    // current (post-removal) chain state.
+    let membership_floor = chain.author_heads();
+    assert_eq!(
+        membership_floor,
+        vec![crate::sync::membership::MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 3,
+        }],
+    );
+
+    let db_owner = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_owner
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &storage,
+        "test-lib",
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db_owner.schema_version(),
+        &owner,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_owner,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    // The provider now serves the PRE-removal head — seq 2 — after the floor
+    // was minted from the post-removal state.
+    let stale_head = AuthorHead::signed(2, entry_hash(&add_member), &owner);
+    storage
+        .put_membership_head(&owner_pk, serde_json::to_vec(&stale_head).unwrap())
+        .await
+        .expect("provider serves the rolled-back head");
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
+        .await
+        .expect("B bootstrap");
+    open_db_and_pull(
+        &lib_b.db_path(),
+        &tables,
+        &test_migrations(),
+        "B",
+        None,
+        &membership_floor,
+        &storage,
+        &boot.cursors,
+        &lib_b,
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await
+    .expect("restore's own bootstrap pull is trust-on-first-use and completes");
+
+    let (db_b, _stamper) = Database::open(
+        &lib_b.db_path(),
+        tables.clone(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        "B".to_string(),
+        &test_migrations(),
+    )
+    .expect("open B db");
+
+    // The founder is now pinned (from the raw listing, unaffected by the
+    // rolled-back head) and the watermark was seeded before the pull. The very
+    // next sync cycle re-reads the pinned owner and must refuse the
+    // still-rolled-back head.
+    let b_hlc = Hlc::new("B".to_string());
+    let cipher_lock = RwLock::new(CloudCipher::Plaintext);
+    let result = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "B",
+        &b_hlc,
+        &SystemClock,
+        &db_b,
+        &cipher_lock,
+        &PendingRotation::none(),
+        &UserKeypair::generate(),
+        None,
+        &lib_b,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a restorer seeded from the restore code's floor must refuse the \
+         rolled-back head on its first real sync cycle, got {result:?}",
     );
 }
 
@@ -843,6 +1003,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         store_id,
         "device-b",
         BootstrapContext::Restore,
+        &[],
         &tables,
         &test_migrations(),
         &join_info,
