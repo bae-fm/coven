@@ -4,19 +4,11 @@
 //! [`KeyCustody::resolve`] turns it into the [`MasterKeyCustody`] trait object
 //! coven drives the rest of the sync engine through.
 
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
-
-use argon2::Argon2;
-use chacha20poly1305::aead::generic_array::GenericArray;
-use chacha20poly1305::aead::Aead;
-use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
+use std::sync::{Arc, RwLock};
 
 use crate::encryption::MasterKeyring;
+pub use crate::envelope::Passphrase;
+use crate::envelope::PassphraseVault;
 use crate::keys::{KeyError, MasterKeyCustody, StoreKeys};
 use crate::store_dir::StoreDir;
 
@@ -132,146 +124,26 @@ impl MasterKeyCustody for InMemoryCustody {
 // Passphrase preset
 // =============================================================================
 
-/// A memorized secret that wraps a store's master keyring under Argon2id.
-/// Held zeroizing — the whole struct is cleared on drop, so no copy of the
-/// passphrase outlives it.
-#[derive(ZeroizeOnDrop)]
-pub struct Passphrase(String);
-
-impl Passphrase {
-    pub fn new(secret: String) -> Self {
-        Self(secret)
-    }
-
-    fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-/// OWASP's current interactive Argon2id recommendation: 64 MiB memory, 3
-/// iterations, 4-way parallelism. `argon2::Params::m_cost` is in KiB.
-const ARGON2_M_COST_KIB: u32 = 64 * 1024;
-const ARGON2_T_COST: u32 = 3;
-const ARGON2_P_COST: u32 = 4;
-const ARGON2_OUTPUT_LEN: usize = 32;
-const SALT_LEN: usize = 16;
-const ENVELOPE_VERSION: u32 = 1;
-const ARGON2ID_ALGO: &str = "argon2id";
-
-/// The on-disk wrapped-keyring format: `<store_dir>/master.keyring`. The KDF
-/// params travel with the ciphertext so a future change to the module
-/// constants only affects new wraps — unlock always re-derives from what the
-/// file itself names, never from the current constants.
-#[derive(Serialize, Deserialize)]
-struct PassphraseEnvelope {
-    v: u32,
-    kdf: KdfParams,
-    nonce_b64: String,
-    ciphertext_b64: String,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct KdfParams {
-    algo: String,
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
-    salt_b64: String,
-}
-
-/// The Argon2id-derived wrapping key, cached after first use — Argon2id is
-/// deliberately slow, so this is paid once per [`PassphraseCustody`] instance
-/// (its "session"), not once per unlock/persist call. Zeroized on drop along
-/// with the salt/params it was derived from.
-#[derive(Clone, ZeroizeOnDrop)]
-struct CachedDerivation {
-    salt: Vec<u8>,
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
-    key: [u8; ARGON2_OUTPUT_LEN],
-}
-
-/// Argon2id over [`Passphrase`] wraps the master keyring; the wrapped blob is
-/// a JSON envelope in a file under the store directory, not a keyring entry —
-/// files have no Windows Credential Manager size cap, and a keyring that has
-/// rotated N times carries N generations.
+/// Argon2id over a [`Passphrase`] wraps the master keyring, via the shared
+/// [`PassphraseVault`] — the wrapped blob is a JSON envelope in a file under
+/// the store directory (`<store_dir>/master.keyring`), not a keyring entry.
 struct PassphraseCustody {
-    passphrase: Passphrase,
-    path: PathBuf,
-    derived: Mutex<Option<CachedDerivation>>,
+    vault: PassphraseVault,
 }
 
 impl PassphraseCustody {
     fn new(passphrase: Passphrase, store_dir: &StoreDir) -> Self {
         Self {
-            passphrase,
-            path: store_dir.join("master.keyring"),
-            derived: Mutex::new(None),
+            vault: PassphraseVault::new(passphrase, store_dir.join("master.keyring")),
         }
-    }
-
-    fn read_envelope(&self) -> Result<Option<PassphraseEnvelope>, KeyError> {
-        match std::fs::read(&self.path) {
-            Ok(bytes) => {
-                let envelope: PassphraseEnvelope = serde_json::from_slice(&bytes).map_err(|e| {
-                    KeyError::Persistence(format!("master keyring envelope is malformed: {e}"))
-                })?;
-                Ok(Some(envelope))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(KeyError::Persistence(format!(
-                "read master keyring file: {e}"
-            ))),
-        }
-    }
-
-    /// The wrapping key for this instance, deriving and caching it on first
-    /// use. The salt/params are fixed for the life of an established
-    /// wrapped file: read from the file if one exists (so a rotation re-wraps
-    /// under the same derivation, only a fresh AEAD nonce), or freshly
-    /// generated on the very first establishment.
-    fn derived_key(&self) -> Result<CachedDerivation, KeyError> {
-        if let Some(cached) = self.derived.lock().unwrap().clone() {
-            return Ok(cached);
-        }
-
-        let (salt, m_cost, t_cost, p_cost) = match self.read_envelope()? {
-            Some(envelope) => (
-                base64_decode(&envelope.kdf.salt_b64)?,
-                envelope.kdf.m_cost,
-                envelope.kdf.t_cost,
-                envelope.kdf.p_cost,
-            ),
-            None => {
-                let mut salt = vec![0u8; SALT_LEN];
-                rand::rng().fill_bytes(&mut salt);
-                (salt, ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST)
-            }
-        };
-
-        let key = derive_wrapping_key(self.passphrase.expose(), &salt, m_cost, t_cost, p_cost)?;
-        let cached = CachedDerivation {
-            salt,
-            m_cost,
-            t_cost,
-            p_cost,
-            key,
-        };
-        *self.derived.lock().unwrap() = Some(cached.clone());
-        Ok(cached)
     }
 }
 
 impl MasterKeyCustody for PassphraseCustody {
     fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
-        let Some(envelope) = self.read_envelope()? else {
+        let Some(plaintext) = self.vault.unlock()? else {
             return Ok(None);
         };
-        let derivation = self.derived_key()?;
-        let nonce = base64_decode(&envelope.nonce_b64)?;
-        let ciphertext = base64_decode(&envelope.ciphertext_b64)?;
-        let plaintext = open(&derivation.key, &nonce, &ciphertext)?;
         let serialized = String::from_utf8(plaintext)
             .map_err(|e| KeyError::Crypto(format!("decrypted master keyring is not UTF-8: {e}")))?;
         MasterKeyring::from_serialized(&serialized)
@@ -280,126 +152,12 @@ impl MasterKeyCustody for PassphraseCustody {
     }
 
     fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
-        let derivation = self.derived_key()?;
-        let (nonce, ciphertext) = seal(&derivation.key, keyring.to_serialized().as_bytes());
-        let envelope = PassphraseEnvelope {
-            v: ENVELOPE_VERSION,
-            kdf: KdfParams {
-                algo: ARGON2ID_ALGO.to_string(),
-                m_cost: derivation.m_cost,
-                t_cost: derivation.t_cost,
-                p_cost: derivation.p_cost,
-                salt_b64: base64_encode(&derivation.salt),
-            },
-            nonce_b64: base64_encode(&nonce),
-            ciphertext_b64: base64_encode(&ciphertext),
-        };
-        let bytes = serde_json::to_vec(&envelope).map_err(|e| {
-            KeyError::Persistence(format!("serialize master keyring envelope: {e}"))
-        })?;
-        write_atomic(&self.path, &bytes)
+        self.vault.persist(keyring.to_serialized().as_bytes())
     }
 
     fn forget(&self) -> Result<(), KeyError> {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(KeyError::Persistence(format!(
-                "remove master keyring file: {e}"
-            ))),
-        }
+        self.vault.forget()
     }
-}
-
-fn derive_wrapping_key(
-    passphrase: &str,
-    salt: &[u8],
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
-) -> Result<[u8; ARGON2_OUTPUT_LEN], KeyError> {
-    let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(ARGON2_OUTPUT_LEN))
-        .map_err(|e| KeyError::Crypto(format!("invalid argon2id params: {e}")))?;
-    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let mut out = [0u8; ARGON2_OUTPUT_LEN];
-    argon2
-        .hash_password_into(passphrase.as_bytes(), salt, &mut out)
-        .map_err(|e| KeyError::Crypto(format!("argon2id derivation failed: {e}")))?;
-    Ok(out)
-}
-
-fn seal(wrapping_key: &[u8; ARGON2_OUTPUT_LEN], plaintext: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(wrapping_key));
-    let mut nonce = vec![0u8; 24];
-    rand::rng().fill_bytes(&mut nonce);
-    let ciphertext = cipher
-        .encrypt(GenericArray::from_slice(&nonce), plaintext)
-        .expect("XChaCha20-Poly1305 encryption should not fail");
-    (nonce, ciphertext)
-}
-
-fn open(
-    wrapping_key: &[u8; ARGON2_OUTPUT_LEN],
-    nonce: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, KeyError> {
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(wrapping_key));
-    let nonce = GenericArray::from_slice(nonce);
-    cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        KeyError::Crypto(
-            "master keyring decryption failed: wrong passphrase or a corrupt file".to_string(),
-        )
-    })
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-fn base64_decode(s: &str) -> Result<Vec<u8>, KeyError> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(s)
-        .map_err(|e| KeyError::Persistence(format!("master keyring envelope base64: {e}")))
-}
-
-/// Write `bytes` to `path` atomically: a uniquely-named temp sibling, fsynced,
-/// then renamed over the destination — the same temp-then-rename discipline
-/// coven's blob store writes with, so a crash mid-write never leaves a torn
-/// `master.keyring`.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), KeyError> {
-    let parent = path.parent().ok_or_else(|| {
-        KeyError::Persistence(format!(
-            "master keyring path has no parent directory: {}",
-            path.display()
-        ))
-    })?;
-    std::fs::create_dir_all(parent)
-        .map_err(|e| KeyError::Persistence(format!("create master keyring directory: {e}")))?;
-    let temp_path = parent.join(format!(
-        "{}master.keyring.{}",
-        crate::local_blob::TEMP_BLOB_PREFIX,
-        uuid::Uuid::new_v4()
-    ));
-    let mut file = std::fs::File::create(&temp_path)
-        .map_err(|e| KeyError::Persistence(format!("write master keyring temp file: {e}")))?;
-    file.write_all(bytes)
-        .map_err(|e| KeyError::Persistence(format!("write master keyring temp file: {e}")))?;
-    file.sync_all()
-        .map_err(|e| KeyError::Persistence(format!("fsync master keyring temp file: {e}")))?;
-    drop(file);
-    std::fs::rename(&temp_path, path)
-        .map_err(|e| KeyError::Persistence(format!("install master keyring file: {e}")))?;
-    // fsync the parent directory so the rename that installed the keyring is
-    // itself durable — the same discipline coven's `sync_parent_dir` and
-    // coven-core's `local_blob::sync_parent_dir` keep, both of which propagate
-    // these errors rather than swallowing them.
-    std::fs::File::open(parent)
-        .map_err(|e| KeyError::Persistence(format!("open the parent dir to fsync it: {e}")))?
-        .sync_all()
-        .map_err(|e| KeyError::Persistence(format!("fsync the parent dir: {e}")))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -563,35 +321,9 @@ mod tests {
         assert!(custody.unlock().expect("unlock with no file").is_none());
     }
 
-    #[test]
-    fn passphrase_preset_rotation_re_wraps_and_old_passphrase_still_unlocks() {
-        let (_tmp, dir) = temp_store_dir();
-        let passphrase_text = "stable passphrase across rotation".to_string();
-        let custody = PassphraseCustody::new(Passphrase::new(passphrase_text.clone()), &dir);
-
-        let first = MasterKeyring::generate();
-        custody.persist(&first).expect("establish");
-        let file_after_first = std::fs::read(&custody.path).expect("read file after first persist");
-
-        let rotated = MasterKeyring::generate();
-        custody.persist(&rotated).expect("rotate");
-        let file_after_rotation =
-            std::fs::read(&custody.path).expect("read file after rotation persist");
-
-        assert_ne!(
-            file_after_first, file_after_rotation,
-            "the file changes after a rotation persist",
-        );
-
-        // A fresh custody instance over the same passphrase and file — proving
-        // the passphrase (not the process-cached derivation) is what unlocks.
-        let reopened = PassphraseCustody::new(Passphrase::new(passphrase_text), &dir);
-        let unlocked = reopened
-            .unlock()
-            .expect("unlock after rotation")
-            .expect("keyring present");
-        assert_eq!(unlocked.fingerprint(), rotated.fingerprint());
-    }
+    // Rotation re-wrap, atomic-write-no-torn-file, and wrong-derivation
+    // behavior are shared envelope-format guarantees, pinned generically once
+    // in `envelope.rs` rather than duplicated per payload type here.
 
     /// A literal v1 envelope, pinned here so a future change to the
     /// derivation, AEAD, or serialization code is caught by a failing test
@@ -623,34 +355,6 @@ mod tests {
         assert_eq!(
             keyring.fingerprint(),
             EncryptionService::from_key([0x11u8; 32]).fingerprint(),
-        );
-    }
-
-    #[test]
-    fn passphrase_preset_persist_over_an_existing_file_never_leaves_a_torn_file() {
-        let (_tmp, dir) = temp_store_dir();
-        let custody =
-            PassphraseCustody::new(Passphrase::new("atomic-write-test".to_string()), &dir);
-        custody
-            .persist(&MasterKeyring::generate())
-            .expect("first persist");
-        custody
-            .persist(&MasterKeyring::generate())
-            .expect("second persist over the existing file");
-
-        // The file is valid, complete JSON after two writes — never a
-        // half-written temp left in place of (or beside) the real file.
-        let bytes = std::fs::read(&custody.path).expect("read final file");
-        let _: PassphraseEnvelope =
-            serde_json::from_slice(&bytes).expect("the file is complete, parseable JSON");
-        let siblings: Vec<_> = std::fs::read_dir(&*dir)
-            .expect("read store dir")
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .filter(|name| name != "master.keyring")
-            .collect();
-        assert!(
-            siblings.is_empty(),
-            "no leftover temp file after a persist over an existing file: {siblings:?}",
         );
     }
 }
