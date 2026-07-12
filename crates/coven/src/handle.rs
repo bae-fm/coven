@@ -862,6 +862,15 @@ mod tests {
     }
 
     fn test_handle(store_id: &str, store_dir: StoreDir, db: Database) -> CovenHandle {
+        test_handle_with_custody(store_id, store_dir, db, test_key_custody())
+    }
+
+    fn test_handle_with_custody(
+        store_id: &str,
+        store_dir: StoreDir,
+        db: Database,
+        key_custody: Arc<dyn crate::keys::MasterKeyCustody>,
+    ) -> CovenHandle {
         let config = Config::with_defaults(
             store_id.to_string(),
             "test-device".to_string(),
@@ -879,7 +888,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new(store_id.to_string()),
-            test_key_custody(),
+            key_custody,
             Arc::new(SystemClock),
             None,
             None,
@@ -1145,6 +1154,100 @@ mod tests {
         );
     }
 
+    /// A read-only handle holds no sync loop, so every cloud-miss read builds
+    /// storage fresh from config via the `cipher: None` fallback
+    /// (`create_sync_storage_with_cloudkit` → `build_cloud_cipher`) — which
+    /// must resolve the same cipher a writer sealed under. Sealing directly
+    /// through storage built the identical way (bypassing the local-store
+    /// staging a `CovenHandle::write` would leave, which a same-store-dir
+    /// reader could serve from without ever touching the cloud) forces the
+    /// read through an actual cloud GET + decrypt.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let store_id = "ro-encrypted-custody-test";
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+
+        let mut config = Config::with_defaults(
+            store_id.to_string(),
+            "test-device".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
+        );
+        config.cloud_home.provider = Some(CloudProvider::CloudKit);
+        config.cloud_home.storage = HomeStorage::Opaque;
+
+        let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+        custody
+            .persist(&crate::encryption::MasterKeyring::generate())
+            .expect("establish a master key");
+
+        let ops = Arc::new(TestCloudKitOps::new());
+        let key_service = StoreKeys::new(store_id.to_string());
+
+        // Seal and upload directly through storage built the same way a
+        // production write path would build it — resolving the cipher from
+        // custody via the `cipher: None` fallback.
+        let writer_storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
+            &config,
+            &key_service,
+            custody.as_ref(),
+            None,
+            Arc::new(SystemClock),
+            Some(ops.clone()),
+        )
+        .await
+        .expect("build cloud storage resolving the cipher from custody");
+        let plaintext = b"encrypted-cloud-blob-for-the-read-only-handle".to_vec();
+        crate::sync::storage::SyncStorage::put_blob(
+            &writer_storage,
+            "images",
+            "cover-1",
+            BlobScope::Master,
+            None,
+            plaintext.clone(),
+        )
+        .await
+        .expect("seal and upload the blob");
+
+        plant_blob_row(&db, "cover-1", true, plaintext.len() as u64).await;
+
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let reader = crate::read_handle::CovenReadHandle::new(
+            db,
+            store_dir,
+            config_provider,
+            key_service,
+            custody,
+            Arc::new(SystemClock),
+            Some(ops),
+        );
+
+        let blob = BlobRef {
+            namespace: "images".to_string(),
+            id: "cover-1".to_string(),
+            scope: BlobScope::Master,
+            cloud_path: None,
+            provenance: Provenance::UserProvided,
+            fill: CacheFill::CacheLazy,
+        };
+        let read = reader
+            .read_blob(&blob)
+            .await
+            .expect("the read-only handle resolves the same cipher through custody");
+        assert_eq!(
+            read, plaintext,
+            "the blob decrypts back to its original plaintext",
+        );
+    }
+
     #[tokio::test]
     async fn sync_not_configured_is_typed() {
         let (_tmp, store_dir) = temp_store_dir();
@@ -1154,6 +1257,141 @@ mod tests {
         let result = handle.get_members().await;
 
         assert!(matches!(result, Err(SyncError::NotConfigured)));
+    }
+
+    /// `initialize_master_key` is the only place coven ever generates a
+    /// master key, and it refuses to run again once one is established —
+    /// coven never generates over an existing key.
+    #[tokio::test]
+    async fn initialize_master_key_refuses_a_second_call() {
+        test_keyring::install();
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve("lib-init-master-key-twice", &store_dir);
+        let handle = test_handle_with_custody("lib-init-master-key-twice", store_dir, db, custody);
+
+        let fingerprint = handle
+            .initialize_master_key()
+            .expect("the first call establishes a master key");
+        assert!(!fingerprint.is_empty());
+        assert_eq!(
+            handle.master_key_fingerprint().unwrap(),
+            Some(fingerprint),
+            "master_key_fingerprint reflects what initialize_master_key just established",
+        );
+
+        let error = handle
+            .initialize_master_key()
+            .expect_err("a second call must refuse rather than generate over an existing key");
+        assert!(matches!(
+            error,
+            crate::keys::MasterKeyError::AlreadyEstablished
+        ));
+    }
+
+    /// Once `initialize_master_key` establishes a key, the sync engine's
+    /// production cipher resolution (`SyncManager::start_sync`, reached
+    /// through `connect_sync`) unlocks it from the same custody rather than
+    /// refusing with `MasterKeyNotEstablished` — proven by getting past that
+    /// gate to the next real failure (no S3 bucket configured), not by a
+    /// live cloud connection.
+    #[tokio::test]
+    async fn initialize_master_key_establishes_a_key_connect_sync_can_use() {
+        test_keyring::install();
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let store_id = "lib-init-master-key-connect";
+        let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+        let mut config = Config::with_defaults(
+            store_id.to_string(),
+            "test-device".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
+        );
+        config.cloud_home.provider = Some(CloudProvider::S3);
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let handle = CovenHandle::new(
+            db.clone(),
+            db.clone(),
+            db.stamper(),
+            store_dir.clone(),
+            config_provider,
+            StoreKeys::new(store_id.to_string()),
+            custody,
+            Arc::new(SystemClock),
+            None,
+            None,
+            StoreOpenGuard::acquire_for_test(&store_dir),
+        );
+
+        handle
+            .initialize_master_key()
+            .expect("establish the master key before connecting");
+
+        let error = handle
+            .connect_sync()
+            .await
+            .expect_err("no S3 bucket is configured, so connect still fails");
+        assert!(
+            !matches!(error, SyncError::MasterKeyNotEstablished),
+            "connect_sync must get past the master-key gate once one is established, got {error:?}",
+        );
+    }
+
+    /// `import_master_key` accepts both formats `MasterKeyring::from_serialized`
+    /// does — the legacy 64-hex single key and the keyring JSON — and returns
+    /// the fingerprint of whichever generation it just established.
+    #[tokio::test]
+    async fn import_master_key_accepts_legacy_hex_and_keyring_json() {
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let handle = test_handle("lib-import-master-key", store_dir, db);
+
+        let raw_hex = hex::encode([0x22u8; 32]);
+        let hex_fingerprint = handle
+            .import_master_key(&raw_hex)
+            .expect("import the legacy raw-hex format");
+        assert_eq!(
+            hex_fingerprint,
+            EncryptionService::from_key([0x22u8; 32]).fingerprint(),
+        );
+        assert_eq!(
+            handle.master_key_fingerprint().unwrap(),
+            Some(hex_fingerprint),
+        );
+
+        let keyring = crate::encryption::MasterKeyring::generate();
+        let json_fingerprint = handle
+            .import_master_key(&keyring.to_serialized())
+            .expect("import the keyring JSON format");
+        assert_eq!(json_fingerprint, keyring.fingerprint());
+        assert_eq!(
+            handle.master_key_fingerprint().unwrap(),
+            Some(json_fingerprint),
+            "the second import replaces the first",
+        );
+    }
+
+    /// `forget_master_key` removes an established key, and is `Ok` whether or
+    /// not one was established — a host's lock/sign-out flow.
+    #[tokio::test]
+    async fn forget_master_key_clears_an_established_key_and_is_idempotent() {
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let handle = test_handle("lib-forget-master-key", store_dir, db);
+
+        assert!(handle.master_key_fingerprint().unwrap().is_some());
+        handle
+            .forget_master_key()
+            .expect("forget an established key");
+        assert!(handle.master_key_fingerprint().unwrap().is_none());
+        handle
+            .forget_master_key()
+            .expect("forgetting an already-absent key is not an error");
     }
 
     #[tokio::test]
