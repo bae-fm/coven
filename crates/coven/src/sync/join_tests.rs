@@ -444,11 +444,10 @@ impl crate::keys::MasterKeyCustody for RecordingCustody {
 
 /// Join's shared bootstrap (`bootstrap_and_save_store`'s step 7) persists the
 /// invite's unwrapped keyring through whatever custody the caller supplies —
-/// never the OS keyring directly. Drives the shared helper itself (the same
-/// unit `join_store` and `restore_from_cloud` both call, see the parallel
-/// restore-side tests in `restore_tests.rs`) with `BootstrapContext::Join`,
-/// so this pins the join-specific wiring without the invite/sealed-box dance
-/// `join_store` layers on top.
+/// never the OS keyring directly. Drives `bootstrap_and_save_store` itself —
+/// the shared unit both `join_store` and `restore_from_cloud` funnel through —
+/// with `BootstrapContext::Join`, so this pins the join-specific wiring without
+/// the invite/sealed-box dance `join_store` layers on top.
 #[tokio::test]
 async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the_os_keyring() {
     crate::keys::test_keyring::install();
