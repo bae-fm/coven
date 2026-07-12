@@ -521,7 +521,30 @@ pub async fn pull_changes(
                 break;
             }
 
-            // Schema version check: skip changesets from a newer schema.
+            // Signature check: reject changesets with invalid signatures. A bad
+            // signature is forged or corrupt; hold the cursor and stop this device
+            // stream at the bad seq so it surfaces as a bounded stall instead of
+            // silently suppressing the seq's data. This runs before the schema gate
+            // so that only an authentic envelope's schema_version steers control
+            // flow: a forged object with a large schema_version must surface as
+            // tamper, not be laundered into the benign skipped-schema count as
+            // routine version skew.
+            if !verify_changeset_signature(&env, &changeset_bytes) {
+                error!(
+                    device_id = %head.device_id,
+                    seq,
+                    "changeset has invalid signature; holding cursor for this device"
+                );
+                result.invalid_signatures.push(InvalidSignature {
+                    device_id: head.device_id.clone(),
+                    seq,
+                });
+                break;
+            }
+
+            // Schema version check: skip changesets from a newer schema. The
+            // envelope is authenticated above, so this schema_version is the one the
+            // author actually wrote against.
             if env.schema_version > db.schema_version() {
                 warn!(
                     device_id = %head.device_id,
@@ -539,23 +562,6 @@ pub async fn pull_changes(
                 // produced is at least this schema version too, so nothing after
                 // it could apply anyway, and leaving the cursor put makes the next
                 // cycle re-fetch from this seq once we've upgraded.
-                break;
-            }
-
-            // Signature check: reject changesets with invalid signatures. A bad
-            // signature is forged or corrupt; hold the cursor and stop this device
-            // stream at the bad seq so it surfaces as a bounded stall instead of
-            // silently suppressing the seq's data.
-            if !verify_changeset_signature(&env, &changeset_bytes) {
-                error!(
-                    device_id = %head.device_id,
-                    seq,
-                    "changeset has invalid signature; holding cursor for this device"
-                );
-                result.invalid_signatures.push(InvalidSignature {
-                    device_id: head.device_id.clone(),
-                    seq,
-                });
                 break;
             }
 

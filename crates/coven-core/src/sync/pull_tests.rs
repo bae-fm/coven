@@ -248,6 +248,103 @@ async fn pull_skips_changeset_from_newer_schema() {
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
 }
 
+/// The schema-version gate reads `env.schema_version` to classify a held stream
+/// as routine version skew (the peer upgraded past us), so it must run only on an
+/// authenticated envelope. A forged object carrying a large `schema_version` and
+/// an invalid signature must surface as tamper — an invalid signature — not be
+/// laundered into the benign `skipped_schema` count, where a host waits for an
+/// upgrade that will never resolve it while the real signal is never raised.
+#[tokio::test]
+async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
+    let storage = MockSyncStorage::new();
+    let forger = UserKeypair::generate();
+
+    // A changeset stamped one schema version above the local db, signed at its own
+    // position so the position check passes and the loop reaches the signature and
+    // schema checks.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'ForgedFuture', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "dev1",
+        1,
+        SCHEMA_VERSION + 1,
+        "",
+        "2026-03-01T00:01:00Z",
+        &forger,
+        None,
+        &cs,
+    );
+    // Corrupt the signature: a well-formed but never-verifying 64-byte Ed25519
+    // signature, leaving the rest of the envelope (including the newer
+    // schema_version) intact so the object reaches the signature and schema gates.
+    let (mut env, changeset_bytes) = envelope::unpack(&packed).unwrap();
+    env.signature = Some("0".repeat(128));
+    storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &changeset_bytes));
+
+    let db2 = open_test_db();
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    // Reported as tamper, not routine version skew: skipped_schema untouched.
+    assert_eq!(result.skipped_schema, 0);
+    assert_eq!(result.invalid_signatures.len(), 1);
+    assert_eq!(result.invalid_signatures[0].device_id, "dev1");
+    assert_eq!(result.invalid_signatures[0].seq, 1);
+    assert_eq!(result.changesets_applied, 0);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    // The cursor holds at the tampered object, the same as any invalid signature.
+    assert_eq!(updated.get("dev1"), None);
+}
+
+/// A genuine newer-schema changeset is signed, so verifying the signature before
+/// the schema gate does not change its handling: it still verifies, still counts
+/// as a schema skip, still holds the cursor, and applies once the local schema
+/// catches up. The reorder rejects only forgeries, never an authentic upgrade.
+#[tokio::test]
+async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
+    let storage = MockSyncStorage::new();
+    let author = UserKeypair::generate();
+
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'SignedFuture', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "dev1",
+        1,
+        SCHEMA_VERSION + 1,
+        "",
+        "2026-03-01T00:01:00Z",
+        &author,
+        None,
+        &cs,
+    );
+    storage.put_changeset_packed("dev1", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    assert_eq!(result.skipped_schema, 1);
+    assert!(result.invalid_signatures.is_empty());
+    assert_eq!(result.changesets_applied, 0);
+    // Held, not advanced: it becomes applicable once this app upgrades.
+    assert_eq!(updated.get("dev1"), None);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+}
+
 /// The pull gate compares an incoming changeset's `schema_version` against the
 /// opened db's [`Database::schema_version`], not a hand-bumped constant: a peer at
 /// version N applies a changeset stamped N and skips one stamped N+1 without
