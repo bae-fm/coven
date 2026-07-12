@@ -538,6 +538,33 @@ impl CovenHandle {
     }
 
     // =========================================================================
+    // Host secrets
+    // =========================================================================
+
+    /// Set a host's own store-scoped secret — an API token, a service
+    /// credential — under the same platform keyring, and the same access
+    /// policy, as coven's own key material. `name` identifies the secret
+    /// within the store; coven owns the account rendering and the entry's
+    /// protection class. [`KeyError::InvalidSecretName`] if `name` collides
+    /// with one of coven's own reserved slot names, is empty, or contains
+    /// `:`.
+    pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
+        self.key_service.set_host_secret(name, value)
+    }
+
+    /// Read a host secret set by [`set_host_secret`](Self::set_host_secret),
+    /// `None` if never set. A present-but-empty entry is corrupt, not
+    /// absent — the same discipline coven's own key reads apply.
+    pub fn host_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
+        self.key_service.get_host_secret(name)
+    }
+
+    /// Remove a host secret. `Ok` whether or not one was set.
+    pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError> {
+        self.key_service.delete_host_secret(name)
+    }
+
+    // =========================================================================
     // App-data sealing
     // =========================================================================
 
@@ -1562,6 +1589,45 @@ mod tests {
         handle
             .forget_master_key()
             .expect("forgetting an already-absent key is not an error");
+    }
+
+    // =========================================================================
+    // Host secrets
+    // =========================================================================
+
+    /// The host-facing round trip: `set_host_secret` / `host_secret` /
+    /// `delete_host_secret` through the handle, with an absent secret
+    /// reading `None` both before it's ever set and after it's deleted.
+    #[tokio::test]
+    async fn host_secret_round_trips_through_the_handle() {
+        test_keyring::install();
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let handle = test_handle("lib-host-secret-round-trip", store_dir, db);
+
+        assert_eq!(
+            handle.host_secret("discogs_api_key").expect("get"),
+            None,
+            "an unset host secret reads as absent",
+        );
+
+        handle
+            .set_host_secret("discogs_api_key", "the-discogs-key")
+            .expect("set");
+        assert_eq!(
+            handle.host_secret("discogs_api_key").expect("get"),
+            Some("the-discogs-key".to_string()),
+        );
+
+        handle
+            .delete_host_secret("discogs_api_key")
+            .expect("delete");
+        assert_eq!(
+            handle
+                .host_secret("discogs_api_key")
+                .expect("get after delete"),
+            None,
+        );
     }
 
     // =========================================================================

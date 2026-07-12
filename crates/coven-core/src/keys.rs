@@ -39,6 +39,8 @@ pub enum KeyError {
         existing_pubkey_hex: String,
         imported_pubkey_hex: String,
     },
+    #[error("invalid host secret name {name:?}: {reason}")]
+    InvalidSecretName { name: String, reason: String },
 }
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.
