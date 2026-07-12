@@ -2,9 +2,12 @@ use std::sync::{Arc, OnceLock};
 
 use tracing::info;
 
+// The key types re-exported at the crate root (see lib.rs) stay public;
+// `public_key_hex` and the SIGN_*BYTES constants are used only within coven, so
+// they stay crate-internal.
+pub(crate) use coven_core::keys::{public_key_hex, SIGN_PUBLICKEYBYTES, SIGN_SECRETKEYBYTES};
 pub use coven_core::keys::{
-    public_key_hex, CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody,
-    UserKeypair, SIGN_PUBLICKEYBYTES, SIGN_SECRETKEYBYTES,
+    CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, UserKeypair,
 };
 
 /// Why a [`CovenHandle`](crate::CovenHandle) master-key lifecycle call

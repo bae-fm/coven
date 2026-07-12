@@ -45,7 +45,7 @@ fn graph_email(user: GraphUser) -> Result<String, CloudHomeError> {
     })
 }
 
-pub async fn fetch_google(tokens: &OAuthTokens) -> Result<String, CloudHomeError> {
+pub(crate) async fn fetch_google(tokens: &OAuthTokens) -> Result<String, CloudHomeError> {
     let resp = reqwest::Client::new()
         .get("https://www.googleapis.com/oauth2/v3/userinfo")
         .bearer_auth(&tokens.access_token)
@@ -57,7 +57,7 @@ pub async fn fetch_google(tokens: &OAuthTokens) -> Result<String, CloudHomeError
     Ok(info.email)
 }
 
-pub async fn fetch_dropbox(tokens: &OAuthTokens) -> Result<String, CloudHomeError> {
+pub(crate) async fn fetch_dropbox(tokens: &OAuthTokens) -> Result<String, CloudHomeError> {
     // This endpoint takes no arguments; Dropbox requires a literal `null` JSON body.
     let resp = reqwest::Client::new()
         .post("https://api.dropboxapi.com/2/users/get_current_account")
@@ -71,7 +71,7 @@ pub async fn fetch_dropbox(tokens: &OAuthTokens) -> Result<String, CloudHomeErro
     Ok(account.email)
 }
 
-pub async fn fetch_onedrive(tokens: &OAuthTokens) -> Result<String, CloudHomeError> {
+pub(crate) async fn fetch_onedrive(tokens: &OAuthTokens) -> Result<String, CloudHomeError> {
     let resp = reqwest::Client::new()
         .get("https://graph.microsoft.com/v1.0/me")
         .bearer_auth(&tokens.access_token)

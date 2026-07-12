@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::envelope::PassphraseVault;
 use crate::keys::{DeviceIdentityCustody, KeyError, KeyringSlot, UserKeypair, SIGN_SECRETKEYBYTES};
 
-pub use crate::envelope::Passphrase;
+pub(crate) use crate::envelope::Passphrase;
 
 /// How the device's signing identity is protected. Registered once via
 /// [`crate::set_identity_custody`]; unregistered defaults to

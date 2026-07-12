@@ -109,7 +109,7 @@ pub(super) fn folder_search_query(folder_name: &str) -> String {
 }
 
 /// Google Drive cloud home backend.
-pub struct GoogleDriveCloudHome {
+pub(crate) struct GoogleDriveCloudHome {
     folder_id: String,
     session: OAuthSession,
 }
@@ -127,7 +127,7 @@ struct CreatedDriveFile {
 }
 
 impl GoogleDriveCloudHome {
-    pub fn new(
+    pub(crate) fn new(
         folder_id: String,
         tokens: OAuthTokens,
         key_service: StoreKeys,
@@ -141,7 +141,7 @@ impl GoogleDriveCloudHome {
         })
     }
 
-    pub fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
+    pub(crate) fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
         let creds = crate::oauth::oauth_client_creds("google_drive")?;
         Ok(OAuthConfig {
             client_id: creds.client_id,

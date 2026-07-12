@@ -21,7 +21,7 @@ pub enum StorageError {
 }
 
 /// Progress callback type: (bytes_written, total_bytes)
-pub type ProgressCallback = Box<dyn Fn(usize, usize) + Send + Sync>;
+pub(super) type ProgressCallback = Box<dyn Fn(usize, usize) + Send + Sync>;
 
 /// Storage implementation for managed local storage.
 ///

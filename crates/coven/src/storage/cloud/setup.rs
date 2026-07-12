@@ -402,7 +402,7 @@ pub enum StorageSetupError {
     NoEncryptionKey,
 }
 
-pub fn build_cloud_cipher(
+pub(crate) fn build_cloud_cipher(
     config: &Config,
     custody: &dyn MasterKeyCustody,
 ) -> Result<CloudCipher, StorageSetupError> {
@@ -425,7 +425,7 @@ pub fn build_cloud_cipher(
 /// storage share one instance for in-place key rotation); when `None` it is
 /// built from config via [`build_cloud_cipher`].
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn create_sync_storage_with_cloudkit(
+pub(crate) async fn create_sync_storage_with_cloudkit(
     config: &Config,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
@@ -443,7 +443,7 @@ pub async fn create_sync_storage_with_cloudkit(
 /// cloud credentials (the home is already built) — only custody, for the
 /// `cipher = None` fallback's master-key read.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn create_sync_storage_with_home(
+pub(crate) fn create_sync_storage_with_home(
     config: &Config,
     custody: &dyn MasterKeyCustody,
     home: Arc<dyn super::CloudHome>,

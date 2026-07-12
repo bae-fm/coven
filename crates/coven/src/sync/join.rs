@@ -378,7 +378,7 @@ pub async fn join_from_invite_code(
 ///
 /// `on_status` is called with progress messages for UI feedback.
 #[allow(clippy::too_many_arguments)]
-pub async fn join_store(
+pub(crate) async fn join_store(
     layout: &StoreLayout,
     code: InviteCode,
     synced_tables: &[SyncedTable],

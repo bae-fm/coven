@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use super::CloudHomeError;
 
 /// How a provider signals "absent key" on a non-success response.
-pub enum NotFound {
+pub(super) enum NotFound {
     /// HTTP 404 (Google Drive, OneDrive, S3).
     Status,
     /// A specific status whose body contains a marker — Dropbox returns 409 with
@@ -28,7 +28,7 @@ pub enum NotFound {
 /// the operation (e.g. `"read heads/dev1.json"`). The one definition of the
 /// `let status = resp.status(); if !status.is_success() { … }` block that was
 /// copied ~30× across the OAuth backends.
-pub async fn ensure_ok(
+pub(super) async fn ensure_ok(
     resp: Response,
     ctx: &str,
     not_found: NotFound,
@@ -60,7 +60,7 @@ pub async fn ensure_ok(
 }
 
 /// Read a successful response's body into bytes. `ctx` names what is being read.
-pub async fn ok_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, CloudHomeError> {
+pub(super) async fn ok_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, CloudHomeError> {
     resp.bytes()
         .await
         .map(|b| b.to_vec())
@@ -69,7 +69,10 @@ pub async fn ok_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, CloudHomeErr
 
 /// Read a successful response's body and parse it as JSON. `ctx` names what is
 /// being parsed.
-pub async fn ok_json<T: DeserializeOwned>(resp: Response, ctx: &str) -> Result<T, CloudHomeError> {
+pub(super) async fn ok_json<T: DeserializeOwned>(
+    resp: Response,
+    ctx: &str,
+) -> Result<T, CloudHomeError> {
     let body = resp
         .text()
         .await
@@ -83,7 +86,7 @@ pub async fn ok_json<T: DeserializeOwned>(resp: Response, ctx: &str) -> Result<T
 /// session, then `None`. This is the one definition of the skip-non-JSON +
 /// debug-log + extract structure each backend's `parse_*_error` repeated; the
 /// caller supplies only where its provider keeps the reason.
-pub fn error_reason(
+pub(super) fn error_reason(
     body: &str,
     extract: impl Fn(&serde_json::Value) -> Option<String>,
 ) -> Option<String> {
@@ -100,7 +103,7 @@ pub fn error_reason(
 /// folds into a placeholder so the status still surfaces. This is the single
 /// definition of the `<body read failed>` fallback that was copied across every
 /// backend's error path.
-pub async fn body_text(resp: Response) -> String {
+pub(super) async fn body_text(resp: Response) -> String {
     resp.text()
         .await
         .unwrap_or_else(|e| format!("<body read failed: {e}>"))
@@ -111,7 +114,7 @@ pub async fn body_text(resp: Response) -> String {
 /// definition of the `match ensure_ok(..) { Ok => true, NotFound => false, Err =>
 /// err }` three-arm match each `exists` repeated. The caller still builds and
 /// sends its own (GET vs metadata POST) request.
-pub async fn exists_from_response(
+pub(super) async fn exists_from_response(
     resp: Response,
     ctx: &str,
     not_found: NotFound,
@@ -127,6 +130,6 @@ pub async fn exists_from_response(
 /// `bytes {start}-{end}/{total}` (both bounds inclusive). The single definition of
 /// the string Google Drive and OneDrive each formatted by hand in their upload
 /// loops.
-pub fn range_content_header(start: u64, end: u64, total: u64) -> String {
+pub(super) fn range_content_header(start: u64, end: u64, total: u64) -> String {
     format!("bytes {start}-{end}/{total}")
 }

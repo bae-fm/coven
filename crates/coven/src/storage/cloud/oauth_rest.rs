@@ -15,7 +15,7 @@ use super::CloudHomeError;
 
 /// One page of a listing: the keys it yielded (already decoded and prefix-filtered)
 /// and the cursor to fetch the next page, present only when more pages remain.
-pub struct ListPage {
+pub(super) struct ListPage {
     pub keys: Vec<String>,
     pub next: Option<String>,
 }
@@ -25,7 +25,7 @@ pub struct ListPage {
 /// the 401 retry happen in one place) and returns the raw response for the shared
 /// status handling.
 #[async_trait]
-pub trait OAuthRestHome: Send + Sync {
+pub(super) trait OAuthRestHome: Send + Sync {
     /// How this provider signals an absent key (HTTP 404, or Dropbox's 409 +
     /// `not_found` body).
     fn not_found(&self) -> NotFound;
@@ -56,7 +56,7 @@ pub trait OAuthRestHome: Send + Sync {
 }
 
 /// Read the full contents of `key`.
-pub async fn rest_read<T: OAuthRestHome + ?Sized>(
+pub(super) async fn rest_read<T: OAuthRestHome + ?Sized>(
     home: &T,
     key: &str,
 ) -> Result<Vec<u8>, CloudHomeError> {
@@ -66,7 +66,7 @@ pub async fn rest_read<T: OAuthRestHome + ?Sized>(
 }
 
 /// Read the `[start, end)` byte range of `key`.
-pub async fn rest_read_range<T: OAuthRestHome + ?Sized>(
+pub(super) async fn rest_read_range<T: OAuthRestHome + ?Sized>(
     home: &T,
     key: &str,
     start: u64,
@@ -89,7 +89,7 @@ pub async fn rest_read_range<T: OAuthRestHome + ?Sized>(
 }
 
 /// Delete `key`; an absent key is success.
-pub async fn rest_delete<T: OAuthRestHome + ?Sized>(
+pub(super) async fn rest_delete<T: OAuthRestHome + ?Sized>(
     home: &T,
     key: &str,
 ) -> Result<(), CloudHomeError> {
@@ -109,7 +109,7 @@ pub async fn rest_delete<T: OAuthRestHome + ?Sized>(
 /// A not-found on a continuation page is a truncated listing — an expired cursor
 /// or a transient 404 mid-pagination — and propagates as an error, since the keys
 /// collected so far are not the complete result the caller would read them as.
-pub async fn rest_list<T: OAuthRestHome + ?Sized>(
+pub(super) async fn rest_list<T: OAuthRestHome + ?Sized>(
     home: &T,
     prefix: &str,
 ) -> Result<Vec<String>, CloudHomeError> {

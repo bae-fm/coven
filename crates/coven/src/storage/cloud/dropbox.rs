@@ -29,14 +29,14 @@ const API_BASE: &str = "https://api.dropboxapi.com/2";
 const CONTENT_BASE: &str = "https://content.dropboxapi.com/2";
 
 /// Dropbox cloud home backend.
-pub struct DropboxCloudHome {
+pub(crate) struct DropboxCloudHome {
     /// Folder path in Dropbox, e.g. "/Apps/your-app/my-store"
     folder_path: String,
     session: OAuthSession,
 }
 
 impl DropboxCloudHome {
-    pub fn new(
+    pub(crate) fn new(
         folder_path: String,
         tokens: OAuthTokens,
         key_service: StoreKeys,
@@ -60,7 +60,7 @@ impl DropboxCloudHome {
         }
     }
 
-    pub fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
+    pub(crate) fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
         let creds = crate::oauth::oauth_client_creds("dropbox")?;
         Ok(OAuthConfig {
             client_id: creds.client_id,

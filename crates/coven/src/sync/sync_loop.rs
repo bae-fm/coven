@@ -75,7 +75,7 @@ pub enum SyncLoopStatus {
 }
 
 /// Manages the background sync loop and provides access to sync components.
-pub struct SyncLoopHandle {
+pub(crate) struct SyncLoopHandle {
     inner: Arc<SyncLoopInner>,
     clock: ClockRef,
     store_dir: StoreDir,
@@ -160,7 +160,7 @@ impl SyncLoopHandle {
     /// Everything the loop holds is `Send`; database access goes through async
     /// calls on the [`Database`] handle, so nothing here is bound to this thread
     /// except by choice of stack size.
-    pub fn start(&self) -> Result<(), SyncLoopError> {
+    pub(crate) fn start(&self) -> Result<(), SyncLoopError> {
         if self.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
@@ -284,12 +284,12 @@ impl SyncLoopHandle {
     }
 
     /// Whether the background sync thread is running.
-    pub fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
 
     /// Request loop shutdown and join the sync thread.
-    pub fn stop(&self) -> Result<(), SyncLoopError> {
+    pub(crate) fn stop(&self) -> Result<(), SyncLoopError> {
         let handle = {
             let mut guard = self.thread_handle.lock().unwrap();
             if guard.is_none() && !self.running.load(Ordering::Acquire) {
@@ -317,7 +317,7 @@ impl SyncLoopHandle {
     /// `Full` means a trigger is already pending — our request collapses into the
     /// existing one, which is exactly what the capacity-1 channel is for.
     /// `Closed` means the loop is gone, so the trigger is moot.
-    pub fn trigger(&self) {
+    pub(crate) fn trigger(&self) {
         match self.trigger_tx.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => {}
             Err(TrySendError::Closed(())) => {
@@ -328,19 +328,19 @@ impl SyncLoopHandle {
 
     // -- Accessors for membership operations --
 
-    pub fn storage(&self) -> &Arc<CloudSyncStorage> {
+    pub(crate) fn storage(&self) -> &Arc<CloudSyncStorage> {
         &self.inner.storage
     }
 
-    pub fn user_keypair(&self) -> &UserKeypair {
+    pub(crate) fn user_keypair(&self) -> &UserKeypair {
         &self.inner.user_keypair
     }
 
-    pub fn hlc(&self) -> &Arc<Hlc> {
+    pub(crate) fn hlc(&self) -> &Arc<Hlc> {
         &self.inner.hlc
     }
 
-    pub fn cipher(&self) -> &Arc<std::sync::RwLock<CloudCipher>> {
+    pub(crate) fn cipher(&self) -> &Arc<std::sync::RwLock<CloudCipher>> {
         &self.inner.cipher
     }
 }

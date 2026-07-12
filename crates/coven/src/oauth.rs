@@ -23,7 +23,7 @@ use tracing::{info, warn};
 /// OAuth provider configuration.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 #[derive(Clone, Debug)]
-pub struct OAuthConfig {
+pub(crate) struct OAuthConfig {
     pub client_id: String,
     /// None for public clients (PKCE-only, no client secret needed).
     pub client_secret: Option<String>,
@@ -98,7 +98,9 @@ pub enum OAuthClientCredsError {
 /// The credentials registered for a provider. `Err` when the host never ran
 /// [`set_oauth_client_creds`], or ran it without an entry for this provider.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-pub fn oauth_client_creds(provider: &str) -> Result<OAuthClientCreds, OAuthClientCredsError> {
+pub(crate) fn oauth_client_creds(
+    provider: &str,
+) -> Result<OAuthClientCreds, OAuthClientCredsError> {
     let registered = OAUTH_CLIENT_CREDS
         .get()
         .ok_or(OAuthClientCredsError::NotRegistered)?;
@@ -324,7 +326,7 @@ async fn post_token_request(
 
 /// Generate a random PKCE code verifier (43-128 URL-safe characters).
 #[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
-pub fn generate_code_verifier() -> String {
+pub(crate) fn generate_code_verifier() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
@@ -332,7 +334,7 @@ pub fn generate_code_verifier() -> String {
 
 /// Compute the S256 PKCE code challenge from a verifier.
 #[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
-pub fn code_challenge(verifier: &str) -> String {
+pub(crate) fn code_challenge(verifier: &str) -> String {
     let hash = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(hash)
 }
@@ -364,7 +366,7 @@ impl AuthorizeRequest {
 /// same `redirect_uri` and returned request. [`authorize`] is this plus coven's
 /// localhost callback server for desktop.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-pub fn build_authorize_url(
+pub(crate) fn build_authorize_url(
     config: &OAuthConfig,
     redirect_uri: &str,
 ) -> Result<AuthorizeRequest, OAuthError> {
@@ -446,7 +448,7 @@ fn verify_callback_state(callback_state: Option<&str>, expected_state: &str) -> 
 /// [`build_authorize_url`] + [`exchange_authorize_request`] pair. Also gated on
 /// `oauth-providers` (it pulls in `open`).
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-pub async fn authorize(
+pub(crate) async fn authorize(
     config: &OAuthConfig,
     cancel: tokio::sync::watch::Receiver<bool>,
     clock: &dyn crate::clock::Clock,
@@ -600,7 +602,7 @@ async fn exchange_code(
 /// Verify the callback state from an [`AuthorizeRequest`] and exchange its code
 /// for tokens.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-pub async fn exchange_authorize_request(
+pub(crate) async fn exchange_authorize_request(
     config: &OAuthConfig,
     code: &str,
     callback_state: Option<&str>,
@@ -614,7 +616,7 @@ pub async fn exchange_authorize_request(
 
 /// Refresh an expired access token using a refresh token.
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
-pub async fn refresh(
+pub(crate) async fn refresh(
     config: &OAuthConfig,
     refresh_token: &str,
     clock: &dyn crate::clock::Clock,

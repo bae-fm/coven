@@ -30,7 +30,7 @@ use crate::sync::cycle::{InitSyncError, SyncComponents};
 use crate::sync::hlc::Hlc;
 /// `MemberInfo` lives next to `MemberRole` in the membership module; coven's
 /// public path reaches it through here (re-exported from `lib.rs`).
-pub use crate::sync::membership::MemberInfo;
+pub(crate) use crate::sync::membership::MemberInfo;
 use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
@@ -38,7 +38,7 @@ use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 /// Supplies the host's current config on demand. coven reads it fresh each call
 /// — never snapshotting or writing it — so a host with reactive config sees
 /// changes without rebuilding the manager.
-pub type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
+pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -84,7 +84,7 @@ fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<EncryptionServ
 /// it per [`start_sync`](Self::start_sync) call, chosen from the home's
 /// [`HomeStorage`](crate::config::HomeStorage) — custody is consulted only on
 /// an opaque home, never a browsable one.
-pub struct SyncManager {
+pub(crate) struct SyncManager {
     config_provider: ConfigProvider,
     key_service: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
@@ -152,11 +152,11 @@ impl SyncManager {
         }
     }
 
-    pub fn cloud_home(&self) -> Option<Arc<dyn CloudHome>> {
+    pub(crate) fn cloud_home(&self) -> Option<Arc<dyn CloudHome>> {
         self.cloud_home.read().unwrap().clone()
     }
 
-    pub fn sync_loop_handle(&self) -> Option<Arc<SyncLoopHandle>> {
+    pub(crate) fn sync_loop_handle(&self) -> Option<Arc<SyncLoopHandle>> {
         self.sync_loop_handle.read().unwrap().clone()
     }
 
@@ -190,7 +190,7 @@ impl SyncManager {
     /// that *fails* (missing credentials, a bad provider config) is an `Err`, not
     /// "no provider connected": the caller must not install a manager that reports
     /// success with nothing started.
-    pub async fn start_sync(&self) -> Result<(), SyncError> {
+    pub(crate) async fn start_sync(&self) -> Result<(), SyncError> {
         let config = (self.config_provider)();
 
         if config.cloud_home.provider.is_none() {
@@ -304,7 +304,7 @@ impl SyncManager {
     /// [`sync_loop_handle`](Self::sync_loop_handle)`().storage()`, so the handle's
     /// read path serves blobs over the same injected home with no separate hook.
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn start_sync_with_home(
+    pub(crate) async fn start_sync_with_home(
         &self,
         home: std::sync::Arc<dyn CloudHome>,
         cipher: CloudCipher,
@@ -347,7 +347,7 @@ impl SyncManager {
     /// opaque home with no key established fails [`SyncError::MasterKeyNotEstablished`]
     /// before the loop starts.
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn start_sync_with_test_home_custody(
+    pub(crate) async fn start_sync_with_test_home_custody(
         &self,
         home: std::sync::Arc<dyn CloudHome>,
     ) -> Result<(), SyncError> {
@@ -357,7 +357,7 @@ impl SyncManager {
     }
 
     /// Tear down the sync loop and cloud home.
-    pub fn stop_sync(&self) -> Result<(), SyncError> {
+    pub(crate) fn stop_sync(&self) -> Result<(), SyncError> {
         let stop_result = self.stop_current_loop();
         *self.sync_loop_handle.write().unwrap() = None;
         *self.cloud_home.write().unwrap() = None;
@@ -392,7 +392,7 @@ impl SyncManager {
     // Status / config queries
     // =========================================================================
 
-    pub fn is_sync_ready(&self) -> bool {
+    pub(crate) fn is_sync_ready(&self) -> bool {
         self.sync_loop_handle
             .read()
             .unwrap()
@@ -400,7 +400,7 @@ impl SyncManager {
             .is_some_and(|h| h.is_running())
     }
 
-    pub fn trigger_sync(&self) {
+    pub(crate) fn trigger_sync(&self) {
         if let Some(ref sync_loop) = *self.sync_loop_handle.read().unwrap() {
             sync_loop.trigger();
         }
@@ -424,7 +424,7 @@ impl SyncManager {
     /// the cycle's inline push uploads the root's host-provided blobs, and
     /// `on_root_made_remote` fires. `pin` keeps the uploaded blobs in coven's cache
     /// as pinned (offline) copies.
-    pub async fn make_remote(
+    pub(crate) async fn make_remote(
         &self,
         root_table: &str,
         root_id: &str,
@@ -471,7 +471,7 @@ impl SyncManager {
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent
     /// and pending uploads and tombstone any blob that already landed. The gate never
     /// flips, so the root stays Local.
-    pub async fn cancel_make_remote(
+    pub(crate) async fn cancel_make_remote(
         &self,
         root_table: &str,
         root_id: &str,
@@ -502,7 +502,7 @@ impl SyncManager {
     /// before the commit (the root stays Remote). `dest` carries user-provided ids
     /// only. Per-blob materialize progress and the completion event reach the
     /// observer this manager was built with.
-    pub async fn make_local(
+    pub(crate) async fn make_local(
         &self,
         root_table: &str,
         root_id: &str,
@@ -542,7 +542,7 @@ impl SyncManager {
     // Membership
     // =========================================================================
 
-    pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
+    pub(crate) async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
         let config = (self.config_provider)();
         if config.cloud_home.provider.is_none() {
             info!("get_members: sync not configured; returning no members");
@@ -588,7 +588,7 @@ impl SyncManager {
         .map_err(SyncError::Membership)
     }
 
-    pub async fn invite_member(
+    pub(crate) async fn invite_member(
         &self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
@@ -631,7 +631,7 @@ impl SyncManager {
         Ok(crate::join_code::encode(&invite_code))
     }
 
-    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
+    pub(crate) async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
         let sync_loop = self
             .sync_loop_handle
             .read()

@@ -27,14 +27,14 @@ use crate::oauth::{OAuthConfig, OAuthTokens};
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 
 /// OneDrive cloud home backend.
-pub struct OneDriveCloudHome {
+pub(crate) struct OneDriveCloudHome {
     drive_id: String,
     folder_id: String,
     session: OAuthSession,
 }
 
 impl OneDriveCloudHome {
-    pub fn new(
+    pub(crate) fn new(
         drive_id: String,
         folder_id: String,
         tokens: OAuthTokens,
@@ -50,7 +50,7 @@ impl OneDriveCloudHome {
         })
     }
 
-    pub fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
+    pub(crate) fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
         let creds = crate::oauth::oauth_client_creds("onedrive")?;
         Ok(OAuthConfig {
             client_id: creds.client_id,

@@ -61,7 +61,7 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
 /// Owns a provider's OAuth tokens (refreshing them as needed) and the
 /// `reqwest::Client` its requests go out on — every OAuth backend shared the same
 /// client field and token lifecycle, so both live here once.
-pub struct OAuthSession {
+pub(crate) struct OAuthSession {
     client: reqwest::Client,
     tokens: RwLock<OAuthTokens>,
     key_service: StoreKeys,
@@ -73,7 +73,7 @@ pub struct OAuthSession {
 }
 
 impl OAuthSession {
-    pub fn new(
+    pub(crate) fn new(
         tokens: OAuthTokens,
         key_service: StoreKeys,
         clock: ClockRef,
@@ -92,7 +92,7 @@ impl OAuthSession {
     }
 
     /// The shared HTTP client requests go out on.
-    pub fn client(&self) -> &reqwest::Client {
+    pub(crate) fn client(&self) -> &reqwest::Client {
         &self.client
     }
 
@@ -190,7 +190,10 @@ impl OAuthSession {
     /// success mutates non-idempotent server state (resumable upload parts) must
     /// not come through here; see
     /// [`api_call_no_transient_retry`](Self::api_call_no_transient_retry).
-    pub async fn api_call<F>(&self, build_request: F) -> Result<reqwest::Response, CloudHomeError>
+    pub(crate) async fn api_call<F>(
+        &self,
+        build_request: F,
+    ) -> Result<reqwest::Response, CloudHomeError>
     where
         F: Fn(&str) -> reqwest::RequestBuilder,
     {
@@ -220,7 +223,7 @@ impl OAuthSession {
     /// response collides with that advanced offset; the recovery is to re-run the
     /// whole upload from the source, which the blob engine does when this call's
     /// error surfaces. Still refreshes and retries once on a 401.
-    pub async fn api_call_no_transient_retry<F>(
+    pub(crate) async fn api_call_no_transient_retry<F>(
         &self,
         build_request: F,
     ) -> Result<reqwest::Response, CloudHomeError>

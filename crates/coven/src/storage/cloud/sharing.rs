@@ -18,7 +18,7 @@ use super::CloudHomeError;
 /// id; `next_page` extracts the next permissions URL from a page. A member with
 /// no matching permission is an error (nothing to revoke); a 404 on the delete
 /// is success (already gone).
-pub async fn revoke_by_email(
+pub(super) async fn revoke_by_email(
     session: &OAuthSession,
     member_id: &str,
     list_url: &str,

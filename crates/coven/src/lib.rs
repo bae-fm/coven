@@ -22,34 +22,34 @@ pub(crate) mod keys;
 pub(crate) mod oauth;
 
 pub(crate) mod blob {
-    pub use coven_core::blob::*;
-    pub mod transition {
+    pub(crate) use coven_core::blob::*;
+    pub(crate) mod transition {
         pub use coven_core::blob::transition::*;
     }
 }
 
 pub(crate) mod clock {
-    pub use coven_core::clock::*;
+    pub(crate) use coven_core::clock::*;
 }
 
 pub(crate) mod config {
-    pub use coven_core::config::*;
+    pub(crate) use coven_core::config::*;
 }
 
 pub(crate) mod database {
-    pub use coven_core::database::*;
+    pub(crate) use coven_core::database::*;
 }
 
 pub(crate) mod encryption {
-    pub use coven_core::encryption::*;
+    pub(crate) use coven_core::encryption::*;
 }
 
 pub(crate) mod id_provider {
-    pub use coven_core::id_provider::*;
+    pub(crate) use coven_core::id_provider::*;
 }
 
 pub(crate) mod join_code {
-    pub use coven_core::join_code::*;
+    pub(crate) use coven_core::join_code::*;
 
     /// Build a join request, signed by this device's signing identity.
     /// Deliberately get-or-create, not a query: requesting an invite IS a
@@ -93,34 +93,34 @@ pub async fn fetch_account_email(
 }
 
 pub(crate) mod store_dir {
-    pub use coven_core::store_dir::*;
+    pub(crate) use coven_core::store_dir::*;
 }
 
 mod local_blob_backend;
 
 pub(crate) mod local_blob {
-    pub use coven_core::local_blob::*;
+    pub(crate) use coven_core::local_blob::*;
 }
 
 pub(crate) mod migration {
-    pub use coven_core::migration::*;
+    pub(crate) use coven_core::migration::*;
 }
 
 pub(crate) mod storage {
-    pub mod cloud {
-        pub use coven_core::storage::cloud::*;
+    pub(crate) mod cloud {
+        pub(crate) use coven_core::storage::cloud::*;
 
-        pub mod s3_common {
-            pub use coven_core::storage::cloud::s3_common::*;
+        pub(crate) mod s3_common {
+            pub(crate) use coven_core::storage::cloud::s3_common::*;
         }
 
         #[cfg(feature = "oauth-providers")]
-        pub mod account_email;
-        pub mod cloudkit;
+        pub(crate) mod account_email;
+        pub(crate) mod cloudkit;
         #[cfg(feature = "oauth-providers")]
-        pub mod dropbox;
+        pub(crate) mod dropbox;
         #[cfg(feature = "oauth-providers")]
-        pub mod google_drive;
+        pub(crate) mod google_drive;
         #[cfg(feature = "oauth-providers")]
         mod http;
         #[cfg(feature = "oauth-providers")]
@@ -128,13 +128,13 @@ pub(crate) mod storage {
         #[cfg(feature = "oauth-providers")]
         mod oauth_rest;
         #[cfg(feature = "oauth-providers")]
-        pub mod oauth_session;
+        pub(crate) mod oauth_session;
         #[cfg(feature = "oauth-providers")]
-        pub mod onedrive;
+        pub(crate) mod onedrive;
         #[cfg(feature = "oauth-providers")]
         mod resumable;
-        pub mod s3;
-        pub mod setup;
+        pub(crate) mod s3;
+        pub(crate) mod setup;
         #[cfg(feature = "oauth-providers")]
         mod sharing;
 
@@ -176,7 +176,7 @@ pub(crate) mod storage {
             create_cloud_home_with_cloudkit(config, key_service, clock, None).await
         }
 
-        pub async fn create_cloud_home_with_cloudkit(
+        pub(crate) async fn create_cloud_home_with_cloudkit(
             config: &crate::config::Config,
             key_service: &crate::keys::StoreKeys,
             clock: crate::clock::ClockRef,
@@ -499,20 +499,20 @@ pub(crate) mod storage {
         }
     }
 
-    pub mod local;
+    pub(crate) mod local;
 }
 
 pub(crate) mod sync {
-    pub use coven_core::sync::*;
+    pub(crate) use coven_core::sync::*;
 
-    pub mod join;
+    pub(crate) mod join;
     #[cfg(test)]
     mod join_tests;
-    pub mod restore;
+    pub(crate) mod restore;
     #[cfg(test)]
     mod restore_tests;
-    pub mod sync_loop;
-    pub mod sync_manager;
+    pub(crate) mod sync_loop;
+    pub(crate) mod sync_manager;
 }
 
 mod coven;

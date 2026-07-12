@@ -64,18 +64,18 @@ pub struct CloudKitShare {
 }
 
 /// CloudKit-backed cloud home with automatic chunking for large files.
-pub struct CloudKitCloudHome {
+pub(crate) struct CloudKitCloudHome {
     ops: Arc<dyn CloudKitOps>,
     ids: IdRef,
     scope: CloudKitScope,
 }
 
 impl CloudKitCloudHome {
-    pub fn new_private(ops: Arc<dyn CloudKitOps>) -> Self {
+    pub(crate) fn new_private(ops: Arc<dyn CloudKitOps>) -> Self {
         Self::new_private_with_ids(ops, Arc::new(UuidProvider))
     }
 
-    pub fn new_private_with_ids(ops: Arc<dyn CloudKitOps>, ids: IdRef) -> Self {
+    pub(crate) fn new_private_with_ids(ops: Arc<dyn CloudKitOps>, ids: IdRef) -> Self {
         Self {
             ops,
             ids,
@@ -83,11 +83,15 @@ impl CloudKitCloudHome {
         }
     }
 
-    pub fn new_shared(ops: Arc<dyn CloudKitOps>, owner_name: String, zone_name: String) -> Self {
+    pub(crate) fn new_shared(
+        ops: Arc<dyn CloudKitOps>,
+        owner_name: String,
+        zone_name: String,
+    ) -> Self {
         Self::new_shared_with_ids(ops, Arc::new(UuidProvider), owner_name, zone_name)
     }
 
-    pub fn new_shared_with_ids(
+    pub(crate) fn new_shared_with_ids(
         ops: Arc<dyn CloudKitOps>,
         ids: IdRef,
         owner_name: String,
@@ -104,7 +108,7 @@ impl CloudKitCloudHome {
     }
 }
 
-pub async fn accept_share(
+pub(crate) async fn accept_share(
     ops: Arc<dyn CloudKitOps>,
     share_url: String,
 ) -> Result<CloudKitShare, CloudHomeError> {

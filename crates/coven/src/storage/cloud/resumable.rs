@@ -16,12 +16,12 @@ use super::CloudHomeError;
 
 /// Maps a non-success upload response `(status, body)` to a `CloudHomeError` —
 /// the per-provider quota/error classifier.
-pub type ClassifyWrite = Box<dyn Fn(StatusCode, &str) -> CloudHomeError + Send + Sync>;
+pub(super) type ClassifyWrite = Box<dyn Fn(StatusCode, &str) -> CloudHomeError + Send + Sync>;
 
 /// A [`PartSink`](super::PartSink) over a resumable upload session: each part is a
 /// `Content-Range` PUT to the pre-authenticated `session_url` (no bearer token),
 /// the last of which commits the file. `finish` is a no-op.
-pub struct RangePutSink {
+pub(super) struct RangePutSink {
     client: reqwest::Client,
     session_url: String,
     /// The accepted non-final status (Drive `308`, OneDrive `202`).
@@ -34,7 +34,7 @@ pub struct RangePutSink {
 }
 
 impl RangePutSink {
-    pub fn new(
+    pub(super) fn new(
         client: reqwest::Client,
         session_url: String,
         intermediate_status: u16,

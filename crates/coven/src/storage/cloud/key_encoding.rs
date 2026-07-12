@@ -8,7 +8,7 @@ use std::fmt;
 use tracing::warn;
 
 #[derive(Debug)]
-pub enum DecodeKeyError {
+pub(super) enum DecodeKeyError {
     Hex(hex::FromHexError),
     Utf8(std::string::FromUtf8Error),
 }
@@ -25,17 +25,17 @@ impl fmt::Display for DecodeKeyError {
 impl std::error::Error for DecodeKeyError {}
 
 /// `changes/dev1/42.enc` -> `6368616e6765732f646576312f34322e656e63`.
-pub fn encode_key(key: &str) -> String {
+pub(super) fn encode_key(key: &str) -> String {
     hex::encode(key.as_bytes())
 }
 
 /// `6368616e6765732f646576312f34322e656e63` -> `changes/dev1/42.enc`.
-pub fn decode_key(filename: &str) -> Result<String, DecodeKeyError> {
+pub(super) fn decode_key(filename: &str) -> Result<String, DecodeKeyError> {
     let bytes = hex::decode(filename).map_err(DecodeKeyError::Hex)?;
     String::from_utf8(bytes).map_err(DecodeKeyError::Utf8)
 }
 
-pub fn decode_listed_key(provider: &str, filename: &str) -> Option<String> {
+pub(super) fn decode_listed_key(provider: &str, filename: &str) -> Option<String> {
     match decode_key(filename) {
         Ok(decoded) => Some(decoded),
         Err(e) => {
