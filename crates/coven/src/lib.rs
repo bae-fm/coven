@@ -552,8 +552,11 @@ pub use coven_core::{ChangeOp, RowChange};
 // `CHUNK_SIZE`), and the store directory and its host-configurable layout,
 // the DB error. `MasterKeyring` is the master-key custody value type — the
 // payload `KeyCustody::InMemory` takes and `import_master_key`/
-// `initialize_master_key` traffic in internally.
-pub use coven_core::{DbError, EncryptionError, MasterKeyring, StoreDir, StoreLayout, CHUNK_SIZE};
+// `initialize_master_key` traffic in internally. `SealError` is what
+// `CovenHandle::seal_app_data` / `open_app_data` return.
+pub use coven_core::{
+    DbError, EncryptionError, MasterKeyring, SealError, StoreDir, StoreLayout, CHUNK_SIZE,
+};
 
 // `EncryptionService` is the cipher coven builds internally from whatever
 // custody supplies; a production host never constructs one. It stays

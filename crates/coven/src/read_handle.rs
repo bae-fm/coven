@@ -28,6 +28,7 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::{CovenError, CovenResult};
 use crate::database::Database;
+use crate::encryption::SealError;
 use crate::keys::{MasterKeyCustody, StoreKeys};
 use crate::store_dir::StoreDir;
 use crate::sync::storage::SyncStorage;
@@ -177,6 +178,22 @@ impl CovenReadHandle {
             len,
         )
         .await
+    }
+
+    /// Open a payload
+    /// [`CovenHandle::seal_app_data`](crate::CovenHandle::seal_app_data) produced,
+    /// resolving the store's master keyring through this handle's custody. The read
+    /// side of app-data sealing: a secondary reader opens what the writer sealed,
+    /// under whichever generation the payload names.
+    ///
+    /// There is no seal counterpart here — sealing writes new ciphertext, which is
+    /// the writer's job; this handle only reads.
+    ///
+    /// [`SealError::Locked`] if the store is locked; a wrong `aad`, a tampered
+    /// payload, an unreadable version, or a generation this store's keyring lacks
+    /// each surface their own typed error.
+    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
+        crate::handle::app_data_cipher(self.key_custody.as_ref())?.open_app_data(sealed, aad)
     }
 
     /// Whether every blob in `blobs` is pinned for offline — present in coven's kept

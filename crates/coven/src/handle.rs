@@ -41,7 +41,7 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::StoreOpenGuard;
 use crate::database::Database;
-use crate::encryption::MasterKeyring;
+use crate::encryption::{EncryptionService, MasterKeyring, SealError};
 use crate::keys::{DeviceKeys, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
@@ -64,6 +64,23 @@ impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
     fn from(e: crate::storage::cloud::setup::StorageSetupError) -> Self {
         BlobCacheError::StorageSetup(e.to_string())
     }
+}
+
+/// The cipher a store's app-data sealing runs under, resolved from `custody`.
+///
+/// A store whose custody unlocks `None` has no key to seal under or open with,
+/// which is [`SealError::Locked`] — the same discipline the sync engine's cipher
+/// resolution keeps, where an opaque home with no established key refuses to
+/// start rather than inventing one.
+///
+/// Shared by [`CovenHandle`] and [`CovenReadHandle`](crate::CovenReadHandle) so
+/// both resolve the identical keyring the identical way; a payload one seals, the
+/// other opens.
+pub(crate) fn app_data_cipher(
+    custody: &dyn MasterKeyCustody,
+) -> Result<EncryptionService, SealError> {
+    let keyring = custody.unlock()?.ok_or(SealError::Locked)?;
+    Ok(EncryptionService::from(keyring))
 }
 
 /// The native handle over one coven store.
@@ -504,6 +521,39 @@ impl CovenHandle {
     /// representable).
     pub fn master_key_fingerprint(&self) -> Result<Option<String>, KeyError> {
         Ok(self.key_custody.unlock()?.map(|k| k.fingerprint()))
+    }
+
+    // =========================================================================
+    // App-data sealing
+    // =========================================================================
+
+    /// Seal `plaintext` under the store's current master-key generation, for a
+    /// host to store in its own rows — a password entry's payload, an API token.
+    /// coven's at-rest encryption is cloud-side; the local database is plaintext
+    /// SQLite, so a host with a secret to keep in a row seals it here first.
+    ///
+    /// The output records the generation it was sealed under, so it stays
+    /// openable after any number of key rotations. `aad` binds the ciphertext to
+    /// its context — the owning row's primary key, say — and
+    /// [`open_app_data`](Self::open_app_data) with a different `aad` fails, so a
+    /// payload moved to another row does not silently open there.
+    ///
+    /// [`SealError::Locked`] if the store has no established master key, the same
+    /// gate [`connect_sync`](Self::connect_sync) applies before it seals cloud
+    /// traffic.
+    pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
+        Ok(app_data_cipher(self.key_custody.as_ref())?.seal_app_data(plaintext, aad))
+    }
+
+    /// Open a payload [`seal_app_data`](Self::seal_app_data) produced, under
+    /// whichever generation it names — a rotated keyring still opens everything
+    /// it sealed before rotating.
+    ///
+    /// [`SealError::Locked`] if the store is locked; a wrong `aad`, a tampered
+    /// payload, an unreadable version, or a generation this store's keyring lacks
+    /// each surface their own typed error.
+    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
+        app_data_cipher(self.key_custody.as_ref())?.open_app_data(sealed, aad)
     }
 
     // =========================================================================
@@ -1498,6 +1548,133 @@ mod tests {
         handle
             .forget_master_key()
             .expect("forgetting an already-absent key is not an error");
+    }
+
+    // =========================================================================
+    // App-data sealing
+    // =========================================================================
+
+    /// The host-facing round trip over a keyring-custody store: what the handle
+    /// seals under the store's established master key, the same handle opens —
+    /// and a payload presented with a different `aad` than it was bound to does
+    /// not open, so a value lifted into another row stays shut.
+    #[tokio::test]
+    async fn seal_and_open_app_data_round_trip_through_the_handle() {
+        test_keyring::install();
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let store_id = "lib-app-data-round-trip";
+        let handle = test_handle_with_custody(
+            store_id,
+            store_dir.clone(),
+            db,
+            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+        );
+        handle
+            .initialize_master_key()
+            .expect("establish the store's master key");
+
+        let sealed = handle
+            .seal_app_data(b"entry-secret", b"row-42")
+            .expect("seal under the established key");
+        assert_ne!(
+            sealed, b"entry-secret",
+            "the sealed payload is not the plaintext",
+        );
+
+        assert_eq!(
+            handle.open_app_data(&sealed, b"row-42").unwrap(),
+            b"entry-secret",
+            "the handle opens what it sealed",
+        );
+
+        let error = handle
+            .open_app_data(&sealed, b"row-99")
+            .expect_err("a different aad must not open the payload");
+        assert!(matches!(error, SealError::Crypto(_)), "{error:?}");
+    }
+
+    /// A read-only handle over the same store opens what the writer sealed: it
+    /// resolves the same master keyring through its own custody (the same
+    /// `store_id` keyring account), so a secondary reader — a File Provider
+    /// extension, a second process — reads the host's sealed rows.
+    #[tokio::test]
+    async fn open_app_data_round_trips_through_the_read_handle() {
+        test_keyring::install();
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let store_id = "lib-app-data-read-handle";
+
+        let writer = test_handle_with_custody(
+            store_id,
+            store_dir.clone(),
+            db.clone(),
+            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+        );
+        writer
+            .initialize_master_key()
+            .expect("establish the store's master key");
+        let sealed = writer
+            .seal_app_data(b"read-me-back", b"ctx")
+            .expect("seal through the write handle");
+
+        let config_provider: ConfigProvider = {
+            let config = Config::with_defaults(
+                store_id.to_string(),
+                "test-device".to_string(),
+                store_dir.clone(),
+                "Test Store".to_string(),
+            );
+            Arc::new(move || config.clone())
+        };
+        let reader = crate::read_handle::CovenReadHandle::new(
+            db,
+            store_dir.clone(),
+            config_provider,
+            StoreKeys::new(store_id.to_string()),
+            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+            Arc::new(SystemClock),
+            None,
+        );
+
+        assert_eq!(
+            reader.open_app_data(&sealed, b"ctx").unwrap(),
+            b"read-me-back",
+            "the read handle opens what the write handle sealed",
+        );
+    }
+
+    /// A store whose custody holds no master key has nothing to seal under and
+    /// nothing to open with. Both directions refuse with `Locked` rather than
+    /// inventing a key — the app-data counterpart of the sync engine's
+    /// `MasterKeyNotEstablished` gate. Here the store is genuinely never
+    /// initialized: a real keyring custody whose account holds no key.
+    #[tokio::test]
+    async fn app_data_is_locked_when_no_master_key_is_established() {
+        test_keyring::install();
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let store_id = "lib-app-data-locked";
+        let handle = test_handle_with_custody(
+            store_id,
+            store_dir.clone(),
+            db,
+            crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+        );
+        assert!(
+            handle.master_key_fingerprint().unwrap().is_none(),
+            "the store starts with no established master key",
+        );
+
+        let seal_error = handle
+            .seal_app_data(b"nothing to seal under", b"ctx")
+            .expect_err("sealing a locked store must refuse");
+        assert!(matches!(seal_error, SealError::Locked), "{seal_error:?}");
+
+        let open_error = handle
+            .open_app_data(b"nothing to open with", b"ctx")
+            .expect_err("opening on a locked store must refuse");
+        assert!(matches!(open_error, SealError::Locked), "{open_error:?}");
     }
 
     #[tokio::test]
