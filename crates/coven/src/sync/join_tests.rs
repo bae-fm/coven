@@ -18,7 +18,7 @@ use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
 use crate::join_code::{encode, InviteCode, JoinCodeError};
-use crate::keys::UserKeypair;
+use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
@@ -410,6 +410,206 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
         std::fs::read(&blob_path).expect("existing blob still present"),
         b"existing-blob-bytes",
         "the existing blob must be left untouched",
+    );
+}
+
+/// A recording [`MasterKeyCustody`] for tests that must observe what join
+/// hands custody, distinct from what actually lands in the OS keyring.
+#[derive(Default)]
+struct RecordingCustody {
+    persisted: std::sync::Mutex<Option<crate::encryption::MasterKeyring>>,
+    forgotten: std::sync::atomic::AtomicBool,
+}
+
+impl crate::keys::MasterKeyCustody for RecordingCustody {
+    fn unlock(&self) -> Result<Option<crate::encryption::MasterKeyring>, crate::keys::KeyError> {
+        Ok(self.persisted.lock().unwrap().clone())
+    }
+
+    fn persist(
+        &self,
+        keyring: &crate::encryption::MasterKeyring,
+    ) -> Result<(), crate::keys::KeyError> {
+        *self.persisted.lock().unwrap() = Some(keyring.clone());
+        Ok(())
+    }
+
+    fn forget(&self) -> Result<(), crate::keys::KeyError> {
+        self.forgotten
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.persisted.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
+/// Join's shared bootstrap (`bootstrap_and_save_store`'s step 7) persists the
+/// invite's unwrapped keyring through whatever custody the caller supplies —
+/// never the OS keyring directly. Drives the shared helper itself (the same
+/// unit `join_store` and `restore_from_cloud` both call, see the parallel
+/// restore-side tests in `restore_tests.rs`) with `BootstrapContext::Join`,
+/// so this pins the join-specific wiring without the invite/sealed-box dance
+/// `join_store` layers on top.
+#[tokio::test]
+async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the_os_keyring() {
+    crate::keys::test_keyring::install();
+
+    let store_id = "join-custody-recording-test";
+    let cloud = crate::InMemoryCloudHome::new();
+    let owner_keypair = UserKeypair::generate();
+    let master_key = crate::encryption::MasterKeyring::generate();
+    let cipher = CloudCipher::Encrypted(master_key.clone().into());
+    let blob_paths =
+        crate::sync::cloud_storage::BlobPathScheme::for_storage(crate::config::HomeStorage::Opaque);
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        owner_keypair.clone(),
+    );
+
+    // `BootstrapContext::Join` pins the owner before the pull, so
+    // `bootstrap_from_snapshot`'s authorization check needs a real,
+    // owner-anchored chain — a founder entry, published and headed.
+    let owner_pk = crate::sync::test_helpers::pubkey_hex(&owner_keypair);
+    let mut chain = crate::sync::membership::MembershipChain::new();
+    let founder = crate::sync::test_helpers::founder_entry(&owner_keypair, "0000000001000-0000-A");
+    chain
+        .add_entry_at(
+            crate::sync::membership::MembershipCoord {
+                author_pubkey: owner_pk.clone(),
+                seq: 1,
+            },
+            founder.clone(),
+        )
+        .expect("valid founder entry");
+    crate::sync::storage::SyncStorage::put_membership_entry(
+        &owner_storage,
+        &owner_pk,
+        1,
+        serde_json::to_vec(&founder).expect("serialize founder entry"),
+    )
+    .await
+    .expect("upload founder entry");
+    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
+        .await
+        .expect("publish founder membership head");
+
+    let tables = test_synced_tables();
+    let db = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("create owner snapshot");
+    push_snapshot(
+        &owner_storage,
+        store_id,
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db.schema_version(),
+        &owner_keypair,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    let joiner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        UserKeypair::generate(),
+    );
+    let (_tmp_b, store_dir) = temp_store_dir();
+    let store_keys = crate::keys::StoreKeys::new(store_id.to_string());
+    let custody = Arc::new(RecordingCustody::default());
+    let join_info = CloudHomeJoinInfo::CloudKit;
+
+    crate::sync::join::bootstrap_and_save_store(
+        &joiner_storage,
+        &cipher,
+        Some(&master_key),
+        &store_dir,
+        store_id,
+        "device-b",
+        crate::sync::join::BootstrapContext::Join {
+            owner_pubkey: &owner_pk,
+        },
+        &tables,
+        &test_migrations(),
+        &join_info,
+        "Joined Store",
+        &store_keys,
+        custody.as_ref(),
+        &|_status: &str| {},
+        &never_cancelled(),
+    )
+    .await
+    .expect("join bootstrap persists the unwrapped keyring");
+
+    assert_eq!(
+        custody.unlock().unwrap().map(|k| k.fingerprint()),
+        Some(master_key.fingerprint()),
+        "the unwrapped keyring reached custody's persist",
+    );
+    assert_eq!(
+        store_keys
+            .get_encryption_key()
+            .expect("read the OS keyring"),
+        None,
+        "the OS keyring is never touched when the host selects a different custody",
+    );
+}
+
+/// A join that fails after custody already holds the unwrapped keyring rolls
+/// it back — `cleanup_after_bootstrap_failure` calls `forget` on whatever
+/// custody the host selected, not just the OS keyring's delete.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn join_failure_calls_forget_on_the_selected_custody() {
+    crate::keys::test_keyring::install();
+    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
+
+    let encoded = encode(&invite_code_with_store_id("join-custody-forget-test"));
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+    let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
+    let custody = Arc::new(RecordingCustody::default());
+
+    let result = join_from_invite_code(
+        &encoded,
+        &crate::store_dir::StoreLayout::new(app_dir),
+        &test_synced_tables(),
+        &test_migrations(),
+        crate::custody::KeyCustody::Custom(custody.clone()),
+        None,
+        None,
+        Arc::new(SystemClock),
+        ids,
+        |_| {},
+        &never_cancelled(),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::Invite(_))),
+        "the bogus cloud endpoint must fail the join at the cloud read, got {result:?}",
+    );
+    assert!(
+        custody.forgotten.load(std::sync::atomic::Ordering::SeqCst),
+        "a failed join must call forget on the host-selected custody",
     );
 }
 
