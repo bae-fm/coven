@@ -15,6 +15,7 @@
 //! let _ = coven::sync::sync_manager::SyncManager::start_sync;
 //! ```
 
+pub(crate) mod custody;
 pub(crate) mod keys;
 pub(crate) mod oauth;
 
@@ -547,11 +548,19 @@ pub use coven_core::{
 // Applied-sync change notification.
 pub use coven_core::{ChangeOp, RowChange};
 
-// At-rest crypto the host configures, the store directory and its
-// host-configurable layout, the DB error.
-pub use coven_core::{
-    DbError, EncryptionError, EncryptionService, StoreDir, StoreLayout, CHUNK_SIZE,
-};
+// At-rest crypto the host configures (the host sizes cloud stream reads from
+// `CHUNK_SIZE`), and the store directory and its host-configurable layout,
+// the DB error. `MasterKeyring` is the master-key custody value type — the
+// payload `KeyCustody::InMemory` takes and `import_master_key`/
+// `initialize_master_key` traffic in internally.
+pub use coven_core::{DbError, EncryptionError, MasterKeyring, StoreDir, StoreLayout, CHUNK_SIZE};
+
+// `EncryptionService` is the cipher coven builds internally from whatever
+// custody supplies; a production host never constructs one. It stays
+// reachable for host integration tests, which build a `CloudCipher` directly
+// to drive `CovenHandle::connect_sync_with_test_home`.
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_core::EncryptionService;
 
 // The register clock vocabulary carried on every synced row.
 pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
@@ -564,11 +573,16 @@ pub use coven_core::{Clock, ClockRef, IdProvider, IdRef, SystemClock, UuidProvid
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_core::{FixedClock, SequentialIdProvider, SteppingClock};
 
-// Bootstrap decoders and the cloud at-rest cipher.
+// Bootstrap decoders.
 pub use coven_core::{
-    decode_invite_code_info, decode_join_request, decode_restore_code_info, CloudCipher,
-    JoinCodeError,
+    decode_invite_code_info, decode_join_request, decode_restore_code_info, JoinCodeError,
 };
+
+// The cloud at-rest cipher. coven resolves it from custody internally; a
+// production host never names it. Host integration tests build one directly
+// to drive `CovenHandle::connect_sync_with_test_home`.
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_core::CloudCipher;
 
 // Cloud provider trait surface a provider implementor needs, the thread-safety
 // floor those traits carry, and the pull-result rejection reports.
@@ -593,10 +607,11 @@ pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
 // --- Native additions and native-only re-exports. ---
 
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
+pub use custody::{KeyCustody, Passphrase};
 pub use join_code::generate_join_request;
 pub use keys::{
     keyring_service, set_keyring_service, CloudHomeCredentials, DeviceKeys, KeyError,
-    KeyPersistence, StoreKeys, UserKeypair,
+    MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,
 };
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;
