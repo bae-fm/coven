@@ -649,8 +649,16 @@ pub use sync::sync_manager::SyncError;
 #[cfg(feature = "oauth-providers")]
 pub use oauth::{
     authorize_provider, build_authorize_request_for_provider, exchange_code_for_provider,
-    OAuthClientCredsError, OAuthError,
+    OAuthClientCredsError,
 };
+
+// `OAuthError` is compiled wherever the token-refresh path is — which includes a
+// test build with no `oauth-providers` feature, since refreshing is not the
+// interactive sign-in the feature gates. Its re-export carries the same cfg, so
+// the type is reachable from the crate root exactly where it exists; gating it on
+// the feature alone left it `pub` but unreachable, which `unreachable_pub` denies.
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+pub use oauth::OAuthError;
 
 #[cfg(feature = "oauth-providers")]
 pub use storage::cloud::setup::{sign_in_dropbox, sign_in_google_drive, sign_in_onedrive};
