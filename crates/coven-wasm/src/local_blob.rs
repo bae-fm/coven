@@ -255,7 +255,7 @@ mod imp {
 
     /// wasm incremental reader: a held-open OPFS sync-access handle read at a
     /// running offset. The handle locks the file, so it is closed on drop.
-    pub struct PlaintextReader {
+    pub(super) struct PlaintextReader {
         sah: FileSystemSyncAccessHandle,
         offset: u64,
         path: std::path::PathBuf,
@@ -268,7 +268,7 @@ mod imp {
     }
 
     impl PlaintextReader {
-        pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+        pub(super) async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
             let mut buf = vec![0u8; max];
             let mut filled = 0usize;
             while filled < max {
@@ -296,7 +296,7 @@ mod imp {
         }
     }
 
-    pub async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
+    pub(super) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
         let fh = file_handle(path, false)
             .await
             .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
@@ -308,7 +308,7 @@ mod imp {
         })
     }
 
-    pub async fn file_len(path: &Path) -> Result<u64, String> {
+    pub(super) async fn file_len(path: &Path) -> Result<u64, String> {
         let fh = file_handle(path, false)
             .await
             .map_err(|e| e.into_message(&format!("local blob {}", path.display())))?;
@@ -320,12 +320,12 @@ mod imp {
         size.map(|s| s as u64)
     }
 
-    pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+    pub(super) async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
         let mut source = open_reader(src).await?;
         write_stream_atomic(dst, &mut source).await.map(|_| ())
     }
 
-    pub async fn write_stream_atomic(
+    pub(super) async fn write_stream_atomic(
         path: &Path,
         source: &mut dyn PlatformPlaintextReader,
     ) -> Result<u64, String> {
@@ -349,7 +349,7 @@ mod imp {
         }
     }
 
-    pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
+    pub(super) async fn read(path: &Path) -> Result<Vec<u8>, String> {
         // A read of a missing file is an error too, so not-found folds into the
         // message the same as any other failure.
         let fh = file_handle(path, false)
@@ -378,7 +378,7 @@ mod imp {
         Ok(buf)
     }
 
-    pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    pub(super) async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
         if len == 0 {
             return Ok(Vec::new());
         }
@@ -421,7 +421,7 @@ mod imp {
         Ok(buf)
     }
 
-    pub async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    pub(super) async fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         // `create = true`, so a component is created rather than reported missing —
         // not-found can't arise here, but fold it into a message for completeness.
         let fh = file_handle(path, true)
@@ -489,7 +489,7 @@ mod imp {
         Ok(offset)
     }
 
-    pub async fn exists(path: &Path) -> Result<bool, String> {
+    pub(super) async fn exists(path: &Path) -> Result<bool, String> {
         match file_handle(path, false).await {
             Ok(_) => Ok(true),
             Err(HandleError::NotFound) => Ok(false),
@@ -499,7 +499,7 @@ mod imp {
 
     /// OPFS has no cross-file rename to build a temp→rename write from, so the
     /// wasm backend uses the same sync-access-handle write path as [`write`].
-    pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    pub(super) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         write(path, bytes).await
     }
 
@@ -508,7 +508,7 @@ mod imp {
     /// both places — but every blob the cache moves is re-fetchable from the cloud
     /// and a read checks both folders, so a transient duplicate is benign because
     /// either folder serves the same bytes.
-    pub async fn rename(from: &Path, to: &Path) -> Result<(), String> {
+    pub(super) async fn rename(from: &Path, to: &Path) -> Result<(), String> {
         copy_atomic(from, to).await?;
 
         // The destination now holds the bytes; drop the original. (`remove_file`
@@ -518,11 +518,11 @@ mod imp {
         Ok(())
     }
 
-    pub async fn remove_file(path: &Path) -> Result<bool, String> {
+    pub(super) async fn remove_file(path: &Path) -> Result<bool, String> {
         remove_entry(path, false).await
     }
 
-    pub async fn remove_dir_all(path: &Path) -> Result<bool, String> {
+    pub(super) async fn remove_dir_all(path: &Path) -> Result<bool, String> {
         remove_entry(path, true).await
     }
 
@@ -562,7 +562,7 @@ mod imp {
         }
     }
 
-    pub async fn create_dir_all(path: &Path) -> Result<(), String> {
+    pub(super) async fn create_dir_all(path: &Path) -> Result<(), String> {
         // `create = true`, so every component is made rather than reported missing —
         // not-found can't arise, but fold it into a message for completeness.
         dir_handle(path, true)
@@ -571,7 +571,7 @@ mod imp {
             .map_err(|e| e.into_message(&format!("OPFS create dir tree {}", path.display())))
     }
 
-    pub async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
+    pub(super) async fn walk_files(dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
         // An absent root directory means nothing has been cached yet — an empty
         // result.
         let start = match dir_handle(dir, false).await {
