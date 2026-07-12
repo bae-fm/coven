@@ -155,8 +155,9 @@ pub use keys::{CloudHomeCredentials, KeyError, MasterKeyCustody, UserKeypair};
 // At-rest crypto the host configures (the host sizes cloud stream reads from
 // `CHUNK_SIZE`), and the store directory the host points coven at. `MasterKeyring`
 // is the master-key custody value type; `EncryptionService` is the cipher coven
-// builds from it internally.
-pub use encryption::{EncryptionError, EncryptionService, MasterKeyring, CHUNK_SIZE};
+// builds from it internally. `SealError` is what the handle's app-data sealing
+// returns.
+pub use encryption::{EncryptionError, EncryptionService, MasterKeyring, SealError, CHUNK_SIZE};
 pub use store_dir::{StoreDir, StoreLayout};
 
 // Sync vocabulary exposed through the native handle.

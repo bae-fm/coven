@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::keys::KeyError;
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
@@ -21,6 +22,17 @@ pub const CHUNK_SIZE: usize = 65536;
 pub const ENCRYPTED_CHUNK_SIZE: usize = CHUNK_SIZE + TAG_SIZE;
 pub const INITIAL_KEY_GENERATION: u64 = 1;
 const AEAD_V2_LABEL: &[u8] = b"coven-aead-v2";
+
+/// The sealed app-data format version this build writes, and the only one it
+/// reads. The leading byte of every payload [`EncryptionService::seal_app_data`]
+/// produces; a payload naming any other version is refused
+/// ([`SealError::UnknownVersion`]) rather than guessed at.
+pub const APP_DATA_SEAL_VERSION: u8 = 1;
+
+/// The fixed header every sealed app-data payload carries ahead of its
+/// ciphertext: the version byte, then the generation as a little-endian `u64`.
+const APP_DATA_GENERATION_SIZE: usize = 8;
+const APP_DATA_HEADER_SIZE: usize = 1 + APP_DATA_GENERATION_SIZE;
 
 /// Generate a random 32-byte key.
 pub fn generate_random_key() -> [u8; 32] {
@@ -107,6 +119,38 @@ pub enum EncryptionError {
     KeyManagement(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Why sealing or opening a host's app-data failed.
+///
+/// Sealing can only fail before the cipher runs — the store has no master key
+/// to seal under. Opening adds the failures a stored payload can carry: a
+/// version this build does not read, a generation this keyring holds no key
+/// for, or an AEAD rejection (a wrong `aad`, a tampered or truncated payload).
+#[derive(Debug, Error)]
+pub enum SealError {
+    /// Custody unlocked no keyring: the store is locked, or a master key was
+    /// never established. The app-data counterpart of the sync engine's
+    /// master-key gate — `unlock` returning `None` is refused here, never
+    /// treated as an empty keyring to seal under.
+    #[error("no master key is established for this store (locked, or never initialized)")]
+    Locked,
+    /// Custody could not produce the keyring — a wrong passphrase, an
+    /// unreadable backing store. Distinct from [`Self::Locked`], which is a
+    /// legitimate absence rather than a failure.
+    #[error("custody error: {0}")]
+    Custody(#[from] KeyError),
+    /// The payload's leading version byte is not one this build seals or reads.
+    #[error("unsupported sealed app-data version {0}")]
+    UnknownVersion(u8),
+    /// The payload names a generation this keyring has no key for: the keyring
+    /// predates the payload, or the payload was sealed under a foreign one.
+    #[error("sealed app-data names generation {0}, which this keyring has no key for")]
+    UnknownGeneration(u64),
+    /// The AEAD rejected the payload — a wrong `aad`, or a tampered or
+    /// truncated ciphertext. Surfaced as it happened, never masked.
+    #[error("app-data cryptography failed: {0}")]
+    Crypto(#[from] EncryptionError),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -612,6 +656,79 @@ impl EncryptionService {
     pub fn derive_key(&self, info: &str) -> [u8; 32] {
         derive_key_from(&self.key_bytes(), info)
     }
+
+    /// Seal `plaintext` for storage in a host's own rows, under this keyring's
+    /// current generation:
+    ///
+    /// ```text
+    /// [0]     version = APP_DATA_SEAL_VERSION
+    /// [1..9]  generation, u64 little-endian
+    /// [9..]   the chunked ciphertext `encrypt` produces for that generation
+    /// ```
+    ///
+    /// Recording the generation is what keeps the payload openable across any
+    /// number of later rotations — [`Self::open_app_data`] reaches for whichever
+    /// generation the payload names, not the current one. `aad` binds the
+    /// ciphertext to its context (the owning row's primary key, say) and must be
+    /// presented unchanged to open it.
+    ///
+    /// The body is the existing chunked format, so a large payload streams the
+    /// same way a blob does; there is no size cliff and no second cipher.
+    pub fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
+        let generation = self.current_generation();
+        let mut sealed = Vec::with_capacity(
+            APP_DATA_HEADER_SIZE + chunked_encrypted_len(plaintext.len() as u64) as usize,
+        );
+        sealed.push(APP_DATA_SEAL_VERSION);
+        sealed.extend_from_slice(&generation.to_le_bytes());
+        sealed.extend(self.encrypt(plaintext, aad));
+        sealed
+    }
+
+    /// Open a payload [`Self::seal_app_data`] produced, under whichever
+    /// generation it names — so a keyring that has rotated since still opens
+    /// everything it sealed before. A version this build does not read, or a
+    /// generation this keyring holds no key for, is a typed error; a wrong `aad`
+    /// or a tampered payload surfaces the AEAD failure through
+    /// [`SealError::Crypto`].
+    pub fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
+        let (generation, ciphertext) = split_sealed_app_data(sealed)?;
+        self.service_for_generation(generation)
+            // `service_for_generation` fails only when the keyring has no key
+            // for that generation, so this names the cause exactly.
+            .map_err(|_| SealError::UnknownGeneration(generation))?
+            .decrypt(ciphertext, aad)
+            .map_err(SealError::Crypto)
+    }
+}
+
+/// Split a sealed app-data payload into the generation it names and its
+/// ciphertext body, refusing a version this build does not read.
+///
+/// A payload too short to hold the fixed header cannot name a version or a
+/// generation, so it is a corrupt envelope — reported as a decryption failure
+/// rather than guessed at or padded.
+fn split_sealed_app_data(sealed: &[u8]) -> Result<(u64, &[u8]), SealError> {
+    let (&version, rest) = sealed.split_first().ok_or_else(|| {
+        SealError::Crypto(EncryptionError::Decryption(
+            "sealed app-data payload is empty".to_string(),
+        ))
+    })?;
+    if version != APP_DATA_SEAL_VERSION {
+        return Err(SealError::UnknownVersion(version));
+    }
+    if rest.len() < APP_DATA_GENERATION_SIZE {
+        return Err(SealError::Crypto(EncryptionError::Decryption(
+            "sealed app-data payload is truncated before its generation".to_string(),
+        )));
+    }
+    let (generation, ciphertext) = rest.split_at(APP_DATA_GENERATION_SIZE);
+    let generation = u64::from_le_bytes(
+        generation
+            .try_into()
+            .expect("split_at yields exactly APP_DATA_GENERATION_SIZE bytes"),
+    );
+    Ok((generation, ciphertext))
 }
 
 fn decode_legacy_key(stored_key: &str) -> Result<[u8; 32], String> {
@@ -1351,5 +1468,173 @@ mod tests {
         let keyring = MasterKeyring::generate();
         let debug = format!("{keyring:?}");
         assert!(debug.contains("<redacted>"), "{debug}");
+    }
+
+    // =========================================================================
+    // App-data sealing
+    // =========================================================================
+
+    /// What the pinned v1 fixture wraps: this payload sealed under [`test_key`]
+    /// at generation 1, with this `aad`. The bytes are
+    /// `[01][01 00 00 00 00 00 00 00][24-byte nonce][ciphertext ++ tag]` — the
+    /// version, the little-endian generation, then the chunked ciphertext.
+    const APP_DATA_V1_FIXTURE_PLAINTEXT: &[u8] = b"pinned app-data payload";
+    const APP_DATA_V1_FIXTURE_AAD: &[u8] = b"pinned-app-data-context";
+    const APP_DATA_V1_FIXTURE_HEX: &str = concat!(
+        "01",
+        "0100000000000000",
+        "2bdfe10d13cb397b648c2eb352bbadd92a19eafd8499b5c5",
+        "b0d1e8eb56f757621ec41a78488c937427aac5df38b5e8af",
+        "2b2b8c9155ead15242e0c87b00bbe8",
+    );
+
+    /// The generation a sealed payload names, read straight out of its header —
+    /// so the tests below assert the recorded generation rather than trusting
+    /// `open_app_data` to have picked the right key silently.
+    fn sealed_generation(sealed: &[u8]) -> u64 {
+        u64::from_le_bytes(sealed[1..9].try_into().expect("a sealed header"))
+    }
+
+    #[test]
+    fn seal_app_data_round_trips_and_records_its_version_and_generation() {
+        let service = create_test_service();
+        for payload in [b"".as_slice(), b"x", b"a longer app-data secret value"] {
+            let sealed = service.seal_app_data(payload, TEST_AAD);
+
+            assert_eq!(sealed[0], APP_DATA_SEAL_VERSION, "the version byte leads");
+            assert_eq!(
+                sealed_generation(&sealed),
+                INITIAL_KEY_GENERATION,
+                "a single-generation keyring seals under generation 1",
+            );
+            assert_eq!(
+                sealed.len(),
+                APP_DATA_HEADER_SIZE + chunked_encrypted_len(payload.len() as u64) as usize,
+                "the body is exactly the chunked ciphertext, behind the fixed header",
+            );
+            assert_eq!(service.open_app_data(&sealed, TEST_AAD).unwrap(), payload);
+        }
+    }
+
+    /// `aad` binds a payload to its context. Opening with a different one must
+    /// fail, so a payload lifted into another row does not silently open there.
+    #[test]
+    fn open_app_data_rejects_a_different_aad() {
+        let service = create_test_service();
+        let sealed = service.seal_app_data(b"bound to row 42", b"row-42");
+
+        let error = service
+            .open_app_data(&sealed, b"row-99")
+            .expect_err("a different aad must not open the payload");
+
+        assert!(matches!(error, SealError::Crypto(_)), "{error:?}");
+    }
+
+    #[test]
+    fn open_app_data_rejects_a_flipped_ciphertext_byte() {
+        let service = create_test_service();
+        let mut sealed = service.seal_app_data(b"tamper with me", TEST_AAD);
+        let last = sealed.len() - 1;
+        sealed[last] ^= 0xFF;
+
+        let error = service
+            .open_app_data(&sealed, TEST_AAD)
+            .expect_err("a tampered payload must fail authentication");
+
+        assert!(matches!(error, SealError::Crypto(_)), "{error:?}");
+    }
+
+    /// A version this build does not read is refused by name, never guessed at
+    /// — the payload was written by a format we have no decoder for.
+    #[test]
+    fn open_app_data_rejects_an_unknown_version() {
+        let service = create_test_service();
+        let mut sealed = service.seal_app_data(b"a version-1 payload", TEST_AAD);
+        sealed[0] = 2;
+
+        let error = service
+            .open_app_data(&sealed, TEST_AAD)
+            .expect_err("version 2 must be refused");
+
+        assert!(matches!(error, SealError::UnknownVersion(2)), "{error:?}");
+    }
+
+    /// Rotation does not orphan already-sealed payloads. Each records the
+    /// generation it was sealed under, and a rotated keyring retains every
+    /// earlier generation, so it opens what it sealed before and after.
+    #[test]
+    fn open_app_data_survives_rotation_and_each_payload_names_its_generation() {
+        let before_rotation = create_test_service();
+        let sealed_under_1 = before_rotation.seal_app_data(b"sealed before rotating", TEST_AAD);
+
+        let after_rotation = before_rotation
+            .with_appended_generation(2, [9u8; 32])
+            .expect("rotate the keyring");
+        let sealed_under_2 = after_rotation.seal_app_data(b"sealed after rotating", TEST_AAD);
+
+        assert_eq!(sealed_generation(&sealed_under_1), 1);
+        assert_eq!(
+            sealed_generation(&sealed_under_2),
+            2,
+            "sealing after a rotation records the new current generation",
+        );
+
+        assert_eq!(
+            after_rotation
+                .open_app_data(&sealed_under_1, TEST_AAD)
+                .unwrap(),
+            b"sealed before rotating",
+            "the rotated keyring still opens what the old generation sealed",
+        );
+        assert_eq!(
+            after_rotation
+                .open_app_data(&sealed_under_2, TEST_AAD)
+                .unwrap(),
+            b"sealed after rotating",
+        );
+    }
+
+    /// A keyring that has no key for the generation a payload names — it predates
+    /// the payload, or the payload is foreign — is a typed error, not a panic and
+    /// not a decrypt attempt under the wrong key.
+    #[test]
+    fn open_app_data_rejects_a_generation_the_keyring_lacks() {
+        let rotated = create_test_service()
+            .with_appended_generation(2, [9u8; 32])
+            .expect("rotate the keyring");
+        let sealed_under_2 = rotated.seal_app_data(b"sealed under generation 2", TEST_AAD);
+
+        let fresh_single_generation = EncryptionService::from_key([7u8; 32]);
+        let error = fresh_single_generation
+            .open_app_data(&sealed_under_2, TEST_AAD)
+            .expect_err("a keyring without generation 2 must not open it");
+
+        assert!(
+            matches!(error, SealError::UnknownGeneration(2)),
+            "{error:?}"
+        );
+    }
+
+    /// The sealed app-data format is a durable storage contract: a host's rows
+    /// hold these bytes, so a build that stopped opening them would strand the
+    /// data. This pins one payload sealed under [`test_key`] — if the version
+    /// byte, the generation encoding, the chunk framing, or the AAD derivation
+    /// ever changes, this stops opening and says so.
+    ///
+    /// Generated once from `seal_app_data` itself, then frozen. It is not
+    /// re-derived at test time on purpose: a fixture that regenerates would
+    /// still pass against a changed format and pin nothing.
+    #[test]
+    fn sealed_app_data_v1_fixture_still_opens() {
+        let sealed = hex::decode(APP_DATA_V1_FIXTURE_HEX).expect("the fixture is valid hex");
+
+        assert_eq!(sealed[0], APP_DATA_SEAL_VERSION, "a version-1 payload");
+        assert_eq!(sealed_generation(&sealed), INITIAL_KEY_GENERATION);
+
+        let opened = EncryptionService::from_key(test_key())
+            .open_app_data(&sealed, APP_DATA_V1_FIXTURE_AAD)
+            .expect("the pinned v1 payload must keep opening");
+
+        assert_eq!(opened, APP_DATA_V1_FIXTURE_PLAINTEXT);
     }
 }
