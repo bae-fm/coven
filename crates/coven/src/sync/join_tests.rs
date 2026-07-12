@@ -81,6 +81,7 @@ async fn join_result_for(
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
+        crate::custody::KeyCustody::Keyring,
         None,
         None,
         Arc::new(SystemClock),
@@ -306,6 +307,7 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
+        crate::custody::KeyCustody::Keyring,
         Some(oauth_tokens),
         None,
         Arc::new(SystemClock),
@@ -378,12 +380,16 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
         .expect("construct S3 cloud home"),
     );
     let ids = crate::id_provider::SequentialIdProvider::new("dev");
+    let layout = crate::store_dir::StoreLayout::new(data_dir);
+    let custody =
+        crate::custody::KeyCustody::Keyring.resolve("abc-123", &layout.store_dir("abc-123"));
 
     let result = crate::sync::join::join_store(
-        &crate::store_dir::StoreLayout::new(data_dir),
+        &layout,
         code,
         &test_synced_tables(),
         &test_migrations(),
+        custody,
         cloud_home,
         &ids,
         |_| {},

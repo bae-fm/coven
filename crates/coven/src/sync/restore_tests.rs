@@ -81,6 +81,7 @@ async fn restore_result_for(
         code_str,
         &test_synced_tables(),
         &test_migrations(),
+        crate::custody::KeyCustody::Keyring,
         None,
         None,
         &crate::store_dir::StoreLayout::new(app_dir),
@@ -217,6 +218,7 @@ async fn restore_with_cancel(
         code,
         &test_synced_tables(),
         &test_migrations(),
+        crate::custody::KeyCustody::Keyring,
         None,
         None,
         &crate::store_dir::StoreLayout::new(app_dir),
@@ -409,6 +411,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         UserKeypair::generate(),
     );
     let store_keys = StoreKeys::new(store_id.to_string());
+    let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
     let join_info = CloudHomeJoinInfo::S3 {
         bucket: "b".to_string(),
         region: "us-east-1".to_string(),
@@ -418,10 +421,12 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         key_prefix: None,
     };
 
+    let master_key = crate::encryption::MasterKeyring::from_serialized(&"bb".repeat(32))
+        .expect("parse the legacy raw-hex fixture key");
     let result = bootstrap_and_save_store(
         &joiner_storage,
         &cipher,
-        Some(&"bb".repeat(32)),
+        Some(&master_key),
         &store_dir,
         store_id,
         "device-late",
@@ -431,6 +436,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         &join_info,
         "Late Step Test",
         &store_keys,
+        custody.as_ref(),
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
@@ -455,7 +461,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         "the cloud home credentials must have been written before the late failure",
     );
 
-    let wrapped = cleanup_after_bootstrap_failure(&store_dir, &store_keys, err);
+    let wrapped = cleanup_after_bootstrap_failure(&store_dir, &store_keys, custody.as_ref(), err);
     assert!(
         !matches!(wrapped, BootstrapError::Cleanup { .. }),
         "cleanup of a directory blocked only by its own contents must fully succeed, got {wrapped:?}",
@@ -571,6 +577,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         joiner_keypair.clone(),
     );
     let store_keys = StoreKeys::new(store_id.to_string());
+    let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &lib_b);
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     bootstrap_and_save_store(
@@ -586,6 +593,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         &join_info,
         "Restored Store",
         &store_keys,
+        custody.as_ref(),
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
@@ -823,6 +831,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         UserKeypair::generate(),
     );
     let store_keys = StoreKeys::new(store_id.to_string());
+    let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &lib_b);
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     bootstrap_and_save_store(
@@ -838,6 +847,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         &join_info,
         "Restored Store",
         &store_keys,
+        custody.as_ref(),
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
