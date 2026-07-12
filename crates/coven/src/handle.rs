@@ -372,6 +372,32 @@ impl CovenHandle {
         Ok(())
     }
 
+    /// Test-only: connect over an injected [`CloudHome`] while resolving the
+    /// at-rest cipher from custody the way production
+    /// [`connect_sync`](Self::connect_sync) does, instead of taking an explicit
+    /// cipher like [`connect_sync_with_test_home`](Self::connect_sync_with_test_home).
+    ///
+    /// Where that method injects the cipher and never touches custody, this drives
+    /// [`SyncManager::start_sync_with_test_home_custody`], which unlocks the master
+    /// keyring through the store's custody exactly as `start_sync` would — so a
+    /// test can establish a key, connect over a mock home, and prove the traffic
+    /// is sealed under that key. An opaque home with no key established fails
+    /// [`SyncError::MasterKeyNotEstablished`] before the loop starts.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn connect_sync_with_test_home_custody(
+        &self,
+        home: Arc<dyn CloudHome>,
+    ) -> Result<(), SyncError> {
+        self.build_and_install_sync(self.cloudkit_ops.clone(), move |manager| async move {
+            manager.start_sync_with_test_home_custody(home).await
+        })
+        .await?;
+        info!(
+            "coven handle: sync manager connected over an injected test cloud home with custody-resolved cipher"
+        );
+        Ok(())
+    }
+
     /// Start (or restart) the sync loop of the installed [`SyncManager`]. A no-op
     /// when no provider is connected — a home-less store has nothing to start.
     /// Errors if the installed manager's cloud home fails to build.
@@ -1290,30 +1316,43 @@ mod tests {
         ));
     }
 
-    /// Once `initialize_master_key` establishes a key, the sync engine's
-    /// production cipher resolution (`SyncManager::start_sync`, reached
-    /// through `connect_sync`) unlocks it from the same custody rather than
-    /// refusing with `MasterKeyNotEstablished` — proven by getting past that
-    /// gate to the next real failure (no S3 bucket configured), not by a
-    /// live cloud connection.
+    /// The end-to-end proof that `initialize_master_key` establishes the key
+    /// that actually seals cloud traffic. A keyring-custody store initializes a
+    /// master key, connects over an injected opaque `InMemoryCloudHome` through
+    /// the custody-resolving connect path — no cipher is injected; the manager
+    /// unlocks the key exactly as production `start_sync` does — then enqueues
+    /// and drains a blob. The bytes at rest in the home are ciphertext, never
+    /// the plaintext (the assertion a browsable/plaintext home would fail),
+    /// while `read_blob` decrypts them back. Only the established key sealing the
+    /// upload makes both hold.
+    // The user keypair is one process-wide keyring account, so the guard is held
+    // across this test's awaits to keep a parallel test from deleting it mid-run.
     #[tokio::test]
-    async fn initialize_master_key_establishes_a_key_connect_sync_can_use() {
+    #[allow(clippy::await_holding_lock)]
+    async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back() {
         test_keyring::install();
-        let (_tmp, store_dir) = temp_store_dir();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
-        let store_id = "lib-init-master-key-connect";
-        let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+        let store_id = "lib-init-master-key-seals-traffic";
+
+        // Opaque storage: the master key established below seals every object at
+        // rest. A configured provider is unnecessary — the injected test home is
+        // the enablement.
         let mut config = Config::with_defaults(
             store_id.to_string(),
             "test-device".to_string(),
             store_dir.clone(),
             "Test Store".to_string(),
         );
-        config.cloud_home.provider = Some(CloudProvider::S3);
+        config.cloud_home.storage = HomeStorage::Opaque;
         let config_provider: ConfigProvider = {
             let config = config.clone();
             Arc::new(move || config.clone())
         };
+
+        let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
         let handle = CovenHandle::new(
             db.clone(),
             db.clone(),
@@ -1332,13 +1371,80 @@ mod tests {
             .initialize_master_key()
             .expect("establish the master key before connecting");
 
-        let error = handle
-            .connect_sync()
+        // Connect over the injected home through the custody path: the manager
+        // resolves the cipher from the just-established key, never an injected
+        // one. An opaque home with no key would fail here with
+        // `MasterKeyNotEstablished`.
+        let home = Arc::new(InMemoryCloudHome::new());
+        handle
+            .connect_sync_with_test_home_custody(home.clone())
             .await
-            .expect_err("no S3 bucket is configured, so connect still fails");
+            .expect("connect over the injected opaque home, resolving the cipher from custody");
+
+        // Enqueue this device's own blob under the hashed key an opaque home uses
+        // (`{namespace}/{uploader}/{ab}/{cd}/{id}`) so the drain seals it and the
+        // read resolves the same uploader to fetch it back. The keypair exists
+        // now that connecting bootstrapped it.
+        let uploader = hex::encode(
+            DeviceKeys::get_user_public_key()
+                .expect("read this device's public key")
+                .expect("a device keypair exists after connecting"),
+        );
+        let cloud_key = StoreDir::uploader_hashed_key("images", &uploader, "cover-1")
+            .expect("build the hashed cloud key");
+        let plaintext = b"cover-art-sealed-under-the-established-master-key".to_vec();
+        let source = tmp.path().join("cover-source.jpg");
+        std::fs::write(&source, &plaintext).expect("write source file");
+        db.enqueue_upload(
+            "cover-1",
+            &cloud_key,
+            Some(source.to_str().expect("temp source path is valid UTF-8")),
+            BlobScope::Master,
+            false,
+            "2024-01-01T00:00:00Z",
+        )
+        .await
+        .expect("enqueue the upload");
+
+        let outcome = handle
+            .drain_uploads()
+            .await
+            .expect("drain through the handle");
+        assert_eq!(outcome.uploaded, 1, "the one queued blob uploaded");
+
+        // At rest the object is ciphertext: the stored bytes are not the
+        // plaintext, and no object in the home holds the plaintext verbatim.
+        let at_rest = home.get(&cloud_key).expect("the blob landed in the home");
+        assert_ne!(
+            at_rest, plaintext,
+            "the master key sealed the upload — the bytes at rest are not the plaintext",
+        );
         assert!(
-            !matches!(error, SyncError::MasterKeyNotEstablished),
-            "connect_sync must get past the master-key gate once one is established, got {error:?}",
+            home.keys()
+                .iter()
+                .all(|k| home.get(k).as_deref() != Some(plaintext.as_slice())),
+            "no object in the home holds the plaintext",
+        );
+
+        // Plant the Remote locality, then read back: the read resolves the
+        // uploader off the home and decrypts through the same custody-resolved
+        // cipher.
+        plant_blob_row(&db, "cover-1", true, plaintext.len() as u64).await;
+        let blob = BlobRef {
+            namespace: "images".to_string(),
+            id: "cover-1".to_string(),
+            scope: BlobScope::Master,
+            cloud_path: None,
+            provenance: Provenance::UserProvided,
+            fill: CacheFill::CacheLazy,
+        };
+        let read = handle
+            .read_blob(&blob)
+            .await
+            .expect("read through the handle");
+        assert_eq!(
+            read, plaintext,
+            "read_blob decrypts the sealed blob back to its original plaintext",
         );
     }
 

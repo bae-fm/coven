@@ -15,7 +15,7 @@ use tracing::{error, info};
 use crate::blob::transition::{self, MakeLocalError, MakeRemoteError};
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
-use crate::config::Config;
+use crate::config::{Config, HomeStorage};
 use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
@@ -164,6 +164,23 @@ impl SyncManager {
     // Sync lifecycle
     // =========================================================================
 
+    /// Resolve the home's at-rest cipher from `storage` and this manager's
+    /// custody. A browsable home never consults custody — it stores in the
+    /// clear regardless. An opaque home unlocks the master keyring; no key
+    /// established (a locked store, or a browsable/opaque storage mismatch)
+    /// is [`SyncError::MasterKeyNotEstablished`], surfaced here rather than
+    /// deep inside the home build. The single custody→cipher decision both
+    /// [`start_sync`](Self::start_sync) and the test-home connect path share.
+    fn resolve_cipher(&self, storage: HomeStorage) -> Result<CloudCipher, SyncError> {
+        if storage.is_browsable() {
+            Ok(CloudCipher::Plaintext)
+        } else {
+            let keyring = self.custody.unlock()?;
+            CloudCipher::for_storage(storage, keyring.map(Into::into))
+                .ok_or(SyncError::MasterKeyNotEstablished)
+        }
+    }
+
     /// Initialize cloud home and sync loop from current config.
     /// Called at startup (if already configured) and after connecting a provider.
     ///
@@ -187,20 +204,10 @@ impl SyncManager {
         self.stop_current_connection()?;
 
         // The home's at-rest cipher, resolved fresh on every start so a
-        // stop/start picks up whatever custody now holds. A browsable home
-        // never consults custody — it stores in the clear regardless. An
-        // opaque home unlocks the master keyring; no key established (a
-        // locked store, or a browsable/opaque storage mismatch) is a typed
-        // error, checked before building the home rather than deep inside it.
-        // Built once here so the sync loop and storage share one instance — a
-        // member removal rotates the key in place through it.
-        let cipher = if config.cloud_home.storage.is_browsable() {
-            CloudCipher::Plaintext
-        } else {
-            let keyring = self.custody.unlock()?;
-            CloudCipher::for_storage(config.cloud_home.storage, keyring.map(Into::into))
-                .ok_or(SyncError::MasterKeyNotEstablished)?
-        };
+        // stop/start picks up whatever custody now holds. Built once here so
+        // the sync loop and storage share one instance — a member removal
+        // rotates the key in place through it.
+        let cipher = self.resolve_cipher(config.cloud_home.storage)?;
 
         // Build the cloud home. A failure here is a real fault — surface it so the
         // caller never installs a manager that started nothing.
@@ -325,6 +332,24 @@ impl SyncManager {
         *self.cloud_home.write().unwrap() = Some(home);
 
         Ok(())
+    }
+
+    /// Test-only: stand the sync loop over an injected `home` while resolving the
+    /// at-rest cipher from custody exactly as [`start_sync`](Self::start_sync)
+    /// does — the counterpart of [`start_sync_with_home`](Self::start_sync_with_home)
+    /// for proving the established master key is the one sealing traffic. Unlike
+    /// that method, which takes the cipher explicitly and never consults custody,
+    /// this drives the real [`resolve_cipher`](Self::resolve_cipher) path: an
+    /// opaque home with no key established fails [`SyncError::MasterKeyNotEstablished`]
+    /// before the loop starts.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn start_sync_with_test_home_custody(
+        &self,
+        home: std::sync::Arc<dyn CloudHome>,
+    ) -> Result<(), SyncError> {
+        let storage = (self.config_provider)().cloud_home.storage;
+        let cipher = self.resolve_cipher(storage)?;
+        self.start_sync_with_home(home, cipher).await
     }
 
     /// Tear down the sync loop and cloud home.
