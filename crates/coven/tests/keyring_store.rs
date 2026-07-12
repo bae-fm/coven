@@ -12,7 +12,7 @@ fn keyring_registration_contract() {
     );
     // Before the service is registered, a key operation names the missing
     // startup call rather than panicking.
-    let err = coven::read_keyring("account").expect_err("service not registered yet");
+    let err = coven::DeviceKeys::get_user_public_key().expect_err("service not registered yet");
     assert!(
         matches!(err, coven::KeyError::ServiceNotRegistered),
         "expected ServiceNotRegistered, got {err:?}"
@@ -37,7 +37,7 @@ fn keyring_registration_contract() {
     // A key operation against a registry with no default store must name the
     // missing startup step, not surface a generic persistence error.
     keyring_core::unset_default_store();
-    let err = coven::read_keyring("account").expect_err("no store installed");
+    let err = coven::DeviceKeys::get_user_public_key().expect_err("no store installed");
     assert!(
         matches!(err, coven::KeyError::StoreNotInstalled),
         "expected StoreNotInstalled, got {err:?}"

@@ -595,7 +595,7 @@ pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
 pub use join_code::generate_join_request;
 pub use keys::{
-    keyring_service, read_keyring, set_keyring_service, CloudHomeCredentials, DeviceKeys, KeyError,
+    keyring_service, set_keyring_service, CloudHomeCredentials, DeviceKeys, KeyError,
     KeyPersistence, StoreKeys, UserKeypair,
 };
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};

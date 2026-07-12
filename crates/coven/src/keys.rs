@@ -48,8 +48,42 @@ fn map_keyring_error(e: keyring_core::Error) -> KeyError {
     }
 }
 
-pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
-    let entry = keyring_core::Entry::new(keyring_service()?, account).map_err(map_keyring_error)?;
+/// Which key a keyring entry holds, and the sole owner of the account name it
+/// is stored under. The device signing key is device-global (no `store_id`); the
+/// encryption master key and cloud-home credentials are per store. Every keyring
+/// read/write/delete names its entry with one of these variants, so the on-disk
+/// account strings live in exactly one place: [`KeyringSlot::account`].
+pub(crate) enum KeyringSlot {
+    /// The device-global Ed25519 signing key, shared by every store on the
+    /// device and stored under one fixed account.
+    DeviceSigningKey,
+    /// A store's encryption master key.
+    EncryptionMasterKey(String),
+    /// A store's cloud-home credentials.
+    CloudHomeCredentials(String),
+}
+
+impl KeyringSlot {
+    /// The keyring account name this slot is stored under. These strings are a
+    /// durable storage contract: a device's already-stored keys are found only
+    /// at these exact accounts, so changing any of them strands stored keys.
+    fn account(&self) -> String {
+        match self {
+            KeyringSlot::DeviceSigningKey => "coven_user_signing_key".to_string(),
+            KeyringSlot::EncryptionMasterKey(store_id) => {
+                format!("encryption_master_key:{store_id}")
+            }
+            KeyringSlot::CloudHomeCredentials(store_id) => {
+                format!("cloud_home_credentials:{store_id}")
+            }
+        }
+    }
+}
+
+fn read(slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
+    let account = slot.account();
+    let entry =
+        keyring_core::Entry::new(keyring_service()?, &account).map_err(map_keyring_error)?;
     match entry.get_password() {
         Ok(p) if p.is_empty() => Err(KeyError::Persistence(format!(
             "keyring entry {account} is present but empty (corrupt)"
@@ -60,15 +94,15 @@ pub fn read_keyring(account: &str) -> Result<Option<String>, KeyError> {
     }
 }
 
-fn write_keyring(account: &str, value: &str) -> Result<(), KeyError> {
-    keyring_core::Entry::new(keyring_service()?, account)
+fn write(slot: &KeyringSlot, value: &str) -> Result<(), KeyError> {
+    keyring_core::Entry::new(keyring_service()?, &slot.account())
         .map_err(map_keyring_error)?
         .set_password(value)
         .map_err(map_keyring_error)
 }
 
-fn delete_keyring(account: &str) -> Result<bool, KeyError> {
-    match keyring_core::Entry::new(keyring_service()?, account)
+fn delete(slot: &KeyringSlot) -> Result<bool, KeyError> {
+    match keyring_core::Entry::new(keyring_service()?, &slot.account())
         .map_err(map_keyring_error)?
         .delete_credential()
     {
@@ -79,21 +113,14 @@ fn delete_keyring(account: &str) -> Result<bool, KeyError> {
 }
 
 /// The device-global signing identity: one Ed25519 keypair per OS user, shared
-/// by every store on the device. It lives under a single fixed keyring account
-/// ([`SIGNING_KEY_KEYRING_ACCOUNT`](Self::SIGNING_KEY_KEYRING_ACCOUNT)) that no
-/// store scope touches, so attestations accumulate under one public key across
-/// all of this device's stores. Stateless — the keyring service is
-/// process-global, so these are associated functions with no per-store data.
+/// by every store on the device. It lives under the single fixed keyring account
+/// of [`KeyringSlot::DeviceSigningKey`] that no store scope touches, so
+/// attestations accumulate under one public key across all of this device's
+/// stores. Stateless — the keyring service is process-global, so these are
+/// associated functions with no per-store data.
 pub struct DeviceKeys;
 
 impl DeviceKeys {
-    /// The fixed keyring account the device signing key is stored under — the
-    /// same for every store, which is exactly what makes the identity
-    /// device-global rather than per-store. Changing this string strands every
-    /// already-stored device key, so it is a stable storage name, not an
-    /// implementation detail.
-    const SIGNING_KEY_KEYRING_ACCOUNT: &'static str = "coven_user_signing_key";
-
     pub fn get_user_keypair() -> Result<UserKeypair, KeyError> {
         Self::get_user_keypair_inner()?
             .ok_or_else(|| KeyError::Crypto("No user keypair found in keyring".to_string()))
@@ -132,11 +159,11 @@ impl DeviceKeys {
 
     fn write_signing_key(signing_key: &[u8; SIGN_SECRETKEYBYTES]) -> Result<(), KeyError> {
         let sk_hex = hex::encode(signing_key);
-        write_keyring(Self::SIGNING_KEY_KEYRING_ACCOUNT, &sk_hex)
+        write(&KeyringSlot::DeviceSigningKey, &sk_hex)
     }
 
     fn get_user_keypair_inner() -> Result<Option<UserKeypair>, KeyError> {
-        let Some(sk_hex) = read_keyring(Self::SIGNING_KEY_KEYRING_ACCOUNT)? else {
+        let Some(sk_hex) = read(&KeyringSlot::DeviceSigningKey)? else {
             return Ok(None);
         };
 
@@ -167,12 +194,8 @@ impl StoreKeys {
         &self.store_id
     }
 
-    fn account(&self, base: &str) -> String {
-        format!("{}:{}", base, self.store_id)
-    }
-
     pub fn get_encryption_key(&self) -> Result<Option<String>, KeyError> {
-        read_keyring(&self.account("encryption_master_key"))
+        read(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))
     }
 
     pub fn get_or_create_encryption_key(&self) -> Result<String, KeyError> {
@@ -180,27 +203,30 @@ impl StoreKeys {
             return Ok(key);
         }
 
+        info!("Generated a new encryption master key");
         let key_hex = hex::encode(crate::encryption::generate_random_key());
-        write_keyring(&self.account("encryption_master_key"), &key_hex)?;
-        info!("Generated and saved new encryption key to keyring");
+        self.set_encryption_key(&key_hex)?;
         Ok(key_hex)
     }
 
     pub fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
-        write_keyring(&self.account("encryption_master_key"), value)?;
+        write(
+            &KeyringSlot::EncryptionMasterKey(self.store_id.clone()),
+            value,
+        )?;
         info!("Encryption key saved to keyring");
         Ok(())
     }
 
     pub fn delete_encryption_key(&self) -> Result<(), KeyError> {
-        if delete_keyring(&self.account("encryption_master_key"))? {
+        if delete(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))? {
             info!("Encryption key deleted from keyring");
         }
         Ok(())
     }
 
     pub fn get_cloud_home_credentials(&self) -> Result<Option<CloudHomeCredentials>, KeyError> {
-        match read_keyring(&self.account("cloud_home_credentials"))? {
+        match read(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))? {
             None => Ok(None),
             Some(j) => serde_json::from_str(&j).map(Some).map_err(|e| {
                 KeyError::Crypto(format!("malformed cloud home credentials JSON: {e}"))
@@ -211,7 +237,10 @@ impl StoreKeys {
     pub fn set_cloud_home_credentials(&self, creds: &CloudHomeCredentials) -> Result<(), KeyError> {
         let json = serde_json::to_string(creds)
             .map_err(|e| KeyError::Crypto(format!("serialize credentials: {e}")))?;
-        write_keyring(&self.account("cloud_home_credentials"), &json)?;
+        write(
+            &KeyringSlot::CloudHomeCredentials(self.store_id.clone()),
+            &json,
+        )?;
         info!("Cloud home credentials saved to keyring");
         Ok(())
     }
@@ -232,12 +261,12 @@ impl StoreKeys {
     ) -> keyring_core::Result<keyring_core::Entry> {
         keyring_core::Entry::new(
             keyring_service().expect("keyring service registered in tests"),
-            &self.account("cloud_home_credentials"),
+            &KeyringSlot::CloudHomeCredentials(self.store_id.clone()).account(),
         )
     }
 
     pub fn delete_cloud_home_credentials(&self) -> Result<(), KeyError> {
-        if delete_keyring(&self.account("cloud_home_credentials"))? {
+        if delete(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))? {
             info!("Cloud home credentials deleted from keyring");
         }
         Ok(())
@@ -277,23 +306,24 @@ mod tests {
     #[test]
     fn empty_keyring_entry_is_an_error_not_absence() {
         test_keyring::install();
-        let account = "empty-keyring-entry";
-        keyring_core::Entry::new(keyring_service().expect("service registered"), account)
+        let slot = KeyringSlot::EncryptionMasterKey("empty-keyring-entry-store".to_string());
+        let account = slot.account();
+        keyring_core::Entry::new(keyring_service().expect("service registered"), &account)
             .expect("create keyring entry")
             .set_password("")
             .expect("write empty keyring entry");
 
-        let error = read_keyring(account).expect_err("empty entry is corrupt");
+        let error = read(&slot).expect_err("empty entry is corrupt");
 
         assert!(error.to_string().contains("present but empty"));
-        assert!(error.to_string().contains(account));
+        assert!(error.to_string().contains(&account));
     }
 
     #[test]
     fn get_or_create_encryption_key_does_not_overwrite_a_corrupt_empty_entry() {
         test_keyring::install();
         let service = StoreKeys::new("empty-encryption-key-store".to_string());
-        let account = service.account("encryption_master_key");
+        let account = KeyringSlot::EncryptionMasterKey(service.store_id().to_string()).account();
         let entry =
             keyring_core::Entry::new(keyring_service().expect("service registered"), &account)
                 .expect("create encryption key entry");
@@ -318,17 +348,16 @@ mod tests {
     /// `StoreKeys` and `DeviceKeys` must keep using them verbatim. Pin all three.
     #[test]
     fn keyring_account_names_are_a_stable_storage_contract() {
-        let store = StoreKeys::new("store-42".to_string());
         assert_eq!(
-            store.account("encryption_master_key"),
+            KeyringSlot::EncryptionMasterKey("store-42".to_string()).account(),
             "encryption_master_key:store-42"
         );
         assert_eq!(
-            store.account("cloud_home_credentials"),
+            KeyringSlot::CloudHomeCredentials("store-42".to_string()).account(),
             "cloud_home_credentials:store-42"
         );
         assert_eq!(
-            DeviceKeys::SIGNING_KEY_KEYRING_ACCOUNT,
+            KeyringSlot::DeviceSigningKey.account(),
             "coven_user_signing_key"
         );
     }
@@ -346,8 +375,8 @@ mod tests {
         let expected_pubkey = keypair.public_key();
         // Write via the raw keyring under the fixed signing-key account, the way
         // the storage layer does — no `DeviceKeys` involved on the write side.
-        write_keyring(
-            DeviceKeys::SIGNING_KEY_KEYRING_ACCOUNT,
+        write(
+            &KeyringSlot::DeviceSigningKey,
             &hex::encode(keypair.to_keypair_bytes()),
         )
         .expect("write signing key to the raw keyring");
