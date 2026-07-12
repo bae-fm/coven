@@ -28,6 +28,17 @@ pub enum KeyError {
         "no keyring service is registered; the host must call set_keyring_service at startup before any key operation"
     )]
     ServiceNotRegistered,
+    #[error(
+        "no device identity is established; call coven::ensure_device_identity() first (or complete a join/restore, which establish one as part of accepting an invite or recovering a store)"
+    )]
+    NoDeviceIdentity,
+    #[error(
+        "device identity is already established under a different key (existing {existing_pubkey_hex}, attempted import {imported_pubkey_hex}); importing a different identity would strand every store that pinned attestations to the existing key"
+    )]
+    IdentityMismatch {
+        existing_pubkey_hex: String,
+        imported_pubkey_hex: String,
+    },
 }
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.
@@ -225,6 +236,27 @@ pub trait MasterKeyCustody: Send + Sync {
     fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError>;
 
     /// Remove the stored keyring. `Ok` when nothing was stored.
+    fn forget(&self) -> Result<(), KeyError>;
+}
+
+/// A device's signing identity's custody: who unlocks it, where a newly
+/// established one is written, and how it is removed. The signing-key
+/// sibling of [`MasterKeyCustody`], same three-method shape, over
+/// [`UserKeypair`] instead of a store's master keyring.
+///
+/// Unlike a store's master key, the signing identity is device-global (one
+/// keypair per host, shared by every store — see [`UserKeypair`]'s doc), so
+/// its custody is selected once per process rather than once per store.
+pub trait DeviceIdentityCustody: Send + Sync {
+    /// The device's established signing identity. `Ok(None)` means none has
+    /// ever been established — distinct from a failure to produce one (wrong
+    /// passphrase, unreadable backing store), which is `Err`.
+    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError>;
+
+    /// Protect and store `keypair`, replacing whatever is stored. Idempotent.
+    fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError>;
+
+    /// Remove the stored identity. `Ok` when nothing was stored.
     fn forget(&self) -> Result<(), KeyError>;
 }
 
