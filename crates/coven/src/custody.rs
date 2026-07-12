@@ -391,9 +391,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), KeyError> {
     drop(file);
     std::fs::rename(&temp_path, path)
         .map_err(|e| KeyError::Persistence(format!("install master keyring file: {e}")))?;
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
+    // fsync the parent directory so the rename that installed the keyring is
+    // itself durable — the same discipline coven's `sync_parent_dir` and
+    // coven-core's `local_blob::sync_parent_dir` keep, both of which propagate
+    // these errors rather than swallowing them.
+    std::fs::File::open(parent)
+        .map_err(|e| KeyError::Persistence(format!("open the parent dir to fsync it: {e}")))?
+        .sync_all()
+        .map_err(|e| KeyError::Persistence(format!("fsync the parent dir: {e}")))?;
     Ok(())
 }
 
