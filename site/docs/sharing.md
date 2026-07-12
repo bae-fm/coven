@@ -162,14 +162,17 @@ Data is only as private as the distribution of its keys: encryption means
 nothing if the key travels carelessly. A store's data is encrypted under a
 symmetric key that can
 [rotate](#revocation-is-key-rotation); the keyring is the full set of those key
-generations. Each member gets their own copy of the keyring, sealed to their
-X25519 public key with libsodium's sealed box and stored at
-`keys/{pubkey}.enc` in the [cloud home](/docs/storage), keyed by the member's
-Ed25519 public key. Only the holder of the matching private key can open it.
+generations. Each member's copy of the keyring is sealed to their X25519
+public key with libsodium's sealed box and stored under the wrapping owner's
+own prefix, at `keys/{owner_pubkey}/{recipient_pubkey}.enc` in the [cloud
+home](/docs/storage) — an owner writes only into its own prefix, which is what
+lets a reader trust that a wrap came from that owner. Only the holder of the
+matching private key can open it.
 
-Inviting a member writes two things: the signed `Add` entry under the inviting
-owner's prefix, and the keyring wrapped to that member at `keys/{pubkey}.enc`.
-The wrapped keyring names the membership entry that activates it, so a joiner
+Inviting a member writes two things, both under the inviting owner's prefix:
+the signed `Add` entry, and the keyring wrapped to that member at
+`keys/{owner_pubkey}/{recipient_pubkey}.enc`. The wrapped keyring names the
+membership entry that activates it, so a joiner
 unwraps it only once the entry granting them membership is visible. The new
 member downloads and unwraps their copy when they join
 ([`unwrap_store_keyring`](rustdoc:fn:coven::sync::invite::unwrap_store_keyring)).
@@ -216,9 +219,12 @@ this author allowed when they claim they wrote this?").
    rotation below, not credential withdrawal, is what protects new content.
 2. Signs and appends a `Remove` entry under the removing owner's prefix.
 3. Appends a **new key generation** to the store keyring.
-4. Re-wraps the updated keyring to every remaining member at their
-   `keys/{pubkey}.enc`.
-5. Deletes the removed member's wrapped keyring.
+4. Re-wraps the updated keyring to every remaining member under the removing
+   owner's own prefix, at `keys/{owner_pubkey}/{member_pubkey}.enc`.
+5. Deletes the removing owner's own wrap for the removed member, at
+   `keys/{owner_pubkey}/{revokee_pubkey}.enc` — a wrap another owner sealed for
+   the revokee earlier holds a pre-rotation generation, so leaving it in place
+   is harmless; that owner reclaims the slot when it next rotates.
 
 <svg class="flow" viewBox="0 0 660 158" role="img" aria-label="Removing a member appends key generation 2; remaining members receive it, the removed member stops at generation 1">
 <line class="arrd" x1="30" y1="62" x2="640" y2="62" marker-end="url(#fam)"/>

@@ -55,7 +55,9 @@ or [`ed25519_to_x25519_public_key`](rustdoc:fn:coven::keys::ed25519_to_x25519_pu
 when only the remote pubkey is known), so an inviter who knows a member's
 identity can wrap to them without any extra handshake. The inviter calls
 [`seal_box_encrypt`](rustdoc:fn:coven::keys::seal_box_encrypt) and stores the
-result at `keys/{member_ed25519_pubkey}.enc`; the joiner downloads it and calls
+result under its own prefix, at
+`keys/{owner_ed25519_pubkey}/{member_ed25519_pubkey}.enc`; the joiner
+downloads it and calls
 [`seal_box_decrypt`](rustdoc:fn:coven::keys::seal_box_decrypt) with their X25519
 secret key. A sealed box is anonymous: it carries an ephemeral sender key, so the
 stored file reveals nothing about who created the invitation.
@@ -96,24 +98,24 @@ opaque byte store. It sees:
 - Flat key paths, which describe structure, not content:
 
   ```text
-  changes/{device_id}/{seq}.enc          encrypted changeset envelopes
-  heads/{device_id}.json.enc             encrypted head pointers
-  images/{ab}/{cd}/{id}                  encrypted blobs
-  snapshot/{author}/{seq}.db.enc         a generation's encrypted database image
-  snapshot/{author}/{seq}_meta.json.enc  that generation's signed per-device cursors
-  snapshot/current.json.enc              signed pointer to the live generation
-  membership/{author_pubkey}/{seq}.enc   encrypted membership entries
-  membership/{author_pubkey}/head.enc    that author's signed membership head
-  keys/{member_pubkey}.enc               store keyring wrapped to each member
+  changes/{device_id}/{seq}.enc               encrypted changeset envelopes
+  heads/{device_id}.json.enc                  encrypted head pointers
+  images/{ab}/{cd}/{id}                       encrypted blobs
+  snapshot/{author}/{seq}.db.enc              a generation's encrypted database image
+  snapshot/{author}/{seq}_meta.json.enc       that generation's signed per-device cursors
+  snapshot/current.json.enc                   signed pointer to the live generation
+  membership/{author_pubkey}/{seq}.enc        encrypted membership entries
+  membership/{author_pubkey}/head.enc         that author's signed membership head
+  keys/{owner_pubkey}/{recipient_pubkey}.enc  store keyring, wrapped by an owner to a member
   ```
 
   (These are the paths of an opaque home. A browsable home, see below, drops
   the `.enc` suffix, so the same objects are at `changes/{device_id}/{seq}`,
   `snapshot/{author}/{seq}.db`, and so on.)
 
-- The existence and count of per-member key files under `keys/`, and the hex
-  Ed25519 public keys in those paths. A pubkey is a random-looking 32-byte value,
-  not a name or an email.
+- The existence and count of key files under each owner's `keys/{owner_pubkey}/`
+  prefix, and the hex Ed25519 public keys in those paths. A pubkey is a
+  random-looking 32-byte value, not a name or an email.
 - On each master- or derived-scoped object, a 12-byte cleartext prefix naming
   the key **generation** it was sealed under, so a reader picks the right key
   without trial decryption. The generation number is a counter, not content.
