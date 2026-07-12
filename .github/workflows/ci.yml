@@ -17,6 +17,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Lib-only check (production feature sets, no test cfg)
+        run: scripts/check-lib-only.sh
       - name: Test
         run: cargo test --all-features
 
