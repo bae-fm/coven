@@ -46,12 +46,14 @@ const ARGON2_OUTPUT_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const ENVELOPE_VERSION: u32 = 1;
 const ARGON2ID_ALGO: &str = "argon2id";
+/// XChaCha20-Poly1305's nonce length.
+const NONCE_LEN: usize = 24;
 
 /// The on-disk wrapped-payload format. The KDF params travel with the
 /// ciphertext so a future change to the module constants only affects new
 /// wraps — unlock always re-derives from what the file itself names, never
 /// from the current constants.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Envelope {
     v: u32,
     kdf: KdfParams,
@@ -111,6 +113,7 @@ impl PassphraseVault {
                 let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|e| {
                     KeyError::Persistence(format!("passphrase envelope is malformed: {e}"))
                 })?;
+                validate_envelope_header(&envelope)?;
                 Ok(Some(envelope))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -131,12 +134,19 @@ impl PassphraseVault {
         }
 
         let (salt, m_cost, t_cost, p_cost) = match self.read_envelope()? {
-            Some(envelope) => (
-                base64_decode(&envelope.kdf.salt_b64)?,
-                envelope.kdf.m_cost,
-                envelope.kdf.t_cost,
-                envelope.kdf.p_cost,
-            ),
+            Some(envelope) => {
+                validate_params_floor(
+                    envelope.kdf.m_cost,
+                    envelope.kdf.t_cost,
+                    envelope.kdf.p_cost,
+                )?;
+                (
+                    base64_decode(&envelope.kdf.salt_b64)?,
+                    envelope.kdf.m_cost,
+                    envelope.kdf.t_cost,
+                    envelope.kdf.p_cost,
+                )
+            }
             None => {
                 let mut salt = vec![0u8; SALT_LEN];
                 rand::rng().fill_bytes(&mut salt);
@@ -202,6 +212,70 @@ impl PassphraseVault {
     }
 }
 
+/// Reject a header this module cannot safely act on: an envelope version this
+/// build does not implement, or a KDF other than Argon2id. Runs on every read
+/// that returns `Some`, before the file's declared version, algorithm, or
+/// parameters ever reach [`derive_wrapping_key`] or the AEAD — the header is
+/// unauthenticated (nothing has decrypted yet), so it is untrusted input that
+/// this module must not act on blindly.
+fn validate_envelope_header(envelope: &Envelope) -> Result<(), KeyError> {
+    if envelope.v < ENVELOPE_VERSION {
+        return Err(KeyError::Persistence(format!(
+            "passphrase envelope is v{}, older than this build's v{ENVELOPE_VERSION}; \
+             re-establish it under the current version",
+            envelope.v
+        )));
+    }
+    if envelope.v > ENVELOPE_VERSION {
+        return Err(KeyError::Persistence(format!(
+            "passphrase envelope is v{}, newer than this build's v{ENVELOPE_VERSION}; \
+             update to a build that understands it",
+            envelope.v
+        )));
+    }
+    if envelope.kdf.algo != ARGON2ID_ALGO {
+        return Err(KeyError::Persistence(format!(
+            "passphrase envelope names KDF {:?}, but this module only wraps with {ARGON2ID_ALGO:?}",
+            envelope.kdf.algo
+        )));
+    }
+    Ok(())
+}
+
+/// Reject Argon2id parameters weaker than this module's floor
+/// (`ARGON2_M_COST_KIB`/`ARGON2_T_COST`/`ARGON2_P_COST`). These values come
+/// from an existing file, read verbatim rather than regenerated from the
+/// current constants, so that a future increase to the floor does not strand
+/// a file already wrapped at the old (still-adequate) strength — reading a
+/// file's own params is what makes that upgrade non-breaking. But nothing
+/// authenticates the header before this point, so an on-disk value is
+/// otherwise free for a file-write-capable attacker to set arbitrarily low;
+/// this floor is what stops a subsequent `persist` from re-wrapping the real
+/// secret at that attacker-chosen strength. Only a value below the floor is
+/// refused — a file already wrapped at a stronger derivation than today's
+/// constants call for unlocks unchanged.
+fn validate_params_floor(m_cost: u32, t_cost: u32, p_cost: u32) -> Result<(), KeyError> {
+    if m_cost < ARGON2_M_COST_KIB {
+        return Err(KeyError::Crypto(format!(
+            "passphrase envelope's Argon2id m_cost ({m_cost} KiB) is below this module's floor \
+             ({ARGON2_M_COST_KIB} KiB); refusing to derive a wrapping key at reduced memory cost"
+        )));
+    }
+    if t_cost < ARGON2_T_COST {
+        return Err(KeyError::Crypto(format!(
+            "passphrase envelope's Argon2id t_cost ({t_cost}) is below this module's floor \
+             ({ARGON2_T_COST}); refusing to derive a wrapping key at a reduced iteration count"
+        )));
+    }
+    if p_cost < ARGON2_P_COST {
+        return Err(KeyError::Crypto(format!(
+            "passphrase envelope's Argon2id p_cost ({p_cost}) is below this module's floor \
+             ({ARGON2_P_COST}); refusing to derive a wrapping key at reduced parallelism"
+        )));
+    }
+    Ok(())
+}
+
 fn derive_wrapping_key(
     passphrase: &str,
     salt: &[u8],
@@ -221,7 +295,7 @@ fn derive_wrapping_key(
 
 fn seal(wrapping_key: &[u8; ARGON2_OUTPUT_LEN], plaintext: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(wrapping_key));
-    let mut nonce = vec![0u8; 24];
+    let mut nonce = vec![0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
     let ciphertext = cipher
         .encrypt(GenericArray::from_slice(&nonce), plaintext)
@@ -234,6 +308,13 @@ fn open(
     nonce: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, KeyError> {
+    if nonce.len() != NONCE_LEN {
+        return Err(KeyError::Crypto(format!(
+            "envelope nonce is {} bytes, expected {NONCE_LEN}: a corrupt file, not a wrong \
+             passphrase",
+            nonce.len()
+        )));
+    }
     let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(wrapping_key));
     let nonce = GenericArray::from_slice(nonce);
     cipher.decrypt(nonce, ciphertext).map_err(|_| {
@@ -309,6 +390,22 @@ mod tests {
         let path = tmp.path().join("payload.envelope");
         let vault = PassphraseVault::new(Passphrase::new(passphrase.to_string()), path);
         (tmp, vault)
+    }
+
+    /// Write `envelope` straight to `path`, bypassing `PassphraseVault`
+    /// entirely — stands in for a file an attacker planted, or one corrupted
+    /// on disk, neither of which goes through this module's own `persist`.
+    fn write_envelope(path: &Path, envelope: &Envelope) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(envelope).expect("serialize test envelope"),
+        )
+        .expect("write test envelope");
+    }
+
+    fn read_envelope_from_disk(path: &Path) -> Envelope {
+        let bytes = std::fs::read(path).expect("read envelope file");
+        serde_json::from_slice(&bytes).expect("parse envelope file")
     }
 
     #[test]
@@ -413,5 +510,149 @@ mod tests {
 
         assert_eq!(a.unlock().unwrap().unwrap(), b"payload-a");
         assert_eq!(b.unlock().unwrap().unwrap(), b"payload-b");
+    }
+
+    /// A file declaring Argon2id parameters below this module's floor —
+    /// planted by whoever can write the file, without needing to read the
+    /// passphrase — must not be honored: `unlock` refuses it, and `persist`
+    /// must refuse too, since re-wrapping the real secret under those
+    /// attacker-chosen parameters is exactly the escalation the floor exists
+    /// to prevent.
+    #[test]
+    fn a_weak_params_envelope_is_refused() {
+        let (_tmp, vault) = temp_vault("victim passphrase");
+        let weak = Envelope {
+            v: ENVELOPE_VERSION,
+            kdf: KdfParams {
+                algo: ARGON2ID_ALGO.to_string(),
+                m_cost: 8,
+                t_cost: 1,
+                p_cost: 1,
+                salt_b64: base64_encode(&[0u8; SALT_LEN]),
+            },
+            nonce_b64: base64_encode(&[0u8; NONCE_LEN]),
+            ciphertext_b64: base64_encode(b"irrelevant: the floor rejects before decryption"),
+        };
+        write_envelope(vault.path(), &weak);
+
+        let unlock_error = vault
+            .unlock()
+            .expect_err("weak Argon2id params must be refused");
+        assert!(
+            matches!(unlock_error, KeyError::Crypto(_)),
+            "got {unlock_error:?}"
+        );
+
+        let persist_error = vault
+            .persist(b"the real secret")
+            .expect_err("persist must refuse to re-wrap under weak params rather than establish");
+        assert!(
+            matches!(persist_error, KeyError::Crypto(_)),
+            "got {persist_error:?}"
+        );
+
+        // The refusal must happen before any write — the planted file, weak
+        // params and all, is exactly as it was.
+        let on_disk = read_envelope_from_disk(vault.path());
+        assert_eq!(on_disk.kdf.m_cost, 8);
+        assert_eq!(on_disk.kdf.t_cost, 1);
+        assert_eq!(on_disk.kdf.p_cost, 1);
+    }
+
+    /// An envelope wrapped at parameters stronger than today's floor still
+    /// unlocks: the stored values travel with the ciphertext precisely so a
+    /// future increase to the module's constants does not strand an
+    /// already-established file. Only a value *below* the floor is refused.
+    #[test]
+    fn an_envelope_with_higher_than_current_params_still_unlocks() {
+        let (_tmp, vault) = temp_vault("upgrade passphrase");
+        let salt = vec![7u8; SALT_LEN];
+        let m_cost = ARGON2_M_COST_KIB * 2;
+        let t_cost = ARGON2_T_COST + 1;
+        let p_cost = ARGON2_P_COST + 1;
+        let key = derive_wrapping_key("upgrade passphrase", &salt, m_cost, t_cost, p_cost)
+            .expect("derive at higher-than-floor params");
+        let (nonce, ciphertext) = seal(&key, b"payload sealed above the floor");
+        let envelope = Envelope {
+            v: ENVELOPE_VERSION,
+            kdf: KdfParams {
+                algo: ARGON2ID_ALGO.to_string(),
+                m_cost,
+                t_cost,
+                p_cost,
+                salt_b64: base64_encode(&salt),
+            },
+            nonce_b64: base64_encode(&nonce),
+            ciphertext_b64: base64_encode(&ciphertext),
+        };
+        write_envelope(vault.path(), &envelope);
+
+        let unlocked = vault
+            .unlock()
+            .expect("params above the floor must still unlock")
+            .expect("payload present");
+        assert_eq!(unlocked, b"payload sealed above the floor");
+    }
+
+    /// A file whose `nonce_b64` decodes to something other than 24 bytes (a
+    /// corrupt file, not a wrong passphrase) must surface as `KeyError`, not
+    /// panic `GenericArray::from_slice` — the module's stated contract is
+    /// that a corrupt file is always `Err`.
+    #[test]
+    fn a_corrupt_nonce_is_an_error_not_a_panic() {
+        let (_tmp, vault) = temp_vault("passphrase");
+        vault.persist(b"payload").expect("establish");
+
+        let mut envelope = read_envelope_from_disk(vault.path());
+        envelope.nonce_b64 = base64_encode(&[0u8; 8]);
+        write_envelope(vault.path(), &envelope);
+
+        let error = vault
+            .unlock()
+            .expect_err("a corrupt nonce length must be an error, not a panic");
+        assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}");
+    }
+
+    /// An envelope naming a version this build does not implement is
+    /// refused, both when it is older (this build no longer knows those
+    /// semantics) and when it is newer (this build doesn't know them yet).
+    #[test]
+    fn an_unknown_envelope_version_is_refused() {
+        let (_tmp, vault) = temp_vault("passphrase");
+        vault.persist(b"payload").expect("establish");
+        let established = read_envelope_from_disk(vault.path());
+
+        let mut older = established.clone();
+        older.v = ENVELOPE_VERSION - 1;
+        write_envelope(vault.path(), &older);
+        let error = vault
+            .unlock()
+            .expect_err("an older envelope version must be refused");
+        assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
+
+        let mut newer = established;
+        newer.v = ENVELOPE_VERSION + 1;
+        write_envelope(vault.path(), &newer);
+        let error = vault
+            .unlock()
+            .expect_err("a newer envelope version must be refused");
+        assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
+    }
+
+    /// An envelope naming a KDF other than Argon2id is refused — the `algo`
+    /// field exists to prevent KDF confusion, not to be read and ignored.
+    #[test]
+    fn an_unknown_kdf_algo_is_refused() {
+        let (_tmp, vault) = temp_vault("passphrase");
+        vault.persist(b"payload").expect("establish");
+
+        let mut envelope = read_envelope_from_disk(vault.path());
+        envelope.kdf.algo = "scrypt".to_string();
+        write_envelope(vault.path(), &envelope);
+
+        let error = vault
+            .unlock()
+            .expect_err("an unrecognized KDF algo must be refused");
+        assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
     }
 }
