@@ -10,7 +10,7 @@ use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 #[cfg(test)]
 use crate::storage::cloud::CloudHome;
 
-use super::cloud_storage::CloudCipher;
+use super::cloud_storage::{CloudCipher, PendingRotation};
 use super::hlc::Hlc;
 use super::invite::InviteError;
 use super::membership::{
@@ -195,7 +195,12 @@ pub async fn invite_member(
 /// [`MembershipOpsError::RotationCommittedAdoptionFailed`] — distinct from a
 /// rotation that never committed — and both of its remedies converge without data
 /// loss: a retry of this call (idempotent for an already-removed member) or the
-/// device's next sync cycle.
+/// device's next sync cycle. Either way, `pending_rotation` marks the committed
+/// generation the moment the cloud rotation lands (see
+/// [`apply_key_rotation`]), so this device seals nothing new for the cloud until
+/// one of those remedies adopts it — the failed return here does not leave a
+/// window where the store keeps producing content the removed member can still
+/// decrypt.
 pub async fn remove_member(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
@@ -206,6 +211,7 @@ pub async fn remove_member(
     current_encryption: &EncryptionService,
     custody: &dyn MasterKeyCustody,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
 ) -> Result<String, MembershipOpsError> {
     // Download existing membership entries and build the chain.
     let entry_keys = storage.list_membership_entries().await?;
@@ -240,7 +246,7 @@ pub async fn remove_member(
     // Adopt the rotated key into this device's live cipher and custody. The cloud
     // rotation is already committed, so a failure here is not a generic membership
     // error but the specific half-applied state its own variant names.
-    apply_key_rotation(new_key, custody, cipher_lock)
+    apply_key_rotation(new_key, custody, cipher_lock, pending_rotation)
         .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })
 }
 
@@ -248,6 +254,15 @@ pub async fn remove_member(
 /// custody and swap the live cipher in place. Returns the new key's fingerprint
 /// for the host to record in its own config — coven never writes the host's
 /// config.
+///
+/// `pending_rotation` is marked with the committed generation before adoption is
+/// even attempted, and cleared only once the swap below actually lands — so a
+/// concurrent seal can never observe "adoption hasn't finished" as "nothing is
+/// pending" in the gap between this function starting and either outcome. On
+/// success the mark is redundant (the swap already makes the live cipher current)
+/// but harmless; on failure it is what keeps every seal path refusing until one
+/// of the two remedies (a retried removal, or the next sync cycle's own adoption)
+/// clears it.
 ///
 /// The key is persisted before the live cipher is swapped, so a persistence
 /// failure leaves the cipher untouched on the superseded generation rather than
@@ -261,7 +276,9 @@ pub fn apply_key_rotation(
     new_encryption: EncryptionService,
     custody: &dyn MasterKeyCustody,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
 ) -> Result<String, KeyError> {
+    pending_rotation.mark_committed(new_encryption.current_generation());
     let new_fingerprint = {
         let mut cipher = cipher_lock.write().unwrap();
         match &mut *cipher {
@@ -282,6 +299,7 @@ pub fn apply_key_rotation(
             }
         }
     };
+    pending_rotation.clear();
     Ok(new_fingerprint)
 }
 
@@ -837,6 +855,7 @@ mod tests {
             &EncryptionService::from_key([7u8; 32]),
             &custody,
             &cipher,
+            &crate::sync::cloud_storage::PendingRotation::none(),
         )
         .await
         .expect("remove");

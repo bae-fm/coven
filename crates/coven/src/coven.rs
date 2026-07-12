@@ -893,7 +893,7 @@ mod tests {
         CloudHomeJoinInfo, RevokeOutcome,
     };
     use crate::store_dir::StoreDir;
-    use crate::sync::cloud_storage::CloudCipher;
+    use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
     use crate::sync::cycle::run_single_sync_cycle;
     use crate::sync::hlc::Hlc;
     use crate::sync::session::BlobDecl;
@@ -1061,6 +1061,7 @@ mod tests {
             &SystemClock,
             handle.db(),
             &cipher,
+            &PendingRotation::none(),
             &keypair,
             None,
             &handle.store_dir(),
@@ -1236,6 +1237,7 @@ mod tests {
             &SystemClock,
             handle.db(),
             &RwLock::new(CloudCipher::Plaintext),
+            &PendingRotation::none(),
             &crate::keys::UserKeypair::generate(),
             None,
             &handle.store_dir(),

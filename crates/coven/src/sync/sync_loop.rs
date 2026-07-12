@@ -363,6 +363,7 @@ async fn run_single_cycle(
 ) -> Result<super::cycle::SyncCycleResult, String> {
     let storage: &dyn SyncStorage = &*inner.storage;
     let cloud_home = inner.storage.cloud_home();
+    let pending_rotation = inner.storage.shared_pending_rotation();
 
     super::cycle::run_single_sync_cycle(
         storage,
@@ -372,6 +373,7 @@ async fn run_single_cycle(
         clock,
         &inner.db,
         &inner.cipher,
+        &pending_rotation,
         &inner.user_keypair,
         Some(inner.custody.as_ref()),
         store_dir,

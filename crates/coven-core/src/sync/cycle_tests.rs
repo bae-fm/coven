@@ -20,7 +20,7 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
@@ -51,6 +51,7 @@ async fn run_cycle_m(
         &SystemClock,
         db,
         cipher,
+        &PendingRotation::none(),
         keypair,
         None,
         ld,
@@ -337,6 +338,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         &SystemClock,
         &db,
         &enc,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld,
@@ -953,6 +955,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         &SystemClock,
         &db,
         &enc,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld,
@@ -1037,6 +1040,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         &SystemClock,
         &db,
         &enc,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld,
@@ -1368,6 +1372,7 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
         &SystemClock,
         &db,
         &enc,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld,
@@ -1436,6 +1441,7 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
         &SystemClock,
         &db,
         &enc,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld,
@@ -1493,6 +1499,7 @@ async fn run_cycle_m_storage(
         &SystemClock,
         db,
         cipher,
+        &PendingRotation::none(),
         keypair,
         None,
         ld,

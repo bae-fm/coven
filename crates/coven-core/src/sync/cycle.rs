@@ -21,7 +21,7 @@ use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 
-use super::cloud_storage::{CloudCipher, CloudSyncStorage};
+use super::cloud_storage::{CloudCipher, CloudSyncStorage, PendingRotation, RotationPending};
 use super::hlc::Hlc;
 use super::publish_blobs::{ensure_publishable_changeset_blobs, PublishBlobError};
 use super::pull::HeldChangeset;
@@ -30,6 +30,7 @@ use super::status::DeviceActivity;
 use super::storage::SyncStorage;
 
 /// Result of a single sync cycle.
+#[derive(Debug)]
 pub struct SyncCycleResult {
     /// Number of remote changesets that were applied.
     pub changesets_applied: u64,
@@ -68,6 +69,13 @@ pub struct SyncCycleResult {
     /// should run the next cycle promptly to drain + publish the rest instead of
     /// waiting the idle interval.
     pub resume_drain_promptly: bool,
+    /// Set when this device has not adopted a store-key rotation the cloud has
+    /// already committed. While set, this cycle sealed nothing new for the
+    /// cloud — no changeset, blob, tombstone, or snapshot — even though pull and
+    /// local writes proceeded normally; the pending local changeset (if any)
+    /// stays queued undrained until a later cycle adopts the rotation. A host
+    /// surfaces this as why sync is paused, distinct from a hard failure.
+    pub rotation_pending: Option<RotationPending>,
 }
 
 /// Path for staging outgoing changeset bytes that survived a push failure.
@@ -426,6 +434,7 @@ pub async fn run_single_sync_cycle(
     clock: &dyn crate::clock::Clock,
     db: &Database,
     cipher: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
     user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
     store_dir: &StoreDir,
@@ -457,10 +466,37 @@ pub async fn run_single_sync_cycle(
     // is adopted on a running device without a restart. Runs before the blob drain
     // so the drain (and every push/pull below) uses the current key. A failure here
     // aborts the cycle and retries next time — a refresh that can't complete must
-    // not also corrupt state.
+    // not also corrupt state. Adoption itself failing is not this kind of failure —
+    // see `rotation_pending` below.
     if let Some(ch) = cloud_home {
-        refresh_authorization_state(ch, cipher, user_keypair, custody, store_id, &membership)
-            .await?;
+        refresh_authorization_state(
+            ch,
+            cipher,
+            pending_rotation,
+            user_keypair,
+            custody,
+            store_id,
+            &membership,
+        )
+        .await?;
+    }
+
+    // Whether this device has adopted everything the store has committed. Read
+    // once, right after the refresh that is the one place this cycle could adopt
+    // a rotation, and used below to skip every write that would otherwise seal
+    // new data under a generation the store has already superseded: the blob
+    // upload drain, the tombstone write drain, both changeset-push paths, and the
+    // snapshot. Pull, local writes, and delete-only paths (tombstone GC and
+    // cancel-drain) are unaffected — the gate is on sealing for the cloud, not on
+    // using the store.
+    let rotation_pending = pending_rotation.check(&cipher.read().unwrap()).err();
+    if let Some(pending) = &rotation_pending {
+        warn!(
+            committed_generation = pending.committed_generation,
+            live_generation = pending.live_generation,
+            "sync paused: this device has not adopted a committed store-key rotation; \
+             sealing nothing new for the cloud until it adopts"
+        );
     }
 
     // Load persisted sync state — DB errors abort the cycle (a transient SQLite
@@ -502,18 +538,28 @@ pub async fn run_single_sync_cycle(
     // whether it broke to publish, which drives the loop's cadence below.
     let mut resume_drain_promptly = false;
     if let Some(ch) = cloud_home {
-        match crate::blob::upload::drain_uploads(
-            db, ch, cipher, store_id, store_dir, clock, hlc, observer,
-        )
-        .await
-        {
-            Ok(outcome) => {
-                resume_drain_promptly = outcome.yielded_for_publish;
-                if outcome.uploaded > 0 {
-                    info!(count = outcome.uploaded, "Drained blob uploads");
+        if rotation_pending.is_none() {
+            match crate::blob::upload::drain_uploads(
+                db,
+                ch,
+                cipher,
+                pending_rotation,
+                store_id,
+                store_dir,
+                clock,
+                hlc,
+                observer,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    resume_drain_promptly = outcome.yielded_for_publish;
+                    if outcome.uploaded > 0 {
+                        info!(count = outcome.uploaded, "Drained blob uploads");
+                    }
                 }
+                Err(e) => warn!("Blob upload drain error: {e}"),
             }
-            Err(e) => warn!("Blob upload drain error: {e}"),
         }
 
         // Retry any tombstone-cancel an upload's inline cancel could not complete.
@@ -540,7 +586,12 @@ pub async fn run_single_sync_cycle(
     // Staging holds the gated, push-ready bytes so a lost push can re-push exactly
     // them next cycle without re-deriving; the span below stages-then-pushes.
     if let Some(seq) = staged_seq {
-        if let Some(staged_data) = read_staged_changeset(store_dir).await {
+        if rotation_pending.is_some() {
+            debug!(
+                seq,
+                "rotation pending; leaving the staged changeset queued until adoption"
+            );
+        } else if let Some(staged_data) = read_staged_changeset(store_dir).await {
             info!(seq, "Retrying staged changeset push");
 
             match push_changeset(
@@ -630,45 +681,52 @@ pub async fn run_single_sync_cycle(
     // push failure re-pushes exactly these gated bytes; the staged-retry above
     // re-pushes on the next cycle.
     if let Some(outgoing) = &sync_result.outgoing {
-        let seq = outgoing.seq;
-        let pending_changeset_max_id = pending_changeset_max_id
-            .ok_or_else(|| "outgoing changeset without pending journal rows".to_string())?;
+        if rotation_pending.is_some() {
+            debug!(
+                seq = outgoing.seq,
+                "rotation pending; leaving the outgoing changeset queued until adoption"
+            );
+        } else {
+            let seq = outgoing.seq;
+            let pending_changeset_max_id = pending_changeset_max_id
+                .ok_or_else(|| "outgoing changeset without pending journal rows".to_string())?;
 
-        crate::local_blob::write_atomic(&staging_path(store_dir), &outgoing.packed)
+            crate::local_blob::write_atomic(&staging_path(store_dir), &outgoing.packed)
+                .await
+                .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
+            persist_staged_push_state(
+                db,
+                seq,
+                pending_changeset_max_id,
+                &outgoing.deferred_local_blob_drops,
+            )
+            .await?;
+
+            match push_changeset(
+                storage,
+                db,
+                device_id,
+                seq,
+                outgoing.packed.clone(),
+                snapshot_seq,
+                &sync_time,
+            )
             .await
-            .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
-        persist_staged_push_state(
-            db,
-            seq,
-            pending_changeset_max_id,
-            &outgoing.deferred_local_blob_drops,
-        )
-        .await?;
-
-        match push_changeset(
-            storage,
-            db,
-            device_id,
-            seq,
-            outgoing.packed.clone(),
-            snapshot_seq,
-            &sync_time,
-        )
-        .await
-        {
-            Ok(()) => {
-                commit_push_success(
-                    db,
-                    store_dir,
-                    seq,
-                    Some(pending_changeset_max_id),
-                    &mut local_seq,
-                )
-                .await?;
-                info!(seq, "Pushed changeset");
-            }
-            Err(e) => {
-                warn!(seq, "Push failed, changeset staged for retry: {e}");
+            {
+                Ok(()) => {
+                    commit_push_success(
+                        db,
+                        store_dir,
+                        seq,
+                        Some(pending_changeset_max_id),
+                        &mut local_seq,
+                    )
+                    .await?;
+                    info!(seq, "Pushed changeset");
+                }
+                Err(e) => {
+                    warn!(seq, "Push failed, changeset staged for retry: {e}");
+                }
             }
         }
     } else if let Some(max_id) = pending_changeset_max_id {
@@ -742,12 +800,22 @@ pub async fn run_single_sync_cycle(
     // signature stops a non-member forging a deletion. (This is blob-tombstone
     // GC; changeset reclamation runs separately, after a snapshot is published.)
     if let Some(ch) = cloud_home {
-        match crate::blob::delete::drain_tombstones(db, ch, cipher, store_id, user_keypair, clock)
+        if rotation_pending.is_none() {
+            match crate::blob::delete::drain_tombstones(
+                db,
+                ch,
+                cipher,
+                pending_rotation,
+                store_id,
+                user_keypair,
+                clock,
+            )
             .await
-        {
-            Ok(n) if n > 0 => info!(count = n, "Wrote blob tombstones"),
-            Err(e) => warn!("Tombstone drain error: {e}"),
-            _ => {}
+            {
+                Ok(n) if n > 0 => info!(count = n, "Wrote blob tombstones"),
+                Err(e) => warn!("Tombstone drain error: {e}"),
+                _ => {}
+            }
         }
         // A still-pending tombstone-cancel means a blob was re-uploaded this
         // cycle (or earlier) but its cancel couldn't reach the cloud, so the
@@ -817,7 +885,11 @@ pub async fn run_single_sync_cycle(
     // propagate via the changeset push above.
     let snapshot_due = is_initial_sync
         || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since);
-    let may_snapshot = if snapshot_due {
+    let may_snapshot = if rotation_pending.is_some() {
+        // A snapshot restates and re-seals the whole catalog under the store key —
+        // exactly the kind of new cloud content the pending rotation must block.
+        false
+    } else if snapshot_due {
         // Judge against the cycle's once-loaded chain, the same acceptance-side rule
         // the readers apply: the author must be a current Owner, and an open/browsable
         // store with no chain is accepted (it has no owner to gate against). The
@@ -967,6 +1039,7 @@ pub async fn run_single_sync_cycle(
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,
         row_changes: sync_result.pull.row_changes,
         resume_drain_promptly,
+        rotation_pending,
     })
 }
 
@@ -983,12 +1056,19 @@ pub async fn run_single_sync_cycle(
 ///
 /// Fail-closed: for an owner-pinned (opaque) store the cycle's shared membership
 /// load has already aborted the cycle if the chain can't be listed, is wiped, or
-/// won't anchor — so `membership.chain` is present whenever an owner is pinned. The
-/// wrapped-key read below surfaces its own failure as an aborted cycle: a refresh
-/// that can't complete must not leave durable state half-updated.
+/// won't anchor — so `membership.chain` is present whenever an owner is pinned.
+///
+/// A rotation this refresh discovers but cannot adopt (no custody handed to this
+/// cycle, or custody's own persist fails) is not a reason to abort the cycle —
+/// `pending_rotation` marks the committed generation instead, and the caller
+/// gates every seal on it for the rest of this cycle. Membership state that
+/// can't be resolved at all (an invisible activation, a read failure) still
+/// aborts: those mean this device doesn't reliably know the current state, which
+/// is a different condition from "knows the state and can't adopt it yet".
 async fn refresh_authorization_state(
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
     user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
     store_id: &str,
@@ -1072,18 +1152,46 @@ async fn refresh_authorization_state(
         Ok(new_encryption) => {
             let incoming_generation = new_encryption.current_generation();
             if incoming_generation <= accepted_generation {
+                // Not newer than what this device already accepted — but that does
+                // NOT mean nothing is pending: a decoy wrap from a non-rotating
+                // owner can be the one this scan happened to resolve (see
+                // `unwrap_store_keyring_for_owners_with_activation`'s per-owner
+                // scan) while a genuinely newer generation, discovered on an
+                // earlier cycle, is still un-adopted. `pending_rotation` is only
+                // ever cleared by a successful adoption, never by this branch, so
+                // an earlier mark survives a scan that re-resolves to something
+                // older.
                 debug!(
                     incoming_generation,
                     accepted_generation, "refresh: ignored non-newer wrapped store key"
                 );
             } else if in_use != new_encryption.keyring_entries() {
-                let custody = custody.ok_or_else(|| {
-                    "refresh: rotated store key needs master-key custody".to_string()
-                })?;
-                let fingerprint =
-                    super::membership_ops::apply_key_rotation(new_encryption, custody, cipher)
-                        .map_err(|e| format!("refresh: adopt rotated store key: {e}"))?;
-                info!(%fingerprint, "Adopted rotated store key");
+                match custody {
+                    None => {
+                        pending_rotation.mark_committed(incoming_generation);
+                        info!(
+                            incoming_generation,
+                            "refresh: found a rotated store key but this cycle has no \
+                             master-key custody to adopt it; sealing is paused until a \
+                             cycle with custody adopts it"
+                        );
+                    }
+                    Some(custody) => {
+                        match super::membership_ops::apply_key_rotation(
+                            new_encryption,
+                            custody,
+                            cipher,
+                            pending_rotation,
+                        ) {
+                            Ok(fingerprint) => info!(%fingerprint, "Adopted rotated store key"),
+                            Err(e) => warn!(
+                                incoming_generation,
+                                "refresh: could not adopt a rotated store key ({e}); sealing \
+                                 is paused until adoption succeeds"
+                            ),
+                        }
+                    }
+                }
             }
         }
         // No wrapped key for this device under any current owner: a solo store

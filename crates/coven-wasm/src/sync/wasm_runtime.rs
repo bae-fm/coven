@@ -253,6 +253,7 @@ impl Drop for WasmSyncRuntime {
 async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleResult, String> {
     let storage: &dyn SyncStorage = &inputs.storage;
     let cloud_home = inputs.storage.cloud_home();
+    let pending_rotation = inputs.storage.shared_pending_rotation();
 
     let result = super::cycle::run_single_sync_cycle(
         storage,
@@ -262,6 +263,7 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleRe
         inputs.clock.as_ref(),
         &inputs.db,
         &inputs.cipher,
+        &pending_rotation,
         &inputs.user_keypair,
         None,
         &inputs.store_dir,
@@ -274,6 +276,13 @@ async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleRe
 }
 
 fn log_alerts(alerts: &SyncLoopAlerts) {
+    if let Some(pending) = &alerts.rotation_pending {
+        warn!(
+            committed_generation = pending.committed_generation,
+            live_generation = pending.live_generation,
+            "Sync paused: this device has not adopted a committed store-key rotation",
+        );
+    }
     if alerts.skipped_schema > 0 {
         error!(
             count = alerts.skipped_schema,

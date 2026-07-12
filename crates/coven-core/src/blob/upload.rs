@@ -38,7 +38,7 @@ use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
 use crate::storage::cloud::{BlobBody, CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::gate::Gates;
 use crate::sync::hlc::Hlc;
 
@@ -155,9 +155,11 @@ async fn record_failure(
 ///
 /// A local file that can't be opened surfaces as an `Err` carrying a
 /// host-readable message, so the upload loop has one failure path
-/// (warn + record + skip).
+/// (warn + record + skip). A rotation this device has not adopted surfaces the
+/// same way — the entry stays queued and is retried once adoption clears it.
 async fn open_scoped_body(
     cipher: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
     file_path: &Path,
     store_id: &str,
     cloud_key: &str,
@@ -166,6 +168,7 @@ async fn open_scoped_body(
     // Snapshot the cipher out of the lock so the (streaming, await-holding) body
     // doesn't keep the guard across the upload.
     let cipher = cipher.read().unwrap().clone();
+    pending_rotation.check(&cipher).map_err(|e| e.to_string())?;
     let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, cloud_key);
     cipher.open_body(scope, file_path, &aad_context).await
 }
@@ -191,7 +194,11 @@ pub struct DrainOutcome {
 /// A failing entry is recorded and skipped rather than stopping the drain, with a
 /// per-entry backoff so a persistently-failing entry doesn't block the rest of
 /// the queue or get re-attempted every cycle. The `observer` (if any) is notified
-/// as each attempt starts, succeeds, or fails.
+/// as each attempt starts, succeeds, or fails. `pending_rotation` refuses to seal
+/// every entry the same way while this device has not adopted a store-key
+/// rotation the cloud has already committed — the entries stay queued, retried
+/// once adoption clears the marker, rather than sealing under the superseded
+/// generation.
 ///
 /// coven owns the make_remote *completion*: after a successful upload it walks the
 /// blob's row up to its gated root, and if that root has a `blob_make_remote_intents`
@@ -209,6 +216,7 @@ pub async fn drain_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
     store_id: &str,
     store_dir: &StoreDir,
     clock: &dyn crate::clock::Clock,
@@ -311,6 +319,7 @@ pub async fn drain_uploads(
         // chunk under the scope's key as it uploads, never holding the whole blob.
         let body = match open_scoped_body(
             cipher,
+            pending_rotation,
             &file_path,
             store_id,
             &entry.cloud_key,

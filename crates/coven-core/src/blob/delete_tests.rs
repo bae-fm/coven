@@ -22,7 +22,7 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::session::BlobDecl;
@@ -468,9 +468,17 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     db.enqueue_delete("blob-key", T0).await.expect("enqueue");
 
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &clock)
-        .await
-        .expect("drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &clock,
+    )
+    .await
+    .expect("drain");
     assert_eq!(n, 1, "one tombstone written");
 
     // The blob is still present — the drain records the deletion, it doesn't
@@ -518,9 +526,17 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
 
     db.enqueue_delete("blob-key", T0).await.expect("enqueue");
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &clock)
-        .await
-        .expect("drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &clock,
+    )
+    .await
+    .expect("drain");
 
     assert_eq!(n, 1, "the garbage object is replaced by a signed tombstone");
     let stored = cloud
@@ -554,9 +570,17 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
 
     db.enqueue_delete("blob-key", T0).await.expect("enqueue");
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &clock)
-        .await
-        .expect("drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &clock,
+    )
+    .await
+    .expect("drain");
 
     assert_eq!(n, 0, "an existing valid tombstone is not rewritten");
     assert_eq!(
@@ -617,9 +641,17 @@ async fn delete_validation_failure_backs_off_then_retries() {
 
     db.enqueue_delete("blob-key", T0).await.expect("enqueue");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
-        .await
-        .expect("first drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &first,
+    )
+    .await
+    .expect("first drain");
     assert_eq!(n, 0, "the failed validation writes no tombstone");
     assert_eq!(cloud.matching_calls(), 1);
 
@@ -637,9 +669,17 @@ async fn delete_validation_failure_backs_off_then_retries() {
     assert_eq!(recorded.with_timezone(&chrono::Utc), first.0);
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &inside)
-        .await
-        .expect("inside backoff drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &inside,
+    )
+    .await
+    .expect("inside backoff drain");
     assert_eq!(n, 0, "inside the backoff window no tombstone is written");
     assert_eq!(
         cloud.matching_calls(),
@@ -653,9 +693,17 @@ async fn delete_validation_failure_backs_off_then_retries() {
     );
 
     let after = FixedClock(at("2024-06-01T00:00:31Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &after)
-        .await
-        .expect("after backoff drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &after,
+    )
+    .await
+    .expect("after backoff drain");
     assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
     assert_eq!(cloud.matching_calls(), 2);
     assert!(
@@ -686,9 +734,17 @@ async fn delete_write_failure_backs_off_then_retries() {
 
     db.enqueue_delete("blob-key", T0).await.expect("enqueue");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
-        .await
-        .expect("first drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &first,
+    )
+    .await
+    .expect("first drain");
     assert_eq!(n, 0, "the failed write creates no tombstone");
     assert_eq!(cloud.matching_calls(), 1);
 
@@ -704,9 +760,17 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &inside)
-        .await
-        .expect("inside backoff drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &inside,
+    )
+    .await
+    .expect("inside backoff drain");
     assert_eq!(n, 0, "inside the backoff window no tombstone is written");
     assert_eq!(
         cloud.matching_calls(),
@@ -715,9 +779,17 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 
     let after = FixedClock(at("2024-06-01T00:00:31Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &after)
-        .await
-        .expect("after backoff drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &after,
+    )
+    .await
+    .expect("after backoff drain");
     assert_eq!(n, 1, "the elapsed backoff allows the tombstone write");
     assert_eq!(cloud.matching_calls(), 2);
     assert!(
@@ -738,9 +810,17 @@ async fn corrupt_delete_backoff_timestamp_does_not_strand_the_row() {
 
     db.enqueue_delete("blob-key", T0).await.expect("enqueue");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
-        .await
-        .expect("first drain");
+    drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &first,
+    )
+    .await
+    .expect("first drain");
 
     db.call(|conn| {
         conn.execute(
@@ -755,9 +835,17 @@ async fn corrupt_delete_backoff_timestamp_does_not_strand_the_row() {
     .expect("corrupt last_attempt_at");
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &inside)
-        .await
-        .expect("corrupt timestamp drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &inside,
+    )
+    .await
+    .expect("corrupt timestamp drain");
     assert_eq!(n, 1, "the corrupt timestamp does not suppress the retry");
     assert_eq!(cloud.matching_calls(), 2);
     assert!(
@@ -1789,6 +1877,7 @@ async fn reupload_through_the_drain_cancels_a_prior_cycle_tombstone() {
         &db,
         &storage,
         &cipher,
+        &PendingRotation::none(),
         "test-lib",
         &StoreDir::new(tmp.path()),
         &clock,
@@ -1857,9 +1946,17 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     // First drain at T0: writes the tombstone, removes the row.
     db.enqueue_delete("blob-key", T0).await.expect("enqueue");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &first)
-        .await
-        .expect("first drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &first,
+    )
+    .await
+    .expect("first drain");
     assert_eq!(n, 1, "the first drain writes the tombstone");
     let original_deleted_at = {
         let stored = cloud.get("blob_tombstones/blob-key").expect("tombstone");
@@ -1874,9 +1971,17 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
         .await
         .expect("re-enqueue");
     let second = FixedClock(at("2024-06-02T00:00:00Z"));
-    let n = drain_tombstones(&db, &cloud, &cipher, "lib", &kp, &second)
-        .await
-        .expect("second drain");
+    let n = drain_tombstones(
+        &db,
+        &cloud,
+        &cipher,
+        &PendingRotation::none(),
+        "lib",
+        &kp,
+        &second,
+    )
+    .await
+    .expect("second drain");
     assert_eq!(n, 0, "the re-drain writes no new tombstone");
 
     // Exactly one tombstone, still carrying the first drain's deleted_at.
@@ -1951,6 +2056,7 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
         &db,
         &failing,
         &cipher,
+        &PendingRotation::none(),
         "test-lib",
         &StoreDir::new(tmp.path()),
         &clock,
@@ -2187,6 +2293,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         &db,
         &storage,
         &cipher,
+        &PendingRotation::none(),
         "test-lib",
         &StoreDir::new(tmp.path()),
         &clock,

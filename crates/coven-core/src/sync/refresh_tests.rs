@@ -17,7 +17,7 @@ use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::invite::{
@@ -80,11 +80,12 @@ async fn run_cycle(
     storage: &MockSyncStorage,
     db: &crate::database::Database,
     cipher: &RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
     keypair: &UserKeypair,
     device_id: &str,
     ld: &StoreDir,
     custody: Option<&dyn MasterKeyCustody>,
-) -> Result<(), String> {
+) -> Result<super::cycle::SyncCycleResult, String> {
     let hlc = Hlc::new(device_id.to_string());
     run_single_sync_cycle(
         storage,
@@ -94,6 +95,7 @@ async fn run_cycle(
         &SystemClock,
         db,
         cipher,
+        pending_rotation,
         keypair,
         custody,
         ld,
@@ -101,7 +103,6 @@ async fn run_cycle(
         None,
     )
     .await
-    .map(|_| ())
 }
 
 /// A non-rotating running device B adopts a rotated store key on its next cycle,
@@ -172,6 +173,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -214,6 +216,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -315,6 +318,7 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -400,6 +404,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -418,6 +423,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -490,6 +496,7 @@ async fn same_generation_wrapped_key_is_not_adopted() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -569,6 +576,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -653,6 +661,7 @@ async fn removed_owner_key_is_not_adopted() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -728,6 +737,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -790,6 +800,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -862,6 +873,7 @@ async fn one_cycle_lists_membership_once() {
         &storage,
         &db_b,
         &cipher_b,
+        &PendingRotation::none(),
         &device_b,
         "B",
         &ld_b,
@@ -892,11 +904,13 @@ fn cipher_generation(cipher: &RwLock<CloudCipher>) -> u64 {
 
 /// Removing a member commits the cloud key rotation before this device adopts the
 /// rotated key locally. When the local keyring write fails, the removal is durable
-/// — the member is out and the store is rotated for everyone — but this device
-/// keeps sealing under the superseded generation. That half-applied state is its
-/// own typed error, and both remedies it names converge without losing the
-/// rotation: the device's next sync cycle adopts the key from its own
-/// `keys/{self}` wrap, and retrying the removal re-derives and re-adopts it.
+/// — the member is out and the store is rotated for everyone — but this device's
+/// live cipher stays on the superseded generation. That half-applied state is its
+/// own typed error, marks this device's rotation-pending gate (so it seals
+/// nothing new for the cloud in the meantime — see `rotation_pending_tests`), and
+/// both remedies it names converge without losing the rotation: the device's next
+/// sync cycle adopts the key from its own `keys/{self}` wrap, and retrying the
+/// removal re-derives and re-adopts it.
 #[tokio::test]
 async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remedies_converge() {
     let owner = UserKeypair::generate(); // this device — performs the removal
@@ -922,6 +936,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     let ks = TestCustody::default();
     ks.set_initial_key(old_key);
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+    let pending_rotation = PendingRotation::none();
     let hlc = Hlc::new("A".to_string());
 
     // The keyring is momentarily unwritable, so local adoption fails after the
@@ -937,6 +952,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         &EncryptionService::from_key(old_key),
         &ks,
         &cipher,
+        &pending_rotation,
     )
     .await
     .expect_err("local adoption fails while the keyring is unwritable");
@@ -975,6 +991,17 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         "the failed adoption did not persist a new key",
     );
 
+    // The failed adoption marks this device's own rotation-pending gate — the
+    // structural half of the fix: every seal for the cloud through this same
+    // storage now refuses until one of the two remedies below clears it (see
+    // `rotation_pending_tests` for the end-to-end proof that nothing seals in
+    // the meantime).
+    assert_eq!(
+        pending_rotation.pending_generation(),
+        Some(2),
+        "the failed adoption marks the committed generation as pending",
+    );
+
     // Remedy 1 — the next sync cycle: a still-stale device (generation 1) adopts
     // the rotated key from its own `keys/{owner}/{owner}` wrap, no retry needed.
     {
@@ -986,11 +1013,13 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         ks_refresh.set_initial_key(old_key);
         let cipher_refresh =
             RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
+        let pending_rotation_refresh = PendingRotation::none();
         let (_tmp, ld) = temp_store_dir();
         run_cycle(
             &storage,
             &db,
             &cipher_refresh,
+            &pending_rotation_refresh,
             &owner,
             "A",
             &ld,
@@ -1019,6 +1048,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         &EncryptionService::from_key(old_key),
         &ks,
         &cipher,
+        &pending_rotation,
     )
     .await
     .expect("retrying the removal converges");
@@ -1030,5 +1060,10 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         cipher_generation(&cipher),
         2,
         "retrying the removal adopts the rotated key",
+    );
+    assert_eq!(
+        pending_rotation.pending_generation(),
+        None,
+        "the retried removal clears this device's own rotation-pending gate",
     );
 }

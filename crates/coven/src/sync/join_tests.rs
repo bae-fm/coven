@@ -20,7 +20,7 @@ use crate::id_provider::SequentialIdProvider;
 use crate::join_code::{encode, InviteCode, JoinCodeError};
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::join::{join_from_invite_code, open_db_and_pull, BootstrapError};
@@ -710,6 +710,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &SystemClock,
         &db_b,
         &enc_lock,
+        &PendingRotation::none(),
         &keypair,
         None,
         &lib_b,

@@ -30,7 +30,7 @@ use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, PendingRotation};
 use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
@@ -159,6 +159,9 @@ async fn run_cycle(
     lib: &StoreDir,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> SyncCycleResult {
+    // A fresh gate each call: none of these transition tests exercise a rotation
+    // this device can't adopt.
+    let pending_rotation = PendingRotation::none();
     run_single_sync_cycle(
         storage,
         "test-lib",
@@ -167,6 +170,7 @@ async fn run_cycle(
         &SystemClock,
         db,
         cipher,
+        &pending_rotation,
         kp,
         None,
         lib,
@@ -1494,6 +1498,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
         &db,
         &storage,
         &enc,
+        &PendingRotation::none(),
         "test-lib",
         &lib,
         &SystemClock,
@@ -1583,6 +1588,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
         &db,
         &storage,
         &enc,
+        &PendingRotation::none(),
         "test-lib",
         &lib,
         &SystemClock,
@@ -1811,6 +1817,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         &db,
         &storage,
         &enc,
+        &PendingRotation::none(),
         "test-lib",
         &lib,
         &SystemClock,
@@ -1839,6 +1846,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         &db,
         &storage,
         &enc,
+        &PendingRotation::none(),
         "test-lib",
         &lib,
         &SystemClock,

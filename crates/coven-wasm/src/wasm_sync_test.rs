@@ -26,7 +26,7 @@ use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
@@ -67,6 +67,7 @@ fn storage_for(cloud: &InMemoryCloudHome) -> CloudSyncStorage {
 /// observer: this engine test pushes/pulls changesets only, not the blob outbox.
 async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
     let cipher = RwLock::new(CloudCipher::Plaintext);
+    let pending_rotation = PendingRotation::none();
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new(device_id.to_string());
     db.set_sync_state("snapshot_seq", "0")
@@ -85,6 +86,7 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
         &SystemClock,
         db,
         &cipher,
+        &pending_rotation,
         &keypair,
         None,
         &store_dir,

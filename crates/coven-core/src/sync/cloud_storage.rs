@@ -31,6 +31,95 @@ pub enum CloudCipher {
     Plaintext,
 }
 
+/// The cloud has committed the store key to `committed_generation`, and this
+/// device's live cipher is still sealing under `live_generation`. A member
+/// removal rotates the store key on the cloud before this device necessarily
+/// folds the new generation into its own cipher (custody can fail to persist it
+/// locally even though the cloud rotation is durable), so the two can
+/// transiently disagree. Every seal for the cloud refuses while this holds,
+/// rather than sealing new data under a generation the store has already
+/// superseded — the removed member still holds a key for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the store key rotated to generation {committed_generation}, which this device has not \
+     adopted (still sealing under generation {live_generation}); refusing to seal for the \
+     cloud until adoption completes"
+)]
+pub struct RotationPending {
+    pub committed_generation: u64,
+    pub live_generation: u64,
+}
+
+/// Whether the cloud has committed the store key to a generation this device's
+/// live cipher has not adopted. Set when a member removal commits its rotation
+/// but this device's own custody fails to persist the new key locally, or when a
+/// peer's rotation is discovered on refresh and can't be adopted the same way;
+/// cleared only alongside the cipher swap that adopts it (see
+/// [`crate::sync::membership_ops::apply_key_rotation`]). `None` — the default —
+/// means the live cipher already holds everything the store has committed.
+///
+/// Shared (behind one `Arc`, via [`CloudSyncStorage::shared_pending_rotation`])
+/// across every path that seals data for the cloud — changesets, heads, blobs,
+/// tombstones, snapshots — so a rotation this device can't adopt blocks all of
+/// them the same way, not just the removal call that discovered it. This is the
+/// structural half of the invariant: this device must never seal under a
+/// generation the store has already superseded.
+pub struct PendingRotation(std::sync::RwLock<Option<u64>>);
+
+impl Default for PendingRotation {
+    fn default() -> Self {
+        Self(std::sync::RwLock::new(None))
+    }
+}
+
+impl PendingRotation {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Record that the cloud has committed `generation` and this device has not
+    /// folded it into its live cipher. Forward-only: a generation not newer than
+    /// one already recorded leaves the recorded value untouched, so an older
+    /// rediscovery (e.g. a decoy wrap from a non-rotating owner) can never erase
+    /// a genuinely newer generation already known to be pending.
+    pub fn mark_committed(&self, generation: u64) {
+        let mut recorded = self.0.write().unwrap();
+        if recorded.is_none_or(|g| generation > g) {
+            *recorded = Some(generation);
+        }
+    }
+
+    /// Clear the marker: the live cipher now holds everything committed.
+    pub fn clear(&self) {
+        *self.0.write().unwrap() = None;
+    }
+
+    /// The recorded committed generation, if any is pending — for status
+    /// reporting independent of a specific cipher snapshot.
+    pub fn pending_generation(&self) -> Option<u64> {
+        *self.0.read().unwrap()
+    }
+
+    /// Check `cipher` against the committed generation, if one is pending. A
+    /// plaintext home never rotates a store key (sharing, and hence removal,
+    /// requires an encrypted home), so it is never blocked.
+    pub fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending> {
+        let live_generation = match cipher {
+            CloudCipher::Encrypted(enc) => enc.current_generation(),
+            CloudCipher::Plaintext => return Ok(()),
+        };
+        if let Some(committed_generation) = self.pending_generation() {
+            if committed_generation > live_generation {
+                return Err(RotationPending {
+                    committed_generation,
+                    live_generation,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// How a cloud home names its blob objects. Paired with the at-rest
 /// [`CloudCipher`] by the home's [`HomeStorage`](crate::config::HomeStorage): an
 /// opaque home is `Hashed` + encrypted, a browsable home is `Plain` + plaintext.
@@ -189,6 +278,11 @@ pub struct CloudSyncStorage {
     /// shared between this storage and the readers it spawns, not owned by one.
     home: Arc<dyn CloudHome>,
     cipher: Arc<RwLock<CloudCipher>>,
+    /// Whether a committed rotation is outstanding — see [`PendingRotation`].
+    /// Shared the same way `cipher` is, so a member removal or a refresh cycle
+    /// that discovers a rotation this device can't adopt blocks every seal path,
+    /// not just the one that discovered it.
+    pending_rotation: Arc<PendingRotation>,
     /// How blob objects are keyed. Unlike the cipher, the scheme does not rotate
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
@@ -211,6 +305,7 @@ impl CloudSyncStorage {
         CloudSyncStorage {
             home,
             cipher: Arc::new(RwLock::new(cipher)),
+            pending_rotation: Arc::new(PendingRotation::none()),
             blob_paths,
             store_id: store_id.into(),
             keypair,
@@ -222,6 +317,15 @@ impl CloudSyncStorage {
     /// removal rotates the key in place through it).
     pub fn shared_cipher(&self) -> Arc<RwLock<CloudCipher>> {
         self.cipher.clone()
+    }
+
+    /// Return a shared reference to the rotation-pending marker for external use
+    /// — the same instance a member removal (or a refresh cycle) marks when it
+    /// commits a rotation this device has not adopted, so every seal path (this
+    /// storage's own, plus the blob upload/tombstone drains, which seal directly
+    /// against a `CloudCipher` rather than through this trait) refuses together.
+    pub fn shared_pending_rotation(&self) -> Arc<PendingRotation> {
+        self.pending_rotation.clone()
     }
 
     /// Borrow the underlying CloudHome for direct access (e.g., grant_access/revoke_access).
@@ -247,8 +351,22 @@ impl CloudSyncStorage {
         hex::encode(self.keypair.public_key())
     }
 
+    /// The cipher to seal new data under — refuses while the cloud has committed
+    /// a rotation this device has not adopted, rather than sealing under the
+    /// generation the store has superseded. Every write that protects data under
+    /// the store key calls this instead of reading `self.cipher()` directly;
+    /// reads/opens are unaffected (they resolve their own generation from the
+    /// ciphertext's tag) and keep reading the cipher plainly.
+    fn cipher_for_seal(&self) -> Result<CloudCipher, StorageError> {
+        let cipher = self.cipher().clone();
+        self.pending_rotation.check(&cipher)?;
+        Ok(cipher)
+    }
+
     async fn write_sealed(&self, key: &str, plaintext: Vec<u8>) -> Result<(), StorageError> {
-        let stored = self.cipher().seal(plaintext, &self.aad_context(key));
+        let stored = self
+            .cipher_for_seal()?
+            .seal(plaintext, &self.aad_context(key));
         self.home
             .write(
                 key,
@@ -286,7 +404,7 @@ impl CloudSyncStorage {
         plaintext: Vec<u8>,
     ) -> Result<(), StorageError> {
         let stored = self
-            .cipher()
+            .cipher_for_seal()?
             .seal_scoped(scope, plaintext, &self.aad_context(key));
         self.home
             .write(
@@ -839,7 +957,7 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<(), StorageError> {
         let uploader = self.self_uploader();
         let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
-        let cipher = self.cipher().clone();
+        let cipher = self.cipher_for_seal()?;
         let body = cipher
             .open_body(scope, source_path, &self.aad_context(&key))
             .await

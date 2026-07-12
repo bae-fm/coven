@@ -20,7 +20,7 @@ use crate::id_provider::SequentialIdProvider;
 use crate::keys::{StoreKeys, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::store_dir::StoreLayout;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::join::{
@@ -620,6 +620,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         &SystemClock,
         &db_b,
         &enc_lock,
+        &PendingRotation::none(),
         &joiner_keypair,
         None,
         &lib_b,

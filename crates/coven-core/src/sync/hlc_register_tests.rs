@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
@@ -100,6 +100,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         &SystemClock,
         &db_b,
         &encryption,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld,
@@ -700,6 +701,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         &SystemClock,
         &db,
         &encryption,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld,

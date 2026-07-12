@@ -27,6 +27,8 @@ pub mod push;
 #[cfg(test)]
 mod refresh_tests;
 pub mod restore_code;
+#[cfg(test)]
+mod rotation_pending_tests;
 pub mod service;
 pub mod session;
 pub mod signed_control;

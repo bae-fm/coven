@@ -12,7 +12,7 @@ use crate::keys::UserKeypair;
 use crate::migration::Migration;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle;
 use crate::sync::envelope;
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
@@ -1865,6 +1865,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
         &crate::clock::SystemClock,
         &db1,
         &cipher,
+        &PendingRotation::none(),
         &keypair,
         None,
         &ld1,

@@ -16,7 +16,7 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 use crate::storage::cloud::CloudHome;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::join::open_db_and_pull;
@@ -39,6 +39,9 @@ async fn run_cycle(
     kp: &UserKeypair,
     lib: &StoreDir,
 ) -> Result<SyncCycleResult, String> {
+    // A fresh gate each call: none of these tests exercise a rotation this device
+    // can't adopt, so there is never anything pending to carry between cycles.
+    let pending_rotation = PendingRotation::none();
     run_single_sync_cycle(
         storage,
         "test-lib",
@@ -47,6 +50,7 @@ async fn run_cycle(
         &SystemClock,
         db,
         cipher,
+        &pending_rotation,
         kp,
         None,
         lib,

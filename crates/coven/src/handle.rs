@@ -829,10 +829,12 @@ impl CovenHandle {
             .ok_or(SyncError::LoopNotRunning)?;
         let storage = sync_loop.storage().clone();
         let cipher = sync_loop.cipher().clone();
+        let pending_rotation = storage.shared_pending_rotation();
         crate::blob::upload::drain_uploads(
             &self.db,
             storage.cloud_home(),
             cipher.as_ref(),
+            pending_rotation.as_ref(),
             &self.config().store_id,
             &self.store_dir,
             self.clock.as_ref(),

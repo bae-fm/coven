@@ -56,7 +56,7 @@ use tracing::{debug, warn};
 use crate::database::Database;
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{no_progress, CloudHome};
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::membership::MembershipChain;
 use crate::sync::membership_ops::{
     authorize_loaded_membership_author, MembershipAuthorRequirement,
@@ -235,6 +235,7 @@ async fn existing_tombstone_state(
 async fn write_signed_tombstone(
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
     store_id: &str,
     key: &str,
     cloud_key: &str,
@@ -250,7 +251,9 @@ async fn write_signed_tombstone(
     let bytes = serde_json::to_vec(&tombstone)
         .map_err(|e| format!("tombstone serialization failed: {e}"))?;
     let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, key);
-    let sealed = cipher.read().unwrap().seal(bytes, &aad_context);
+    let cipher = cipher.read().unwrap().clone();
+    pending_rotation.check(&cipher).map_err(|e| e.to_string())?;
+    let sealed = cipher.seal(bytes, &aad_context);
     cloud_home
         .write(
             key,
@@ -274,6 +277,9 @@ async fn write_signed_tombstone(
 /// after the tombstone is present), with a per-row backoff before the next retry —
 /// the deletion is not lost. Per-row failures are logged and skipped so one bad row
 /// doesn't block the rest. Returns the number of tombstones written this pass.
+/// `pending_rotation` refuses every write the same way while this device has not
+/// adopted a store-key rotation the cloud has already committed — the rows stay
+/// queued, retried once adoption clears the marker.
 ///
 /// The write is idempotent on the tombstone's existence, not its contents: if a
 /// tombstone already exists for the key it is left untouched and only the row is
@@ -286,6 +292,7 @@ pub async fn drain_tombstones(
     db: &Database,
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
     store_id: &str,
     keypair: &UserKeypair,
     clock: &dyn crate::clock::Clock,
@@ -335,6 +342,7 @@ pub async fn drain_tombstones(
                 if let Err(e) = write_signed_tombstone(
                     cloud_home,
                     cipher,
+                    pending_rotation,
                     store_id,
                     &key,
                     &entry.cloud_key,
@@ -358,6 +366,7 @@ pub async fn drain_tombstones(
                 if let Err(e) = write_signed_tombstone(
                     cloud_home,
                     cipher,
+                    pending_rotation,
                     store_id,
                     &key,
                     &entry.cloud_key,

@@ -19,7 +19,7 @@ use crate::encryption::EncryptionService;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::hlc::Hlc;
 use rusqlite::OptionalExtension;
 
@@ -37,7 +37,15 @@ async fn run_drain(
 ) -> Result<DrainOutcome, crate::database::DbError> {
     let hlc = Hlc::new("test-device".to_string());
     drain_uploads(
-        db, cloud, cipher, "test-lib", store_dir, clock, &hlc, observer,
+        db,
+        cloud,
+        cipher,
+        &PendingRotation::none(),
+        "test-lib",
+        store_dir,
+        clock,
+        &hlc,
+        observer,
     )
     .await
 }
@@ -391,6 +399,49 @@ async fn bad_item_does_not_block_good_later_item() {
     assert_eq!(recorded.with_timezone(&chrono::Utc), clock.now());
 
     assert!(get_upload(&db, 2).await.is_none(), "uploaded entry removed");
+}
+
+/// While this device has not adopted a store-key rotation the cloud has already
+/// committed, the drain refuses to seal any entry rather than sealing it under
+/// the superseded generation: no object reaches the cloud, and the entry stays
+/// queued (the same "recorded and skipped" shape a cloud write failure takes),
+/// to retry once adoption clears the marker.
+#[tokio::test]
+async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "f1", "k1", Some(path), 0, None).await;
+    let cloud = InMemoryCloudHome::new();
+    let cipher = enc();
+    let pending_rotation = PendingRotation::none();
+    pending_rotation.mark_committed(2);
+
+    let outcome = drain_uploads(
+        &db,
+        &cloud,
+        &cipher,
+        &pending_rotation,
+        "test-lib",
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        &Hlc::new("test-device".to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.uploaded, 0,
+        "nothing seals while adoption is pending"
+    );
+    assert!(cloud.get("k1").is_none(), "no object reaches the cloud");
+    let (attempt, err, _) = get_upload(&db, 1).await.expect("entry stays queued");
+    assert_eq!(attempt, 1);
+    assert!(
+        err.as_deref().unwrap().contains("rotated to generation 2"),
+        "the recorded failure names the rotation, got {err:?}"
+    );
 }
 
 /// A failed attempt persists attempt_count + last_error, and a later cycle past

@@ -111,6 +111,10 @@ pub enum StorageError {
     NotFound(String),
     #[error("decryption failed: {0}")]
     Decryption(String),
+    /// This device has not adopted a store-key rotation the cloud already
+    /// committed; see [`crate::sync::cloud_storage::RotationPending`].
+    #[error("{0}")]
+    RotationPending(#[from] crate::sync::cloud_storage::RotationPending),
 }
 
 impl From<crate::storage::cloud::CloudHomeError> for StorageError {

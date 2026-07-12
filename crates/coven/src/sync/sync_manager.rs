@@ -648,12 +648,15 @@ impl SyncManager {
 
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         let cloud_home = sync_loop.storage().cloud_home();
+        let pending_rotation = sync_loop.storage().shared_pending_rotation();
 
         // Removing a member commits the cloud key rotation and then adopts the
         // rotated key into this device's keyring and live cipher. The host records
         // the returned fingerprint and that a key is stored in its own config; an
         // adoption failure surfaces as its own membership variant naming the
-        // half-applied state and its remedies.
+        // half-applied state and its remedies — and, structurally, this device
+        // seals nothing new for the cloud until one of those remedies adopts it
+        // (`pending_rotation`, shared with the sync loop this same store runs).
         let fingerprint = crate::sync::membership_ops::remove_member(
             storage,
             cloud_home,
@@ -664,6 +667,7 @@ impl SyncManager {
             &current_encryption,
             self.custody.as_ref(),
             sync_loop.cipher(),
+            &pending_rotation,
         )
         .await
         .map_err(SyncError::Membership)?;

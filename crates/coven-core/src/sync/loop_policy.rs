@@ -6,6 +6,7 @@
 
 use crate::changeset::RowChange;
 
+use super::cloud_storage::RotationPending;
 use super::cycle::SyncCycleResult;
 use super::pull::HeldChangeset;
 use super::status::DeviceActivity;
@@ -29,6 +30,11 @@ impl LoopWait {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncLoopAlerts {
+    /// This device has not adopted a store-key rotation the cloud has already
+    /// committed. While set, this cycle sealed nothing new for the cloud — a
+    /// confidentiality invariant, so it takes priority over every other alert
+    /// below.
+    pub rotation_pending: Option<RotationPending>,
     pub skipped_schema: u64,
     pub rejected_unauthorized: u64,
     pub invalid_signatures: u64,
@@ -41,7 +47,14 @@ pub struct SyncLoopAlerts {
 
 impl SyncLoopAlerts {
     pub fn primary_message(&self) -> Option<String> {
-        if self.skipped_schema > 0 {
+        if let Some(pending) = &self.rotation_pending {
+            Some(format!(
+                "Sync is paused: the store key rotated to generation {}, which this device \
+                 has not adopted yet (still on generation {}). Remove the member again, or \
+                 wait for the next sync cycle to adopt the key.",
+                pending.committed_generation, pending.live_generation,
+            ))
+        } else if self.skipped_schema > 0 {
             Some(format!(
                 "{} changes from a newer app version were skipped. Update the app to apply them.",
                 self.skipped_schema,
@@ -135,6 +148,7 @@ pub fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
             data_changed,
             row_changes,
             alerts: SyncLoopAlerts {
+                rotation_pending: result.rotation_pending,
                 skipped_schema: result.skipped_schema,
                 rejected_unauthorized: result.rejected_unauthorized,
                 invalid_signatures: result.invalid_signatures,
@@ -204,6 +218,7 @@ mod tests {
             asset_downloads_failed: false,
             row_changes: vec![],
             resume_drain_promptly: false,
+            rotation_pending: None,
         }
     }
 
@@ -281,6 +296,7 @@ mod tests {
     #[test]
     fn alert_message_priority_matches_native_status() {
         let alerts = SyncLoopAlerts {
+            rotation_pending: None,
             skipped_schema: 1,
             rejected_unauthorized: 2,
             invalid_signatures: 3,
@@ -296,8 +312,31 @@ mod tests {
     }
 
     #[test]
+    fn rotation_pending_alert_takes_priority_over_every_other_alert() {
+        let alerts = SyncLoopAlerts {
+            rotation_pending: Some(RotationPending {
+                committed_generation: 2,
+                live_generation: 1,
+            }),
+            skipped_schema: 1,
+            rejected_unauthorized: 2,
+            invalid_signatures: 3,
+            held_changesets: held(4),
+            constraint_conflicts: 5,
+            asset_downloads_failed: true,
+        };
+
+        let message = alerts.primary_message().expect("rotation pending alert");
+        assert!(
+            message.contains("generation 2") && message.contains("generation 1"),
+            "message names both generations: {message}",
+        );
+    }
+
+    #[test]
     fn constraint_conflict_alert_is_reported() {
         let alerts = SyncLoopAlerts {
+            rotation_pending: None,
             skipped_schema: 0,
             rejected_unauthorized: 0,
             invalid_signatures: 0,
