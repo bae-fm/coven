@@ -83,6 +83,7 @@ async fn restore_result_for(
         &test_synced_tables(),
         &test_migrations(),
         crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
         None,
         None,
         &crate::store_dir::StoreLayout::new(app_dir),
@@ -220,6 +221,7 @@ async fn restore_with_cancel(
         &test_synced_tables(),
         &test_migrations(),
         crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
         None,
         None,
         &crate::store_dir::StoreLayout::new(app_dir),
@@ -413,6 +415,8 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     );
     let store_keys = StoreKeys::new(store_id.to_string());
     let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
     let join_info = CloudHomeJoinInfo::S3 {
         bucket: "b".to_string(),
         region: "us-east-1".to_string(),
@@ -463,7 +467,13 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         "the cloud home credentials must have been written before the late failure",
     );
 
-    let wrapped = cleanup_after_bootstrap_failure(&store_dir, &store_keys, custody.as_ref(), err);
+    let wrapped = cleanup_after_bootstrap_failure(
+        &store_dir,
+        &store_keys,
+        custody.as_ref(),
+        identity_custody.as_ref(),
+        err,
+    );
     assert!(
         !matches!(wrapped, BootstrapError::Cleanup { .. }),
         "cleanup of a directory blocked only by its own contents must fully succeed, got {wrapped:?}",
@@ -1039,5 +1049,47 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         std::fs::read(&expected_blob).expect("read backfilled blob"),
         b"cover-bytes",
         "the backfilled file must hold the blob's plaintext bytes",
+    );
+}
+
+/// A restore code for store A establishes an identity for A alone. This
+/// drives the exact step `restore_from_code` runs after `restore_from_cloud`
+/// succeeds — importing the code's signing key into the named store's own
+/// identity custody — and shows a different store on the same device, whose
+/// custody this restore never touched, is left with no identity established.
+#[tokio::test]
+async fn restore_establishes_no_identity_for_another_store() {
+    crate::keys::test_keyring::install();
+
+    let restored_identity = UserKeypair::generate();
+    let identity_custody_a = crate::identity_custody::IdentityCustody::Keyring.resolve(
+        "restore-scope-store-a",
+        &crate::store_dir::StoreDir::new("unused-restore-scope-a"),
+    );
+    let identity_custody_b = crate::identity_custody::IdentityCustody::Keyring.resolve(
+        "restore-scope-store-b",
+        &crate::store_dir::StoreDir::new("unused-restore-scope-b"),
+    );
+
+    crate::keys::import_identity(
+        identity_custody_a.as_ref(),
+        &restored_identity.to_keypair_bytes(),
+    )
+    .expect("import store a's restored identity");
+
+    assert_eq!(
+        identity_custody_a
+            .unlock()
+            .expect("read store a's identity")
+            .map(|kp| kp.public_key()),
+        Some(restored_identity.public_key()),
+        "store a now holds the restored identity",
+    );
+    assert!(
+        identity_custody_b
+            .unlock()
+            .expect("read store b's identity")
+            .is_none(),
+        "a restore for store a must establish no identity for store b",
     );
 }

@@ -12,8 +12,11 @@ use tracing::info;
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
 use crate::encryption::{EncryptionError, MasterKeyring};
+use crate::identity_custody::IdentityCustody;
 use crate::join_code::InviteCode;
-use crate::keys::{CloudHomeCredentials, DeviceKeys, KeyError, MasterKeyCustody, StoreKeys};
+use crate::keys::{
+    CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys,
+};
 use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::{StoreDir, StoreLayout};
@@ -83,12 +86,14 @@ pub enum BootstrapError {
 /// entry point establishes that this invocation owns everything under the
 /// store id — no live store existed when it started, so the store-scoped
 /// directory, custody, and keyring accounts are this invocation's alone to
-/// remove, which makes total removal unconditionally safe here. Three steps,
+/// remove, which makes total removal unconditionally safe here. Four steps,
 /// each best-effort so one failing doesn't skip the others: the store
 /// directory (tolerating it never having existed — a failure before
 /// `create_dir_all` leaves nothing to remove; also covers a Passphrase
 /// custody's wrapped-file, which lives inside it), the master key via custody
-/// (idempotent regardless of policy), and the cloud-home credentials (OAuth
+/// (idempotent regardless of policy), this store's identity via its own
+/// custody (idempotent the same way — a no-op if a join never got as far as
+/// promoting its pending identity), and the cloud-home credentials (OAuth
 /// tokens are stored *as* credentials — see
 /// `StoreKeys::set_cloud_home_oauth_tokens` — so this one delete covers both).
 /// On a clean run the original `cause` is returned unchanged; if any step
@@ -98,6 +103,7 @@ pub(crate) fn cleanup_after_bootstrap_failure(
     store_dir: &StoreDir,
     store_keys: &StoreKeys,
     custody: &dyn MasterKeyCustody,
+    identity_custody: &dyn DeviceIdentityCustody,
     cause: BootstrapError,
 ) -> BootstrapError {
     let mut failures: Vec<String> = Vec::new();
@@ -110,6 +116,10 @@ pub(crate) fn cleanup_after_bootstrap_failure(
 
     if let Err(e) = custody.forget() {
         failures.push(format!("master key: {e}"));
+    }
+
+    if let Err(e) = identity_custody.forget() {
+        failures.push(format!("identity: {e}"));
     }
 
     if let Err(e) = store_keys.delete_cloud_home_credentials() {
@@ -295,16 +305,24 @@ async fn build_cloud_home_for_join(
 
 /// Join a shared store using an invite code string.
 ///
-/// Handles everything: decode invite, get keypair, build cloud home (using
-/// caller-provided OAuth tokens for the providers that need them), run the join
-/// protocol, and set as active store.
+/// `join_request_code` is the string this device's own [`crate::generate_join_request`]
+/// returned when it asked to join — decoded here to recover the public key that
+/// names the pending identity minted for that request, which a completed join
+/// promotes into this store's own identity custody (see
+/// [`crate::keys::mint_pending_identity`]/[`crate::keys::promote_pending_identity`]).
+///
+/// Handles everything: decode invite, promote the pending identity, build cloud
+/// home (using caller-provided OAuth tokens for the providers that need them),
+/// run the join protocol, and set as active store.
 #[allow(clippy::too_many_arguments)]
 pub async fn join_from_invite_code(
     invite_code_str: &str,
+    join_request_code: &str,
     layout: &StoreLayout,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     key_custody: crate::custody::KeyCustody,
+    identity_custody: IdentityCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
@@ -316,6 +334,9 @@ pub async fn join_from_invite_code(
 
     let code = crate::join_code::decode(invite_code_str)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
+    let joiner_public_key = crate::join_code::decode_join_request(join_request_code)
+        .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?
+        .public_key;
 
     // Refuse a store already present locally before any keyring or provider side
     // effect. Re-joining a store you already have adds nothing — the existing
@@ -334,6 +355,7 @@ pub async fn join_from_invite_code(
     // rollback instead of escaping via `?`.
     let store_keys = StoreKeys::new(code.store_id.clone());
     let custody = key_custody.resolve(&code.store_id, &store_dir);
+    let identity_custody = identity_custody.resolve(&code.store_id, &store_dir);
 
     let result = async {
         let cloud_home = build_cloud_home_for_join(
@@ -348,9 +370,11 @@ pub async fn join_from_invite_code(
         join_store(
             layout,
             code,
+            &joiner_public_key,
             synced_tables,
             migrations,
             custody.clone(),
+            identity_custody.clone(),
             cloud_home,
             ids.as_ref(),
             &on_status,
@@ -367,6 +391,7 @@ pub async fn join_from_invite_code(
             &store_dir,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             err,
         )),
     }
@@ -375,16 +400,20 @@ pub async fn join_from_invite_code(
 /// Join an existing shared store using a decoded invite code.
 ///
 /// Lower-level function — caller provides pre-built `CloudHome`.
-/// Prefer `join_from_invite_code` for the full flow.
+/// Prefer `join_from_invite_code` for the full flow. `joiner_public_key_hex`
+/// is the pending identity's public key (see [`join_from_invite_code`]'s
+/// doc) — the store's own identity once a completed join promotes it.
 ///
 /// `on_status` is called with progress messages for UI feedback.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn join_store(
     layout: &StoreLayout,
     code: InviteCode,
+    joiner_public_key_hex: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     custody: Arc<dyn MasterKeyCustody>,
+    identity_custody: Arc<dyn DeviceIdentityCustody>,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
@@ -417,11 +446,13 @@ pub(crate) async fn join_store(
     let store_keys = StoreKeys::new(code.store_id.clone());
 
     let result = async {
-        // Load the device signing keypair (must already exist — the inviter
+        // Load the pending identity this join's request minted (the inviter
         // wrapped the store key for this public key, so join never mints one
-        // of its own). It is device-global, not store-scoped.
+        // of its own). Not yet this store's identity — that happens only once
+        // the whole join succeeds, below — so this reads the pending slot
+        // rather than the store's own (not-yet-established) identity custody.
         on_status("Loading keypair...");
-        let user_keypair = DeviceKeys::require_user_keypair()?;
+        let user_keypair = crate::keys::peek_pending_identity(joiner_public_key_hex)?;
 
         // Accept the invitation to get the store encryption key. The joiner
         // authenticates it against the current Owner set derived from the
@@ -491,13 +522,34 @@ pub(crate) async fn join_store(
 
     match result {
         Ok(config) => {
-            info!("Joined store {} at {}", code.store_id, store_dir.display());
-            Ok(config)
+            // Promote the pending identity into this store's own identity
+            // custody only now that the join has fully succeeded — mirrors
+            // restore, which imports its signing key only after
+            // `restore_from_cloud` returns `Ok` (see `restore_from_code`).
+            // A promotion failure rolls back everything else the join wrote,
+            // the same as any other post-bootstrap failure.
+            match crate::keys::promote_pending_identity(
+                joiner_public_key_hex,
+                identity_custody.as_ref(),
+            ) {
+                Ok(_) => {
+                    info!("Joined store {} at {}", code.store_id, store_dir.display());
+                    Ok(config)
+                }
+                Err(e) => Err(cleanup_after_bootstrap_failure(
+                    &store_dir,
+                    &store_keys,
+                    custody.as_ref(),
+                    identity_custody.as_ref(),
+                    BootstrapError::Key(e),
+                )),
+            }
         }
         Err(err) => Err(cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             err,
         )),
     }
@@ -891,11 +943,14 @@ mod tests {
         let store_keys = StoreKeys::new("cleanup-failure-cause-test".to_string());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve("cleanup-failure-cause-test", &blocked);
+        let identity_custody =
+            IdentityCustody::Keyring.resolve("cleanup-failure-cause-test", &blocked);
 
         let wrapped = cleanup_after_bootstrap_failure(
             &blocked,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -922,11 +977,14 @@ mod tests {
         let store_keys = StoreKeys::new("successful-cleanup-test".to_string());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve("successful-cleanup-test", &store_dir);
+        let identity_custody =
+            IdentityCustody::Keyring.resolve("successful-cleanup-test", &store_dir);
 
         let returned = cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -950,11 +1008,14 @@ mod tests {
         let store_keys = StoreKeys::new("never-created-dir-test".to_string());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve("never-created-dir-test", &never_created);
+        let identity_custody =
+            IdentityCustody::Keyring.resolve("never-created-dir-test", &never_created);
 
         let returned = cleanup_after_bootstrap_failure(
             &never_created,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -965,10 +1026,11 @@ mod tests {
     }
 
     /// The extended rollback also removes the store-scoped keyring accounts —
-    /// the encryption master key and the cloud-home credentials (which is also
-    /// where an OAuth token lands, via `set_cloud_home_oauth_tokens`) — not just
-    /// the directory. Seed both accounts the way a partial bootstrap would have
-    /// written them, then assert cleanup leaves neither behind.
+    /// the encryption master key, this store's identity, and the cloud-home
+    /// credentials (which is also where an OAuth token lands, via
+    /// `set_cloud_home_oauth_tokens`) — not just the directory. Seed all three
+    /// the way a partial bootstrap would have written them, then assert
+    /// cleanup leaves none behind.
     #[test]
     fn cleanup_also_removes_both_keyring_accounts() {
         crate::keys::test_keyring::install();
@@ -981,6 +1043,10 @@ mod tests {
         custody
             .persist(&MasterKeyring::generate())
             .expect("seed the master key via custody");
+        let identity_custody = IdentityCustody::Keyring.resolve("keyring-cleanup-test", &store_dir);
+        identity_custody
+            .persist(&crate::keys::UserKeypair::generate())
+            .expect("seed this store's identity via custody");
         store_keys
             .set_cloud_home_credentials(&CloudHomeCredentials::S3 {
                 access_key: "ak".to_string(),
@@ -992,6 +1058,7 @@ mod tests {
             &store_dir,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -1004,6 +1071,13 @@ mod tests {
             store_keys.get_encryption_key().expect("read keyring"),
             None,
             "the encryption key must be removed from the keyring",
+        );
+        assert!(
+            identity_custody
+                .unlock()
+                .expect("read identity custody")
+                .is_none(),
+            "this store's identity must be removed from custody",
         );
         assert!(
             store_keys

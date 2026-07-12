@@ -19,7 +19,7 @@ use crate::config::{Config, HomeStorage};
 use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
-use crate::keys::{DeviceKeys, KeyError, MasterKeyCustody, StoreKeys};
+use crate::keys::{DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys};
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::{CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
@@ -90,6 +90,7 @@ pub(crate) struct SyncManager {
     config_provider: ConfigProvider,
     key_service: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
+    identity_custody: Arc<dyn DeviceIdentityCustody>,
     db: Database,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
@@ -130,6 +131,7 @@ impl SyncManager {
         config_provider: ConfigProvider,
         key_service: StoreKeys,
         custody: Arc<dyn MasterKeyCustody>,
+        identity_custody: Arc<dyn DeviceIdentityCustody>,
         db: Database,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
@@ -142,6 +144,7 @@ impl SyncManager {
             config_provider,
             key_service,
             custody,
+            identity_custody,
             db,
             clock,
             cloudkit_ops,
@@ -233,10 +236,11 @@ impl SyncManager {
         // Connect never mints a device identity: a locked agent with no
         // identity established must fail here with `KeyError::NoDeviceIdentity`,
         // not silently forge one.
-        let user_keypair = DeviceKeys::require_user_keypair()?;
+        let user_keypair = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
             self.custody.as_ref(),
+            self.identity_custody.as_ref(),
             cloud_home.clone(),
             Some(cipher.clone()),
         )
@@ -305,6 +309,10 @@ impl SyncManager {
     /// After this returns, the connected loop's storage is reachable via
     /// [`sync_loop_handle`](Self::sync_loop_handle)`().storage()`, so the handle's
     /// read path serves blobs over the same injected home with no separate hook.
+    ///
+    /// Like [`start_sync`](Self::start_sync), this never mints a device
+    /// identity: the caller must establish one under this manager's identity
+    /// custody first, or this fails with `KeyError::NoDeviceIdentity`.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn start_sync_with_home(
         &self,
@@ -314,7 +322,7 @@ impl SyncManager {
         let config = (self.config_provider)();
         self.stop_current_connection()?;
 
-        let keypair = DeviceKeys::get_or_create_user_keypair()?;
+        let keypair = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let storage = CloudSyncStorage::new(
             home.clone(),
             cipher.clone(),
@@ -453,7 +461,7 @@ impl SyncManager {
     /// uploads key under. Ready only once the keypair is loaded, which
     /// `is_sync_ready` has already established at the call sites below.
     fn self_uploader(&self) -> Result<String, MakeRemoteError> {
-        match DeviceKeys::get_user_public_key() {
+        match crate::keys::identity_public_key(self.identity_custody.as_ref()) {
             Ok(Some(pk)) => Ok(hex::encode(pk)),
             // No keypair loaded yet: sync genuinely isn't ready.
             Ok(None) => Err(MakeRemoteError::SyncNotReady),
@@ -562,6 +570,7 @@ impl SyncManager {
                 Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
                     &config,
                     self.custody.as_ref(),
+                    self.identity_custody.as_ref(),
                     home,
                     None,
                 ),
@@ -570,6 +579,7 @@ impl SyncManager {
                         &config,
                         &self.key_service,
                         self.custody.as_ref(),
+                        self.identity_custody.as_ref(),
                         None,
                         self.clock.clone(),
                         self.cloudkit_ops.clone(),
@@ -581,7 +591,7 @@ impl SyncManager {
             &owned_storage
         };
 
-        let user_pubkey = DeviceKeys::get_user_public_key()?;
+        let user_pubkey = crate::keys::identity_public_key(self.identity_custody.as_ref())?;
         crate::sync::membership_ops::get_members(
             storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
@@ -614,6 +624,7 @@ impl SyncManager {
                 Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
                     &config,
                     self.custody.as_ref(),
+                    self.identity_custody.as_ref(),
                     home,
                     None,
                 ),
@@ -622,6 +633,7 @@ impl SyncManager {
                         &config,
                         &self.key_service,
                         self.custody.as_ref(),
+                        self.identity_custody.as_ref(),
                         None,
                         self.clock.clone(),
                         self.cloudkit_ops.clone(),
@@ -649,6 +661,7 @@ impl SyncManager {
             &config,
             &self.key_service,
             self.custody.as_ref(),
+            self.identity_custody.as_ref(),
             membership_floor,
         )
         .map_err(SyncError::from)
@@ -773,6 +786,30 @@ mod tests {
         }
     }
 
+    /// The identity sibling of [`NoKeyCustody`]: `unlock` always returns
+    /// `None`, for tests exercising a store with no identity established.
+    struct NoIdentityCustody;
+
+    impl DeviceIdentityCustody for NoIdentityCustody {
+        fn unlock(&self) -> Result<Option<crate::keys::UserKeypair>, KeyError> {
+            Ok(None)
+        }
+        fn persist(&self, _keypair: &crate::keys::UserKeypair) -> Result<(), KeyError> {
+            Ok(())
+        }
+        fn forget(&self) -> Result<(), KeyError> {
+            Ok(())
+        }
+    }
+
+    /// A ready-to-use, already-established identity custody for tests whose
+    /// focus is elsewhere (blob transitions, membership, restore-code
+    /// generation) — seeded in-memory so it needs no keyring registration.
+    fn established_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
+        crate::identity_custody::IdentityCustody::InMemory(crate::keys::UserKeypair::generate())
+            .resolve("unused-store-id", &StoreDir::new("unused-store-dir"))
+    }
+
     #[tokio::test]
     async fn get_members_surfaces_malformed_cloud_credentials() {
         test_keyring::install();
@@ -805,6 +842,7 @@ mod tests {
             Arc::new(move || config.clone()),
             key_service,
             Arc::new(NoKeyCustody),
+            established_identity_custody(),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -850,6 +888,7 @@ mod tests {
             Arc::new(move || config.clone()),
             StoreKeys::new("lib-opaque-no-encryption".to_string()),
             Arc::new(NoKeyCustody),
+            established_identity_custody(),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -869,10 +908,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn start_sync_with_home_stops_the_previous_loop_before_replacement() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
@@ -886,6 +923,7 @@ mod tests {
             Arc::new(move || config.clone()),
             StoreKeys::new("lib-manager-restart".to_string()),
             Arc::new(NoKeyCustody),
+            established_identity_custody(),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -922,10 +960,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn failed_restart_leaves_no_stale_cloud_home() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
@@ -948,6 +984,7 @@ mod tests {
                 "lib-manager-failed-restart",
                 &StoreDir::new("unused-store-dir"),
             ),
+            established_identity_custody(),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -988,15 +1025,8 @@ mod tests {
     /// storage so the master-key precondition is out of the way and this
     /// isolates the identity check.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn start_sync_rejects_a_connect_with_no_device_identity_established() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        // Clear whatever an earlier test in this binary may have left at the
-        // fixed device-signing-key account, so this test's precondition (no
-        // identity established) holds regardless of test execution order —
-        // the account is device-global, shared by every test in this binary.
-        let _ = crate::keys::delete(&crate::keys::KeyringSlot::DeviceSigningKey);
 
         let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
@@ -1024,6 +1054,7 @@ mod tests {
             Arc::new(move || config.clone()),
             key_service,
             Arc::new(NoKeyCustody),
+            Arc::new(NoIdentityCustody),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -1087,6 +1118,7 @@ mod tests {
             Arc::new(move || config.clone()),
             StoreKeys::new(store_id.to_string()),
             custody.clone(),
+            established_identity_custody(),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,

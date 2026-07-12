@@ -29,16 +29,20 @@ pub enum KeyError {
     )]
     ServiceNotRegistered,
     #[error(
-        "no device identity is established; call coven::ensure_device_identity() first (or complete a join/restore, which establish one as part of accepting an invite or recovering a store)"
+        "no identity is established for this store; create, join, or restore the store first — each establishes this store's identity as part of what it does"
     )]
     NoDeviceIdentity,
     #[error(
-        "device identity is already established under a different key (existing {existing_pubkey_hex}, attempted import {imported_pubkey_hex}); importing a different identity would strand every store that pinned attestations to the existing key"
+        "this store's identity is already established under a different key (existing {existing_pubkey_hex}, attempted import {imported_pubkey_hex}); importing a different identity would strand this store's membership entries"
     )]
     IdentityMismatch {
         existing_pubkey_hex: String,
         imported_pubkey_hex: String,
     },
+    #[error(
+        "no pending identity is held for join request {request_public_key_hex}; the request may have already completed, been abandoned, or never existed"
+    )]
+    NoPendingIdentity { request_public_key_hex: String },
     #[error("invalid host secret name {name:?}: {reason}")]
     InvalidSecretName { name: String, reason: String },
     /// The OS refused a Keychain data-protection-store operation with
@@ -104,8 +108,10 @@ impl std::fmt::Debug for CloudHomeCredentials {
 /// Ed25519 keypair for signing changesets and membership changes.
 /// The same seed can derive an X25519 keypair for key wrapping.
 ///
-/// This is a global identity (not per-store) so attestations accumulate
-/// under one pubkey across all stores.
+/// One keypair is generated per (store, device) pair: a device holds a
+/// distinct identity in each store it belongs to, so a key scoped to one
+/// store carries no authority in another, and the same device's pubkey does
+/// not appear in more than one store's membership chain.
 #[derive(Clone)]
 pub struct UserKeypair {
     signing_key: SigningKey,
@@ -113,8 +119,8 @@ pub struct UserKeypair {
 
 impl UserKeypair {
     /// Generate a new random Ed25519 keypair. The unmanaged primitive behind
-    /// the native `DeviceKeys::get_or_create_user_keypair`; also lets host code
-    /// (and its tests) mint an identity directly.
+    /// every identity-establishing act — creating, joining, or restoring a
+    /// store; also lets host code (and its tests) mint an identity directly.
     pub fn generate() -> Self {
         let mut seed = [0u8; 32];
         rand::rng().fill_bytes(&mut seed);
@@ -262,16 +268,13 @@ pub trait MasterKeyCustody: Send + Sync {
     fn forget(&self) -> Result<(), KeyError>;
 }
 
-/// A device's signing identity's custody: who unlocks it, where a newly
-/// established one is written, and how it is removed. The signing-key
-/// sibling of [`MasterKeyCustody`], same three-method shape, over
-/// [`UserKeypair`] instead of a store's master keyring.
-///
-/// Unlike a store's master key, the signing identity is device-global (one
-/// keypair per host, shared by every store — see [`UserKeypair`]'s doc), so
-/// its custody is selected once per process rather than once per store.
+/// A device's signing identity's custody FOR ONE STORE: who unlocks it,
+/// where a newly established one is written, and how it is removed. The
+/// signing-key sibling of [`MasterKeyCustody`], same three-method shape and
+/// the same per-store selection, over [`UserKeypair`] instead of a store's
+/// master keyring.
 pub trait DeviceIdentityCustody: Send + Sync {
-    /// The device's established signing identity. `Ok(None)` means none has
+    /// This store's established signing identity. `Ok(None)` means none has
     /// ever been established — distinct from a failure to produce one (wrong
     /// passphrase, unreadable backing store), which is `Err`.
     fn unlock(&self) -> Result<Option<UserKeypair>, KeyError>;

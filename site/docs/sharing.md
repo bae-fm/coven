@@ -285,10 +285,10 @@ right direction, and neither side ever types a key by hand.
 <text class="lbl s11" x="120" y="181" text-anchor="middle">join_from_invite_code</text>
 </svg>
 
-The joiner runs `generate_join_request`, producing a base64url code that
-carries their Ed25519 public key (and, for folder-sharing providers, the
-account email the owner should share to). They send it to the owner out of
-band.
+The joiner runs `generate_join_request`, which mints a fresh Ed25519 keypair
+— scoped to this one join, not yet to any store — and produces a base64url
+code carrying its public key (and, for folder-sharing providers, the account
+email the owner should share to). They send it to the owner out of band.
 
 The owner calls `handle.invite_member(...)` with that public key and a role.
 Under it, coven:
@@ -304,18 +304,24 @@ owner pubkey into an
 [`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner sends
 that back.
 
-The joiner pastes the invite code into
+The joiner pastes the invite code, alongside the join-request code it kept
+from step 1, into
 [`join_from_invite_code`](rustdoc:fn:coven::sync::join::join_from_invite_code),
 which:
 
-1. decodes it and builds the cloud connection (running any OAuth flow inline),
+1. decodes both codes and builds the cloud connection (running any OAuth flow
+   inline),
 2. unwraps the store keyring,
 3. bootstraps the local database from the latest snapshot,
 4. pulls the changesets created since that snapshot,
-5. saves the new store config.
+5. promotes the pending identity from step 1 into this store's own identity
+   — scoped to this store alone; a device's identity in any other store it
+   belongs to is untouched,
+6. saves the new store config.
 
 The device is now a writer. A join that fails partway never deletes a store
-that already existed on the device.
+that already existed on the device, and leaves the pending identity from
+step 1 untouched — the same join can be retried with the same request code.
 
 The invite code carries plaintext cloud credentials (for S3, the access key and
 secret). Treat it with the same secrecy as the encryption key, and send it over
@@ -340,6 +346,8 @@ coven:eyJ2IjoxLCJsaWQiOiI1NTBl…
 
 Restoring with the signing key keeps the same Ed25519 identity, so the
 recovered device is still the same member in the chain and can keep writing.
+That identity is scoped to the one store the code names — a restore code for
+store A carries no authority in any other store the same device belongs to.
 [`decode_restore_code`](rustdoc:fn:coven::sync::restore_code::decode_restore_code)
 parses the string back, and on garbled input returns a
 [`RestoreCodeError`](rustdoc:enum:coven::sync::restore_code::RestoreCodeError)

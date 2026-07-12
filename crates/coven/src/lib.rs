@@ -51,17 +51,28 @@ pub(crate) mod id_provider {
 pub(crate) mod join_code {
     pub(crate) use coven_core::join_code::*;
 
-    /// Build a join request, signed by this device's signing identity.
-    /// Deliberately get-or-create, not a query: requesting an invite IS a
-    /// deliberate identity-establishing act, the same category as completing
-    /// a restore — a fresh device that has never called
-    /// [`crate::ensure_device_identity`] still gets a usable join request,
-    /// minting its identity as a side effect of the request it asked for.
+    /// Build a join request carrying a freshly minted pending identity (see
+    /// [`crate::keys::mint_pending_identity`]) — the joiner sends its public
+    /// key before it learns which store the invite names, so the keypair is
+    /// generated now and held under a pending slot keyed by that public key.
+    /// Completing the join with [`crate::join_from_invite_code`] (passing
+    /// this same code back) promotes it into the joined store's own identity;
+    /// [`crate::abandon_join_request`] discards it if the request is
+    /// abandoned instead.
     pub fn generate_join_request(email: Option<String>) -> Result<String, crate::keys::KeyError> {
-        let keypair = crate::keys::DeviceKeys::get_or_create_user_keypair()?;
+        let keypair = crate::keys::mint_pending_identity()?;
         Ok(coven_core::join_code::generate_join_request_for_keypair(
             &keypair, email,
         ))
+    }
+
+    /// Abandon a join request this device generated but never completed —
+    /// removes the pending identity [`generate_join_request`] minted for it.
+    /// `Ok` whether or not one was still pending.
+    pub fn abandon_join_request(request_code: &str) -> Result<(), crate::keys::KeyError> {
+        let request = decode_join_request(request_code)
+            .map_err(|e| crate::keys::KeyError::Crypto(e.to_string()))?;
+        crate::keys::discard_pending_identity(&request.public_key)
     }
 }
 
@@ -624,11 +635,10 @@ pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
 pub use custody::{KeyCustody, Passphrase};
 pub use identity_custody::IdentityCustody;
-pub use join_code::generate_join_request;
+pub use join_code::{abandon_join_request, generate_join_request};
 pub use keys::{
-    ensure_device_identity, keyring_service, set_identity_custody, set_keyring_service,
-    CloudHomeCredentials, DeviceIdentityCustody, DeviceKeys, KeyError, MasterKeyCustody,
-    MasterKeyError, StoreKeys, UserKeypair,
+    keyring_service, set_keyring_service, CloudHomeCredentials, DeviceIdentityCustody,
+    IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,
 };
 
 // The sole keyring entry-construction chokepoint (`keys::entry_for`), reached

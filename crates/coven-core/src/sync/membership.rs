@@ -587,6 +587,101 @@ mod tests {
         UserKeypair::generate()
     }
 
+    /// The core invariant a per-store identity buys: a device's identity in
+    /// one store carries no authority in another.
+    ///
+    /// Two stores, A and B, each founded by their own device identity (two
+    /// separate `UserKeypair`s — already proof that creating two stores
+    /// yields two different pubkeys, and that neither chain's founder is the
+    /// other's). Round-trip A's identity through an actual restore code, the
+    /// exact bytes a user would extract and hand over, then try to use it to
+    /// author a new entry in B's chain: refused, because B's active-member
+    /// set names a different pubkey for this device. The same extracted
+    /// identity authors an entry in A's own chain without issue, proving the
+    /// refusal in B is about scope, not a broken signature.
+    #[test]
+    fn a_store_identity_does_not_authorize_another_store() {
+        use crate::storage::cloud::CloudHomeJoinInfo;
+        use crate::sync::restore_code::{decode_restore_code, encode_restore_code, RestoreCode};
+
+        let identity_a = gen_keypair();
+        let identity_b = gen_keypair();
+        assert_ne!(
+            pubkey_hex(&identity_a),
+            pubkey_hex(&identity_b),
+            "two stores on one device must generate distinct identities",
+        );
+
+        let mut chain_a = MembershipChain::new();
+        chain_a
+            .add_entry(founder_entry(&identity_a, "0000000001000-0000-a"))
+            .expect("found store a");
+        let mut chain_b = MembershipChain::new();
+        chain_b
+            .add_entry(founder_entry(&identity_b, "0000000001000-0000-b"))
+            .expect("found store b");
+        assert_ne!(
+            chain_a.founder_pubkey(),
+            chain_b.founder_pubkey(),
+            "neither store's chain names the other's founder",
+        );
+
+        // The identity a restore code for store A carries — round-tripped
+        // through the actual wire format, not just the same value in memory.
+        let restore_code = RestoreCode {
+            v: crate::sync::restore_code::RESTORE_CODE_VERSION,
+            sid: "store-a".to_string(),
+            ek: None,
+            name: "Store A".to_string(),
+            provider: CloudHomeJoinInfo::CloudKit,
+            sk: hex::encode(identity_a.to_keypair_bytes()),
+            membership_floor: Vec::new(),
+        };
+        let decoded =
+            decode_restore_code(&encode_restore_code(&restore_code)).expect("restore code decodes");
+        let extracted_signing_key: [u8; 64] = hex::decode(&decoded.sk)
+            .expect("sk is hex")
+            .try_into()
+            .expect("sk is 64 bytes");
+        let extracted =
+            UserKeypair::from_signing_key_bytes(&extracted_signing_key).expect("valid keypair");
+        assert_eq!(
+            pubkey_hex(&extracted),
+            pubkey_hex(&identity_a),
+            "the restore code round-trips store a's identity unchanged",
+        );
+
+        // The extracted identity authors a new entry in ITS OWN store (A)
+        // without issue — it really is a working signer.
+        let outsider = gen_keypair();
+        let add_in_a = make_entry(
+            &extracted,
+            MembershipAction::Add,
+            &outsider,
+            MemberRole::Member,
+            "0000000002000-0000-a",
+        );
+        chain_a
+            .add_entry(add_in_a)
+            .expect("store a's own identity can author entries in store a");
+
+        // The SAME identity, presented as the author of a new entry in store
+        // B's chain, is refused: B's active-member set was founded by
+        // identity_b, and never recognized identity_a as a member at all.
+        let add_in_b = make_entry(
+            &extracted,
+            MembershipAction::Add,
+            &outsider,
+            MemberRole::Member,
+            "0000000002000-0000-b",
+        );
+        let result = chain_b.add_entry(add_in_b);
+        assert!(
+            matches!(result, Err(MembershipError::NotAnOwner(_))),
+            "store a's identity must not authorize a write in store b, got {result:?}",
+        );
+    }
+
     #[test]
     fn single_owner_chain() {
         let owner = gen_keypair();

@@ -1,8 +1,9 @@
-//! Browser keystore: persists coven's device identity (the Ed25519 user keypair)
-//! across browser sessions, encrypted at rest.
+//! Browser keystore: persists each store's signing identity (an Ed25519
+//! keypair, one per store on this origin) across browser sessions, encrypted
+//! at rest.
 //!
-//! On native, the device signing key lives behind `DeviceKeys`, a
-//! `keyring_core::Store` over the OS keychain. That store is synchronous and
+//! On native, a store's signing key lives behind its identity custody, over a
+//! `keyring_core::Store` on the OS keychain. That store is synchronous and
 //! `Send + Sync`; the browser's secure primitives — WebCrypto and IndexedDB — are
 //! asynchronous and single-thread-bound, and there is no synchronous secure
 //! storage in a browser at all. So the trait can't wrap them. coven keeps browser
@@ -44,9 +45,13 @@ use crate::keys::UserKeypair;
 const DB_NAME: &str = "coven-keystore";
 const DB_VERSION: u32 = 1;
 const STORE: &str = "secrets";
-/// Object-store keys: the non-extractable wrapping key, and the sealed signing key.
+/// Object-store keys: the non-extractable wrapping key (shared by every
+/// store on this origin — it protects entries, it isn't one), and the base
+/// name a store's sealed signing key renders as `{base}:{store_id}` under —
+/// each store on one origin gets its own identity, the same way coven's
+/// native keyring accounts are per store, not per device.
 const WRAP_KEY_ID: &str = "wrap_key";
-const SIGNING_KEY_ID: &str = "user_signing_key";
+const SIGNING_KEY_ID_BASE: &str = "user_signing_key";
 /// AES-GCM standard nonce length, prepended to each ciphertext.
 const IV_LEN: usize = 12;
 /// Ed25519 keypair byte length (seed + public key) — what the signing key seals to.
@@ -77,11 +82,14 @@ impl BrowserKeystore {
         })
     }
 
-    /// Load the device's Ed25519 keypair, generating and persisting one on first
-    /// use. The same identity is returned on every later `open`, so a reopened tab
-    /// keeps the membership identity other devices already trust.
-    pub async fn get_or_create_user_keypair(&self) -> Result<UserKeypair, String> {
-        if let Some(val) = get(&self.db, SIGNING_KEY_ID).await? {
+    /// Load `store_id`'s Ed25519 identity, generating and persisting one on
+    /// first use. The same identity is returned for that store on every later
+    /// `open`, so a reopened tab keeps the membership identity other devices
+    /// already trust for it; a different `store_id` on the same origin gets
+    /// its own independent identity, never this one.
+    pub async fn get_or_create_user_keypair(&self, store_id: &str) -> Result<UserKeypair, String> {
+        let signing_key_id = format!("{SIGNING_KEY_ID_BASE}:{store_id}");
+        if let Some(val) = get(&self.db, &signing_key_id).await? {
             let blob = val
                 .dyn_into::<js_sys::Uint8Array>()
                 .map_err(|_| "stored signing key is not a byte array".to_string())?
@@ -95,7 +103,7 @@ impl BrowserKeystore {
         let blob = self.seal(&keypair.to_keypair_bytes()).await?;
         put(
             &self.db,
-            SIGNING_KEY_ID,
+            &signing_key_id,
             js_sys::Uint8Array::from(blob.as_slice()).as_ref(),
         )
         .await?;

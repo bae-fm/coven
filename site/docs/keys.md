@@ -2,16 +2,16 @@
 
 coven runs entirely on the host's own device and the host's own storage;
 there is no coven server. Every key coven needs — the master key that
-encrypts a store's data, this device's signing identity, a host's own
-secrets — lives on the device, and the only trustworthy place on a device to
-keep a secret is the platform's own key store. Getting that right across four
-platforms is real work: four different APIs, four different access-policy
-models, a decision about what never leaves the device, and a decision about
-what happens when a host wants something coven doesn't provide out of the
-box. Most cross-platform apps get some part of this wrong, silently — a key
-that works but isn't actually protected, an access policy more (or less)
-permissive than intended, a secret that migrates to a new device through a
-backup channel nobody meant to grant.
+encrypts a store's data, this device's signing identity for that store, a
+host's own secrets — lives on the device, and the only trustworthy place on a
+device to keep a secret is the platform's own key store. Getting that right
+across four platforms is real work: four different APIs, four different
+access-policy models, a decision about what never leaves the device, and a
+decision about what happens when a host wants something coven doesn't provide
+out of the box. Most cross-platform apps get some part of this wrong,
+silently — a key that works but isn't actually protected, an access policy
+more (or less) permissive than intended, a secret that migrates to a new
+device through a backup channel nobody meant to grant.
 
 This page is coven's position: the right default should require no decision
 from the host, and a host with a real reason to deviate should still be able
@@ -54,8 +54,8 @@ no bundled store at all — not the normal path.
 ## Correct access policy, by default
 
 Every keyring item coven writes on Apple — the master key, cloud-home
-credentials, the device signing key, and any [host secret](#host-secrets) —
-is created `WhenUnlockedThisDeviceOnly`: unreadable while the device is
+credentials, a store's signing identity, and any [host secret](#host-secrets)
+— is created `WhenUnlockedThisDeviceOnly`: unreadable while the device is
 locked, and, the part that matters, excluded from restoring onto a different
 device through an encrypted local (Finder/iTunes) backup, because the item is
 bound to this device's Secure Enclave. This is the default, not an opt-in — a
@@ -65,30 +65,30 @@ The access policy an item is created under is fixed for its lifetime; an item
 a build wrote before this policy existed keeps its old accessibility class
 until something deletes and recreates it.
 [`StoreKeys::reprotect_apple_keys`](rustdoc:method:coven::StoreKeys::reprotect_apple_keys)
-and
-[`DeviceKeys::reprotect_apple_keys`](rustdoc:method:coven::DeviceKeys::reprotect_apple_keys)
-are the explicit upgrade path — a host calls them once, after upgrading to a
-coven build that writes device-only, to bring items an older build wrote
-forward. coven never does this on its own, on a read or a write.
+is the explicit upgrade path — a host calls it once per store, after
+upgrading to a coven build that writes device-only, to bring items an older
+build wrote forward. coven never does this on its own, on a read or a write.
 
 ```rust
-// Per store: the master key, cloud-home credentials, and any host secret
-// names the host passes (coven doesn't track which names a host used).
+// Per store: the master key, the store's signing identity, cloud-home
+// credentials, and any host secret names the host passes (coven doesn't
+// track which names a host used).
 key_service.reprotect_apple_keys(&["discogs_api_key"])?;
-// Device-global: the signing identity. No arguments.
-coven::DeviceKeys::reprotect_apple_keys()?;
 ```
 
-Both are cfg'd to Apple targets only.
+Cfg'd to Apple targets only.
 
 ## Custody is a choice, with working presets
 
-Two of the three secrets coven manages — the store's master key, and this
-device's signing identity — are each protected by a **custody**: a value you
+Two of the three secrets coven manages — the store's master key, and that
+store's signing identity — are each protected by a **custody**: a value you
 choose that says where the secret is unlocked from, where it's written when
 established, and how it's removed. coven never touches a cipher or a raw key
 directly; it drives every master-key and identity operation through whatever
-custody resolves to.
+custody resolves to. Both are selected per store, on the builder — a device
+holds a distinct signing identity in each store it belongs to, generated
+fresh when that store is created, joined, or restored, never derived from a
+shared root secret and never reused across stores.
 
 **The master key** is selected per store, on the builder, with
 [`CovenBuilder::key_custody`](rustdoc:method:coven::CovenBuilder::key_custody):
@@ -115,39 +115,30 @@ Coven::builder(config)
   [`MasterKeyCustody`](rustdoc:trait:coven::MasterKeyCustody) implementation
   (`unlock` / `persist` / `forget`).
 
-**The device identity** is process-global, not per-store — the signing
-keypair is shared by every store on the device, so it is registered once at
-startup with
-[`set_identity_custody`](rustdoc:fn:coven::set_identity_custody), before any
-key operation:
+**The store's signing identity** is selected next to the master key, on the
+builder, with
+[`CovenBuilder::identity_custody`](rustdoc:method:coven::CovenBuilder::identity_custody):
 
 ```rust
-coven::set_identity_custody(coven::IdentityCustody::Keyring)?;   // the default
+Coven::builder(config)
+    .identity_custody(coven::IdentityCustody::Keyring)   // the default
+    .synced_tables(tables)
+    .migrations(migrations)
+    .open()?;
 ```
 
-Its presets mirror the master key's, minus `InMemory` (an identity that
-vanishes at process exit is not workable as a default for something every
-store's changesets are signed with):
+Its presets mirror the master key's:
 [`IdentityCustody::Keyring`](rustdoc:enum:coven::IdentityCustody) (the
 default),
 [`IdentityCustody::Passphrase`](rustdoc:enum:coven::IdentityCustody) (the
-same envelope format, at a host-chosen path outside any store
-directory — identity is device-global, so it does not belong inside one
-store's directory):
-
-```rust
-coven::set_identity_custody(coven::IdentityCustody::Passphrase {
-    path: data_dir.join("identity.envelope"),
-    passphrase: coven::Passphrase::new(passphrase_string),
-})?;
-```
-
-and [`IdentityCustody::Custom`](rustdoc:enum:coven::IdentityCustody) (a
-host's own
-[`DeviceIdentityCustody`](rustdoc:trait:coven::DeviceIdentityCustody)
-implementation). Registering twice — or registering after a key operation
-already resolved the default implicitly — is refused; the choice is a
-one-time startup decision, like `set_keyring_service`.
+same envelope format, wrapped in a file inside the store directory —
+`identity.envelope` — alongside `master.keyring`),
+[`IdentityCustody::InMemory`](rustdoc:enum:coven::IdentityCustody) (a
+[`UserKeypair`](rustdoc:struct:coven::UserKeypair) supplied for this session,
+never persisted by coven), and
+[`IdentityCustody::Custom`](rustdoc:enum:coven::IdentityCustody) (a host's
+own [`DeviceIdentityCustody`](rustdoc:trait:coven::DeviceIdentityCustody)
+implementation).
 
 The two presets are not interchangeable defaults — they protect against
 different things. The keyring protects against a stolen, locked device: the
@@ -162,20 +153,35 @@ exactly as thoroughly as losing a keyring entry would.
 
 ## No silent identity minting
 
-coven never mints a device signing identity implicitly. Connect and join
-require an already-established identity; its absence surfaces as
+coven never mints a store's signing identity implicitly. Connect requires an
+already-established identity; its absence surfaces as
 [`KeyError::NoDeviceIdentity`](rustdoc:enum:coven::KeyError), never a
-mint-on-demand.
-[`coven::ensure_device_identity()`](rustdoc:fn:coven::ensure_device_identity)
-is the explicit call that establishes one — a host runs it at its own setup
-moment (store create, first run) — and it is idempotent and safe under
-concurrent callers: two callers racing it converge on one identity, never
-two. Requesting a join code
-([`coven::generate_join_request`](rustdoc:fn:coven::generate_join_request))
-and completing a restore are the other two acts that establish an identity,
-deliberately, as a side effect of what they were asked to do — a fresh device
-still gets a usable join request or a completed restore without a separate
-setup step.
+mint-on-demand. A store's identity is established exactly once, by whichever
+of these three acts brought the store into existence on this device:
+
+- **Creating a store fresh** —
+  [`CovenHandle::initialize_identity`](rustdoc:method:coven::CovenHandle::initialize_identity)
+  generates and establishes it, refusing with
+  [`IdentityError::AlreadyEstablished`](rustdoc:enum:coven::IdentityError) on
+  a second call, the same discipline
+  [`initialize_master_key`](rustdoc:method:coven::CovenHandle::initialize_master_key)
+  keeps for the master key.
+- **Joining a shared store** —
+  [`coven::generate_join_request`](rustdoc:fn:coven::generate_join_request)
+  mints the keypair before the joiner even knows which store the invite
+  names (a *pending* identity, held under a slot keyed by the request), and
+  [`coven::join_from_invite_code`](rustdoc:fn:coven::join_from_invite_code)
+  promotes it into that store's own identity custody once the join
+  completes. A join never finished can discard its pending identity with
+  [`coven::abandon_join_request`](rustdoc:fn:coven::abandon_join_request).
+- **Restoring a store** —
+  [`coven::restore_from_code`](rustdoc:fn:coven::restore_from_code) imports
+  the identity the restore code carries, scoped to the one store it names.
+
+Each of these is per store: a device holds a distinct identity in every store
+it belongs to, so a restore code or a join for one store carries no authority
+in another, and the same device's pubkey never appears in more than one
+store's membership chain.
 
 ## Sealing your own data
 

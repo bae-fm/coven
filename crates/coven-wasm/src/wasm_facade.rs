@@ -180,15 +180,17 @@ impl CovenStore {
             config.key_prefix,
         ));
 
-        // Load (or, on first use, mint) this device's persistent signing identity
+        // Load (or, on first use, mint) this store's persistent signing identity
         // from the browser keystore, so a reopened tab keeps the identity other
         // members already trust rather than appearing as a new device each time.
+        // Scoped to `store_id`: a second store opened from the same origin gets
+        // its own independent identity, never this one.
         let user_keypair = BrowserKeystore::open()
             .await
             .map_err(|e| JsValue::from_str(&format!("open keystore: {e}")))?
-            .get_or_create_user_keypair()
+            .get_or_create_user_keypair(&config.store_id)
             .await
-            .map_err(|e| JsValue::from_str(&format!("load device identity: {e}")))?;
+            .map_err(|e| JsValue::from_str(&format!("load this store's identity: {e}")))?;
 
         Self::from_home(
             home,

@@ -29,7 +29,7 @@ use crate::config::Config;
 use crate::coven::{CovenError, CovenResult};
 use crate::database::Database;
 use crate::encryption::SealError;
-use crate::keys::{MasterKeyCustody, StoreKeys};
+use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 use crate::store_dir::StoreDir;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_manager::ConfigProvider;
@@ -60,6 +60,7 @@ pub struct CovenReadHandle {
     config_provider: ConfigProvider,
     key_service: StoreKeys,
     key_custody: Arc<dyn MasterKeyCustody>,
+    identity_custody: Arc<dyn DeviceIdentityCustody>,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
@@ -72,6 +73,7 @@ impl CovenReadHandle {
         config_provider: ConfigProvider,
         key_service: StoreKeys,
         key_custody: Arc<dyn MasterKeyCustody>,
+        identity_custody: Arc<dyn DeviceIdentityCustody>,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Self {
@@ -81,6 +83,7 @@ impl CovenReadHandle {
             config_provider,
             key_service,
             key_custody,
+            identity_custody,
             clock,
             cloudkit_ops,
         }
@@ -131,6 +134,7 @@ impl CovenReadHandle {
             &config,
             &self.key_service,
             self.key_custody.as_ref(),
+            self.identity_custody.as_ref(),
             None,
             self.clock.clone(),
             self.cloudkit_ops.clone(),

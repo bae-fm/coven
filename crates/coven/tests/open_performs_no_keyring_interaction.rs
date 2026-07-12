@@ -1,9 +1,8 @@
-//! Process-global identity-custody contracts. `CovenBuilder::open` must
-//! perform no keyring interaction, and `set_identity_custody` follows the
-//! same one-time-registration discipline as `set_keyring_service`. Both are
-//! process-wide state, so — like `keyring_store.rs` — this runs as one
-//! ordered test in its own process rather than racing coven's other
-//! integration tests over shared globals.
+//! `CovenBuilder::open` must perform no keyring interaction: resolving both
+//! `key_custody` and `identity_custody` builds their trait objects without
+//! ever calling `unlock`. Runs as one ordered test in its own process, like
+//! `keyring_store.rs`, since a panicking store installed process-wide would
+//! otherwise race coven's other integration tests.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,7 +52,7 @@ fn notes_migration() -> Migration {
 }
 
 #[test]
-fn open_performs_no_keyring_interaction_and_identity_custody_registers_once() {
+fn open_performs_no_keyring_interaction_for_either_custody() {
     keyring_core::set_default_store(Arc::new(PanicOnAnyKeyringOpStore));
 
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -64,23 +63,12 @@ fn open_performs_no_keyring_interaction_and_identity_custody_registers_once() {
         dir,
         "Test".to_string(),
     );
+    // Both custodies default to `Keyring`, so `open()` resolves both to a
+    // trait object over the panicking store above and must still succeed —
+    // resolving a policy is not consulting it.
     Coven::builder(config)
         .synced_tables(vec![SyncedTable::new("notes")])
         .migrations(vec![notes_migration()])
         .open()
         .expect("open must succeed while performing no keyring credential build");
-
-    // `set_identity_custody` is the process-wide, one-time registration
-    // `DeviceIdentityCustody` shares with `set_keyring_service`: the first
-    // call registers, a second is a startup contradiction. Neither call
-    // touches the panicking store above — `IdentityCustody::Keyring.resolve()`
-    // only constructs the trait object; it reads no credential.
-    coven::set_identity_custody(coven::IdentityCustody::Keyring)
-        .expect("first identity custody registration succeeds");
-    let err = coven::set_identity_custody(coven::IdentityCustody::Keyring)
-        .expect_err("a second registration is a startup contradiction");
-    assert!(
-        err.to_string().contains("already registered"),
-        "error names the conflict: {err}"
-    );
 }

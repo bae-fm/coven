@@ -12,7 +12,8 @@ use tracing::info;
 use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
 use crate::encryption::MasterKeyring;
-use crate::keys::{DeviceKeys, MasterKeyCustody, StoreKeys, UserKeypair};
+use crate::identity_custody::IdentityCustody;
+use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
@@ -172,6 +173,7 @@ pub async fn restore_from_cloud(
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     custody: Arc<dyn MasterKeyCustody>,
+    identity_custody: Arc<dyn DeviceIdentityCustody>,
     source: RestoreSource,
     membership_floor: &[MembershipCoord],
     keypair: &UserKeypair,
@@ -286,6 +288,7 @@ pub async fn restore_from_cloud(
             &store_dir,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             err,
         )),
     }
@@ -302,6 +305,7 @@ pub async fn restore_from_code(
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     key_custody: KeyCustody,
+    identity_custody: IdentityCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     layout: &StoreLayout,
@@ -317,12 +321,13 @@ pub async fn restore_from_code(
     let parsed = restore_code::decode_restore_code(code)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
     let custody = key_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
+    let identity_custody = identity_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
 
     // `decode_restore_code` already validated the field; convert it to bytes so
     // restore can rebuild and later import the signing identity.
     let signing_key_bytes = hex::decode(&parsed.sk)
         .map_err(|e| BootstrapError::InvalidSigningKey(format!("invalid encoding: {e}")))?;
-    // The restored device's identity. Rebuilt here (not imported yet) so the
+    // This store's restored identity. Rebuilt here (not imported yet) so the
     // storage can sign its control objects during restore, while the keyring
     // import still happens only after restore succeeds.
     let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
@@ -350,6 +355,7 @@ pub async fn restore_from_code(
         synced_tables,
         migrations,
         custody.clone(),
+        identity_custody.clone(),
         source,
         &parsed.membership_floor,
         &keypair,
@@ -361,19 +367,20 @@ pub async fn restore_from_code(
     )
     .await?;
 
-    // Import the device signing key after restore succeeds so we don't overwrite
-    // an existing keypair if the restore fails. `restore_from_code` returns `Ok`
-    // with everything durable, or `Err` with nothing durable — never a store left
-    // behind that a retry can't reach, so an import failure here rolls back the
-    // store `restore_from_cloud` just committed the same way a bootstrap failure
-    // does.
-    if let Err(e) = DeviceKeys::import_user_keypair(&signing_key_bytes) {
+    // Import this store's signing key after restore succeeds so we don't
+    // overwrite an existing identity if the restore fails. `restore_from_code`
+    // returns `Ok` with everything durable, or `Err` with nothing durable —
+    // never a store left behind that a retry can't reach, so an import
+    // failure here rolls back the store `restore_from_cloud` just committed
+    // the same way a bootstrap failure does.
+    if let Err(e) = crate::keys::import_identity(identity_custody.as_ref(), &signing_key_bytes) {
         let store_dir = layout.store_dir(&parsed.sid);
         let store_keys = StoreKeys::new(parsed.sid.clone());
         return Err(cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             BootstrapError::Key(e),
         ));
     }

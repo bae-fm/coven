@@ -149,15 +149,17 @@ A fresh store has no master key yet:
 [`initialize_master_key`](rustdoc:method:coven::CovenHandle::initialize_master_key)
 generates one and establishes it under whatever custody the builder
 selected; coven refuses to run it again once one is established, so a
-corrupt entry is never silently overwritten. This device also needs a
+corrupt entry is never silently overwritten. This store also needs its own
 signing identity — coven never mints one implicitly (see
 [Keys](/docs/keys#no-silent-identity-minting)) —
-[`ensure_device_identity`](rustdoc:fn:coven::ensure_device_identity)
-establishes it explicitly.
+[`initialize_identity`](rustdoc:method:coven::CovenHandle::initialize_identity)
+establishes it explicitly, the same way, for a store created fresh (joining
+or restoring an existing store establishes its identity as part of that
+instead).
 
 ```rust
 handle.initialize_master_key()?;
-coven::ensure_device_identity()?;
+handle.initialize_identity()?;
 ```
 
 Once a provider is connected, start sync through the handle. Which rows carry

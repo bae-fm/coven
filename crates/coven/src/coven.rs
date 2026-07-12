@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::custody::KeyCustody;
 use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
+use crate::identity_custody::IdentityCustody;
 use crate::keys::StoreKeys;
 use crate::migration::{Migration, MigrationError};
 use crate::store_dir::PathTokenError;
@@ -115,6 +116,7 @@ impl Coven {
             clock: Arc::new(SystemClock),
             key_service: StoreKeys::new(current.store_id),
             key_custody: KeyCustody::Keyring,
+            identity_custody: IdentityCustody::Keyring,
             cloudkit_ops: None,
             observer: None,
         }
@@ -129,6 +131,7 @@ pub struct CovenBuilder {
     clock: ClockRef,
     key_service: StoreKeys,
     key_custody: KeyCustody,
+    identity_custody: IdentityCustody,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
@@ -232,6 +235,18 @@ impl CovenBuilder {
         self
     }
 
+    /// How this store's device-signing identity is protected: the OS keyring
+    /// (the default), a passphrase-wrapped file, an in-memory session value,
+    /// or a host's own
+    /// [`DeviceIdentityCustody`](crate::DeviceIdentityCustody) implementation.
+    /// Selected next to [`key_custody`](Self::key_custody) — the identity is
+    /// scoped to this store, established as part of creating, joining, or
+    /// restoring it (see [`CovenHandle::initialize_identity`]).
+    pub fn identity_custody(mut self, custody: IdentityCustody) -> Self {
+        self.identity_custody = custody;
+        self
+    }
+
     pub fn cloudkit_ops(
         mut self,
         ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
@@ -297,6 +312,7 @@ impl CovenBuilder {
             &migrations,
         )?;
         let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
+        let identity_custody = self.identity_custody.resolve(&config.store_id, &store_dir);
         Ok(CovenHandle::new(
             db,
             read_db,
@@ -305,6 +321,7 @@ impl CovenBuilder {
             provider,
             self.key_service,
             key_custody,
+            identity_custody,
             self.clock,
             self.cloudkit_ops,
             self.observer,
@@ -350,12 +367,14 @@ impl CovenBuilder {
             &migrations,
         )?;
         let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
+        let identity_custody = self.identity_custody.resolve(&config.store_id, &store_dir);
         Ok(crate::read_handle::CovenReadHandle::new(
             db,
             store_dir,
             provider,
             self.key_service,
             key_custody,
+            identity_custody,
             self.clock,
             self.cloudkit_ops,
         ))
@@ -2215,19 +2234,30 @@ mod tests {
         panic!("store lock never released: reopen kept failing");
     }
 
-    // The user keypair is one process-wide keyring account, so the guard is held
-    // across this test's awaits to serialize it against the other keyring tests
-    // (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so
-    // the blocking `std` lock never deadlocks against another task on this runtime).
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
         test_keyring::install();
-        let _keyring = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
-        let handle = open_files_handle_in(dir.clone());
+        // A store id distinct from every other test's — `try_open`/
+        // `open_when_lock_released` below reopen the same directory (the
+        // lock is path-scoped, not store-id-scoped) but this test's own
+        // identity establishment must not collide with a concurrently
+        // running test that also establishes one under the shared default id.
+        let handle = Coven::builder(Config::with_defaults(
+            "lock-held-until-cycle-exits".to_string(),
+            "device-test".to_string(),
+            dir.clone(),
+            "Test".to_string(),
+        ))
+        .synced_tables(vec![files_table()])
+        .migrations(vec![files_migration()])
+        .open()
+        .expect("open handle");
+        handle
+            .initialize_identity()
+            .expect("establish this store's identity before connecting");
 
         let armed = Arc::new(AtomicBool::new(false));
         let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
@@ -2270,14 +2300,26 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn normal_shutdown_releases_the_lock_for_reopen() {
         test_keyring::install();
-        let _keyring = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
-        let handle = open_files_handle_in(dir.clone());
+        // A store id distinct from every other test's — see the identical
+        // note in `lock_is_held_until_the_sync_loop_exits_its_cycle`.
+        let handle = Coven::builder(Config::with_defaults(
+            "normal-shutdown-releases-lock".to_string(),
+            "device-test".to_string(),
+            dir.clone(),
+            "Test".to_string(),
+        ))
+        .synced_tables(vec![files_table()])
+        .migrations(vec![files_migration()])
+        .open()
+        .expect("open handle");
+        handle
+            .initialize_identity()
+            .expect("establish this store's identity before connecting");
         handle
             .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
             .await

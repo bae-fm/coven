@@ -1,5 +1,3 @@
-use std::sync::{Arc, OnceLock};
-
 use tracing::info;
 
 // The key types re-exported at the crate root (see lib.rs) stay public;
@@ -23,6 +21,20 @@ pub enum MasterKeyError {
     Key(#[from] KeyError),
     #[error("invalid master key material: {0}")]
     Encryption(#[from] crate::encryption::EncryptionError),
+}
+
+/// Why a [`CovenHandle`](crate::CovenHandle) [`initialize_identity`](crate::CovenHandle::initialize_identity)
+/// call failed.
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    /// `initialize_identity` found an identity already established for this
+    /// store — custody `unlock()` returned `Some`. coven never generates over
+    /// an existing identity; a store's identity is established exactly once,
+    /// by whichever of create/join/restore established it first.
+    #[error("an identity is already established for this store")]
+    AlreadyEstablished,
+    #[error("key error: {0}")]
+    Key(#[from] KeyError),
 }
 
 static KEYRING_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -61,58 +73,6 @@ pub fn keyring_service() -> Result<&'static str, KeyError> {
         .ok_or(KeyError::ServiceNotRegistered)
 }
 
-static IDENTITY_CUSTODY: OnceLock<Arc<dyn DeviceIdentityCustody>> = OnceLock::new();
-
-/// Register the process-wide custody for the device's signing identity —
-/// deliberately process-global, not per-store: the identity is one keypair
-/// per host, shared by every store (see [`UserKeypair`]'s doc), and every
-/// [`DeviceKeys`] call site is a free function far from any builder, so a
-/// per-store custody would pretend a variation that must not exist.
-///
-/// One-time startup registration, like [`set_keyring_service`], and stricter:
-/// unlike a keyring *service name* (where re-registering the same name is a
-/// no-op), a custody policy can't be compared for equality, so any second
-/// call is refused — including one that resolved implicitly, the first time
-/// any key operation ran under the [`IdentityCustody::Keyring`] default. Call
-/// this before any key operation if a non-default policy is wanted.
-pub fn set_identity_custody(
-    custody: crate::identity_custody::IdentityCustody,
-) -> Result<(), KeyError> {
-    IDENTITY_CUSTODY.set(custody.resolve()).map_err(|_| {
-        KeyError::Persistence(
-            "identity custody is already registered (either by an earlier set_identity_custody \
-             call, or implicitly defaulted to Keyring by an earlier key operation); \
-             set_identity_custody must run before any key operation"
-                .to_string(),
-        )
-    })
-}
-
-/// The registered identity custody, defaulting to
-/// [`IdentityCustody::Keyring`] — today's behavior, byte-for-byte — the
-/// first time this runs with none registered. That first resolution is
-/// permanent for the process (see [`set_identity_custody`]'s doc).
-fn identity_custody() -> Arc<dyn DeviceIdentityCustody> {
-    IDENTITY_CUSTODY
-        .get_or_init(|| crate::identity_custody::IdentityCustody::Keyring.resolve())
-        .clone()
-}
-
-/// Get-or-create this device's signing identity through the registered
-/// [`IdentityCustody`], returning its public key. The explicit,
-/// host-facing entry point for identity establishment — hosts call it at
-/// their own setup moments (store create, first run). Idempotent and
-/// concurrent-call-safe: two callers racing this in the same process
-/// converge on one identity, never two.
-///
-/// Connect paths never mint on their own absence — see
-/// [`KeyError::NoDeviceIdentity`] — so this (or a completed join/restore,
-/// which also establish one deliberately) is the only way a fresh device
-/// gets a signing identity.
-pub fn ensure_device_identity() -> Result<[u8; SIGN_PUBLICKEYBYTES], KeyError> {
-    DeviceKeys::get_or_create_user_keypair().map(|kp| kp.public_key())
-}
-
 fn map_keyring_error(e: keyring_core::Error) -> KeyError {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     if is_missing_keychain_entitlement(&e) {
@@ -144,15 +104,18 @@ fn is_missing_keychain_entitlement(e: &keyring_core::Error) -> bool {
         .is_some_and(|err| err.code() == -34018)
 }
 
-/// The base account name [`KeyringSlot::DeviceSigningKey`] is stored under —
-/// it carries no `store_id`, so this is its whole account, not a prefix.
-const DEVICE_SIGNING_KEY_ACCOUNT: &str = "coven_user_signing_key";
+/// The base account name [`KeyringSlot::DeviceSigningKey`] renders as
+/// `{base}:{store_id}` under.
+const DEVICE_SIGNING_KEY_BASE: &str = "coven_user_signing_key";
 /// The base account name [`KeyringSlot::EncryptionMasterKey`] renders as
 /// `{base}:{store_id}` under.
 const ENCRYPTION_MASTER_KEY_BASE: &str = "encryption_master_key";
 /// The base account name [`KeyringSlot::CloudHomeCredentials`] renders as
 /// `{base}:{store_id}` under.
 const CLOUD_HOME_CREDENTIALS_BASE: &str = "cloud_home_credentials";
+/// The base account name [`KeyringSlot::PendingIdentity`] renders as
+/// `{base}:{request_public_key_hex}` under.
+const PENDING_IDENTITY_BASE: &str = "coven_pending_identity";
 
 /// Every name coven's own [`KeyringSlot`] variants reserve for themselves —
 /// built from the same constants [`KeyringSlot::account`] renders accounts
@@ -160,25 +123,30 @@ const CLOUD_HOME_CREDENTIALS_BASE: &str = "cloud_home_credentials";
 /// host secret's `name` must not equal any of these: see
 /// [`validate_host_secret_name`].
 pub(crate) const RESERVED_HOST_SECRET_NAMES: &[&str] = &[
-    DEVICE_SIGNING_KEY_ACCOUNT,
+    DEVICE_SIGNING_KEY_BASE,
     ENCRYPTION_MASTER_KEY_BASE,
     CLOUD_HOME_CREDENTIALS_BASE,
+    PENDING_IDENTITY_BASE,
 ];
 
 /// Which key a keyring entry holds, and the sole owner of the account name it
-/// is stored under. The device signing key is device-global (no `store_id`); the
-/// encryption master key, cloud-home credentials, and a host secret are per
-/// store. Every keyring read/write/delete names its entry with one of these
-/// variants, so the on-disk account strings live in exactly one place:
-/// [`KeyringSlot::account`].
+/// is stored under. The device signing key, the encryption master key, the
+/// cloud-home credentials, and a host secret are all per store; a pending
+/// identity is keyed by its own join request instead of a store (it exists
+/// before the joiner knows which store the invite names — see
+/// [`crate::keys::mint_pending_identity`]). Every keyring read/write/delete
+/// names its entry with one of these variants, so the on-disk account
+/// strings live in exactly one place: [`KeyringSlot::account`].
 pub(crate) enum KeyringSlot {
-    /// The device-global Ed25519 signing key, shared by every store on the
-    /// device and stored under one fixed account.
-    DeviceSigningKey,
+    /// A store's Ed25519 signing identity.
+    DeviceSigningKey(String),
     /// A store's encryption master key.
     EncryptionMasterKey(String),
     /// A store's cloud-home credentials.
     CloudHomeCredentials(String),
+    /// A join request's not-yet-store-scoped signing identity, keyed by the
+    /// request's own public key.
+    PendingIdentity(String),
     /// A host's own store-scoped secret, named by the host and validated
     /// against [`RESERVED_HOST_SECRET_NAMES`] before it ever reaches this
     /// variant (see [`validate_host_secret_name`]).
@@ -194,12 +162,17 @@ impl KeyringSlot {
     /// already wrote its secrets under before this API existed.
     pub(crate) fn account(&self) -> String {
         match self {
-            KeyringSlot::DeviceSigningKey => DEVICE_SIGNING_KEY_ACCOUNT.to_string(),
+            KeyringSlot::DeviceSigningKey(store_id) => {
+                format!("{DEVICE_SIGNING_KEY_BASE}:{store_id}")
+            }
             KeyringSlot::EncryptionMasterKey(store_id) => {
                 format!("{ENCRYPTION_MASTER_KEY_BASE}:{store_id}")
             }
             KeyringSlot::CloudHomeCredentials(store_id) => {
                 format!("{CLOUD_HOME_CREDENTIALS_BASE}:{store_id}")
+            }
+            KeyringSlot::PendingIdentity(request_public_key_hex) => {
+                format!("{PENDING_IDENTITY_BASE}:{request_public_key_hex}")
             }
             KeyringSlot::HostSecret { name, store_id } => format!("{name}:{store_id}"),
         }
@@ -270,8 +243,7 @@ pub(crate) fn validate_host_secret_name(name: &str) -> Result<(), KeyError> {
 /// class — so an item created before this dispatch existed keeps its old
 /// class until something deletes and re-creates it (a rotation, a
 /// credential refresh, or an explicit
-/// [`StoreKeys::reprotect_apple_keys`]/[`DeviceKeys::reprotect_apple_keys`]
-/// call).
+/// [`StoreKeys::reprotect_apple_keys`] call).
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
     let service = keyring_service()?;
@@ -351,110 +323,138 @@ fn reprotect_slot(slot: &KeyringSlot) -> Result<(), KeyError> {
     write(slot, &value)
 }
 
-/// Serializes [`DeviceKeys::get_or_create_user_keypair`]'s check-then-act
-/// sequence process-wide, so two callers racing identity establishment (two
-/// threads, or two `ensure_device_identity` calls) converge on one generated
-/// keypair rather than each generating its own and the last write winning.
-static GET_OR_CREATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// This store's established signing identity through `custody`, or
+/// [`KeyError::NoDeviceIdentity`] when none is established — the caller must
+/// complete create/join/restore for this store first. Never mints: a
+/// connect/join precondition, not a query.
+pub(crate) fn require_identity(
+    custody: &dyn DeviceIdentityCustody,
+) -> Result<UserKeypair, KeyError> {
+    custody.unlock()?.ok_or(KeyError::NoDeviceIdentity)
+}
 
-/// The device-global signing identity: one Ed25519 keypair per OS user,
-/// shared by every store on the device (see [`UserKeypair`]'s doc), read from
-/// and written to whatever [`crate::set_identity_custody`] registered —
-/// [`crate::identity_custody::IdentityCustody::Keyring`] and its fixed
-/// [`KeyringSlot::DeviceSigningKey`] account when nothing was registered.
-/// This is an internal facade over that custody: its public methods keep
-/// coven's existing signatures where possible, so the custody split's blast
-/// radius stays here. Stateless — associated functions with no per-store
-/// data, since the identity itself is process-global.
-pub struct DeviceKeys;
+/// A query, not a connect: `Ok(None)` when this store has no identity
+/// established, distinct from a key-store failure (`Err`). Never mints.
+pub(crate) fn identity_public_key(
+    custody: &dyn DeviceIdentityCustody,
+) -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
+    Ok(custody.unlock()?.map(|kp| kp.public_key()))
+}
 
-impl DeviceKeys {
-    /// The device's established signing identity, or
-    /// [`KeyError::NoDeviceIdentity`] when none is established — the caller
-    /// must run identity establishment first
-    /// ([`crate::ensure_device_identity`], a completed join, or a completed
-    /// restore) before any operation that requires an existing identity.
-    /// Never mints: a connect/join precondition, not a query.
-    pub fn require_user_keypair() -> Result<UserKeypair, KeyError> {
-        identity_custody()
-            .unlock()?
-            .ok_or(KeyError::NoDeviceIdentity)
-    }
+/// Import an already-generated signing key (a restore code's `sk`) into
+/// `custody`. Same-pubkey re-import is idempotent; importing over a
+/// DIFFERENT already-established identity is refused with
+/// [`KeyError::IdentityMismatch`] naming both — silently swapping this
+/// store's identity would strand its already-signed membership entries.
+pub(crate) fn import_identity(
+    custody: &dyn DeviceIdentityCustody,
+    signing_key_bytes: &[u8],
+) -> Result<(), KeyError> {
+    let signing_key: [u8; SIGN_SECRETKEYBYTES] = signing_key_bytes.try_into().map_err(|_| {
+        KeyError::Crypto(format!(
+            "Signing key must be {SIGN_SECRETKEYBYTES} bytes, got {}",
+            signing_key_bytes.len()
+        ))
+    })?;
+    let imported = UserKeypair::from_signing_key_bytes(&signing_key)?;
 
-    /// Get-or-create through the registered custody. Internal primitive
-    /// behind [`crate::ensure_device_identity`] and the deliberate
-    /// identity-establishing acts that mint as a side effect of what they're
-    /// asked to do (requesting a join code, generating a restore code) — not
-    /// exposed directly so every other call site goes through
-    /// [`require_user_keypair`](Self::require_user_keypair) instead and never
-    /// mints by accident.
-    pub(crate) fn get_or_create_user_keypair() -> Result<UserKeypair, KeyError> {
-        let _guard = GET_OR_CREATE_LOCK.lock().unwrap();
-        let custody = identity_custody();
-        if let Some(kp) = custody.unlock()? {
-            return Ok(kp);
+    if let Some(existing) = custody.unlock()? {
+        if existing.public_key() != imported.public_key() {
+            return Err(KeyError::IdentityMismatch {
+                existing_pubkey_hex: public_key_hex(&existing),
+                imported_pubkey_hex: public_key_hex(&imported),
+            });
         }
-
-        let kp = UserKeypair::generate();
-        custody.persist(&kp)?;
-        info!("Generated and saved new user Ed25519 keypair");
-        Ok(kp)
     }
+    custody.persist(&imported)?;
+    info!("Imported this store's Ed25519 signing identity");
+    Ok(())
+}
 
-    /// A query, not a connect: `Ok(None)` when no identity is established,
-    /// distinct from a key-store failure (`Err`). Never mints.
-    pub fn get_user_public_key() -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
-        Ok(identity_custody().unlock()?.map(|kp| kp.public_key()))
-    }
+/// Mint a fresh identity for a join request that has not yet named a store:
+/// the joiner sends its public key before it learns which store the invite
+/// is for (`JoinRequestCode`), so this keypair is generated now and held
+/// under a pending slot keyed by its own public key. [`promote_pending_identity`]
+/// moves it into the joined store's own identity custody once the join
+/// completes; [`discard_pending_identity`] removes it if the request is
+/// abandoned instead. Always the OS keyring: unlike an established store's
+/// identity, there is no store yet to select a custody policy for, and a
+/// pending identity's lifetime is short (a join round trip, not a store's
+/// lifetime).
+pub(crate) fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
+    let keypair = UserKeypair::generate();
+    write(
+        &KeyringSlot::PendingIdentity(public_key_hex(&keypair)),
+        &hex::encode(keypair.to_keypair_bytes()),
+    )?;
+    info!("Minted a pending identity for a join request");
+    Ok(keypair)
+}
 
-    /// Import an already-generated signing key (a restore code's `sk`, or a
-    /// keypair migrated from elsewhere) into the registered custody.
-    /// Same-pubkey re-import is idempotent; importing over a DIFFERENT
-    /// already-established identity is refused with
-    /// [`KeyError::IdentityMismatch`] naming both — silently swapping the
-    /// device identity would strand every store that pinned attestations to
-    /// the old key.
-    pub fn import_user_keypair(signing_key_bytes: &[u8]) -> Result<(), KeyError> {
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] =
-            signing_key_bytes.try_into().map_err(|_| {
-                KeyError::Crypto(format!(
-                    "Signing key must be {SIGN_SECRETKEYBYTES} bytes, got {}",
-                    signing_key_bytes.len()
-                ))
-            })?;
-        let imported = UserKeypair::from_signing_key_bytes(&signing_key)?;
+/// Read (without consuming) the pending identity keyed by
+/// `request_public_key_hex` — what a join in progress signs its bootstrap
+/// traffic with, before the join has succeeded and
+/// [`promote_pending_identity`] can run. [`KeyError::NoPendingIdentity`] if
+/// none is held under that key.
+pub(crate) fn peek_pending_identity(request_public_key_hex: &str) -> Result<UserKeypair, KeyError> {
+    read_pending_identity_slot(&KeyringSlot::PendingIdentity(
+        request_public_key_hex.to_string(),
+    ))
+}
 
-        let custody = identity_custody();
-        if let Some(existing) = custody.unlock()? {
-            if existing.public_key() != imported.public_key() {
-                return Err(KeyError::IdentityMismatch {
-                    existing_pubkey_hex: public_key_hex(&existing),
-                    imported_pubkey_hex: public_key_hex(&imported),
-                });
-            }
-        }
-        custody.persist(&imported)?;
-        info!("Imported user Ed25519 keypair");
-        Ok(())
-    }
+fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyError> {
+    let KeyringSlot::PendingIdentity(request_public_key_hex) = slot else {
+        unreachable!("read_pending_identity_slot is only ever called with a PendingIdentity slot");
+    };
+    let sk_hex = read(slot)?.ok_or_else(|| KeyError::NoPendingIdentity {
+        request_public_key_hex: request_public_key_hex.clone(),
+    })?;
+    let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
+        .map_err(|e| KeyError::Crypto(format!("invalid pending identity hex: {e}")))?
+        .try_into()
+        .map_err(|_| KeyError::Crypto("pending identity wrong length".to_string()))?;
+    UserKeypair::from_signing_key_bytes(&signing_key)
+}
 
-    /// Re-create the device signing key's keyring item under today's Apple
-    /// device-only accessibility policy (see [`entry_for`]). A no-op when no
-    /// identity is established yet — there is nothing to reprotect. A host
-    /// calls this explicitly, once, after upgrading to a coven build that
-    /// writes device-only, to bring an item created under an older
-    /// accessibility policy forward; coven never does this on its own on a
-    /// read or write.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub fn reprotect_apple_keys() -> Result<(), KeyError> {
-        reprotect_slot(&KeyringSlot::DeviceSigningKey)
-    }
+/// Promote the pending identity keyed by `request_public_key_hex` into
+/// `custody` — the newly-named store's own identity slot — and remove the
+/// pending entry. Persists before deleting: if the delete then fails, the
+/// promoted identity is already safely established and only a harmless
+/// leftover pending entry remains, never the reverse (a deleted pending
+/// entry with nothing established). [`KeyError::NoPendingIdentity`] if no
+/// pending identity is held under that key (already promoted, already
+/// discarded, or never minted).
+pub(crate) fn promote_pending_identity(
+    request_public_key_hex: &str,
+    custody: &dyn DeviceIdentityCustody,
+) -> Result<UserKeypair, KeyError> {
+    let slot = KeyringSlot::PendingIdentity(request_public_key_hex.to_string());
+    let keypair = read_pending_identity_slot(&slot)?;
+
+    custody.persist(&keypair)?;
+    delete(&slot)?;
+    info!("Promoted a pending identity to this store's identity");
+    Ok(keypair)
+}
+
+/// Discard the pending identity keyed by `request_public_key_hex` — a join
+/// request abandoned without ever completing. `Ok` whether or not one was
+/// pending.
+pub(crate) fn discard_pending_identity(request_public_key_hex: &str) -> Result<(), KeyError> {
+    delete(&KeyringSlot::PendingIdentity(
+        request_public_key_hex.to_string(),
+    ))
+    .map(|_| ())
 }
 
 /// One store's key material: the encryption master key, cloud-home credentials,
 /// and OAuth tokens, each stored under a store-scoped keyring account
-/// (`{base}:{store_id}`). The device signing identity is *not* here — it is
-/// device-global; see [`DeviceKeys`].
+/// (`{base}:{store_id}`). The store's signing identity is not here — it goes
+/// through [`crate::identity_custody::IdentityCustody`], the same way the
+/// master key goes through [`crate::custody::KeyCustody`] — but
+/// [`reprotect_apple_keys`](Self::reprotect_apple_keys) also sweeps its fixed
+/// keyring account, since that account name never depends on which custody
+/// policy is active.
 #[derive(Clone)]
 pub struct StoreKeys {
     store_id: String,
@@ -570,18 +570,22 @@ impl StoreKeys {
     }
 
     /// Re-create this store's Apple keyring items (the encryption master
-    /// key, the cloud-home credentials, and every host secret named in
-    /// `host_secrets`) under today's device-only accessibility policy (see
-    /// [`entry_for`]). Each slot that is absent is left absent — nothing to
-    /// reprotect there. coven does not enumerate a store's host-secret
-    /// names, so a host secret omitted from `host_secrets` keeps its old
-    /// accessibility policy; the host passes its own names, which it already
-    /// holds as constants. A host calls this explicitly, once per store,
-    /// after upgrading to a coven build that writes device-only, to bring
-    /// items created under an older accessibility policy forward; coven
-    /// never does this on its own on a read or write.
+    /// key, the signing identity — if [`crate::identity_custody::IdentityCustody::Keyring`]
+    /// is what actually wrote it; the sweep is a no-op otherwise, since
+    /// nothing lives at that account — the cloud-home credentials, and every
+    /// host secret named in `host_secrets`) under today's device-only
+    /// accessibility policy (see [`entry_for`]). Each slot that is absent is
+    /// left absent — nothing to reprotect there. coven does not enumerate a
+    /// store's host-secret names, so a host secret omitted from
+    /// `host_secrets` keeps its old accessibility policy; the host passes its
+    /// own names, which it already holds as constants. A host calls this
+    /// explicitly, once per store, after upgrading to a coven build that
+    /// writes device-only, to bring items created under an older
+    /// accessibility policy forward; coven never does this on its own on a
+    /// read or write.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub fn reprotect_apple_keys(&self, host_secrets: &[&str]) -> Result<(), KeyError> {
+        reprotect_slot(&KeyringSlot::DeviceSigningKey(self.store_id.clone()))?;
         reprotect_slot(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))?;
         reprotect_slot(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))?;
         for name in host_secrets {
@@ -598,10 +602,9 @@ impl StoreKeys {
 
 #[cfg(test)]
 pub(crate) mod test_keyring {
-    use std::sync::{Mutex, Once};
+    use std::sync::Once;
 
     static INSTALL: Once = Once::new();
-    pub(crate) static SIGNING_KEY_GUARD: Mutex<()> = Mutex::new(());
 
     pub(crate) fn install() {
         INSTALL.call_once(|| {
@@ -690,11 +693,12 @@ mod tests {
 
     /// The keyring account names are a durable storage contract: a device's
     /// already-stored keys are found only at these exact accounts, so
-    /// `StoreKeys` and `DeviceKeys` must keep using them verbatim. Pin all
-    /// four. `HostSecret`'s rendering (`{name}:{store_id}`) is additionally a
-    /// contract with any host that already stores a secret at that account
-    /// by name — a host's own already-stored secrets are found only at the
-    /// exact account its name renders to, so this must stay byte-identical.
+    /// `StoreKeys` and every identity operation must keep using them
+    /// verbatim. Pin all five. `HostSecret`'s rendering (`{name}:{store_id}`)
+    /// is additionally a contract with any host that already stores a secret
+    /// at that account by name — a host's own already-stored secrets are
+    /// found only at the exact account its name renders to, so this must
+    /// stay byte-identical.
     #[test]
     fn keyring_account_names_are_a_stable_storage_contract() {
         assert_eq!(
@@ -706,8 +710,12 @@ mod tests {
             "cloud_home_credentials:store-42"
         );
         assert_eq!(
-            KeyringSlot::DeviceSigningKey.account(),
-            "coven_user_signing_key"
+            KeyringSlot::DeviceSigningKey("store-42".to_string()).account(),
+            "coven_user_signing_key:store-42"
+        );
+        assert_eq!(
+            KeyringSlot::PendingIdentity("deadbeef".to_string()).account(),
+            "coven_pending_identity:deadbeef"
         );
         assert_eq!(
             KeyringSlot::HostSecret {
@@ -842,44 +850,53 @@ mod tests {
         );
     }
 
-    /// The device signing key is store-independent and lives at one fixed
-    /// account. A keypair written straight to the raw keyring under that account
-    /// name reads back through `DeviceKeys` unchanged — the account math the two
-    /// sides use is the same, so the split doesn't strand an already-stored key.
+    /// A per-store keyring identity custody. Each test names its own
+    /// `store_id` so tests never race each other's keyring accounts.
+    fn test_identity_custody(store_id: &str) -> std::sync::Arc<dyn DeviceIdentityCustody> {
+        crate::identity_custody::IdentityCustody::Keyring.resolve(
+            store_id,
+            &crate::store_dir::StoreDir::new("unused-store-dir"),
+        )
+    }
+
+    /// A keypair written straight to the raw keyring under a store's signing-key
+    /// account reads back through `require_identity` unchanged — the account
+    /// math both sides use is the same, so the split doesn't strand an
+    /// already-stored key.
     #[test]
-    fn device_keys_reads_a_keypair_written_at_the_fixed_account() {
+    fn require_identity_reads_a_keypair_written_at_the_stores_account() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+        let store_id = "require-identity-fixed-account-test";
 
         let keypair = UserKeypair::generate();
         let expected_pubkey = keypair.public_key();
-        // Write via the raw keyring under the fixed signing-key account, the way
-        // the storage layer does — no `DeviceKeys` involved on the write side.
+        // Write via the raw keyring under the store's signing-key account, the
+        // way the identity custody preset does — no `require_identity` involved
+        // on the write side.
         write(
-            &KeyringSlot::DeviceSigningKey,
+            &KeyringSlot::DeviceSigningKey(store_id.to_string()),
             &hex::encode(keypair.to_keypair_bytes()),
         )
         .expect("write signing key to the raw keyring");
 
-        let read = DeviceKeys::require_user_keypair().expect("read the device keypair back");
+        let custody = test_identity_custody(store_id);
+        let read = require_identity(custody.as_ref()).expect("read the identity back");
         assert_eq!(
             read.public_key(),
             expected_pubkey,
-            "DeviceKeys must read the keypair stored at the fixed account",
+            "require_identity must read the keypair stored at the store's account",
         );
     }
 
-    /// `require_user_keypair` maps absence to the typed
-    /// `KeyError::NoDeviceIdentity`, not the generic string error the old
-    /// `get_user_keypair` returned — every connect/join precondition that
-    /// requires an existing identity gets a matchable, actionable error.
+    /// `require_identity` maps absence to the typed `KeyError::NoDeviceIdentity`
+    /// — every connect/join precondition that requires an existing identity
+    /// gets a matchable, actionable error.
     #[test]
-    fn require_user_keypair_maps_absence_to_no_device_identity() {
+    fn require_identity_maps_absence_to_no_device_identity() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+        let custody = test_identity_custody("require-identity-absent-test");
 
-        match DeviceKeys::require_user_keypair() {
+        match require_identity(custody.as_ref()) {
             Err(error) => assert!(matches!(error, KeyError::NoDeviceIdentity), "got {error:?}"),
             Ok(_) => panic!("no identity is established"),
         }
@@ -890,19 +907,18 @@ mod tests {
     /// write) is idempotent — no error, and the identity reads back
     /// unchanged.
     #[test]
-    fn import_user_keypair_same_pubkey_reimport_is_idempotent() {
+    fn import_identity_same_pubkey_reimport_is_idempotent() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+        let custody = test_identity_custody("import-identity-idempotent-test");
 
         let keypair = UserKeypair::generate();
-        DeviceKeys::import_user_keypair(&keypair.to_keypair_bytes())
+        import_identity(custody.as_ref(), &keypair.to_keypair_bytes())
             .expect("first import establishes the identity");
-        DeviceKeys::import_user_keypair(&keypair.to_keypair_bytes())
+        import_identity(custody.as_ref(), &keypair.to_keypair_bytes())
             .expect("re-importing the same key is idempotent");
 
         assert_eq!(
-            DeviceKeys::require_user_keypair()
+            require_identity(custody.as_ref())
                 .expect("identity still readable")
                 .public_key(),
             keypair.public_key(),
@@ -910,20 +926,19 @@ mod tests {
     }
 
     /// Importing a DIFFERENT key over an already-established identity is
-    /// refused — silently swapping the device identity would strand every
-    /// store that pinned attestations to the existing key.
+    /// refused — silently swapping this store's identity would strand its
+    /// already-signed membership entries.
     #[test]
-    fn import_user_keypair_refuses_to_overwrite_a_different_identity() {
+    fn import_identity_refuses_to_overwrite_a_different_identity() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+        let custody = test_identity_custody("import-identity-mismatch-test");
 
         let established = UserKeypair::generate();
-        DeviceKeys::import_user_keypair(&established.to_keypair_bytes())
+        import_identity(custody.as_ref(), &established.to_keypair_bytes())
             .expect("establish the first identity");
 
         let different = UserKeypair::generate();
-        let error = DeviceKeys::import_user_keypair(&different.to_keypair_bytes())
+        let error = import_identity(custody.as_ref(), &different.to_keypair_bytes())
             .expect_err("importing a different identity must be refused");
         match error {
             KeyError::IdentityMismatch {
@@ -938,35 +953,92 @@ mod tests {
 
         // The refusal must not have overwritten the established identity.
         assert_eq!(
-            DeviceKeys::require_user_keypair()
+            require_identity(custody.as_ref())
                 .expect("the original identity is untouched")
                 .public_key(),
             established.public_key(),
         );
     }
 
-    /// Two callers racing `ensure_device_identity` in the same process
-    /// converge on one generated identity — the `GET_OR_CREATE_LOCK` around
-    /// `get_or_create_user_keypair`'s check-then-act sequence, not a race
-    /// where the second generate-and-persist silently clobbers the first.
+    /// A pending identity minted for a join request is promoted into a
+    /// store's identity custody, and the pending slot no longer serves it —
+    /// the same request can't be promoted twice.
     #[test]
-    fn ensure_device_identity_concurrent_calls_converge_on_one_key() {
+    fn pending_identity_promotes_into_the_named_stores_custody() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+        let pending = mint_pending_identity().expect("mint pending identity");
+        let request_pubkey = public_key_hex(&pending);
+        let custody = test_identity_custody("pending-identity-promote-test");
 
-        let handles: Vec<_> = (0..8)
-            .map(|_| std::thread::spawn(crate::ensure_device_identity))
-            .collect();
-        let pubkeys: Vec<[u8; SIGN_PUBLICKEYBYTES]> = handles
-            .into_iter()
-            .map(|h| h.join().unwrap().expect("ensure_device_identity"))
-            .collect();
+        let promoted = promote_pending_identity(&request_pubkey, custody.as_ref())
+            .expect("promote the pending identity");
+        assert_eq!(promoted.public_key(), pending.public_key());
+        assert_eq!(
+            require_identity(custody.as_ref())
+                .expect("the store now has an identity")
+                .public_key(),
+            pending.public_key(),
+        );
 
-        let first = pubkeys[0];
+        let error = promote_pending_identity(&request_pubkey, custody.as_ref())
+            .map(|_| ())
+            .expect_err("the same request cannot be promoted twice");
         assert!(
-            pubkeys.iter().all(|pk| *pk == first),
-            "every concurrent caller must observe the same established identity: {pubkeys:?}",
+            matches!(error, KeyError::NoPendingIdentity { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// An abandoned join request's pending identity is removed and can no
+    /// longer be promoted; discarding is `Ok` even when nothing was pending.
+    #[test]
+    fn discard_pending_identity_removes_it_and_is_idempotent() {
+        test_keyring::install();
+        let pending = mint_pending_identity().expect("mint pending identity");
+        let request_pubkey = public_key_hex(&pending);
+
+        discard_pending_identity(&request_pubkey).expect("discard the pending identity");
+        discard_pending_identity(&request_pubkey)
+            .expect("discarding an already-absent pending identity is not an error");
+
+        let custody = test_identity_custody("discard-pending-identity-test");
+        let error = promote_pending_identity(&request_pubkey, custody.as_ref())
+            .map(|_| ())
+            .expect_err("a discarded pending identity cannot be promoted");
+        assert!(
+            matches!(error, KeyError::NoPendingIdentity { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// Two concurrent join requests mint distinct pending identities, keyed by
+    /// their own public keys, and promoting one never touches the other.
+    #[test]
+    fn two_concurrent_pending_joins_do_not_cross() {
+        test_keyring::install();
+        let pending_a = mint_pending_identity().expect("mint pending identity a");
+        let pending_b = mint_pending_identity().expect("mint pending identity b");
+        assert_ne!(pending_a.public_key(), pending_b.public_key());
+
+        let custody_a = test_identity_custody("two-concurrent-joins-store-a");
+        let custody_b = test_identity_custody("two-concurrent-joins-store-b");
+        promote_pending_identity(&public_key_hex(&pending_a), custody_a.as_ref())
+            .expect("promote a into store a");
+
+        assert!(
+            require_identity(custody_b.as_ref()).is_err(),
+            "store b must not see store a's promoted identity",
+        );
+        let promoted_b = promote_pending_identity(&public_key_hex(&pending_b), custody_b.as_ref())
+            .expect("promote b into store b");
+        assert_eq!(promoted_b.public_key(), pending_b.public_key());
+        assert_ne!(
+            require_identity(custody_a.as_ref())
+                .expect("store a's identity")
+                .public_key(),
+            require_identity(custody_b.as_ref())
+                .expect("store b's identity")
+                .public_key(),
         );
     }
 
@@ -1068,22 +1140,24 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
-    fn device_keys_reprotect_apple_keys_round_trips_the_signing_key() {
+    fn store_keys_reprotect_apple_keys_round_trips_the_signing_identity() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+        let store_id = "reprotect-store-signing-identity";
 
         let keypair = UserKeypair::generate();
         write(
-            &KeyringSlot::DeviceSigningKey,
+            &KeyringSlot::DeviceSigningKey(store_id.to_string()),
             &hex::encode(keypair.to_keypair_bytes()),
         )
-        .expect("establish a device identity");
+        .expect("establish this store's identity");
 
-        DeviceKeys::reprotect_apple_keys().expect("reprotect");
+        StoreKeys::new(store_id.to_string())
+            .reprotect_apple_keys(&[])
+            .expect("reprotect");
 
+        let custody = test_identity_custody(store_id);
         assert_eq!(
-            DeviceKeys::require_user_keypair()
+            require_identity(custody.as_ref())
                 .expect("read after reprotect")
                 .public_key(),
             keypair.public_key(),
@@ -1092,16 +1166,17 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[test]
-    fn device_keys_reprotect_apple_keys_is_a_no_op_with_no_established_identity() {
+    fn store_keys_reprotect_apple_keys_is_a_no_op_with_no_established_identity() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+        let store_id = "reprotect-store-no-identity";
 
-        DeviceKeys::reprotect_apple_keys()
+        StoreKeys::new(store_id.to_string())
+            .reprotect_apple_keys(&[])
             .expect("reprotecting with no established identity is not an error");
 
+        let custody = test_identity_custody(store_id);
         assert!(matches!(
-            DeviceKeys::require_user_keypair(),
+            require_identity(custody.as_ref()),
             Err(KeyError::NoDeviceIdentity)
         ));
     }

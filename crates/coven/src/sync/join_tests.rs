@@ -69,9 +69,21 @@ fn invite_code_with_store_id(store_id: &str) -> InviteCode {
     }
 }
 
+/// Mint a pending identity and encode the join-request code that names it —
+/// the pair a real join flow carries from `generate_join_request` through to
+/// `join_from_invite_code`, which decodes it back to find the same pending
+/// identity to promote.
+fn seed_join_request() -> String {
+    crate::keys::test_keyring::install();
+    let keypair = crate::keys::mint_pending_identity().expect("mint pending identity");
+    crate::join_code::generate_join_request_for_keypair(&keypair, None)
+}
+
 /// Drive the full join path for an invite code string and return its result. Uses
 /// an app dir under `tmp` and no-op blob source; a malicious id fails at decode
-/// before any cloud home is built, so the cloud details never matter.
+/// before any cloud home is built, so the cloud details never matter. Mints its
+/// own fresh pending identity each call — every join here reaches at most its
+/// own attempt, never another's.
 async fn join_result_for(
     code_str: &str,
     app_dir: &std::path::Path,
@@ -79,10 +91,12 @@ async fn join_result_for(
     let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
     join_from_invite_code(
         code_str,
+        &seed_join_request(),
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
         crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
         None,
         None,
         Arc::new(SystemClock),
@@ -149,22 +163,15 @@ async fn join_rejects_traversal_store_id_at_decode() {
 /// download) rather than on the id — proving the decoder rejects only unsafe ids
 /// and the directory the join would create sits under `stores/`.
 ///
-/// Join reads the device's user keypair from the keyring before the cloud download,
-/// so a keypair must exist for execution to reach the cloud. The user keypair is one
-/// process-wide keyring account, so this seeds it under `SIGNING_KEY_GUARD` to keep
-/// a parallel test from deleting it mid-join; the guard is held across the join await
-/// (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so the
-/// blocking `std` lock never deadlocks against another task on this runtime).
+/// Join reads its pending identity from the keyring before the cloud
+/// download, so one must exist for execution to reach the cloud —
+/// `join_result_for` mints one keyed to its own join request, fresh, before
+/// every attempt.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn join_accepts_a_normal_store_id_past_decode() {
     let encoded = encode(&invite_code_with_store_id("abc-123"));
     let decoded = crate::join_code::decode(&encoded).expect("a normal id decodes");
     assert_eq!(decoded.store_id, "abc-123");
-
-    crate::keys::test_keyring::install();
-    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     // End to end the join still fails — the S3 endpoint above is bogus — but it
     // fails at the cloud read past the decode boundary, not at the id.
@@ -180,17 +187,10 @@ async fn join_accepts_a_normal_store_id_past_decode() {
 /// A store already present locally is the data — re-joining it adds nothing, and
 /// the old code would delete its database and blobs during the failure-cleanup once
 /// bootstrap failed. The join now refuses up front with a typed error naming the
-/// store and leaves the existing files untouched. The keypair is seeded (and the
-/// endpoint is unreachable) so that, absent the guard, execution would reach the
-/// cloud read and the destructive cleanup — the guard is what stops it first.
+/// store and leaves the existing files untouched.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn join_refuses_when_store_exists_and_leaves_it_untouched() {
     let encoded = encode(&invite_code_with_store_id("abc-123"));
-
-    crate::keys::test_keyring::install();
-    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
@@ -225,13 +225,8 @@ async fn join_refuses_when_store_exists_and_leaves_it_untouched() {
 /// removes the directory it created — the failure-cleanup keeps working for the
 /// directory this invocation owns.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn fresh_join_failure_cleans_up_its_own_directory() {
     let encoded = encode(&invite_code_with_store_id("fresh-123"));
-
-    crate::keys::test_keyring::install();
-    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
@@ -258,19 +253,20 @@ async fn fresh_join_failure_cleans_up_its_own_directory() {
 /// succeeds (a real Dropbox home is built) and the very next step — loading
 /// the device signing keypair, `join_store`'s first line — is made to fail via
 /// a one-shot keyring error, landing exactly between persist and
-/// `create_dir_all`. The `SIGNING_KEY_GUARD` lock, held for the whole call,
-/// guarantees the injected error is consumed by this read and not raced by
-/// another test sharing the same device-global keyring account.
+/// `create_dir_all`.
 #[cfg(feature = "oauth-providers")]
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_keyring() {
     crate::keys::test_keyring::install();
     crate::oauth::install_test_client_creds();
-    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
-    // Prime a one-shot error on the device signing-key account's next read.
-    let entry = crate::keys::entry_for("coven_user_signing_key").expect("create signing-key entry");
+    // Mint the pending identity this join's request names, then prime a
+    // one-shot error on its keyring account's next read.
+    let pending = crate::keys::mint_pending_identity().expect("mint pending identity");
+    let join_request = crate::join_code::generate_join_request_for_keypair(&pending, None);
+    let account =
+        crate::keys::KeyringSlot::PendingIdentity(crate::keys::public_key_hex(&pending)).account();
+    let entry = crate::keys::entry_for(&account).expect("create pending-identity entry");
     let mock: &keyring_core::mock::Cred = entry
         .as_any()
         .downcast_ref()
@@ -302,10 +298,12 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
     let ids: crate::id_provider::IdRef = Arc::new(SequentialIdProvider::new("dev"));
     let result = join_from_invite_code(
         &encoded,
+        &join_request,
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
         crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
         Some(oauth_tokens),
         None,
         Arc::new(SystemClock),
@@ -339,17 +337,13 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
 /// `join_store` without that check. Its failure-cleanup removes the store
 /// directory unconditionally, so `join_store` must refuse a store already
 /// present locally itself, independent of any check a wrapper does or doesn't
-/// do around it. The keypair is seeded (and the endpoint is unreachable) so
-/// that, absent its own guard, `join_store` would reach the cloud read and the
-/// destructive cleanup — the guard is what stops it first.
+/// do around it. Nothing here ever reaches the pending-identity read — the
+/// exists-check refuses first — so no join request needs to be seeded.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
     let code = invite_code_with_store_id("abc-123");
 
     crate::keys::test_keyring::install();
-    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let data_dir = tmp.path();
@@ -381,13 +375,17 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
     let layout = crate::store_dir::StoreLayout::new(data_dir);
     let custody =
         crate::custody::KeyCustody::Keyring.resolve("abc-123", &layout.store_dir("abc-123"));
+    let identity_custody = crate::identity_custody::IdentityCustody::Keyring
+        .resolve("abc-123", &layout.store_dir("abc-123"));
 
     let result = crate::sync::join::join_store(
         &layout,
         code,
+        "unused-no-pending-identity-is-ever-read",
         &test_synced_tables(),
         &test_migrations(),
         custody,
+        identity_custody,
         cloud_home,
         &ids,
         |_| {},
@@ -574,11 +572,8 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
 /// it back — `cleanup_after_bootstrap_failure` calls `forget` on whatever
 /// custody the host selected, not just the OS keyring's delete.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn join_failure_calls_forget_on_the_selected_custody() {
     crate::keys::test_keyring::install();
-    let _guard = crate::keys::test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-    crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed the device user keypair");
 
     let encoded = encode(&invite_code_with_store_id("join-custody-forget-test"));
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -588,10 +583,12 @@ async fn join_failure_calls_forget_on_the_selected_custody() {
 
     let result = join_from_invite_code(
         &encoded,
+        &seed_join_request(),
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
         crate::custody::KeyCustody::Custom(custody.clone()),
+        crate::identity_custody::IdentityCustody::Keyring,
         None,
         None,
         Arc::new(SystemClock),

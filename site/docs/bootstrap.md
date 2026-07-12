@@ -225,7 +225,8 @@ let _bootstrap = bootstrap_from_snapshot(
 )
 .await?;
 // join_from_invite_code / restore_from_code persist the bootstrapped master
-// key under custody here, before returning — see Keys.
+// key and this store's signing identity under custody here, before
+// returning — see Keys.
 let handle = Coven::builder(config)
     .synced_tables(synced_tables.to_vec())
     .migrations(migrations)   // the same ladder every open passes

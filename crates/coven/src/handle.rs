@@ -42,7 +42,9 @@ use crate::config::Config;
 use crate::coven::StoreOpenGuard;
 use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring, SealError};
-use crate::keys::{DeviceKeys, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys};
+use crate::keys::{
+    DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
+};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
@@ -150,6 +152,13 @@ pub struct CovenHandle {
     /// write in the handle and the sync engine goes through this — coven never
     /// touches a crypto type directly.
     key_custody: Arc<dyn MasterKeyCustody>,
+
+    /// This store's device-identity custody, resolved once at
+    /// [`open`](crate::CovenBuilder::open) from the builder's
+    /// [`IdentityCustody`](crate::IdentityCustody) selection. Every read of
+    /// this store's signing identity in the handle and the sync engine goes
+    /// through this.
+    identity_custody: Arc<dyn DeviceIdentityCustody>,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 
@@ -202,6 +211,7 @@ impl CovenHandle {
         config_provider: ConfigProvider,
         key_service: StoreKeys,
         key_custody: Arc<dyn MasterKeyCustody>,
+        identity_custody: Arc<dyn DeviceIdentityCustody>,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -215,6 +225,7 @@ impl CovenHandle {
             config_provider,
             key_service,
             key_custody,
+            identity_custody,
             clock,
             cloudkit_ops,
             observer,
@@ -345,6 +356,7 @@ impl CovenHandle {
             self.config_provider.clone(),
             self.key_service.clone(),
             self.key_custody.clone(),
+            self.identity_custody.clone(),
             self.db.clone(),
             self.clock.clone(),
             cloudkit_ops,
@@ -538,6 +550,27 @@ impl CovenHandle {
     }
 
     // =========================================================================
+    // Identity lifecycle
+    // =========================================================================
+
+    /// Generate this store's signing identity and establish it under the
+    /// handle's identity custody. Errors with
+    /// [`IdentityError::AlreadyEstablished`] if custody already unlocks one —
+    /// coven never generates over an existing identity. The counterpart of
+    /// [`initialize_master_key`](Self::initialize_master_key) for a store a
+    /// host is creating fresh (not joining or restoring, which each establish
+    /// their own identity as part of what they do). Returns the established
+    /// public key, hex-encoded.
+    pub fn initialize_identity(&self) -> Result<String, IdentityError> {
+        if self.identity_custody.unlock()?.is_some() {
+            return Err(IdentityError::AlreadyEstablished);
+        }
+        let keypair = crate::keys::UserKeypair::generate();
+        self.identity_custody.persist(&keypair)?;
+        Ok(crate::keys::public_key_hex(&keypair))
+    }
+
+    // =========================================================================
     // Host secrets
     // =========================================================================
 
@@ -636,6 +669,7 @@ impl CovenHandle {
                 let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
                     &config,
                     self.key_custody.as_ref(),
+                    self.identity_custody.as_ref(),
                     home,
                     None,
                 )?;
@@ -650,6 +684,7 @@ impl CovenHandle {
             &config,
             &self.key_service,
             self.key_custody.as_ref(),
+            self.identity_custody.as_ref(),
             None,
             self.clock.clone(),
             self.cloudkit_ops.clone(),
@@ -717,8 +752,8 @@ impl CovenHandle {
         let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
         // This device's own blobs key under its own public key (the host asks for
         // the key of a blob it uploaded).
-        let uploader = DeviceKeys::get_user_public_key()
-            .map_err(|e| StorageError::Storage(format!("read device public key: {e}")))?
+        let uploader = crate::keys::identity_public_key(self.identity_custody.as_ref())
+            .map_err(|e| StorageError::Storage(format!("read this store's identity: {e}")))?
             .map(hex::encode);
         CloudSyncStorage::blob_key(
             scheme,
@@ -858,7 +893,7 @@ impl CovenHandle {
     }
 
     pub fn get_user_pubkey(&self) -> Result<Option<String>, SyncError> {
-        DeviceKeys::get_user_public_key()
+        crate::keys::identity_public_key(self.identity_custody.as_ref())
             .map(|opt| opt.map(hex::encode))
             .map_err(SyncError::from)
     }
@@ -932,6 +967,17 @@ mod tests {
         )
     }
 
+    /// A ready-to-use identity custody for the same tests, seeded in-memory
+    /// so it needs no keyring registration — the identity sibling of
+    /// [`test_key_custody`].
+    fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
+        crate::identity_custody::IdentityCustody::InMemory(crate::keys::UserKeypair::generate())
+            .resolve(
+                "unused-store-id",
+                &crate::store_dir::StoreDir::new("unused-store-dir"),
+            )
+    }
+
     #[tokio::test]
     async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
         let (_tmp, store_dir) = temp_store_dir();
@@ -959,6 +1005,7 @@ mod tests {
             config_provider,
             StoreKeys::new("lib-setup-error".to_string()),
             test_key_custody(),
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1011,6 +1058,7 @@ mod tests {
             config_provider,
             StoreKeys::new(store_id.to_string()),
             key_custody,
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1106,15 +1154,9 @@ mod tests {
     /// through it: a blob enqueued for upload drains to the home through the
     /// handle, and a subsequent `read_blob` resolves the Remote miss back out of
     /// the same home — end to end, with the host supplying only the home + cipher.
-    // The user keypair is one process-wide keyring account, so the guard is held
-    // across this test's awaits to keep a parallel test from deleting it mid-run
-    // (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so
-    // the blocking `std` lock never deadlocks against another task on this runtime).
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_home_drives_drain_and_read_through_the_handle() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (tmp, store_dir) = temp_store_dir();
         // `note_photos` carries a blob in the `images` namespace so the read path can
@@ -1148,6 +1190,7 @@ mod tests {
             config_provider,
             StoreKeys::new("lib-test".to_string()),
             test_key_custody(),
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1219,10 +1262,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn connected_manager_reuses_cloud_home_for_loop_storage() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
@@ -1251,6 +1292,7 @@ mod tests {
             config_provider,
             StoreKeys::new("lib-cloudkit-home-reuse".to_string()),
             test_key_custody(),
+            test_identity_custody(),
             Arc::new(SystemClock),
             Some(Arc::new(TestCloudKitOps::new())),
             None,
@@ -1285,15 +1327,8 @@ mod tests {
     /// reader could serve from without ever touching the cloud) forces the
     /// read through an actual cloud GET + decrypt.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-
-        // The hashed (opaque) layout keys a blob under its uploader's signing key,
-        // so the writer storage needs this device's signing identity to seal under
-        // its own prefix — establish it before building that storage.
-        crate::keys::ensure_device_identity().expect("establish this device's signing identity");
 
         let store_id = "ro-encrypted-custody-test";
         let (_tmp, store_dir) = temp_store_dir();
@@ -1313,6 +1348,15 @@ mod tests {
             .persist(&crate::encryption::MasterKeyring::generate())
             .expect("establish a master key");
 
+        // The hashed (opaque) layout keys a blob under its uploader's signing key,
+        // so the writer storage needs this store's signing identity to seal under
+        // its own prefix — establish it before building that storage.
+        let identity_custody =
+            crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
+        identity_custody
+            .persist(&crate::keys::UserKeypair::generate())
+            .expect("establish this store's signing identity");
+
         let ops = Arc::new(TestCloudKitOps::new());
         let key_service = StoreKeys::new(store_id.to_string());
 
@@ -1323,6 +1367,7 @@ mod tests {
             &config,
             &key_service,
             custody.as_ref(),
+            identity_custody.as_ref(),
             None,
             Arc::new(SystemClock),
             Some(ops.clone()),
@@ -1360,6 +1405,7 @@ mod tests {
             config_provider,
             key_service,
             custody,
+            identity_custody,
             Arc::new(SystemClock),
             Some(ops),
         );
@@ -1433,13 +1479,9 @@ mod tests {
     /// the plaintext (the assertion a browsable/plaintext home would fail),
     /// while `read_blob` decrypts them back. Only the established key sealing the
     /// upload makes both hold.
-    // The user keypair is one process-wide keyring account, so the guard is held
-    // across this test's awaits to keep a parallel test from deleting it mid-run.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
@@ -1461,6 +1503,8 @@ mod tests {
         };
 
         let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+        let identity_custody =
+            crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
         let handle = CovenHandle::new(
             db.clone(),
             db.clone(),
@@ -1469,6 +1513,7 @@ mod tests {
             config_provider,
             StoreKeys::new(store_id.to_string()),
             custody,
+            identity_custody,
             Arc::new(SystemClock),
             None,
             None,
@@ -1478,6 +1523,9 @@ mod tests {
         handle
             .initialize_master_key()
             .expect("establish the master key before connecting");
+        handle
+            .initialize_identity()
+            .expect("establish this store's identity before connecting");
 
         // Connect over the injected home through the custody path: the manager
         // resolves the cipher from the just-established key, never an injected
@@ -1491,13 +1539,11 @@ mod tests {
 
         // Enqueue this device's own blob under the hashed key an opaque home uses
         // (`{namespace}/{uploader}/{ab}/{cd}/{id}`) so the drain seals it and the
-        // read resolves the same uploader to fetch it back. The keypair exists
-        // now that connecting bootstrapped it.
-        let uploader = hex::encode(
-            DeviceKeys::get_user_public_key()
-                .expect("read this device's public key")
-                .expect("a device keypair exists after connecting"),
-        );
+        // read resolves the same uploader to fetch it back.
+        let uploader = handle
+            .get_user_pubkey()
+            .expect("read this store's identity")
+            .expect("this store's identity is established");
         let cloud_key = StoreDir::uploader_hashed_key("images", &uploader, "cover-1")
             .expect("build the hashed cloud key");
         let plaintext = b"cover-art-sealed-under-the-established-master-key".to_vec();
@@ -1609,6 +1655,105 @@ mod tests {
         handle
             .forget_master_key()
             .expect("forgetting an already-absent key is not an error");
+    }
+
+    // =========================================================================
+    // Identity lifecycle
+    // =========================================================================
+
+    /// A handle over a real (keyring-backed) identity custody, for tests that
+    /// need to prove something about a store's *own* keyring account rather
+    /// than the shared in-memory `test_identity_custody`.
+    fn test_handle_with_real_identity(
+        store_id: &str,
+        store_dir: StoreDir,
+        db: Database,
+    ) -> CovenHandle {
+        let config = Config::with_defaults(
+            store_id.to_string(),
+            "test-device".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
+        );
+        let config_provider: ConfigProvider = Arc::new(move || config.clone());
+        CovenHandle::new(
+            db.clone(),
+            db.clone(),
+            db.stamper(),
+            store_dir.clone(),
+            config_provider,
+            StoreKeys::new(store_id.to_string()),
+            test_key_custody(),
+            crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir),
+            Arc::new(SystemClock),
+            None,
+            None,
+            StoreOpenGuard::acquire_for_test(&store_dir),
+        )
+    }
+
+    /// `initialize_identity` is the only place coven ever generates a
+    /// store's signing identity, and it refuses to run again once one is
+    /// established — coven never generates over an existing identity. The
+    /// identity sibling of `initialize_master_key_refuses_a_second_call`.
+    #[tokio::test]
+    async fn initialize_identity_refuses_a_second_call() {
+        test_keyring::install();
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let handle = test_handle_with_real_identity("lib-init-identity-twice", store_dir, db);
+
+        let pubkey = handle
+            .initialize_identity()
+            .expect("the first call establishes an identity");
+        assert!(!pubkey.is_empty());
+        assert_eq!(
+            handle.get_user_pubkey().unwrap(),
+            Some(pubkey),
+            "get_user_pubkey reflects what initialize_identity just established",
+        );
+
+        let error = handle
+            .initialize_identity()
+            .expect_err("a second call must refuse rather than generate over an existing identity");
+        assert!(matches!(
+            error,
+            crate::keys::IdentityError::AlreadyEstablished
+        ));
+    }
+
+    /// Creating two stores on one device establishes two different
+    /// identities — each store's `initialize_identity` generates its own
+    /// keypair, under its own keyring account, independent of the other.
+    #[tokio::test]
+    async fn creating_two_stores_yields_two_different_identities() {
+        test_keyring::install();
+        let (_tmp_a, store_dir_a) = temp_store_dir();
+        let (_tmp_b, store_dir_b) = temp_store_dir();
+        let handle_a = test_handle_with_real_identity(
+            "lib-two-stores-identity-a",
+            store_dir_a,
+            read_test_db("images"),
+        );
+        let handle_b = test_handle_with_real_identity(
+            "lib-two-stores-identity-b",
+            store_dir_b,
+            read_test_db("images"),
+        );
+
+        let pubkey_a = handle_a
+            .initialize_identity()
+            .expect("establish store a's identity");
+        let pubkey_b = handle_b
+            .initialize_identity()
+            .expect("establish store b's identity");
+
+        assert_ne!(
+            pubkey_a, pubkey_b,
+            "two stores on one device must not share an identity",
+        );
+        assert_eq!(handle_a.get_user_pubkey().unwrap(), Some(pubkey_a));
+        assert_eq!(handle_b.get_user_pubkey().unwrap(), Some(pubkey_b));
     }
 
     // =========================================================================
@@ -1733,6 +1878,7 @@ mod tests {
             config_provider,
             StoreKeys::new(store_id.to_string()),
             crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir),
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
         );
@@ -1778,10 +1924,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn plaintext_membership_operations_are_typed() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
@@ -1802,10 +1946,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn reconnect_sync_stops_the_previous_loop() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
@@ -1830,6 +1972,7 @@ mod tests {
             config_provider,
             StoreKeys::new("lib-reconnect-loop".to_string()),
             test_key_custody(),
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1868,10 +2011,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn stopped_installed_loop_blocks_blob_transitions() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
@@ -1896,6 +2037,7 @@ mod tests {
             config_provider,
             StoreKeys::new("lib-stopped-loop-readiness".to_string()),
             test_key_custody(),
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1921,15 +2063,9 @@ mod tests {
         assert!(matches!(make_local, Err(MakeLocalError::SyncNotReady)));
     }
 
-    // The user keypair is one process-wide keyring account, so the guard is held
-    // across this test's awaits to keep a parallel test from deleting it mid-run
-    // (sound here: a `#[tokio::test]` is a single-task current-thread runtime, so
-    // the blocking `std` lock never deadlocks against another task on this runtime).
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn host_drain_uses_the_installed_sync_loop_cipher_lock() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
@@ -1956,6 +2092,7 @@ mod tests {
             config_provider,
             StoreKeys::new("lib-test".to_string()),
             test_key_custody(),
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -2025,6 +2162,7 @@ mod tests {
             config_provider,
             StoreKeys::new(store_id.to_string()),
             test_key_custody(),
+            test_identity_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -2036,10 +2174,8 @@ mod tests {
     /// The loop emits `Started` when a cycle begins and a terminal status when it
     /// ends, so a host can show a sync in progress and then its outcome.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn subscribed_host_sees_started_then_a_terminal_status() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, handle) = status_test_handle("lib-status-syncing");
         let mut rx = handle.subscribe_sync_status();
@@ -2075,10 +2211,8 @@ mod tests {
     /// a reconnect replaces. Under a per-loop channel the receiver would observe
     /// `Closed` after the reconnect dropped the first loop's sender.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn subscription_survives_a_reconnect() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, handle) = status_test_handle("lib-status-reconnect");
 
@@ -2117,10 +2251,8 @@ mod tests {
     /// (`resolve_cipher_never_caches_reflects_whatever_custody_now_serves` in
     /// `sync_manager.rs` pins that re-resolution).
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn disconnect_sync_drops_the_installed_manager_not_just_the_loop() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");

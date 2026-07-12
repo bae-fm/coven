@@ -9,7 +9,7 @@
 use tracing::info;
 
 use crate::config::{CloudProvider, Config};
-use crate::keys::{CloudHomeCredentials, DeviceKeys, MasterKeyCustody, StoreKeys};
+use crate::keys::{CloudHomeCredentials, DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 use crate::oauth::OAuthTokens;
 #[cfg(not(target_arch = "wasm32"))]
@@ -262,6 +262,7 @@ pub fn generate_restore_code(
     config: &Config,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
+    identity_custody: &dyn DeviceIdentityCustody,
     membership_floor: Vec<crate::sync::membership::MembershipCoord>,
 ) -> Result<String, SetupError> {
     use crate::storage::cloud::CloudHomeJoinInfo;
@@ -287,12 +288,11 @@ pub fn generate_restore_code(
         None
     };
 
-    // Deliberately get-or-create, not a query: a restore code embeds this
-    // device's signing key so a second device can re-establish the same
-    // identity, so generating one is itself a deliberate identity-establishing
-    // act (the same category as `generate_join_request`) — a fresh device
-    // still gets a usable restore code, minting its identity as a side effect.
-    let keypair = DeviceKeys::get_or_create_user_keypair()
+    // A restore code embeds this store's signing identity so a second device
+    // can re-establish it; the store already has one — established when it
+    // was created, joined, or restored — so this reads it rather than
+    // minting: a connect-shaped precondition, not a query.
+    let keypair = crate::keys::require_identity(identity_custody)
         .map_err(|e| SetupError(format!("Failed to get signing key: {e}")))?;
 
     let provider = match cloud_provider {
@@ -439,13 +439,20 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     config: &Config,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
+    identity_custody: &dyn DeviceIdentityCustody,
     cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     let cloud_home =
         super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops).await?;
-    create_sync_storage_with_home(config, custody, Arc::from(cloud_home), cipher)
+    create_sync_storage_with_home(
+        config,
+        custody,
+        identity_custody,
+        Arc::from(cloud_home),
+        cipher,
+    )
 }
 
 /// Create sync storage over an already-built [`CloudHome`](super::CloudHome).
@@ -456,6 +463,7 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
 pub(crate) fn create_sync_storage_with_home(
     config: &Config,
     custody: &dyn MasterKeyCustody,
+    identity_custody: &dyn DeviceIdentityCustody,
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
@@ -464,12 +472,12 @@ pub(crate) fn create_sync_storage_with_home(
         None => build_cloud_cipher(config, custody)?,
     };
 
-    // The device's global signing identity, used to sign the control objects the
+    // This store's signing identity, used to sign the control objects the
     // storage writes (its head, the min_schema floor) so a reader can attribute
     // and verify them against the membership chain. A connect path, so this
     // never mints: an unestablished identity fails with
     // `KeyError::NoDeviceIdentity` rather than forging one.
-    let keypair = DeviceKeys::require_user_keypair()?;
+    let keypair = crate::keys::require_identity(identity_custody)?;
 
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
         home,
@@ -522,15 +530,24 @@ mod tests {
     #[test]
     fn generate_restore_code_rejects_a_share_joined_cloudkit_config() {
         crate::keys::test_keyring::install();
-        crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed device keypair");
 
         let config = cloudkit_config(Some(("owner-name", "zone-name")));
         let key_service = StoreKeys::new(config.store_id.clone());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
+        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
+            crate::keys::UserKeypair::generate(),
+        )
+        .resolve(&config.store_id, &config.store_dir);
 
-        let err = generate_restore_code(&config, &key_service, custody.as_ref(), Vec::new())
-            .expect_err("a share-joined CloudKit config must not generate a restore code");
+        let err = generate_restore_code(
+            &config,
+            &key_service,
+            custody.as_ref(),
+            identity_custody.as_ref(),
+            Vec::new(),
+        )
+        .expect_err("a share-joined CloudKit config must not generate a restore code");
         let message = err.to_string();
         assert!(
             message.contains("share"),
@@ -543,15 +560,24 @@ mod tests {
     #[test]
     fn generate_restore_code_private_cloudkit_round_trips() {
         crate::keys::test_keyring::install();
-        crate::keys::DeviceKeys::get_or_create_user_keypair().expect("seed device keypair");
 
         let config = cloudkit_config(None);
         let key_service = StoreKeys::new(config.store_id.clone());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
+        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
+            crate::keys::UserKeypair::generate(),
+        )
+        .resolve(&config.store_id, &config.store_dir);
 
-        let code = generate_restore_code(&config, &key_service, custody.as_ref(), Vec::new())
-            .expect("a private CloudKit config generates a restore code");
+        let code = generate_restore_code(
+            &config,
+            &key_service,
+            custody.as_ref(),
+            identity_custody.as_ref(),
+            Vec::new(),
+        )
+        .expect("a private CloudKit config generates a restore code");
         let decoded = decode_restore_code(&code).expect("generated code decodes");
         assert!(
             matches!(decoded.provider, CloudHomeJoinInfo::CloudKit),

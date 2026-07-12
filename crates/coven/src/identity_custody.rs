@@ -1,49 +1,50 @@
-//! Device-identity custody: where the device's signing keypair is unlocked
+//! A store's device-identity custody: where its signing keypair is unlocked
 //! from, where a newly established one is written, and how it is removed.
-//! [`IdentityCustody`] is the policy a host selects at process startup via
-//! [`crate::set_identity_custody`]; [`IdentityCustody::resolve`] turns it
-//! into the [`DeviceIdentityCustody`] trait object [`DeviceKeys`](crate::keys::DeviceKeys)
-//! drives.
-//!
-//! Unlike [`crate::custody::KeyCustody`] (selected once per store, on the
-//! builder), this is selected once per process — the signing identity is
-//! device-global, shared by every store, so its custody is process-wide
-//! state by the same design.
+//! [`IdentityCustody`] is the policy a host selects on the builder, next to
+//! [`crate::custody::KeyCustody`]; [`IdentityCustody::resolve`] turns it into
+//! the [`DeviceIdentityCustody`] trait object the identity-establishing call
+//! sites (create, join, restore) drive.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::envelope::PassphraseVault;
 use crate::keys::{DeviceIdentityCustody, KeyError, KeyringSlot, UserKeypair, SIGN_SECRETKEYBYTES};
+use crate::store_dir::StoreDir;
 
 pub(crate) use crate::envelope::Passphrase;
 
-/// How the device's signing identity is protected. Registered once via
-/// [`crate::set_identity_custody`]; unregistered defaults to
-/// [`IdentityCustody::Keyring`] — today's behavior, same fixed account,
-/// byte-for-byte.
+/// How a store's device-signing identity is protected. Selected on the
+/// builder, resolved once per store — the identity sibling of
+/// [`crate::custody::KeyCustody`], same shape.
 pub enum IdentityCustody {
-    /// The OS keyring, device-global (no `store_id`) — the default.
+    /// The OS keyring — the default, byte-for-byte today's behavior.
     Keyring,
     /// Argon2id over a memorized passphrase wraps the keypair; the wrapped
-    /// blob lives in a file at `path`. Identity is device-global, so `path`
-    /// is a host-chosen location at the host's own data root — never inside
-    /// a per-store directory.
-    Passphrase {
-        path: PathBuf,
-        passphrase: Passphrase,
-    },
+    /// blob lives in a file in the store directory.
+    Passphrase(Passphrase),
+    /// Supplied for this session, never persisted by coven.
+    InMemory(UserKeypair),
     /// A host-supplied custody implementation.
     Custom(Arc<dyn DeviceIdentityCustody>),
 }
 
 impl IdentityCustody {
-    pub(crate) fn resolve(self) -> Arc<dyn DeviceIdentityCustody> {
+    /// Resolve the selected policy into the trait object the identity-
+    /// establishing call sites drive, injecting what each preset needs from
+    /// the store's identity: `store_id` for [`IdentityCustody::Keyring`] (the
+    /// keyring account name), `store_dir` for [`IdentityCustody::Passphrase`]
+    /// (the wrapped-file path).
+    pub(crate) fn resolve(
+        self,
+        store_id: &str,
+        store_dir: &StoreDir,
+    ) -> Arc<dyn DeviceIdentityCustody> {
         match self {
-            IdentityCustody::Keyring => Arc::new(KeyringIdentityCustody),
-            IdentityCustody::Passphrase { path, passphrase } => {
-                Arc::new(PassphraseIdentityCustody::new(passphrase, path))
+            IdentityCustody::Keyring => Arc::new(KeyringIdentityCustody::new(store_id.to_string())),
+            IdentityCustody::Passphrase(passphrase) => {
+                Arc::new(PassphraseIdentityCustody::new(passphrase, store_dir))
             }
+            IdentityCustody::InMemory(keypair) => Arc::new(InMemoryIdentityCustody::new(keypair)),
             IdentityCustody::Custom(custody) => custody,
         }
     }
@@ -53,15 +54,23 @@ impl IdentityCustody {
 // Keyring preset
 // =============================================================================
 
-/// The OS keyring, wrapping the fixed [`KeyringSlot::DeviceSigningKey`]
+/// The OS keyring, wrapping this store's [`KeyringSlot::DeviceSigningKey`]
 /// account verbatim (`keyring_account_names_are_a_stable_storage_contract`
-/// pins the account name), so an already-stored device identity is found
-/// unchanged.
-struct KeyringIdentityCustody;
+/// pins the account name), so an already-stored identity is found unchanged.
+struct KeyringIdentityCustody {
+    store_id: String,
+}
+
+impl KeyringIdentityCustody {
+    fn new(store_id: String) -> Self {
+        Self { store_id }
+    }
+}
 
 impl DeviceIdentityCustody for KeyringIdentityCustody {
     fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
-        let Some(sk_hex) = crate::keys::read(&KeyringSlot::DeviceSigningKey)? else {
+        let slot = KeyringSlot::DeviceSigningKey(self.store_id.clone());
+        let Some(sk_hex) = crate::keys::read(&slot)? else {
             return Ok(None);
         };
         let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
@@ -73,13 +82,47 @@ impl DeviceIdentityCustody for KeyringIdentityCustody {
 
     fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
         crate::keys::write(
-            &KeyringSlot::DeviceSigningKey,
+            &KeyringSlot::DeviceSigningKey(self.store_id.clone()),
             &hex::encode(keypair.to_keypair_bytes()),
         )
     }
 
     fn forget(&self) -> Result<(), KeyError> {
-        crate::keys::delete(&KeyringSlot::DeviceSigningKey).map(|_| ())
+        crate::keys::delete(&KeyringSlot::DeviceSigningKey(self.store_id.clone())).map(|_| ())
+    }
+}
+
+// =============================================================================
+// InMemory preset
+// =============================================================================
+
+/// Supplied for this session, never persisted by coven — the identity
+/// sibling of [`crate::custody::KeyCustody::InMemory`].
+struct InMemoryIdentityCustody {
+    keypair: RwLock<Option<UserKeypair>>,
+}
+
+impl InMemoryIdentityCustody {
+    fn new(seed: UserKeypair) -> Self {
+        Self {
+            keypair: RwLock::new(Some(seed)),
+        }
+    }
+}
+
+impl DeviceIdentityCustody for InMemoryIdentityCustody {
+    fn unlock(&self) -> Result<Option<UserKeypair>, KeyError> {
+        Ok(self.keypair.read().unwrap().clone())
+    }
+
+    fn persist(&self, keypair: &UserKeypair) -> Result<(), KeyError> {
+        *self.keypair.write().unwrap() = Some(keypair.clone());
+        Ok(())
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        *self.keypair.write().unwrap() = None;
+        Ok(())
     }
 }
 
@@ -87,18 +130,19 @@ impl DeviceIdentityCustody for KeyringIdentityCustody {
 // Passphrase preset
 // =============================================================================
 
-/// Argon2id over a [`Passphrase`] wraps the device's raw 64-byte signing
+/// Argon2id over a [`Passphrase`] wraps this store's raw 64-byte signing
 /// keypair, via the shared [`PassphraseVault`] — the same envelope format
-/// [`crate::custody::KeyCustody::Passphrase`] uses for a store's master
-/// keyring, parameterized here by a different payload.
+/// [`crate::custody::KeyCustody::Passphrase`] uses for the master keyring,
+/// parameterized here by a different payload and a different file name
+/// (`identity.envelope`) in the same store directory.
 struct PassphraseIdentityCustody {
     vault: PassphraseVault,
 }
 
 impl PassphraseIdentityCustody {
-    fn new(passphrase: Passphrase, path: PathBuf) -> Self {
+    fn new(passphrase: Passphrase, store_dir: &StoreDir) -> Self {
         Self {
-            vault: PassphraseVault::new(passphrase, path),
+            vault: PassphraseVault::new(passphrase, store_dir.join("identity.envelope")),
         }
     }
 }
@@ -131,6 +175,12 @@ mod tests {
     use super::*;
     use crate::keys::test_keyring;
 
+    fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = StoreDir::new(tmp.path());
+        (tmp, dir)
+    }
+
     // =========================================================================
     // Keyring preset
     // =========================================================================
@@ -138,13 +188,11 @@ mod tests {
     #[test]
     fn keyring_preset_unlock_persist_forget_round_trip() {
         test_keyring::install();
-        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
-        crate::keys::delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+        let custody = KeyringIdentityCustody::new("identity-keyring-roundtrip".to_string());
 
-        let custody = KeyringIdentityCustody;
         assert!(
-            custody.unlock().expect("unlock a fresh device").is_none(),
-            "a fresh device has no established identity",
+            custody.unlock().expect("unlock a fresh store").is_none(),
+            "a fresh store has no established identity",
         );
 
         let keypair = UserKeypair::generate();
@@ -162,22 +210,70 @@ mod tests {
         );
     }
 
+    /// Two stores' keyring identities never collide: each `KeyringIdentityCustody`
+    /// is scoped by its own `store_id`, the identity sibling of the master
+    /// key's per-store keyring account.
+    #[test]
+    fn keyring_preset_is_scoped_to_its_store() {
+        test_keyring::install();
+        let store_a = KeyringIdentityCustody::new("identity-keyring-scope-a".to_string());
+        let store_b = KeyringIdentityCustody::new("identity-keyring-scope-b".to_string());
+
+        let keypair_a = UserKeypair::generate();
+        store_a.persist(&keypair_a).expect("persist to store a");
+
+        assert_eq!(
+            store_a.unlock().unwrap().unwrap().public_key(),
+            keypair_a.public_key(),
+        );
+        assert!(
+            store_b.unlock().unwrap().is_none(),
+            "store b must not see store a's identity",
+        );
+    }
+
+    // =========================================================================
+    // InMemory preset
+    // =========================================================================
+
+    #[test]
+    fn in_memory_preset_unlock_returns_the_seeded_keypair() {
+        let seed = UserKeypair::generate();
+        let expected = seed.public_key();
+        let custody = InMemoryIdentityCustody::new(seed);
+
+        let unlocked = custody
+            .unlock()
+            .expect("unlock")
+            .expect("seeded keypair is present");
+        assert_eq!(unlocked.public_key(), expected);
+    }
+
+    #[test]
+    fn in_memory_preset_persist_replaces_and_forget_clears() {
+        let custody = InMemoryIdentityCustody::new(UserKeypair::generate());
+
+        let rotated = UserKeypair::generate();
+        custody.persist(&rotated).expect("persist");
+        assert_eq!(
+            custody.unlock().unwrap().unwrap().public_key(),
+            rotated.public_key(),
+        );
+
+        custody.forget().expect("forget");
+        assert!(custody.unlock().unwrap().is_none());
+    }
+
     // =========================================================================
     // Passphrase preset
     // =========================================================================
 
-    fn temp_path() -> (tempfile::TempDir, PathBuf) {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let path = tmp.path().join("identity.envelope");
-        (tmp, path)
-    }
-
     #[test]
     fn passphrase_preset_establish_then_unlock_round_trips() {
-        let (_tmp, path) = temp_path();
+        let (_tmp, dir) = temp_store_dir();
         let custody = PassphraseIdentityCustody::new(
             Passphrase::new("correct horse battery staple".to_string()),
-            path,
+            &dir,
         );
 
         assert!(custody.unlock().expect("unlock before establish").is_none());
@@ -193,45 +289,37 @@ mod tests {
 
     #[test]
     fn passphrase_preset_wrong_passphrase_is_err_not_none() {
-        let (_tmp, path) = temp_path();
-        let writer = PassphraseIdentityCustody::new(
-            Passphrase::new("right passphrase".to_string()),
-            path.clone(),
-        );
+        let (_tmp, dir) = temp_store_dir();
+        let writer =
+            PassphraseIdentityCustody::new(Passphrase::new("right passphrase".to_string()), &dir);
         writer.persist(&UserKeypair::generate()).expect("establish");
 
         let reader =
-            PassphraseIdentityCustody::new(Passphrase::new("wrong passphrase".to_string()), path);
+            PassphraseIdentityCustody::new(Passphrase::new("wrong passphrase".to_string()), &dir);
         match reader.unlock() {
             Err(error) => assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}"),
             Ok(_) => panic!("wrong passphrase must not unlock"),
         }
     }
 
+    /// The identity envelope lives inside the store directory, alongside
+    /// `master.keyring` — a store's identity belongs with the rest of that
+    /// store's own state.
     #[test]
-    fn passphrase_preset_lives_at_the_exact_host_chosen_path_not_a_store_dir() {
-        let (tmp, path) = temp_path();
-        let custody =
-            PassphraseIdentityCustody::new(Passphrase::new("unused".to_string()), path.clone());
+    fn passphrase_preset_lives_inside_the_store_directory() {
+        let (_tmp, dir) = temp_store_dir();
+        let custody = PassphraseIdentityCustody::new(Passphrase::new("unused".to_string()), &dir);
         custody.persist(&UserKeypair::generate()).expect("persist");
 
+        let path = dir.join("identity.envelope");
         assert!(
             path.exists(),
-            "the envelope is written at the exact host-chosen path"
-        );
-        let siblings: Vec<_> = std::fs::read_dir(tmp.path())
-            .expect("read temp dir")
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(
-            siblings,
-            vec![path.file_name().unwrap().to_owned()],
-            "no other file is written beside the host-chosen path",
+            "the envelope is written inside the store directory"
         );
     }
 
-    /// A literal v1 envelope, independently captured, pinned here to prove
-    /// the identity preset reads the exact same wire format `custody.rs`'s
+    /// A literal v1 envelope, independently captured, pinned here to prove the
+    /// identity preset reads the exact same wire format `custody.rs`'s
     /// master-key preset does — one shared envelope implementation, not two
     /// that happen to agree today. Wraps the 64-byte keypair built from
     /// Ed25519 seed `[0x11u8; 32]` under passphrase "fixture-passphrase"; a
@@ -248,12 +336,13 @@ mod tests {
 
     #[test]
     fn passphrase_preset_envelope_fixture_v1_unlocks() {
-        let (_tmp, path) = temp_path();
-        std::fs::write(&path, V1_FIXTURE_ENVELOPE_JSON).expect("write fixture envelope");
+        let (_tmp, dir) = temp_store_dir();
+        std::fs::write(dir.join("identity.envelope"), V1_FIXTURE_ENVELOPE_JSON)
+            .expect("write fixture envelope");
 
         let custody = PassphraseIdentityCustody::new(
             Passphrase::new(V1_FIXTURE_PASSPHRASE.to_string()),
-            path,
+            &dir,
         );
         let keypair = custody
             .unlock()
