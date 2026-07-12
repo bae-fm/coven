@@ -564,6 +564,7 @@ pub async fn pull_changes(
                 if !authorized {
                     match resolve_membership_authorization(
                         storage,
+                        db,
                         membership_chain.as_ref().unwrap(),
                         owner_pubkey.as_deref(),
                         author,
@@ -968,10 +969,19 @@ enum MembershipJudgment {
 
 /// Decide whether `author` may write when the cycle-start chain didn't already
 /// say so. The cycle-start chain is built from a LIST that can lag the entry that
-/// authorizes a freshly-added member, so this reloads the chain, and if still
-/// unauthorized, fetches the exact entry the changeset is signed under by
-/// coordinate — a keyed GET is strongly consistent, so a `NotFound` is
-/// authoritative — then re-judges against the merged chain.
+/// authorizes a freshly-added member, so this reloads the chain — through the
+/// same head-committed, tip-hash-checked, watermarked loader the cycle start
+/// uses, never a plain listing — and if still unauthorized, fetches the exact
+/// entry the changeset is signed under by coordinate — a keyed GET is strongly
+/// consistent, so a `NotFound` is authoritative — then re-judges against the
+/// merged chain.
+///
+/// A hash-linked chain built from a bare listing can't detect a missing TAIL
+/// entry (nothing points forward to it): a listing that omits a committed
+/// `Remove` would validate cleanly and read the removed member as current. Only a
+/// signed `AuthorHead` names how far a chain actually reaches, so the reload must
+/// go through the loader that checks it — the same one the cycle start uses —
+/// rather than building a chain from whatever the listing happens to show.
 ///
 /// `owner_pubkey` is the store's pinned owner (issue #102) when it is an opaque
 /// (owner-anchored) store. Any chain this adopts or merges must still be founded
@@ -979,6 +989,7 @@ enum MembershipJudgment {
 /// does not authorize anyone, so it is treated as unauthorized — never adopted.
 async fn resolve_membership_authorization(
     storage: &dyn SyncStorage,
+    db: &Database,
     current: &MembershipChain,
     owner_pubkey: Option<&str>,
     author: Option<&str>,
@@ -993,29 +1004,47 @@ async fn resolve_membership_authorization(
     // lagged. This is ONLY an optimization to refresh the broader chain; nothing
     // here decides retry-vs-skip, so nothing here returns Indeterminate. On ANY
     // reload problem — a storage read failure, an unparseable/undecryptable entry,
-    // or a whole-set validation failure (a member can plant a bogus, listable
-    // entry) — fall back to the known-good cycle-start chain. The keyed grant GET
-    // below is the sole authority: it fetches the one specific entry (bypassing a
-    // poisoned whole set) and it alone separates a real I/O error (retry) from
-    // forged content (skip). A genuine storage outage therefore still surfaces as
-    // Indeterminate via that GET, while no bogus entry can stall the pull.
-    let fresh = match reload_entries(storage).await {
-        Some(entries) if entries.is_empty() => {
+    // a chain that won't validate, a head that regresses this reader's watermark,
+    // or a chain that no longer anchors to the pinned owner — fall back to the
+    // known-good cycle-start chain. The keyed grant GET below is the sole
+    // authority: it fetches the one specific entry (bypassing a poisoned whole
+    // set) and it alone separates a real I/O error (retry) from forged content
+    // (skip). A genuine storage outage therefore still surfaces as Indeterminate
+    // via that GET, while no bogus entry can stall the pull.
+    let fresh = match storage.list_membership_entries().await {
+        Ok(entries) if entries.is_empty() => {
             // Append-only chain came back empty mid-cycle — an anomalous transient.
             warn!("membership re-list came back empty mid-cycle; keeping the cycle-start chain");
             current.clone()
         }
-        Some(entries) => {
-            let only_entries = entries.into_iter().map(|(_, e)| e).collect();
-            build_anchored_chain(only_entries, owner_pubkey).unwrap_or_else(|| {
-                warn!(
-                    "reloaded membership chain failed validation or is not anchored to \
-                     the pinned owner; falling back to the cycle-start chain"
-                );
-                current.clone()
-            })
+        Ok(entries) => {
+            match super::membership_ops::load_anchored_chain(
+                storage,
+                &entries,
+                owner_pubkey,
+                Some(db),
+            )
+            .await
+            {
+                Ok(chain) => chain,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "reloaded membership chain failed to load or validate; \
+                         falling back to the cycle-start chain"
+                    );
+                    current.clone()
+                }
+            }
         }
-        None => current.clone(),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "membership re-list failed while resolving authorization; \
+                 keeping the cycle-start chain"
+            );
+            current.clone()
+        }
     };
     if fresh.can_write_now(author) {
         return MembershipJudgment::Authorized(fresh);
@@ -1100,6 +1129,17 @@ async fn resolve_membership_authorization(
 /// valid chain OR the resulting chain's founder isn't the pinned owner — either
 /// way the chain must not be trusted to authorize a write. A store with no
 /// pinned owner (browsable) skips the anchor check.
+///
+/// `MembershipChain::from_entries` only hash-links its input: it has no notion of
+/// a signed `AuthorHead` or a watermark, so it cannot tell a complete listing from
+/// one missing its tail (nothing points forward to a dropped last entry) and
+/// cannot refuse a head that regresses a reader's prior view. So this must never
+/// be called on a listing-derived entry set — that is what
+/// [`load_anchored_chain`](super::membership_ops::load_anchored_chain) is for.
+/// Its only caller is [`resolve_membership_authorization`]'s merge step, where
+/// `entries` is the already head-committed, watermarked reload plus the one
+/// keyed-GET grant entry — both individually authenticated before they reach
+/// here, so re-validating their union with a bare hash-link check is safe.
 fn build_anchored_chain(
     entries: Vec<MembershipEntry>,
     owner_pubkey: Option<&str>,
@@ -1114,33 +1154,6 @@ fn build_anchored_chain(
     match owner_pubkey {
         Some(owner) if !chain.is_founded_by(owner) => None,
         _ => Some(chain),
-    }
-}
-
-/// Re-list and re-download the membership entries for a best-effort chain refresh.
-/// Returns `None` on ANY problem — a list/get I/O error OR an unparseable /
-/// undecryptable entry — logging the cause; the caller then falls back to the
-/// known-good cycle-start chain. Deliberately never signals "retry": a planted,
-/// listable entry that can't be parsed is attacker-controllable content, and
-/// folding it into a retry would let one such object stall every device's pull
-/// forever. Whether a genuine I/O outage should retry is decided downstream by the
-/// keyed grant GET, which is per-entry and can separate I/O from content.
-async fn reload_entries(
-    storage: &dyn SyncStorage,
-) -> Option<Vec<(MembershipCoord, MembershipEntry)>> {
-    let keys = match storage.list_membership_entries().await {
-        Ok(keys) => keys,
-        Err(e) => {
-            warn!("membership re-list failed while resolving authorization: {e}");
-            return None;
-        }
-    };
-    match super::membership_ops::download_entries(storage, &keys).await {
-        Ok(entries) => Some(entries),
-        Err(e) => {
-            warn!("membership re-download failed while resolving authorization: {e}");
-            None
-        }
     }
 }
 

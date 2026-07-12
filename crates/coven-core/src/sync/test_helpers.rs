@@ -578,6 +578,12 @@ pub struct MockSyncStorage {
     /// fail-closed path where membership can't even be listed (#88), instead of
     /// silently disabling authorization for the cycle.
     fail_membership_list: std::sync::atomic::AtomicBool,
+    /// Paired with `membership_list_count` via [`arm_put_failure`] /
+    /// [`armed_put_failure_hits`] to fail exactly one numbered
+    /// `list_membership_entries` call, so a test can make the cycle-start listing
+    /// succeed and a later mid-cycle re-list fail (or vice versa) instead of
+    /// failing every call alike.
+    fail_membership_list_on: std::sync::atomic::AtomicUsize,
     membership_list_count: std::sync::atomic::AtomicUsize,
     membership_get_count: std::sync::atomic::AtomicUsize,
     /// `(author_pubkey, seq)` entries the LIST omits but a keyed GET still serves.
@@ -648,6 +654,7 @@ impl MockSyncStorage {
             membership_heads: Mutex::new(HashMap::new()),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
+            fail_membership_list_on: std::sync::atomic::AtomicUsize::new(0),
             membership_list_count: std::sync::atomic::AtomicUsize::new(0),
             membership_get_count: std::sync::atomic::AtomicUsize::new(0),
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
@@ -672,6 +679,20 @@ impl MockSyncStorage {
     pub fn fail_membership_listing(&self) {
         self.fail_membership_list
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Fail exactly the `call_number`-th (1-based) `list_membership_entries` call,
+    /// leaving every other call to succeed normally. Lets a test isolate a
+    /// mid-cycle re-list (the second call within one pull) from the cycle-start
+    /// listing (the first), to exercise the reload's own fallback to the
+    /// cycle-start chain without also failing cycle start itself.
+    pub fn fail_membership_list_on_call(&self, call_number: usize) {
+        arm_put_failure(
+            &self.membership_list_count,
+            &self.fail_membership_list_on,
+            call_number,
+            "membership-list",
+        );
     }
 
     pub fn membership_list_count(&self) -> usize {
@@ -1269,11 +1290,12 @@ impl SyncStorage for MockSyncStorage {
     }
 
     async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
-        self.membership_list_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let armed_call_hit =
+            armed_put_failure_hits(&self.membership_list_count, &self.fail_membership_list_on);
         if self
             .fail_membership_list
             .load(std::sync::atomic::Ordering::SeqCst)
+            || armed_call_hit
         {
             return Err(StorageError::Storage(
                 "injected membership-list failure".into(),

@@ -2287,6 +2287,320 @@ async fn pull_skips_a_removed_members_changeset() {
     assert_eq!(updated.get("devM"), Some(&1));
 }
 
+/// A hash-linked membership chain detects a missing MIDDLE entry via `prev_hash`,
+/// but nothing points forward to a missing TAIL entry, so a listing that omits a
+/// committed `Remove` still hash-links cleanly and reads the removed member as
+/// current. The owner removes the member at (owner, 3) and publishes a head
+/// covering it, but the LIST that rebuilds the chain omits that key while a keyed
+/// GET still serves it — the same eventual-consistency gap a legitimate lagging
+/// Add exploits, except here the lagging object is the one that revokes, not the
+/// one that grants. The removed member's changeset, naming its now-superseded
+/// (owner, 2) Add as its grant, must still be judged against the full,
+/// head-committed chain (which the keyed GET recovers) and refused — not against
+/// whatever a bare listing happens to hash-link into.
+#[tokio::test]
+async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let member = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+    let remove_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Remove,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:03:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    // The LIST omits the committed Remove; a keyed GET of (owner, 3) still serves
+    // it, exactly as the cycle-start load already recovers it via the head.
+    storage.hide_membership_from_listing(&owner_pk, 3);
+
+    // The removed member authors a changeset stamping their old grant (owner, 2),
+    // which looks like a legitimate lagging Add if the reload is judged against a
+    // plain listing instead of the committed chain.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromRemoved', NULL, '0000000004000-0000-devM', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devM",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:04:00Z",
+        &member,
+        Some(MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 2,
+        }),
+        &cs,
+    );
+    storage.put_changeset_packed("devM", 1, packed);
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    // Not applied: the removed member is not re-admitted by the lagging listing.
+    // Surfaced as rejected-unauthorized and the cursor advances so the device is
+    // not stuck on it.
+    assert_eq!(result.changesets_applied, 0);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert_eq!(
+        result.rejected_unauthorized[0].author,
+        Some(hex::encode(member.public_key()))
+    );
+    assert_eq!(updated.get("devM"), Some(&1));
+}
+
+/// The cycle-start chain only ever admits a member through a committed prefix —
+/// entries `1..=head.seq` — so an Add that exists in storage but that no head
+/// covers yet is genuinely uncommitted, not merely list-lagging: the cycle-start
+/// load recovers a listing lag by keyed GET within a published head's range
+/// (`pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing` covers
+/// that), but nothing recovers an entry beyond it. This is the gap the mid-cycle
+/// reload's own keyed grant GET exists to close, naming the entry directly by the
+/// coordinate the changeset carries, bypassing both the listing AND the head
+/// entirely.
+#[tokio::test]
+async fn pull_resolves_a_changeset_naming_a_grant_no_head_yet_covers() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let member = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    // The owner publishes a head covering only the founder entry (seq 1) before
+    // adding the member, so the Add at seq 2 is uploaded but no head certifies it
+    // yet — genuinely uncommitted, not just list-lagging.
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+
+    // The member authors a signed changeset, stamping the grant coordinate of the
+    // entry that authorizes them: (owner, 2), the Add no head covers yet.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromUncommittedMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devM",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:02:00Z",
+        &member,
+        Some(MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 2,
+        }),
+        &cs,
+    );
+    storage.put_changeset_packed("devM", 1, packed);
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    // The reload was reached (the cycle-start chain, capped at the published
+    // head, did not yet authorize the member) and the grant GET resolved the
+    // entry directly — applied, not dropped as non-member.
+    assert_eq!(storage.membership_list_count(), 2);
+    assert_eq!(result.changesets_applied, 1);
+    assert!(result.rejected_unauthorized.is_empty());
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devM"), Some(&1));
+}
+
+/// The mid-cycle membership reload is a best-effort refresh: nothing about it
+/// decides retry-vs-skip, so a problem reloading it (here the reload's own
+/// re-list, distinct from the cycle-start listing, hitting a storage error) must
+/// fall back to the known-good cycle-start chain rather than stalling the pull.
+/// The member's changeset still resolves through the keyed grant GET, which is a
+/// direct fetch by coordinate and unaffected by the LIST failure — the sole
+/// authority that separates a real outage (retry) from forged content (skip).
+#[tokio::test]
+async fn pull_falls_back_to_the_cycle_start_chain_when_the_mid_cycle_relist_fails() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let member = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    // The owner publishes a head covering only the founder entry (seq 1) before
+    // adding the member, so the Add at seq 2 is uploaded but no head certifies it
+    // yet — genuinely uncommitted, not just list-lagging.
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+
+    // Only the SECOND `list_membership_entries` call fails: the first (cycle
+    // start, inside `load_cycle_membership`) succeeds, and the second (the
+    // mid-cycle reload inside `resolve_membership_authorization`) hits a storage
+    // error.
+    storage.fail_membership_list_on_call(2);
+
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'FromLaggingMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devM",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:02:00Z",
+        &member,
+        Some(MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 2,
+        }),
+        &cs,
+    );
+    storage.put_changeset_packed("devM", 1, packed);
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    // The reload's re-list did fail (confirming the fallback was actually
+    // exercised, not skipped), yet the changeset still applied via the keyed
+    // grant GET — the pull is not stalled by the reload's storage error.
+    assert_eq!(storage.membership_list_count(), 2);
+    assert_eq!(result.changesets_applied, 1);
+    assert!(result.rejected_unauthorized.is_empty());
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devM"), Some(&1));
+}
+
+/// Cycle start and the mid-cycle reload now share the same head-committed,
+/// watermarked loader, so a membership head that regresses below a reader's
+/// accepted watermark is refused wherever it is read — there is no longer a
+/// second, unwatermarked path a stale or rewound head could slip through. Driven
+/// across two cycles on the same reader database: the first accepts the head at
+/// the Remove's seq (persisting the watermark), the second serves a head from
+/// before the Remove and must be refused rather than adopted.
+#[tokio::test]
+async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycles() {
+    use crate::sync::membership::{entry_hash, AuthorHead};
+
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let member = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member.clone()).await;
+    let remove_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Remove,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:03:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    let db2 = open_test_db();
+    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    // First cycle: accepts the head at seq 3 (member removed), persisting the
+    // reader's watermark at 3.
+    let (updated, _) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    // A stale replica serves the head from before the Remove (seq 2, signed over
+    // the Add's tip hash).
+    let stale = AuthorHead::signed(2, entry_hash(&add_member), &owner);
+    storage
+        .put_membership_head(&owner_pk, serde_json::to_vec(&stale).unwrap())
+        .await
+        .unwrap();
+
+    let result = pull_into_result(&db2, &storage, "dev2", &updated, &temp_store_dir().1).await;
+    assert!(
+        matches!(result, Err(PullError::MembershipTampered(_))),
+        "a head regressing below the accepted watermark must be refused, got {:?}",
+        result.map(|_| ()),
+    );
+}
+
 /// The fail-open the auditor reproduced: a non-empty but MALFORMED chain (here a
 /// founder with a corrupt signature, so `download_chain` errors) on a pinned-owner
 /// store must be refused — not treated as "no chain, accept everything", which
