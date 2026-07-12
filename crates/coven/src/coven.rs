@@ -253,6 +253,16 @@ impl CovenBuilder {
         self
     }
 
+    /// Open the store, returning the [`CovenHandle`].
+    ///
+    /// Opening performs no keyring interaction: it opens the database, runs
+    /// migrations, and resolves the master-key custody selection to a value
+    /// (constructing the trait object, never calling its `unlock`) — a locked
+    /// agent (no OS keyring session, no established master key or device
+    /// identity) can `open()` a store and use it fully for rows and Local
+    /// blobs. The first read of any key happens lazily, at the specific call
+    /// that needs it ([`CovenHandle::connect_sync`],
+    /// [`CovenHandle::master_key_fingerprint`], and similar).
     pub fn open(self) -> CovenResult<CovenHandle> {
         crate::install_platform();
         let config = self.config.current();

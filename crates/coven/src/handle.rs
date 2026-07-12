@@ -432,6 +432,14 @@ impl CovenHandle {
     /// Stop the sync loop after the in-flight cycle, keeping the installed
     /// manager so [`start_sync`](Self::start_sync) can resume it. A no-op when no
     /// provider is connected.
+    ///
+    /// The material a running loop resolved from custody (the master keyring,
+    /// the device signing identity) is cached only inside that loop for as
+    /// long as it runs — nowhere else in the handle — and this is where it is
+    /// purged. A subsequent [`start_sync`](Self::start_sync)/
+    /// [`connect_sync`](Self::connect_sync) re-resolves fresh from whatever
+    /// custody now serves, so a host's lock flow that stops sync as part of
+    /// locking, then later reconnects, never resumes on stale material.
     pub fn stop_sync(&self) {
         match self.sync_manager() {
             Some(manager) => {
@@ -446,6 +454,12 @@ impl CovenHandle {
     /// Disconnect the provider entirely: stop the loop and drop the installed
     /// [`SyncManager`]. The store becomes home-less until the next
     /// [`connect_sync`](Self::connect_sync).
+    ///
+    /// Carries the same purge as [`stop_sync`](Self::stop_sync) (dropping the
+    /// manager cannot leave more behind than stopping its loop already
+    /// cleared) and additionally drops the manager itself, so nothing about
+    /// the previous connection — including which custody it resolved
+    /// material from — survives into the next connect.
     pub fn disconnect_sync(&self) {
         if let Some(manager) = self.sync_manager() {
             if let Err(stop_error) = manager.stop_sync() {
@@ -2004,6 +2018,48 @@ mod tests {
         assert!(
             matches!(status, SyncLoopStatus::Started),
             "the received status is a cycle start marker, got {status:?}",
+        );
+    }
+
+    /// `stop_sync` keeps the installed manager (so `start_sync` can resume
+    /// it); `disconnect_sync` drops it outright. The resolved cipher and the
+    /// device keypair `SyncManager`/`CloudSyncStorage` hold live only inside
+    /// that manager (see its doc) — nothing else in the handle references
+    /// them — so once `sync_manager()` is `None`, nothing a connection
+    /// resolved survives past the call. A later `connect_sync` builds a new
+    /// manager that re-resolves fresh from custody
+    /// (`resolve_cipher_never_caches_reflects_whatever_custody_now_serves` in
+    /// `sync_manager.rs` pins that re-resolution).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn disconnect_sync_drops_the_installed_manager_not_just_the_loop() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let handle = test_handle("lib-disconnect-drops-manager", store_dir, db);
+
+        handle
+            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("connect over injected home");
+        assert!(
+            handle.sync_manager().is_some(),
+            "connect installs a manager"
+        );
+
+        handle.stop_sync();
+        assert!(
+            handle.sync_manager().is_some(),
+            "stop_sync keeps the manager installed so start_sync can resume it",
+        );
+
+        handle.disconnect_sync();
+        assert!(
+            handle.sync_manager().is_none(),
+            "disconnect_sync drops the installed manager entirely — nothing it \
+             cached survives past this call",
         );
     }
 }
