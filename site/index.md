@@ -41,8 +41,8 @@ features:
           dark: /icons/devices-dark.svg
           width: 28
           height: 28
-      title: Everyone writes
-      details: 'Any device edits anything, offline included, and concurrent edits merge on their own.'
+      title: No conflicts
+      details: 'Every device writes, offline included, and concurrent writes merge on their own.'
       link: /docs/merge
     - icon:
           light: /icons/layers-light.svg
