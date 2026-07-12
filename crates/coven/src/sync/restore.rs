@@ -10,8 +10,9 @@ use tokio::sync::watch;
 use tracing::info;
 
 use crate::config::{Config, HomeStorage};
-use crate::encryption::EncryptionService;
-use crate::keys::{DeviceKeys, StoreKeys, UserKeypair};
+use crate::custody::KeyCustody;
+use crate::encryption::MasterKeyring;
+use crate::keys::{DeviceKeys, MasterKeyCustody, StoreKeys, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
@@ -169,6 +170,7 @@ pub async fn restore_from_cloud(
     store_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    custody: Arc<dyn MasterKeyCustody>,
     source: RestoreSource,
     keypair: &UserKeypair,
     layout: &StoreLayout,
@@ -209,17 +211,23 @@ pub async fn restore_from_cloud(
         // opaque home (encrypted, obfuscated blob paths); a key absent ⇒ a
         // browsable home (plaintext, readable blob paths). The cipher and the
         // blob-path scheme both follow from it, so this device computes the
-        // same blob keys the source wrote.
+        // same blob keys the source wrote. Parsed once here (not re-parsed
+        // inside `bootstrap_and_save_store`) so the cipher and the persisted
+        // master key always agree on the same value.
         let storage = if encryption_key_hex.is_some() {
             HomeStorage::Opaque
         } else {
             HomeStorage::Browsable
         };
-        let cipher = match encryption_key_hex {
+        let master_key: Option<MasterKeyring> = match encryption_key_hex {
             Some(key_hex) => {
                 on_status("Verifying encryption key...");
-                CloudCipher::Encrypted(EncryptionService::new(key_hex)?)
+                Some(MasterKeyring::from_serialized(key_hex)?)
             }
+            None => None,
+        };
+        let cipher = match &master_key {
+            Some(keyring) => CloudCipher::Encrypted(keyring.clone().into()),
             None => CloudCipher::Plaintext,
         };
 
@@ -244,7 +252,7 @@ pub async fn restore_from_cloud(
         bootstrap_and_save_store(
             &storage,
             &cipher,
-            encryption_key_hex,
+            master_key.as_ref(),
             &store_dir,
             store_id,
             &device_id,
@@ -254,6 +262,7 @@ pub async fn restore_from_cloud(
             &join_info,
             store_name,
             &store_keys,
+            custody.as_ref(),
             &on_status,
             cancel,
         )
@@ -273,6 +282,7 @@ pub async fn restore_from_cloud(
         Err(err) => Err(cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
+            custody.as_ref(),
             err,
         )),
     }
@@ -288,6 +298,7 @@ pub async fn restore_from_code(
     code: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    key_custody: KeyCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     layout: &StoreLayout,
@@ -302,6 +313,7 @@ pub async fn restore_from_code(
 
     let parsed = restore_code::decode_restore_code(code)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
+    let custody = key_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
 
     // `decode_restore_code` already validated the field; convert it to bytes so
     // restore can rebuild and later import the signing identity.
@@ -334,6 +346,7 @@ pub async fn restore_from_code(
         &parsed.name,
         synced_tables,
         migrations,
+        custody.clone(),
         source,
         &keypair,
         layout,
@@ -356,6 +369,7 @@ pub async fn restore_from_code(
         return Err(cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
+            custody.as_ref(),
             BootstrapError::Key(e),
         ));
     }

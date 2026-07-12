@@ -11,9 +11,9 @@ use tracing::info;
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
-use crate::encryption::EncryptionError;
+use crate::encryption::{EncryptionError, MasterKeyring};
 use crate::join_code::InviteCode;
-use crate::keys::{CloudHomeCredentials, DeviceKeys, KeyError, StoreKeys};
+use crate::keys::{CloudHomeCredentials, DeviceKeys, KeyError, MasterKeyCustody, StoreKeys};
 use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::{StoreDir, StoreLayout};
@@ -81,12 +81,14 @@ pub enum BootstrapError {
 /// the error to propagate. The exists-guard at the top of every join/restore
 /// entry point establishes that this invocation owns everything under the
 /// store id — no live store existed when it started, so the store-scoped
-/// directory and keyring accounts are this invocation's alone to remove, which
-/// makes total removal unconditionally safe here. Three steps, each
-/// best-effort so one failing doesn't skip the others: the store directory
-/// (tolerating it never having existed — a failure before `create_dir_all`
-/// leaves nothing to remove), the encryption master key, and the cloud-home
-/// credentials (OAuth tokens are stored *as* credentials — see
+/// directory, custody, and keyring accounts are this invocation's alone to
+/// remove, which makes total removal unconditionally safe here. Three steps,
+/// each best-effort so one failing doesn't skip the others: the store
+/// directory (tolerating it never having existed — a failure before
+/// `create_dir_all` leaves nothing to remove; also covers a Passphrase
+/// custody's wrapped-file, which lives inside it), the master key via custody
+/// (idempotent regardless of policy), and the cloud-home credentials (OAuth
+/// tokens are stored *as* credentials — see
 /// `StoreKeys::set_cloud_home_oauth_tokens` — so this one delete covers both).
 /// On a clean run the original `cause` is returned unchanged; if any step
 /// fails, every failure is carried in a [`BootstrapError::Cleanup`] so none is
@@ -94,6 +96,7 @@ pub enum BootstrapError {
 pub(crate) fn cleanup_after_bootstrap_failure(
     store_dir: &StoreDir,
     store_keys: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
     cause: BootstrapError,
 ) -> BootstrapError {
     let mut failures: Vec<String> = Vec::new();
@@ -104,8 +107,8 @@ pub(crate) fn cleanup_after_bootstrap_failure(
         Err(e) => failures.push(format!("store directory: {e}")),
     }
 
-    if let Err(e) = store_keys.delete_encryption_key() {
-        failures.push(format!("encryption key: {e}"));
+    if let Err(e) = custody.forget() {
+        failures.push(format!("master key: {e}"));
     }
 
     if let Err(e) = store_keys.delete_cloud_home_credentials() {
@@ -300,6 +303,7 @@ pub async fn join_from_invite_code(
     layout: &StoreLayout,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    key_custody: crate::custody::KeyCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
@@ -328,6 +332,7 @@ pub async fn join_from_invite_code(
     // `join_store` even creates the store directory — funnels through the same
     // rollback instead of escaping via `?`.
     let store_keys = StoreKeys::new(code.store_id.clone());
+    let custody = key_custody.resolve(&code.store_id, &store_dir);
 
     let result = async {
         let cloud_home = build_cloud_home_for_join(
@@ -344,6 +349,7 @@ pub async fn join_from_invite_code(
             code,
             synced_tables,
             migrations,
+            custody.clone(),
             cloud_home,
             ids.as_ref(),
             &on_status,
@@ -359,6 +365,7 @@ pub async fn join_from_invite_code(
         Err(err) => Err(cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
+            custody.as_ref(),
             err,
         )),
     }
@@ -376,6 +383,7 @@ pub async fn join_store(
     code: InviteCode,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    custody: Arc<dyn MasterKeyCustody>,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
@@ -430,7 +438,7 @@ pub async fn join_store(
             &code.owner_pubkey,
         )
         .await?;
-        let encryption_keyring = encryption.to_keyring_string()?;
+        let master_key = MasterKeyring::from(encryption.clone());
 
         // Create the sync storage with the real encryption key. Joining a
         // shared store only makes sense over an opaque home — the invite wraps
@@ -459,7 +467,7 @@ pub async fn join_store(
         bootstrap_and_save_store(
             &storage,
             &cipher,
-            Some(&encryption_keyring),
+            Some(&master_key),
             &store_dir,
             &code.store_id,
             &device_id,
@@ -471,6 +479,7 @@ pub async fn join_store(
             &code.join_info,
             &code.store_name,
             &store_keys,
+            custody.as_ref(),
             &on_status,
             cancel,
         )
@@ -486,6 +495,7 @@ pub async fn join_store(
         Err(err) => Err(cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
+            custody.as_ref(),
             err,
         )),
     }
@@ -497,7 +507,7 @@ pub async fn join_store(
 pub(crate) async fn bootstrap_and_save_store(
     storage: &CloudSyncStorage,
     cipher: &CloudCipher,
-    encryption_key_hex: Option<&str>,
+    master_key: Option<&MasterKeyring>,
     store_dir: &StoreDir,
     store_id: &str,
     device_id: &str,
@@ -507,6 +517,7 @@ pub(crate) async fn bootstrap_and_save_store(
     join_info: &CloudHomeJoinInfo,
     store_name: &str,
     key_service: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
     on_status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -560,10 +571,10 @@ pub(crate) async fn bootstrap_and_save_store(
         info!("Applied {changesets_applied} changesets since snapshot");
     }
 
-    // Step 7: Save encryption key to keyring.
+    // Step 7: Persist the master key via custody.
     on_status("Saving configuration...");
-    if let Some(key_hex) = encryption_key_hex {
-        key_service.set_encryption_key(key_hex)?;
+    if let Some(keyring) = master_key {
+        custody.persist(keyring)?;
     }
 
     // Step 8: Save cloud credentials to keyring.
@@ -860,10 +871,13 @@ mod tests {
         let blocked = StoreDir::new(tmp.path().join("blocked-by-a-file"));
         std::fs::write(&*blocked, b"not a directory").expect("seed a file at the store dir path");
         let store_keys = StoreKeys::new("cleanup-failure-cause-test".to_string());
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve("cleanup-failure-cause-test", &blocked);
 
         let wrapped = cleanup_after_bootstrap_failure(
             &blocked,
             &store_keys,
+            custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -888,10 +902,13 @@ mod tests {
         let store_dir = StoreDir::new(tmp.path().join("to-remove"));
         std::fs::create_dir_all(&*store_dir).expect("create store dir");
         let store_keys = StoreKeys::new("successful-cleanup-test".to_string());
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve("successful-cleanup-test", &store_dir);
 
         let returned = cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
+            custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -913,10 +930,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("temp dir");
         let never_created = StoreDir::new(tmp.path().join("never-created"));
         let store_keys = StoreKeys::new("never-created-dir-test".to_string());
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve("never-created-dir-test", &never_created);
 
         let returned = cleanup_after_bootstrap_failure(
             &never_created,
             &store_keys,
+            custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 
@@ -938,9 +958,11 @@ mod tests {
         let store_dir = StoreDir::new(tmp.path().join("keyring-cleanup-test"));
         std::fs::create_dir_all(&*store_dir).expect("create store dir");
         let store_keys = StoreKeys::new("keyring-cleanup-test".to_string());
-        store_keys
-            .set_encryption_key("aa".repeat(32).as_str())
-            .expect("seed encryption key");
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve("keyring-cleanup-test", &store_dir);
+        custody
+            .persist(&MasterKeyring::generate())
+            .expect("seed the master key via custody");
         store_keys
             .set_cloud_home_credentials(&CloudHomeCredentials::S3 {
                 access_key: "ak".to_string(),
@@ -951,6 +973,7 @@ mod tests {
         let returned = cleanup_after_bootstrap_failure(
             &store_dir,
             &store_keys,
+            custody.as_ref(),
             BootstrapError::Database("bootstrap boom".to_string()),
         );
 

@@ -1,9 +1,24 @@
 use tracing::info;
 
 pub use coven_core::keys::{
-    CloudHomeCredentials, KeyError, KeyPersistence, UserKeypair, SIGN_PUBLICKEYBYTES,
+    CloudHomeCredentials, KeyError, MasterKeyCustody, UserKeypair, SIGN_PUBLICKEYBYTES,
     SIGN_SECRETKEYBYTES,
 };
+
+/// Why a [`CovenHandle`](crate::CovenHandle) master-key lifecycle call
+/// (`initialize_master_key`, `import_master_key`) failed.
+#[derive(Debug, thiserror::Error)]
+pub enum MasterKeyError {
+    /// `initialize_master_key` found a master key already established —
+    /// custody `unlock()` returned `Some`. coven never generates over an
+    /// existing key; the host imports or forgets it first.
+    #[error("a master key is already established for this store")]
+    AlreadyEstablished,
+    #[error("key error: {0}")]
+    Key(#[from] KeyError),
+    #[error("invalid master key material: {0}")]
+    Encryption(#[from] crate::encryption::EncryptionError),
+}
 
 static KEYRING_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -67,7 +82,7 @@ impl KeyringSlot {
     /// The keyring account name this slot is stored under. These strings are a
     /// durable storage contract: a device's already-stored keys are found only
     /// at these exact accounts, so changing any of them strands stored keys.
-    fn account(&self) -> String {
+    pub(crate) fn account(&self) -> String {
         match self {
             KeyringSlot::DeviceSigningKey => "coven_user_signing_key".to_string(),
             KeyringSlot::EncryptionMasterKey(store_id) => {
@@ -198,17 +213,6 @@ impl StoreKeys {
         read(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))
     }
 
-    pub fn get_or_create_encryption_key(&self) -> Result<String, KeyError> {
-        if let Some(key) = self.get_encryption_key()? {
-            return Ok(key);
-        }
-
-        info!("Generated a new encryption master key");
-        let key_hex = hex::encode(crate::encryption::generate_random_key());
-        self.set_encryption_key(&key_hex)?;
-        Ok(key_hex)
-    }
-
     pub fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
         write(
             &KeyringSlot::EncryptionMasterKey(self.store_id.clone()),
@@ -273,12 +277,6 @@ impl StoreKeys {
     }
 }
 
-impl KeyPersistence for StoreKeys {
-    fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
-        self.set_encryption_key(value)
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod test_keyring {
     use std::sync::{Mutex, Once};
@@ -317,30 +315,6 @@ mod tests {
 
         assert!(error.to_string().contains("present but empty"));
         assert!(error.to_string().contains(&account));
-    }
-
-    #[test]
-    fn get_or_create_encryption_key_does_not_overwrite_a_corrupt_empty_entry() {
-        test_keyring::install();
-        let service = StoreKeys::new("empty-encryption-key-store".to_string());
-        let account = KeyringSlot::EncryptionMasterKey(service.store_id().to_string()).account();
-        let entry =
-            keyring_core::Entry::new(keyring_service().expect("service registered"), &account)
-                .expect("create encryption key entry");
-        entry
-            .set_password("")
-            .expect("write empty encryption key entry");
-
-        let error = service
-            .get_or_create_encryption_key()
-            .expect_err("empty entry is corrupt");
-
-        assert!(error.to_string().contains("present but empty"));
-        assert_eq!(
-            entry.get_password().expect("read corrupt entry"),
-            "",
-            "corrupt value is not overwritten"
-        );
     }
 
     /// The keyring account names are a durable storage contract: a device's

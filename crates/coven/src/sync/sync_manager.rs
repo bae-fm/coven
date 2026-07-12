@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
-use crate::keys::{DeviceKeys, KeyError, StoreKeys};
+use crate::keys::{DeviceKeys, KeyError, MasterKeyCustody, StoreKeys};
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::{CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
@@ -48,10 +48,8 @@ pub enum SyncError {
     LoopNotRunning,
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
-    #[error(
-        "opaque cloud home configured without an encryption service (a locked store, or a browsable/opaque storage mismatch)"
-    )]
-    OpaqueHomeWithoutEncryption,
+    #[error("no master key is established for this opaque store (locked, or never initialized)")]
+    MasterKeyNotEstablished,
     #[error("failed to build cloud home: {0}")]
     CloudHome(#[from] CloudHomeError),
     #[error("failed to create sync storage: {0}")]
@@ -82,14 +80,14 @@ fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<EncryptionServ
 
 /// High-level sync manager.
 ///
-/// Holds an `EncryptionService` for an opaque home and `None` for a browsable
-/// (plaintext) one — a browsable home has no store key. The at-rest cipher is
-/// chosen per cycle from the home's [`HomeStorage`](crate::config::HomeStorage),
-/// so the service is consulted only on an opaque home.
+/// Holds the store's master-key custody; the at-rest cipher is resolved from
+/// it per [`start_sync`](Self::start_sync) call, chosen from the home's
+/// [`HomeStorage`](crate::config::HomeStorage) — custody is consulted only on
+/// an opaque home, never a browsable one.
 pub struct SyncManager {
     config_provider: ConfigProvider,
     key_service: StoreKeys,
-    encryption_service: Option<EncryptionService>,
+    custody: Arc<dyn MasterKeyCustody>,
     db: Database,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
@@ -125,10 +123,11 @@ impl SyncManager {
     /// Construction is infallible and synchronous: seeding already happened in
     /// the open path. The manager is built lazily, only once a provider is
     /// connected.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config_provider: ConfigProvider,
         key_service: StoreKeys,
-        encryption_service: Option<EncryptionService>,
+        custody: Arc<dyn MasterKeyCustody>,
         db: Database,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
@@ -140,7 +139,7 @@ impl SyncManager {
         Self {
             config_provider,
             key_service,
-            encryption_service,
+            custody,
             db,
             clock,
             cloudkit_ops,
@@ -155,13 +154,6 @@ impl SyncManager {
 
     pub fn cloud_home(&self) -> Option<Arc<dyn CloudHome>> {
         self.cloud_home.read().unwrap().clone()
-    }
-
-    /// The encryption service this manager holds: `Some` for an opaque home
-    /// (sealed under the store key), `None` for a browsable one (no store
-    /// key, stored in the clear).
-    pub fn encryption_service(&self) -> Option<EncryptionService> {
-        self.encryption_service.clone()
     }
 
     pub fn sync_loop_handle(&self) -> Option<Arc<SyncLoopHandle>> {
@@ -194,17 +186,21 @@ impl SyncManager {
 
         self.stop_current_connection()?;
 
-        // The home's at-rest cipher: an opaque home seals under the manager's
-        // store key, a browsable home stores in the clear. An opaque home with
-        // no store key is a config contradiction (a locked store, or a
-        // browsable/opaque storage mismatch) — decided from storage mode and the
-        // held encryption service alone, so check it before building the home and
-        // fail with a typed error rather than deep inside it. Built once here so
-        // the sync loop and storage share one instance — a member removal rotates
-        // the key in place through it.
-        let cipher =
-            CloudCipher::for_storage(config.cloud_home.storage, self.encryption_service.clone())
-                .ok_or(SyncError::OpaqueHomeWithoutEncryption)?;
+        // The home's at-rest cipher, resolved fresh on every start so a
+        // stop/start picks up whatever custody now holds. A browsable home
+        // never consults custody — it stores in the clear regardless. An
+        // opaque home unlocks the master keyring; no key established (a
+        // locked store, or a browsable/opaque storage mismatch) is a typed
+        // error, checked before building the home rather than deep inside it.
+        // Built once here so the sync loop and storage share one instance — a
+        // member removal rotates the key in place through it.
+        let cipher = if config.cloud_home.storage.is_browsable() {
+            CloudCipher::Plaintext
+        } else {
+            let keyring = self.custody.unlock()?;
+            CloudCipher::for_storage(config.cloud_home.storage, keyring.map(Into::into))
+                .ok_or(SyncError::MasterKeyNotEstablished)?
+        };
 
         // Build the cloud home. A failure here is a real fault — surface it so the
         // caller never installs a manager that started nothing.
@@ -227,7 +223,7 @@ impl SyncManager {
         let user_keypair = DeviceKeys::get_or_create_user_keypair()?;
         let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
-            &self.key_service,
+            self.custody.as_ref(),
             cloud_home.clone(),
             Some(cipher.clone()),
         )
@@ -263,7 +259,7 @@ impl SyncManager {
         let handle = Arc::new(SyncLoopHandle::new(
             components,
             self.db.clone(),
-            self.key_service.clone(),
+            self.custody.clone(),
             self.clock.clone(),
             store_dir,
             self.observer.clone(),
@@ -534,7 +530,7 @@ impl SyncManager {
             owned_storage = match self.cloud_home() {
                 Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
                     &config,
-                    &self.key_service,
+                    self.custody.as_ref(),
                     home,
                     None,
                 ),
@@ -542,6 +538,7 @@ impl SyncManager {
                     crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
                         &config,
                         &self.key_service,
+                        self.custody.as_ref(),
                         None,
                         self.clock.clone(),
                         self.cloudkit_ops.clone(),
@@ -636,7 +633,7 @@ impl SyncManager {
             public_key_hex,
             &store_id,
             &current_encryption,
-            &self.key_service,
+            self.custody.as_ref(),
             sync_loop.cipher(),
         )
         .await
@@ -653,11 +650,29 @@ mod tests {
     use crate::clock::SystemClock;
     use crate::config::CloudProvider;
     use crate::coven::StoreOpenGuard;
-    use crate::keys::{test_keyring, StoreKeys};
+    use crate::encryption::MasterKeyring;
+    use crate::keys::{test_keyring, KeyError, StoreKeys};
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::store_dir::StoreDir;
     use std::sync::Arc;
+
+    /// A custody that never has a master key established — `unlock` always
+    /// returns `None`. For tests exercising a locked/unestablished store, or
+    /// a browsable home where custody is never consulted at all.
+    struct NoKeyCustody;
+
+    impl MasterKeyCustody for NoKeyCustody {
+        fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+            Ok(None)
+        }
+        fn persist(&self, _keyring: &MasterKeyring) -> Result<(), KeyError> {
+            Ok(())
+        }
+        fn forget(&self) -> Result<(), KeyError> {
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn get_members_surfaces_malformed_cloud_credentials() {
@@ -690,7 +705,7 @@ mod tests {
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
             key_service,
-            None,
+            Arc::new(NoKeyCustody),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -718,7 +733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_sync_rejects_an_opaque_home_without_an_encryption_service() {
+    async fn start_sync_rejects_an_opaque_home_without_a_master_key() {
         test_keyring::install();
         let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
@@ -729,13 +744,13 @@ mod tests {
             "Test Store".to_string(),
         );
         // Opaque storage (the default) with a configured provider but no
-        // encryption service is a locked-store contradiction — the manager
-        // holds `None` for the encryption service.
+        // established master key is a locked-store contradiction — custody's
+        // `unlock` returns `None`.
         config.cloud_home.provider = Some(CloudProvider::S3);
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
             StoreKeys::new("lib-opaque-no-encryption".to_string()),
-            None,
+            Arc::new(NoKeyCustody),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -747,10 +762,10 @@ mod tests {
         let error = manager
             .start_sync()
             .await
-            .expect_err("opaque home without an encryption service must fail");
+            .expect_err("opaque home without an established master key must fail");
         assert!(
-            matches!(error, SyncError::OpaqueHomeWithoutEncryption),
-            "expected OpaqueHomeWithoutEncryption, got {error:?}"
+            matches!(error, SyncError::MasterKeyNotEstablished),
+            "expected MasterKeyNotEstablished, got {error:?}"
         );
     }
 
@@ -771,7 +786,7 @@ mod tests {
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
             StoreKeys::new("lib-manager-restart".to_string()),
-            None,
+            Arc::new(NoKeyCustody),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,
@@ -827,9 +842,13 @@ mod tests {
                 Arc::new(move || config.read().unwrap().clone())
             },
             StoreKeys::new("lib-manager-failed-restart".to_string()),
-            // An encryption service so the opaque default storage passes the
-            // cipher precondition and the restart fails at the home build itself.
-            Some(EncryptionService::from_key([7u8; 32])),
+            // An established master key so the opaque default storage passes
+            // the cipher precondition and the restart fails at the home build
+            // itself.
+            crate::custody::KeyCustody::InMemory(MasterKeyring::generate()).resolve(
+                "lib-manager-failed-restart",
+                &StoreDir::new("unused-store-dir"),
+            ),
             crate::sync::test_helpers::open_test_db(),
             Arc::new(SystemClock),
             None,

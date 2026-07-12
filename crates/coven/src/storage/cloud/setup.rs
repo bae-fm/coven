@@ -9,7 +9,7 @@
 use tracing::info;
 
 use crate::config::{CloudProvider, Config};
-use crate::keys::{CloudHomeCredentials, DeviceKeys, StoreKeys};
+use crate::keys::{CloudHomeCredentials, DeviceKeys, MasterKeyCustody, StoreKeys};
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
 use crate::oauth::OAuthTokens;
 #[cfg(not(target_arch = "wasm32"))]
@@ -249,10 +249,11 @@ pub async fn sign_in_onedrive(
     Ok((drive_id, folder_id))
 }
 
-/// Build a RestoreCode from config and keyring, then encode it.
+/// Build a RestoreCode from config and custody, then encode it.
 pub fn generate_restore_code(
     config: &Config,
     key_service: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
 ) -> Result<String, SetupError> {
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::sync::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
@@ -267,10 +268,11 @@ pub fn generate_restore_code(
     // absence.
     let ek = if config.cloud_home.storage.is_opaque() {
         Some(
-            key_service
-                .get_encryption_key()
-                .map_err(|e| SetupError(format!("Failed to read encryption key: {e}")))?
-                .ok_or_else(|| SetupError("No encryption key found".to_string()))?,
+            custody
+                .unlock()
+                .map_err(|e| SetupError(format!("Failed to read master key: {e}")))?
+                .ok_or_else(|| SetupError("No encryption key found".to_string()))?
+                .to_serialized(),
         )
     } else {
         None
@@ -393,22 +395,19 @@ pub enum StorageSetupError {
     Key(#[from] crate::keys::KeyError),
     #[error("no encryption key found for an encrypted cloud home")]
     NoEncryptionKey,
-    #[error("failed to build the encryption service: {0}")]
-    Encryption(#[from] crate::encryption::EncryptionError),
 }
 
 pub fn build_cloud_cipher(
     config: &Config,
-    key_service: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
 ) -> Result<CloudCipher, StorageSetupError> {
     if config.cloud_home.storage.is_browsable() {
         return Ok(CloudCipher::Plaintext);
     }
-    let key = key_service
-        .get_encryption_key()?
+    let keyring = custody
+        .unlock()?
         .ok_or(StorageSetupError::NoEncryptionKey)?;
-    let enc = crate::encryption::EncryptionService::new(&key)?;
-    Ok(CloudCipher::Encrypted(enc))
+    Ok(CloudCipher::Encrypted(keyring.into()))
 }
 
 /// Create sync storage from config and credentials.
@@ -424,25 +423,30 @@ pub fn build_cloud_cipher(
 pub async fn create_sync_storage_with_cloudkit(
     config: &Config,
     key_service: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
     cipher: Option<CloudCipher>,
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     let cloud_home =
         super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops).await?;
-    create_sync_storage_with_home(config, key_service, Arc::from(cloud_home), cipher)
+    create_sync_storage_with_home(config, custody, Arc::from(cloud_home), cipher)
 }
 
+/// Create sync storage over an already-built [`CloudHome`](super::CloudHome).
+/// Unlike [`create_sync_storage_with_cloudkit`], this needs no store-scoped
+/// cloud credentials (the home is already built) — only custody, for the
+/// `cipher = None` fallback's master-key read.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn create_sync_storage_with_home(
     config: &Config,
-    key_service: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     let cipher = match cipher {
         Some(c) => c,
-        None => build_cloud_cipher(config, key_service)?,
+        None => build_cloud_cipher(config, custody)?,
     };
 
     // The device's global signing identity, used to sign the control objects the
@@ -505,8 +509,10 @@ mod tests {
 
         let config = cloudkit_config(Some(("owner-name", "zone-name")));
         let key_service = StoreKeys::new(config.store_id.clone());
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
 
-        let err = generate_restore_code(&config, &key_service)
+        let err = generate_restore_code(&config, &key_service, custody.as_ref())
             .expect_err("a share-joined CloudKit config must not generate a restore code");
         let message = err.to_string();
         assert!(
@@ -524,8 +530,10 @@ mod tests {
 
         let config = cloudkit_config(None);
         let key_service = StoreKeys::new(config.store_id.clone());
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
 
-        let code = generate_restore_code(&config, &key_service)
+        let code = generate_restore_code(&config, &key_service, custody.as_ref())
             .expect("a private CloudKit config generates a restore code");
         let decoded = decode_restore_code(&code).expect("generated code decodes");
         assert!(

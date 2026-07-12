@@ -23,7 +23,7 @@ use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
 use crate::coven::StoreOpenGuard;
 use crate::database::Database;
-use crate::keys::{StoreKeys, UserKeypair};
+use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::store_dir::StoreDir;
 
 use super::cloud_storage::{CloudCipher, CloudSyncStorage};
@@ -99,7 +99,7 @@ struct SyncLoopInner {
     cipher: Arc<std::sync::RwLock<CloudCipher>>,
     db: Database,
     user_keypair: UserKeypair,
-    key_service: StoreKeys,
+    custody: Arc<dyn MasterKeyCustody>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
     /// The store-directory lock, held so it releases only when the loop's
@@ -114,7 +114,7 @@ impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
         db: Database,
-        key_service: StoreKeys,
+        custody: Arc<dyn MasterKeyCustody>,
         clock: ClockRef,
         store_dir: StoreDir,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -133,7 +133,7 @@ impl SyncLoopHandle {
                 cipher: components.cipher,
                 db,
                 user_keypair: components.user_keypair,
-                key_service,
+                custody,
                 observer,
                 _open_guard: open_guard,
             }),
@@ -373,7 +373,7 @@ async fn run_single_cycle(
         &inner.db,
         &inner.cipher,
         &inner.user_keypair,
-        Some(&inner.key_service),
+        Some(inner.custody.as_ref()),
         store_dir,
         Some(cloud_home),
         inner.observer.as_deref(),

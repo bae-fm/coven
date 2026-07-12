@@ -41,8 +41,8 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::StoreOpenGuard;
 use crate::database::Database;
-use crate::encryption::EncryptionService;
-use crate::keys::{DeviceKeys, StoreKeys};
+use crate::encryption::MasterKeyring;
+use crate::keys::{DeviceKeys, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
@@ -99,7 +99,7 @@ impl From<crate::storage::cloud::setup::StorageSetupError> for BlobCacheError {
 ///
 /// // Sync is optional. Connect a provider, then drive it; a store with no
 /// // cloud home never calls these and stays fully usable on-device.
-/// handle.connect_sync(None).await?;
+/// handle.connect_sync().await?;
 /// handle.sync_now();
 /// # let _ = note_count;
 /// # Ok(())
@@ -126,6 +126,13 @@ pub struct CovenHandle {
     /// handle. The same provider the [`SyncManager`] reads from.
     config_provider: ConfigProvider,
     key_service: StoreKeys,
+
+    /// The store's master-key custody, resolved once at
+    /// [`open`](crate::CovenBuilder::open) from the builder's
+    /// [`KeyCustody`](crate::KeyCustody) selection. Every master-key read and
+    /// write in the handle and the sync engine goes through this — coven never
+    /// touches a crypto type directly.
+    key_custody: Arc<dyn MasterKeyCustody>,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 
@@ -169,6 +176,7 @@ impl CovenHandle {
     /// config (the cloud-home selection, the blob-path scheme), so the host can
     /// reconnect a provider without rebuilding the handle. `observer` carries the
     /// host's transition bookkeeping; pass `None` if it surfaces none.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         db: Database,
         read_db: Database,
@@ -176,6 +184,7 @@ impl CovenHandle {
         store_dir: StoreDir,
         config_provider: ConfigProvider,
         key_service: StoreKeys,
+        key_custody: Arc<dyn MasterKeyCustody>,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
@@ -188,6 +197,7 @@ impl CovenHandle {
             store_dir,
             config_provider,
             key_service,
+            key_custody,
             clock,
             cloudkit_ops,
             observer,
@@ -263,19 +273,16 @@ impl CovenHandle {
     /// home fails to build — in which case nothing is installed, so the handle
     /// never holds a manager that reports success with nothing started.
     ///
-    /// `encryption_service` is `Some` for an opaque home (sealed under the store
-    /// key) and `None` for a browsable one (stored in the clear). Reconnecting a
-    /// provider rebuilds the manager — the [`Database`] keeps the seeded register
-    /// clock across the rebuild, so only the cloud home + loop are replaced.
-    pub async fn connect_sync(
-        &self,
-        encryption_service: Option<EncryptionService>,
-    ) -> Result<(), SyncError> {
-        self.build_and_install_sync(
-            encryption_service,
-            self.cloudkit_ops.clone(),
-            |manager| async move { manager.start_sync().await },
-        )
+    /// The at-rest cipher is resolved from the handle's custody per start: an
+    /// opaque home unlocks the master keyring (failing with
+    /// [`SyncError::MasterKeyNotEstablished`] if none is established), a
+    /// browsable one never consults custody. Reconnecting a provider rebuilds
+    /// the manager — the [`Database`] keeps the seeded register clock across
+    /// the rebuild, so only the cloud home + loop are replaced.
+    pub async fn connect_sync(&self) -> Result<(), SyncError> {
+        self.build_and_install_sync(self.cloudkit_ops.clone(), |manager| async move {
+            manager.start_sync().await
+        })
         .await?;
         info!("coven handle: sync manager connected");
         Ok(())
@@ -283,14 +290,11 @@ impl CovenHandle {
 
     pub async fn connect_sync_with_cloudkit(
         &self,
-        encryption_service: Option<EncryptionService>,
         cloudkit_ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<(), SyncError> {
-        self.build_and_install_sync(
-            encryption_service,
-            Some(cloudkit_ops),
-            |manager| async move { manager.start_sync().await },
-        )
+        self.build_and_install_sync(Some(cloudkit_ops), |manager| async move {
+            manager.start_sync().await
+        })
         .await?;
         info!("coven handle: sync manager connected with CloudKit driver");
         Ok(())
@@ -299,9 +303,7 @@ impl CovenHandle {
     /// Build a [`SyncManager`], start its loop via `start`, and install it — the
     /// shared construct-and-install both [`connect_sync`](Self::connect_sync) and
     /// the test-only
-    /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) run,
-    /// parameterized by the `encryption_service` the manager reports and which
-    /// start method `start` invokes.
+    /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) run.
     ///
     /// Start before installing: a failed start (the cloud home fails to build, or a
     /// test home's bootstrap fails) returns its error with nothing installed, so the
@@ -309,7 +311,6 @@ impl CovenHandle {
     /// started.
     async fn build_and_install_sync<F, Fut>(
         &self,
-        encryption_service: Option<EncryptionService>,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         start: F,
     ) -> Result<Arc<SyncManager>, SyncError>
@@ -326,7 +327,7 @@ impl CovenHandle {
         let manager = Arc::new(SyncManager::new(
             self.config_provider.clone(),
             self.key_service.clone(),
-            encryption_service,
+            self.key_custody.clone(),
             self.db.clone(),
             self.clock.clone(),
             cloudkit_ops,
@@ -348,10 +349,9 @@ impl CovenHandle {
     /// manager over `home`/`cipher` through
     /// [`SyncManager::start_sync_with_home`], starts the loop, and installs it with
     /// the same start-before-install discipline — a failed connect leaves the
-    /// handle home-less rather than holding a manager whose loop never started. The
-    /// encryption service the manager reports (for the blob at-rest cipher and the
-    /// membership path) is taken from the injected `cipher`, the single source of
-    /// at-rest protection on the test path.
+    /// handle home-less rather than holding a manager whose loop never started.
+    /// The injected `cipher` is the at-rest protection directly — the manager's
+    /// custody is never consulted on this path.
     ///
     /// The read path needs no separate hook: [`blob_storage`](Self::blob_storage)
     /// serves reads from the connected loop's own [`CloudSyncStorage`], which here
@@ -364,18 +364,9 @@ impl CovenHandle {
         home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
-        // The test supplies encryption through the cipher, not a separate service;
-        // derive the manager's service from it so the blob at-rest cipher and the
-        // membership path agree with the protection the loop and storage seal under.
-        let encryption_service = match &cipher {
-            CloudCipher::Encrypted(service) => Some(service.clone()),
-            CloudCipher::Plaintext => None,
-        };
-        self.build_and_install_sync(
-            encryption_service,
-            self.cloudkit_ops.clone(),
-            move |manager| async move { manager.start_sync_with_home(home, cipher).await },
-        )
+        self.build_and_install_sync(self.cloudkit_ops.clone(), move |manager| async move {
+            manager.start_sync_with_home(home, cipher).await
+        })
         .await?;
         info!("coven handle: sync manager connected over an injected test cloud home");
         Ok(())
@@ -445,11 +436,48 @@ impl CovenHandle {
         self.sync_manager().is_some()
     }
 
-    /// The active [`EncryptionService`] for the connected opaque home, or `None`
-    /// for a home-less store or a connected browsable home (stored in the
-    /// clear).
-    pub fn encryption_service(&self) -> Option<EncryptionService> {
-        self.sync_manager().and_then(|m| m.encryption_service())
+    // =========================================================================
+    // Master-key lifecycle
+    // =========================================================================
+
+    /// Generate this store's master key and establish it under the handle's
+    /// custody. Errors with [`MasterKeyError::AlreadyEstablished`] if custody
+    /// already unlocks one — coven never generates over an existing key, so a
+    /// corrupt (present-but-unreadable) entry is never silently overwritten
+    /// either, since custody's `unlock` surfaces that as `Err`, not `None`.
+    /// The only place coven ever generates a master key. Returns its
+    /// fingerprint for the host to record in its own config.
+    pub fn initialize_master_key(&self) -> Result<String, MasterKeyError> {
+        if self.key_custody.unlock()?.is_some() {
+            return Err(MasterKeyError::AlreadyEstablished);
+        }
+        let keyring = MasterKeyring::generate();
+        self.key_custody.persist(&keyring)?;
+        Ok(keyring.fingerprint())
+    }
+
+    /// Import a master key a host already holds — a pasted restore/invite
+    /// key, or a keyring migrated from elsewhere — and establish it under the
+    /// handle's custody, replacing whatever custody already holds. Accepts
+    /// both the keyring JSON and the legacy 64-hex single-key formats.
+    /// Returns its fingerprint for the host to record in its own config.
+    pub fn import_master_key(&self, serialized: &str) -> Result<String, MasterKeyError> {
+        let keyring = MasterKeyring::from_serialized(serialized)?;
+        self.key_custody.persist(&keyring)?;
+        Ok(keyring.fingerprint())
+    }
+
+    /// Remove the master key from custody — a host's lock/sign-out flow. `Ok`
+    /// whether or not one was established.
+    pub fn forget_master_key(&self) -> Result<(), KeyError> {
+        self.key_custody.forget()
+    }
+
+    /// The established master key's fingerprint, or `None` if custody has
+    /// never had one established (or is locked, for a policy where that's
+    /// representable).
+    pub fn master_key_fingerprint(&self) -> Result<Option<String>, KeyError> {
+        Ok(self.key_custody.unlock()?.map(|k| k.fingerprint()))
     }
 
     // =========================================================================
@@ -490,7 +518,7 @@ impl CovenHandle {
                 let config = self.config();
                 let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
                     &config,
-                    &self.key_service,
+                    self.key_custody.as_ref(),
                     home,
                     None,
                 )?;
@@ -504,6 +532,7 @@ impl CovenHandle {
         let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
             &config,
             &self.key_service,
+            self.key_custody.as_ref(),
             None,
             self.clock.clone(),
             self.cloudkit_ops.clone(),
@@ -716,8 +745,12 @@ impl CovenHandle {
     }
 
     pub fn generate_restore_code(&self) -> Result<String, SyncError> {
-        crate::storage::cloud::setup::generate_restore_code(&self.config(), &self.key_service)
-            .map_err(SyncError::from)
+        crate::storage::cloud::setup::generate_restore_code(
+            &self.config(),
+            &self.key_service,
+            self.key_custody.as_ref(),
+        )
+        .map_err(SyncError::from)
     }
 
     pub async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
@@ -766,6 +799,17 @@ mod tests {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
     }
 
+    /// A ready-to-use custody for tests that build a [`CovenHandle`] directly
+    /// (bypassing the builder) and never exercise master-key lifecycle
+    /// methods — the blob/storage/status tests in this module. Seeded
+    /// in-memory so it needs no keyring registration.
+    fn test_key_custody() -> Arc<dyn crate::keys::MasterKeyCustody> {
+        crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate()).resolve(
+            "unused-store-id",
+            &crate::store_dir::StoreDir::new("unused-store-dir"),
+        )
+    }
+
     #[tokio::test]
     async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
         let (_tmp, store_dir) = temp_store_dir();
@@ -792,6 +836,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new("lib-setup-error".to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -834,6 +879,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new(store_id.to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -970,6 +1016,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new("lib-test".to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1072,6 +1119,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new("lib-cloudkit-home-reuse".to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             Some(Arc::new(TestCloudKitOps::new())),
             None,
@@ -1079,7 +1127,7 @@ mod tests {
         );
 
         handle
-            .connect_sync(None)
+            .connect_sync()
             .await
             .expect("connect sync over the test CloudKit driver");
 
@@ -1160,6 +1208,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new("lib-reconnect-loop".to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1225,6 +1274,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new("lib-stopped-loop-readiness".to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1284,6 +1334,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new("lib-test".to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             None,
             None,
@@ -1352,6 +1403,7 @@ mod tests {
             store_dir.clone(),
             config_provider,
             StoreKeys::new(store_id.to_string()),
+            test_key_custody(),
             Arc::new(SystemClock),
             None,
             None,

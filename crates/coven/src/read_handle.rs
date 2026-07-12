@@ -28,7 +28,7 @@ use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::{CovenError, CovenResult};
 use crate::database::Database;
-use crate::keys::StoreKeys;
+use crate::keys::{MasterKeyCustody, StoreKeys};
 use crate::store_dir::StoreDir;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_manager::ConfigProvider;
@@ -58,16 +58,19 @@ pub struct CovenReadHandle {
     store_dir: StoreDir,
     config_provider: ConfigProvider,
     key_service: StoreKeys,
+    key_custody: Arc<dyn MasterKeyCustody>,
     clock: ClockRef,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
 
 impl CovenReadHandle {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         db: Database,
         store_dir: StoreDir,
         config_provider: ConfigProvider,
         key_service: StoreKeys,
+        key_custody: Arc<dyn MasterKeyCustody>,
         clock: ClockRef,
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     ) -> Self {
@@ -76,6 +79,7 @@ impl CovenReadHandle {
             store_dir,
             config_provider,
             key_service,
+            key_custody,
             clock,
             cloudkit_ops,
         }
@@ -125,6 +129,7 @@ impl CovenReadHandle {
         let storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
             &config,
             &self.key_service,
+            self.key_custody.as_ref(),
             None,
             self.clock.clone(),
             self.cloudkit_ops.clone(),

@@ -11,6 +11,7 @@ use crate::blob::local_files::LocalBlobError;
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::{ClockRef, SystemClock};
 use crate::config::Config;
+use crate::custody::KeyCustody;
 use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
 use crate::keys::StoreKeys;
@@ -113,6 +114,7 @@ impl Coven {
             blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
             clock: Arc::new(SystemClock),
             key_service: StoreKeys::new(current.store_id),
+            key_custody: KeyCustody::Keyring,
             cloudkit_ops: None,
             observer: None,
         }
@@ -126,6 +128,7 @@ pub struct CovenBuilder {
     blob_tombstone_grace: chrono::Duration,
     clock: ClockRef,
     key_service: StoreKeys,
+    key_custody: KeyCustody,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 }
@@ -219,6 +222,16 @@ impl CovenBuilder {
         self
     }
 
+    /// How the store's master key is protected: the OS keyring (the
+    /// default), a passphrase-wrapped file, an in-memory session value, or a
+    /// host's own [`MasterKeyCustody`](crate::MasterKeyCustody) implementation.
+    /// coven builds every cipher internally from what this custody supplies —
+    /// the host never touches a crypto type.
+    pub fn key_custody(mut self, custody: KeyCustody) -> Self {
+        self.key_custody = custody;
+        self
+    }
+
     pub fn cloudkit_ops(
         mut self,
         ops: Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>,
@@ -273,6 +286,7 @@ impl CovenBuilder {
             config.device_id.clone(),
             &migrations,
         )?;
+        let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
         Ok(CovenHandle::new(
             db,
             read_db,
@@ -280,6 +294,7 @@ impl CovenBuilder {
             store_dir,
             provider,
             self.key_service,
+            key_custody,
             self.clock,
             self.cloudkit_ops,
             self.observer,
@@ -324,11 +339,13 @@ impl CovenBuilder {
             config.device_id.clone(),
             &migrations,
         )?;
+        let key_custody = self.key_custody.resolve(&config.store_id, &store_dir);
         Ok(crate::read_handle::CovenReadHandle::new(
             db,
             store_dir,
             provider,
             self.key_service,
+            key_custody,
             self.clock,
             self.cloudkit_ops,
         ))
