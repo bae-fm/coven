@@ -137,6 +137,7 @@ export default defineConfig({
                     items: [
                         { text: 'Example', link: '/docs/example' },
                         { text: 'Comparison', link: '/docs/comparison' },
+                        { text: 'Constraints', link: '/docs/constraints' },
                         { text: 'Rust API', link: '/rustdoc/coven/index.html', target: '_self' },
                         { text: 'Crate Index', link: '/rustdoc/coven/all.html', target: '_self' },
                     ],

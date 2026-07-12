@@ -73,7 +73,8 @@ server reads the data), though PowerSync supports an opt-in app-layer pattern
 where rows are encrypted before sync so the service stores ciphertext. coven
 removes the server and the central database entirely, which is what forces the
 E2EE and the cryptographic membership: with no trusted server, trust has to live
-in keys.
+in keys. Removing the server also removes what a server enforces; the
+[Constraints](/docs/constraints) page is the honest ledger of what that costs.
 
 **SQLite-to-object-store replication: Litestream / LiteFS.** These stream a
 SQLite database to S3-family storage you own, which overlaps coven's
