@@ -16,6 +16,8 @@
 //! ```
 
 pub(crate) mod custody;
+pub(crate) mod envelope;
+pub(crate) mod identity_custody;
 pub(crate) mod keys;
 pub(crate) mod oauth;
 
@@ -49,6 +51,12 @@ pub(crate) mod id_provider {
 pub(crate) mod join_code {
     pub use coven_core::join_code::*;
 
+    /// Build a join request, signed by this device's signing identity.
+    /// Deliberately get-or-create, not a query: requesting an invite IS a
+    /// deliberate identity-establishing act, the same category as completing
+    /// a restore — a fresh device that has never called
+    /// [`crate::ensure_device_identity`] still gets a usable join request,
+    /// minting its identity as a side effect of the request it asked for.
     pub fn generate_join_request(email: Option<String>) -> Result<String, crate::keys::KeyError> {
         let keypair = crate::keys::DeviceKeys::get_or_create_user_keypair()?;
         Ok(coven_core::join_code::generate_join_request_for_keypair(
@@ -611,10 +619,12 @@ pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
 
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
 pub use custody::{KeyCustody, Passphrase};
+pub use identity_custody::IdentityCustody;
 pub use join_code::generate_join_request;
 pub use keys::{
-    keyring_service, set_keyring_service, CloudHomeCredentials, DeviceKeys, KeyError,
-    MasterKeyCustody, MasterKeyError, StoreKeys, UserKeypair,
+    ensure_device_identity, keyring_service, set_identity_custody, set_keyring_service,
+    CloudHomeCredentials, DeviceIdentityCustody, DeviceKeys, KeyError, MasterKeyCustody,
+    MasterKeyError, StoreKeys, UserKeypair,
 };
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;

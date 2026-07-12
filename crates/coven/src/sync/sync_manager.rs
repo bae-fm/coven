@@ -227,7 +227,11 @@ impl SyncManager {
         // tables, storage/keypair/auth/membership bootstrap) that init_sync already
         // logged — surface it so the caller never installs a manager whose loop
         // never started.
-        let user_keypair = DeviceKeys::get_or_create_user_keypair()?;
+        //
+        // Connect never mints a device identity: a locked agent with no
+        // identity established must fail here with `KeyError::NoDeviceIdentity`,
+        // not silently forge one.
+        let user_keypair = DeviceKeys::require_user_keypair()?;
         let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
             self.custody.as_ref(),
@@ -904,6 +908,154 @@ mod tests {
         assert!(
             manager.cloud_home().is_none(),
             "failed restart must not leave the previous cloud home installed",
+        );
+    }
+
+    /// The `NoDeviceIdentity` sibling of
+    /// `start_sync_rejects_an_opaque_home_without_a_master_key`: connecting
+    /// with a configured home but no device identity established must fail
+    /// typed, with nothing installed — never silently mint one. Browsable
+    /// storage so the master-key precondition is out of the way and this
+    /// isolates the identity check.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn start_sync_rejects_a_connect_with_no_device_identity_established() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+        // Clear whatever an earlier test in this binary may have left at the
+        // fixed device-signing-key account, so this test's precondition (no
+        // identity established) holds regardless of test execution order —
+        // the account is device-global, shared by every test in this binary.
+        let _ = crate::keys::delete(&crate::keys::KeyringSlot::DeviceSigningKey);
+
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
+        let store_id = "lib-no-device-identity".to_string();
+        let key_service = StoreKeys::new(store_id.clone());
+        key_service
+            .set_cloud_home_credentials(&crate::keys::CloudHomeCredentials::S3 {
+                access_key: "ak".to_string(),
+                secret_key: "sk".to_string(),
+            })
+            .expect("seed S3 credentials");
+
+        let mut config = Config::with_defaults(
+            store_id.clone(),
+            "test-device".to_string(),
+            store_dir,
+            "Test Store".to_string(),
+        );
+        config.cloud_home.provider = Some(CloudProvider::S3);
+        config.cloud_home.storage = HomeStorage::Browsable;
+        config.cloud_home.s3_bucket = Some("bucket".to_string());
+        config.cloud_home.s3_region = Some("us-east-1".to_string());
+
+        let manager = SyncManager::new(
+            Arc::new(move || config.clone()),
+            key_service,
+            Arc::new(NoKeyCustody),
+            crate::sync::test_helpers::open_test_db(),
+            Arc::new(SystemClock),
+            None,
+            None,
+            open_guard,
+            tokio::sync::broadcast::channel(16).0,
+        );
+
+        let error = manager
+            .start_sync()
+            .await
+            .expect_err("no device identity established must fail the connect");
+        assert!(
+            matches!(error, SyncError::Key(KeyError::NoDeviceIdentity)),
+            "got {error:?}"
+        );
+        assert!(
+            manager.sync_loop_handle().is_none(),
+            "a failed connect installs no loop",
+        );
+        assert!(
+            manager.cloud_home().is_none(),
+            "a failed connect installs no cloud home",
+        );
+    }
+
+    /// Key material a connect resolves from custody is never cached across
+    /// connects — `start_sync` re-derives the cipher fresh every call via
+    /// `resolve_cipher`, this manager's single
+    /// custody→cipher decision. Persists key A, resolves, swaps what the SAME
+    /// custody instance serves to key B (a rotation outside any manager call
+    /// — the way a host's own key-rotation flow would), and resolves again:
+    /// the second resolution reflects B, not a value cached from the first.
+    ///
+    /// This drives `resolve_cipher` directly rather than a full
+    /// connect/disconnect/reconnect through an opaque home: an opaque store's
+    /// membership chain is founded and pinned to the local device on first
+    /// connect, so swapping its master key outright (rather than through the
+    /// real in-place rotation `remove_member` performs, which also re-wraps
+    /// existing membership content) would desync a live home — an unrelated
+    /// concern to what this test pins. `resolve_cipher` is the exact
+    /// mechanism `start_sync` and the custody-resolving test-home connect
+    /// path share, so calling it twice with custody mutated in between is the
+    /// real unit behind "reconnect uses new material," without wading into
+    /// membership bootstrap.
+    #[test]
+    fn resolve_cipher_never_caches_reflects_whatever_custody_now_serves() {
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let store_id = "lib-resolve-cipher-fresh";
+        let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
+        let key_a = MasterKeyring::generate();
+        custody.persist(&key_a).expect("establish key A");
+
+        let config = Config::with_defaults(
+            store_id.to_string(),
+            "test-device".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
+        );
+        let manager = SyncManager::new(
+            Arc::new(move || config.clone()),
+            StoreKeys::new(store_id.to_string()),
+            custody.clone(),
+            crate::sync::test_helpers::open_test_db(),
+            Arc::new(SystemClock),
+            None,
+            None,
+            StoreOpenGuard::acquire_for_test(&store_dir),
+            tokio::sync::broadcast::channel(16).0,
+        );
+
+        let fingerprint_a = match manager
+            .resolve_cipher(crate::config::HomeStorage::Opaque)
+            .expect("resolve the cipher custody serves for key A")
+        {
+            CloudCipher::Encrypted(enc) => enc.fingerprint(),
+            CloudCipher::Plaintext => panic!("opaque storage must resolve an encrypted cipher"),
+        };
+        assert_eq!(fingerprint_a, key_a.fingerprint());
+
+        // Swap what the SAME custody instance serves — outside any manager
+        // call, the way a host's own key-rotation flow would.
+        let key_b = MasterKeyring::generate();
+        custody
+            .persist(&key_b)
+            .expect("rotate custody's served key to B");
+
+        let fingerprint_b = match manager
+            .resolve_cipher(crate::config::HomeStorage::Opaque)
+            .expect("resolve the cipher custody serves for key B")
+        {
+            CloudCipher::Encrypted(enc) => enc.fingerprint(),
+            CloudCipher::Plaintext => panic!("opaque storage must resolve an encrypted cipher"),
+        };
+        assert_eq!(
+            fingerprint_b,
+            key_b.fingerprint(),
+            "the second resolution must reflect key B, not a value cached from the first call",
+        );
+        assert_ne!(
+            fingerprint_a, fingerprint_b,
+            "the two resolutions must differ — custody actually served different material",
         );
     }
 }

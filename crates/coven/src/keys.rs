@@ -1,8 +1,10 @@
+use std::sync::{Arc, OnceLock};
+
 use tracing::info;
 
 pub use coven_core::keys::{
-    CloudHomeCredentials, KeyError, MasterKeyCustody, UserKeypair, SIGN_PUBLICKEYBYTES,
-    SIGN_SECRETKEYBYTES,
+    public_key_hex, CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody,
+    UserKeypair, SIGN_PUBLICKEYBYTES, SIGN_SECRETKEYBYTES,
 };
 
 /// Why a [`CovenHandle`](crate::CovenHandle) master-key lifecycle call
@@ -56,6 +58,58 @@ pub fn keyring_service() -> Result<&'static str, KeyError> {
         .ok_or(KeyError::ServiceNotRegistered)
 }
 
+static IDENTITY_CUSTODY: OnceLock<Arc<dyn DeviceIdentityCustody>> = OnceLock::new();
+
+/// Register the process-wide custody for the device's signing identity —
+/// deliberately process-global, not per-store: the identity is one keypair
+/// per host, shared by every store (see [`UserKeypair`]'s doc), and every
+/// [`DeviceKeys`] call site is a free function far from any builder, so a
+/// per-store custody would pretend a variation that must not exist.
+///
+/// One-time startup registration, like [`set_keyring_service`], and stricter:
+/// unlike a keyring *service name* (where re-registering the same name is a
+/// no-op), a custody policy can't be compared for equality, so any second
+/// call is refused — including one that resolved implicitly, the first time
+/// any key operation ran under the [`IdentityCustody::Keyring`] default. Call
+/// this before any key operation if a non-default policy is wanted.
+pub fn set_identity_custody(
+    custody: crate::identity_custody::IdentityCustody,
+) -> Result<(), KeyError> {
+    IDENTITY_CUSTODY.set(custody.resolve()).map_err(|_| {
+        KeyError::Persistence(
+            "identity custody is already registered (either by an earlier set_identity_custody \
+             call, or implicitly defaulted to Keyring by an earlier key operation); \
+             set_identity_custody must run before any key operation"
+                .to_string(),
+        )
+    })
+}
+
+/// The registered identity custody, defaulting to
+/// [`IdentityCustody::Keyring`] — today's behavior, byte-for-byte — the
+/// first time this runs with none registered. That first resolution is
+/// permanent for the process (see [`set_identity_custody`]'s doc).
+fn identity_custody() -> Arc<dyn DeviceIdentityCustody> {
+    IDENTITY_CUSTODY
+        .get_or_init(|| crate::identity_custody::IdentityCustody::Keyring.resolve())
+        .clone()
+}
+
+/// Get-or-create this device's signing identity through the registered
+/// [`IdentityCustody`], returning its public key. The explicit,
+/// host-facing entry point for identity establishment — hosts call it at
+/// their own setup moments (store create, first run). Idempotent and
+/// concurrent-call-safe: two callers racing this in the same process
+/// converge on one identity, never two.
+///
+/// Connect paths never mint on their own absence — see
+/// [`KeyError::NoDeviceIdentity`] — so this (or a completed join/restore,
+/// which also establish one deliberately) is the only way a fresh device
+/// gets a signing identity.
+pub fn ensure_device_identity() -> Result<[u8; SIGN_PUBLICKEYBYTES], KeyError> {
+    DeviceKeys::get_or_create_user_keypair().map(|kp| kp.public_key())
+}
+
 fn map_keyring_error(e: keyring_core::Error) -> KeyError {
     match e {
         keyring_core::Error::NoDefaultStore => KeyError::StoreNotInstalled,
@@ -95,7 +149,7 @@ impl KeyringSlot {
     }
 }
 
-fn read(slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
+pub(crate) fn read(slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
     let account = slot.account();
     let entry =
         keyring_core::Entry::new(keyring_service()?, &account).map_err(map_keyring_error)?;
@@ -109,14 +163,14 @@ fn read(slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
     }
 }
 
-fn write(slot: &KeyringSlot, value: &str) -> Result<(), KeyError> {
+pub(crate) fn write(slot: &KeyringSlot, value: &str) -> Result<(), KeyError> {
     keyring_core::Entry::new(keyring_service()?, &slot.account())
         .map_err(map_keyring_error)?
         .set_password(value)
         .map_err(map_keyring_error)
 }
 
-fn delete(slot: &KeyringSlot) -> Result<bool, KeyError> {
+pub(crate) fn delete(slot: &KeyringSlot) -> Result<bool, KeyError> {
     match keyring_core::Entry::new(keyring_service()?, &slot.account())
         .map_err(map_keyring_error)?
         .delete_credential()
@@ -127,35 +181,69 @@ fn delete(slot: &KeyringSlot) -> Result<bool, KeyError> {
     }
 }
 
-/// The device-global signing identity: one Ed25519 keypair per OS user, shared
-/// by every store on the device. It lives under the single fixed keyring account
-/// of [`KeyringSlot::DeviceSigningKey`] that no store scope touches, so
-/// attestations accumulate under one public key across all of this device's
-/// stores. Stateless — the keyring service is process-global, so these are
-/// associated functions with no per-store data.
+/// Serializes [`DeviceKeys::get_or_create_user_keypair`]'s check-then-act
+/// sequence process-wide, so two callers racing identity establishment (two
+/// threads, or two `ensure_device_identity` calls) converge on one generated
+/// keypair rather than each generating its own and the last write winning.
+static GET_OR_CREATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The device-global signing identity: one Ed25519 keypair per OS user,
+/// shared by every store on the device (see [`UserKeypair`]'s doc), read from
+/// and written to whatever [`crate::set_identity_custody`] registered —
+/// [`crate::identity_custody::IdentityCustody::Keyring`] and its fixed
+/// [`KeyringSlot::DeviceSigningKey`] account when nothing was registered.
+/// This is an internal facade over that custody: its public methods keep
+/// coven's existing signatures where possible, so the custody split's blast
+/// radius stays here. Stateless — associated functions with no per-store
+/// data, since the identity itself is process-global.
 pub struct DeviceKeys;
 
 impl DeviceKeys {
-    pub fn get_user_keypair() -> Result<UserKeypair, KeyError> {
-        Self::get_user_keypair_inner()?
-            .ok_or_else(|| KeyError::Crypto("No user keypair found in keyring".to_string()))
+    /// The device's established signing identity, or
+    /// [`KeyError::NoDeviceIdentity`] when none is established — the caller
+    /// must run identity establishment first
+    /// ([`crate::ensure_device_identity`], a completed join, or a completed
+    /// restore) before any operation that requires an existing identity.
+    /// Never mints: a connect/join precondition, not a query.
+    pub fn require_user_keypair() -> Result<UserKeypair, KeyError> {
+        identity_custody()
+            .unlock()?
+            .ok_or(KeyError::NoDeviceIdentity)
     }
 
-    pub fn get_or_create_user_keypair() -> Result<UserKeypair, KeyError> {
-        if let Some(kp) = Self::get_user_keypair_inner()? {
+    /// Get-or-create through the registered custody. Internal primitive
+    /// behind [`crate::ensure_device_identity`] and the deliberate
+    /// identity-establishing acts that mint as a side effect of what they're
+    /// asked to do (requesting a join code, generating a restore code) — not
+    /// exposed directly so every other call site goes through
+    /// [`require_user_keypair`](Self::require_user_keypair) instead and never
+    /// mints by accident.
+    pub(crate) fn get_or_create_user_keypair() -> Result<UserKeypair, KeyError> {
+        let _guard = GET_OR_CREATE_LOCK.lock().unwrap();
+        let custody = identity_custody();
+        if let Some(kp) = custody.unlock()? {
             return Ok(kp);
         }
 
         let kp = UserKeypair::generate();
-        Self::write_signing_key(&kp.to_keypair_bytes())?;
+        custody.persist(&kp)?;
         info!("Generated and saved new user Ed25519 keypair");
         Ok(kp)
     }
 
+    /// A query, not a connect: `Ok(None)` when no identity is established,
+    /// distinct from a key-store failure (`Err`). Never mints.
     pub fn get_user_public_key() -> Result<Option<[u8; SIGN_PUBLICKEYBYTES]>, KeyError> {
-        Ok(Self::get_user_keypair_inner()?.map(|kp| kp.public_key()))
+        Ok(identity_custody().unlock()?.map(|kp| kp.public_key()))
     }
 
+    /// Import an already-generated signing key (a restore code's `sk`, or a
+    /// keypair migrated from elsewhere) into the registered custody.
+    /// Same-pubkey re-import is idempotent; importing over a DIFFERENT
+    /// already-established identity is refused with
+    /// [`KeyError::IdentityMismatch`] naming both — silently swapping the
+    /// device identity would strand every store that pinned attestations to
+    /// the old key.
     pub fn import_user_keypair(signing_key_bytes: &[u8]) -> Result<(), KeyError> {
         let signing_key: [u8; SIGN_SECRETKEYBYTES] =
             signing_key_bytes.try_into().map_err(|_| {
@@ -164,30 +252,20 @@ impl DeviceKeys {
                     signing_key_bytes.len()
                 ))
             })?;
-        ed25519_dalek::SigningKey::from_keypair_bytes(&signing_key)
-            .map_err(|e| KeyError::Crypto(format!("Invalid keypair bytes: {e}")))?;
+        let imported = UserKeypair::from_signing_key_bytes(&signing_key)?;
 
-        Self::write_signing_key(&signing_key)?;
+        let custody = identity_custody();
+        if let Some(existing) = custody.unlock()? {
+            if existing.public_key() != imported.public_key() {
+                return Err(KeyError::IdentityMismatch {
+                    existing_pubkey_hex: public_key_hex(&existing),
+                    imported_pubkey_hex: public_key_hex(&imported),
+                });
+            }
+        }
+        custody.persist(&imported)?;
         info!("Imported user Ed25519 keypair");
         Ok(())
-    }
-
-    fn write_signing_key(signing_key: &[u8; SIGN_SECRETKEYBYTES]) -> Result<(), KeyError> {
-        let sk_hex = hex::encode(signing_key);
-        write(&KeyringSlot::DeviceSigningKey, &sk_hex)
-    }
-
-    fn get_user_keypair_inner() -> Result<Option<UserKeypair>, KeyError> {
-        let Some(sk_hex) = read(&KeyringSlot::DeviceSigningKey)? else {
-            return Ok(None);
-        };
-
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
-            .map_err(|e| KeyError::Crypto(format!("Invalid signing key hex: {e}")))?
-            .try_into()
-            .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
-
-        Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
     }
 }
 
@@ -355,11 +433,112 @@ mod tests {
         )
         .expect("write signing key to the raw keyring");
 
-        let read = DeviceKeys::get_user_keypair().expect("read the device keypair back");
+        let read = DeviceKeys::require_user_keypair().expect("read the device keypair back");
         assert_eq!(
             read.public_key(),
             expected_pubkey,
             "DeviceKeys must read the keypair stored at the fixed account",
+        );
+    }
+
+    /// `require_user_keypair` maps absence to the typed
+    /// `KeyError::NoDeviceIdentity`, not the generic string error the old
+    /// `get_user_keypair` returned — every connect/join precondition that
+    /// requires an existing identity gets a matchable, actionable error.
+    #[test]
+    fn require_user_keypair_maps_absence_to_no_device_identity() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+
+        match DeviceKeys::require_user_keypair() {
+            Err(error) => assert!(matches!(error, KeyError::NoDeviceIdentity), "got {error:?}"),
+            Ok(_) => panic!("no identity is established"),
+        }
+    }
+
+    /// A same-pubkey re-import (the retry path a host takes if the first
+    /// import attempt's caller-side bookkeeping failed after the keyring
+    /// write) is idempotent — no error, and the identity reads back
+    /// unchanged.
+    #[test]
+    fn import_user_keypair_same_pubkey_reimport_is_idempotent() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+
+        let keypair = UserKeypair::generate();
+        DeviceKeys::import_user_keypair(&keypair.to_keypair_bytes())
+            .expect("first import establishes the identity");
+        DeviceKeys::import_user_keypair(&keypair.to_keypair_bytes())
+            .expect("re-importing the same key is idempotent");
+
+        assert_eq!(
+            DeviceKeys::require_user_keypair()
+                .expect("identity still readable")
+                .public_key(),
+            keypair.public_key(),
+        );
+    }
+
+    /// Importing a DIFFERENT key over an already-established identity is
+    /// refused — silently swapping the device identity would strand every
+    /// store that pinned attestations to the existing key.
+    #[test]
+    fn import_user_keypair_refuses_to_overwrite_a_different_identity() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+
+        let established = UserKeypair::generate();
+        DeviceKeys::import_user_keypair(&established.to_keypair_bytes())
+            .expect("establish the first identity");
+
+        let different = UserKeypair::generate();
+        let error = DeviceKeys::import_user_keypair(&different.to_keypair_bytes())
+            .expect_err("importing a different identity must be refused");
+        match error {
+            KeyError::IdentityMismatch {
+                existing_pubkey_hex,
+                imported_pubkey_hex,
+            } => {
+                assert_eq!(existing_pubkey_hex, public_key_hex(&established));
+                assert_eq!(imported_pubkey_hex, public_key_hex(&different));
+            }
+            other => panic!("expected IdentityMismatch, got {other:?}"),
+        }
+
+        // The refusal must not have overwritten the established identity.
+        assert_eq!(
+            DeviceKeys::require_user_keypair()
+                .expect("the original identity is untouched")
+                .public_key(),
+            established.public_key(),
+        );
+    }
+
+    /// Two callers racing `ensure_device_identity` in the same process
+    /// converge on one generated identity — the `GET_OR_CREATE_LOCK` around
+    /// `get_or_create_user_keypair`'s check-then-act sequence, not a race
+    /// where the second generate-and-persist silently clobbers the first.
+    #[test]
+    fn ensure_device_identity_concurrent_calls_converge_on_one_key() {
+        test_keyring::install();
+        let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
+        delete(&KeyringSlot::DeviceSigningKey).expect("clear any prior test's key");
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(crate::ensure_device_identity))
+            .collect();
+        let pubkeys: Vec<[u8; SIGN_PUBLICKEYBYTES]> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().expect("ensure_device_identity"))
+            .collect();
+
+        let first = pubkeys[0];
+        assert!(
+            pubkeys.iter().all(|pk| *pk == first),
+            "every concurrent caller must observe the same established identity: {pubkeys:?}",
         );
     }
 }

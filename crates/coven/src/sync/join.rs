@@ -417,10 +417,10 @@ pub async fn join_store(
 
     let result = async {
         // Load the device signing keypair (must already exist — the inviter
-        // wrapped the store key for this public key). It is device-global, not
-        // store-scoped.
+        // wrapped the store key for this public key, so join never mints one
+        // of its own). It is device-global, not store-scoped.
         on_status("Loading keypair...");
-        let user_keypair = DeviceKeys::get_user_keypair()?;
+        let user_keypair = DeviceKeys::require_user_keypair()?;
 
         // Accept the invitation to get the store encryption key. The joiner
         // authenticates it against the current Owner set derived from the

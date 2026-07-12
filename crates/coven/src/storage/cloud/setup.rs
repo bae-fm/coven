@@ -278,6 +278,11 @@ pub fn generate_restore_code(
         None
     };
 
+    // Deliberately get-or-create, not a query: a restore code embeds this
+    // device's signing key so a second device can re-establish the same
+    // identity, so generating one is itself a deliberate identity-establishing
+    // act (the same category as `generate_join_request`) — a fresh device
+    // still gets a usable restore code, minting its identity as a side effect.
     let keypair = DeviceKeys::get_or_create_user_keypair()
         .map_err(|e| SetupError(format!("Failed to get signing key: {e}")))?;
 
@@ -451,8 +456,10 @@ pub fn create_sync_storage_with_home(
 
     // The device's global signing identity, used to sign the control objects the
     // storage writes (its head, the min_schema floor) so a reader can attribute
-    // and verify them against the membership chain.
-    let keypair = DeviceKeys::get_or_create_user_keypair()?;
+    // and verify them against the membership chain. A connect path, so this
+    // never mints: an unestablished identity fails with
+    // `KeyError::NoDeviceIdentity` rather than forging one.
+    let keypair = DeviceKeys::require_user_keypair()?;
 
     Ok(crate::sync::cloud_storage::CloudSyncStorage::new(
         home,
