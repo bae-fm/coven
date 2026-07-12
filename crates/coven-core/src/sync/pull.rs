@@ -104,6 +104,16 @@ pub enum HeldChangesetReason {
     MalformedEnvelope {
         error: String,
     },
+    /// The envelope's signature covers its self-declared position
+    /// (`device_id`, `seq`), but that position does not match the storage location
+    /// the object was fetched from. The bytes are authentic for a *different*
+    /// position, so an object relocated here would replay one changeset in
+    /// another's place (and, by advancing the cursor, suppress the real occupant).
+    /// Held so the host sees the relocation as tamper rather than a generic stall.
+    PositionMismatch {
+        declared_device_id: String,
+        declared_seq: u64,
+    },
     SizeMismatch {
         expected: usize,
         actual: usize,
@@ -478,6 +488,38 @@ pub async fn pull_changes(
                     break;
                 }
             };
+
+            // The signature covers the envelope's self-declared position
+            // (device_id, seq). Bind that to the position this object was actually
+            // fetched from BEFORE anything else reads the envelope: an object whose
+            // authentic bytes belong to a different position was relocated here, and
+            // applying it would replay that changeset in this slot while the cursor
+            // advance suppresses the real occupant. Anyone holding the store key can
+            // re-seal a peer's changeset under another key's authenticated data, so
+            // this is the only check that ties the signed content to its location.
+            // It precedes the schema gate so a relocated object cannot be laundered
+            // into the benign skipped-schema count; hold the cursor and stop this
+            // device's stream, the same discipline as a malformed or size-mismatched
+            // object.
+            if env.device_id != head.device_id || env.seq != seq {
+                error!(
+                    device_id = %head.device_id,
+                    seq,
+                    declared_device_id = %env.device_id,
+                    declared_seq = env.seq,
+                    "changeset envelope declares a different position than it was \
+                     fetched from; holding cursor for this device"
+                );
+                result.held_changesets.push(HeldChangeset {
+                    device_id: head.device_id.clone(),
+                    seq,
+                    reason: HeldChangesetReason::PositionMismatch {
+                        declared_device_id: env.device_id.clone(),
+                        declared_seq: env.seq,
+                    },
+                });
+                break;
+            }
 
             // Schema version check: skip changesets from a newer schema.
             if env.schema_version > db.schema_version() {

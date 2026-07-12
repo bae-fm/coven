@@ -531,6 +531,177 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     );
 }
 
+/// The changeset signature covers the envelope's self-declared position
+/// (`device_id`, `seq`). A member holding the store key can decrypt a peer's
+/// changeset and re-seal the identical bytes under the authenticated data for a
+/// different storage key — the victim's own signature still authorizes the
+/// content. If the puller trusted the signature without binding it to the
+/// location it fetched from, it would apply the relocated changeset in the new
+/// slot (replaying rows that may have been deleted since, with no last-writer
+/// opponent to lose to) and, by advancing the cursor, suppress the real occupant
+/// of that slot. The puller must instead hold the cursor and surface the
+/// relocation as tamper.
+#[tokio::test]
+async fn a_changeset_replayed_at_another_seq_is_held_not_applied() {
+    let storage = MockSyncStorage::new();
+    let victim = UserKeypair::generate();
+
+    // The victim authors a valid, signed changeset for its own position (dev, 5).
+    let src = open_test_db();
+    let cs = capture_bytes(
+        &src,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Replayed', NULL, '0000000005000-0000-dev', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "dev",
+        5,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:05:00Z",
+        &victim,
+        None,
+        &cs,
+    );
+
+    // A member re-seals those exact bytes at (dev, 9). In the mock the sealed
+    // object is the packed envelope itself, so relocating is writing the same
+    // bytes under the new key; the envelope still declares its authored position
+    // (dev, 5). The head advances to 9.
+    storage.put_changeset_packed("dev", 9, packed);
+
+    // The reader has already applied this device's stream through seq 8, so its
+    // pull legitimately begins at the relocated object's slot, seq 9.
+    let db2 = open_test_db();
+    let cursors = HashMap::from([("dev".to_string(), 8u64)]);
+
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &cursors, &temp_store_dir().1).await;
+
+    // The relocated seq-5 content is not applied at seq 9, the cursor holds at 8
+    // (never advances past the tampered slot), and the relocation is surfaced.
+    assert_eq!(result.changesets_applied, 0);
+    assert!(
+        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "a changeset relocated to another seq must not be applied",
+    );
+    assert_eq!(
+        updated.get("dev"),
+        Some(&8),
+        "cursor holds at the tampered slot, does not advance past it",
+    );
+    assert_eq!(result.held_changesets.len(), 1);
+    assert_eq!(result.held_changesets[0].device_id, "dev");
+    assert_eq!(result.held_changesets[0].seq, 9);
+    assert_eq!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::PositionMismatch {
+            declared_device_id: "dev".to_string(),
+            declared_seq: 5,
+        }
+    );
+}
+
+/// The position the signature covers includes the device prefix, not only the
+/// seq: an object authentic for one device's stream, relocated under another
+/// device's prefix, is held rather than applied. Same binding, other coordinate.
+#[tokio::test]
+async fn a_changeset_relocated_to_another_device_is_held() {
+    let storage = MockSyncStorage::new();
+    let victim = UserKeypair::generate();
+
+    // The victim authors a valid, signed changeset for (devVictim, 1).
+    let src = open_test_db();
+    let cs = capture_bytes(
+        &src,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Relocated', NULL, '0000000001000-0000-devVictim', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devVictim",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:01:00Z",
+        &victim,
+        None,
+        &cs,
+    );
+
+    // A member writes those exact bytes under a different device's prefix. The
+    // envelope still declares device_id "devVictim".
+    storage.put_changeset_packed("devAttacker", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert!(
+        !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "a changeset relocated to another device must not be applied",
+    );
+    assert_eq!(
+        updated.get("devAttacker"),
+        None,
+        "cursor holds at the relocated slot",
+    );
+    assert_eq!(result.held_changesets.len(), 1);
+    assert_eq!(result.held_changesets[0].device_id, "devAttacker");
+    assert_eq!(result.held_changesets[0].seq, 1);
+    assert_eq!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::PositionMismatch {
+            declared_device_id: "devVictim".to_string(),
+            declared_seq: 1,
+        }
+    );
+}
+
+/// A signed changeset sitting at the exact position its envelope declares is
+/// untouched by the position binding — it applies normally. The check rejects
+/// relocation, not authorship.
+#[tokio::test]
+async fn a_changeset_at_its_own_position_still_applies() {
+    let storage = MockSyncStorage::new();
+    let author = UserKeypair::generate();
+
+    let src = open_test_db();
+    let cs = capture_bytes(
+        &src,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'InPlace', NULL, '0000000001000-0000-dev', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "dev",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:01:00Z",
+        &author,
+        None,
+        &cs,
+    );
+    storage.put_changeset_packed("dev", 1, packed);
+
+    let db2 = open_test_db();
+    let (updated, result) =
+        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("dev"), Some(&1));
+    assert!(result.held_changesets.is_empty());
+}
+
 #[tokio::test]
 async fn apply_failure_isolates_to_one_device() {
     let storage = MockSyncStorage::new();
