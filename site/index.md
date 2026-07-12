@@ -13,6 +13,14 @@ hero:
 
 features:
     - icon:
+          light: /icons/lock-light.svg
+          dark: /icons/lock-dark.svg
+          width: 28
+          height: 28
+      title: Private
+      details: 'Every row and file is encrypted on the cloud. Key handling is idiomatic on every platform.'
+      link: /docs/encryption
+    - icon:
           light: /icons/harddrive-light.svg
           dark: /icons/harddrive-dark.svg
           width: 28
@@ -37,21 +45,13 @@ features:
       details: 'Any device edits anything, offline included, and concurrent edits merge on their own.'
       link: /docs/merge
     - icon:
-          light: /icons/image-light.svg
-          dark: /icons/image-dark.svg
-          width: 28
-          height: 28
-      title: Blobs, too
-      details: 'Rows carry files. A file commits in the row''s transaction and syncs alongside it.'
-      link: /docs/blobs
-    - icon:
           light: /icons/layers-light.svg
           dark: /icons/layers-dark.svg
           width: 28
           height: 28
       title: Beyond the disk
-      details: 'Files can live in the cloud and stream back when read. Pin what should stay offline.'
-      link: /docs/cache
+      details: 'Rows carry files. A file commits in the row''s transaction and streams from the cloud.'
+      link: /docs/blobs
     - icon:
           light: /icons/database-light.svg
           dark: /icons/database-dark.svg
