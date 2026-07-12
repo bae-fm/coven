@@ -33,11 +33,23 @@ through it.
 coven::set_keyring_service("todos")?;
 ```
 
-A host with an unusual requirement isn't required to use a bundled store:
+That is the whole integration. A host does not depend on a keyring-store crate
+itself, does not call `keyring_core::set_default_store`, and does not construct
+a store — coven brings the store for each target it supports, installs it, and
+fails loud with a typed error if it cannot. A host that installs its own store
+alongside coven's is duplicating work coven already did, and the usual way that
+goes wrong is a construction failure that gets logged and swallowed, leaving no
+store installed and the real cause discarded. On Android there is one further
+step, but it belongs to the *app*, not to key storage:
+[the JNI application context](#android) must be initialized before the first
+coven call.
+
+The one exception is a host with a requirement no bundled store meets:
 `keyring_core::set_default_store` installs any store implementing
-`keyring_core`'s trait before `set_keyring_service` runs, and coven then
-drives that instead of installing one of its own. See [Linux](#linux) below,
-the one target with no bundled store at all.
+`keyring_core`'s trait, and if one is already installed when
+`set_keyring_service` runs, coven keeps it instead of installing its own. That
+is the deliberate escape hatch — see [Linux](#linux) below, the one target with
+no bundled store at all — not the normal path.
 
 ## Correct access policy, by default
 
