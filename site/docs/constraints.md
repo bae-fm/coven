@@ -112,8 +112,10 @@ transaction. The consequences:
 ## The key lives on the device and in the restore code
 
 There is no account to sign into and no server that can gate access to the data.
-The store key lives in the [operating system keyring](/docs/encryption#where-the-store-key-lives),
-with no environment-variable or file fallback, and a
+The store key lives, by default, in the [operating system
+keyring](/docs/encryption#where-the-store-key-lives) — a host can choose a
+different [custody](/docs/keys) instead, but never an
+environment-variable or file fallback — and a
 [restore code](/docs/sharing#restore-codes) carries the store keyring and signing
 key so a new device of an existing member can reconnect. The restore code
 therefore *is* the key: anyone who holds it has full access to the store, so it is

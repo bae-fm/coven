@@ -129,6 +129,7 @@ export default defineConfig({
                         { text: 'Sharing', link: '/docs/sharing' },
                         { text: 'Bootstrap', link: '/docs/bootstrap' },
                         { text: 'Encryption', link: '/docs/encryption' },
+                        { text: 'Keys', link: '/docs/keys' },
                         { text: 'Schema evolution', link: '/docs/schema-evolution' },
                     ],
                 },

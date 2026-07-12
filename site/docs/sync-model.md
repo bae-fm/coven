@@ -268,17 +268,25 @@ is its own page: [Schema evolution](/docs/schema-evolution).
 ## Lifecycle
 
 `CovenHandle` owns the sync lifecycle natively. The host calls
-`handle.connect_sync(...)` once a provider is connected; the handle builds the
-[cloud home](/docs/storage) and, if sync is enabled, spawns the loop. `handle.stop_sync()` drops
-the loop handle and cloud home, `handle.is_syncing()` reports whether the loop
-thread is running, and `handle.sync_now()` asks the loop to run a cycle now.
+`handle.connect_sync()` once a provider is connected; the handle builds the
+[cloud home](/docs/storage) and, if sync is enabled, spawns the loop.
+`handle.stop_sync()` stops the loop after the in-flight cycle but keeps the
+installed manager so `handle.start_sync()` can resume it;
+`handle.disconnect_sync()` additionally drops the manager and its cloud
+home. `handle.is_syncing()` reports whether the loop thread is running, and
+`handle.sync_now()` asks the loop to run a cycle now.
 
-The keys the loop signs and encrypts with come from the OS keyring. The host
-names its keyring service once at startup with
-[`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service), which
-also installs the platform keyring store (apple-native on macOS and iOS,
-android-native on Android; a target with no bundled store errors). There is no
-environment-variable or dev-mode key path.
+The keys the loop signs and encrypts with are resolved from custody at each
+sync start: the OS keyring by default, or whatever preset the store's
+[`key_custody`](rustdoc:method:coven::CovenBuilder::key_custody) selected
+before `open()` — see [Keys](/docs/keys) for the presets and what each one
+protects against. Either way, the host names its keyring service once at
+startup with
+[`set_keyring_service`](rustdoc:fn:coven::set_keyring_service), which also
+installs the platform keyring store (apple-native on macOS and iOS,
+android-native on Android, windows-native on Windows; a target with no
+bundled store errors). There is no environment-variable or dev-mode key
+path.
 
 The loop runs on a dedicated OS thread with its own current-thread tokio runtime.
 Database access goes through async calls on the `Database` handle, so the loop

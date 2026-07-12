@@ -177,7 +177,10 @@ in `sync_state`, which feed the next policy check.
 </svg>
 
 Bootstrapping happens inside the join flow (a new member added by an owner) and
-the restore flow (the owner recovering the store on new hardware). Both call
+the restore flow (the owner recovering the store on new hardware). Both take
+the store's [`KeyCustody`](rustdoc:enum:coven::KeyCustody) selection as a
+parameter and persist the bootstrapped master key under it before returning
+(see [Keys](/docs/keys)), and both call
 [`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot):
 
 1. Resolve the `current.json` pointer to the live generation, authenticating the
@@ -213,12 +216,21 @@ no local writer, so there is no whole-cycle suspend to manage; the pull disables
 capture only around each apply, exactly as a steady-state cycle does.
 
 ```rust
-let _bootstrap = bootstrap_from_snapshot(storage, store_id, &cipher, owner_pubkey, &db_path).await?;
+let _bootstrap = bootstrap_from_snapshot(
+    storage,
+    store_id,
+    owner_pubkey,
+    binary_schema_version,
+    &db_path,
+)
+.await?;
+// join_from_invite_code / restore_from_code persist the bootstrapped master
+// key under custody here, before returning — see Keys.
 let handle = Coven::builder(config)
     .synced_tables(synced_tables.to_vec())
     .migrations(migrations)   // the same ladder every open passes
     .open()?;                 // runs any rungs above the snapshot's version
-handle.connect_sync(Some(encryption_service)).await?;
+handle.connect_sync().await?;
 handle.sync_now();
 ```
 

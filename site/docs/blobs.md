@@ -157,12 +157,13 @@ never the raw key bytes:
 
 - `Master` encrypts with the store master key. Every member holds it, so every
   member can decrypt the blob. The common case, with no key management at all.
-- `Derived(scope_id)` encrypts with a key derived from the master via
-  [`derive_scoped`](rustdoc:method:coven::encryption::EncryptionService::derive_scoped),
-  one distinct key per `scope_id`. Deterministic: the same `scope_id` yields the
-  same key on push and on pull, which is what lets a puller re-derive it and
-  decrypt. The corollary is that `scope_id` must be stable; a row id that later
-  changes would re-derive a different key and the stored blob would not decrypt.
+- `Derived(scope_id)` encrypts with a key coven derives from the master key,
+  one distinct key per `scope_id` (see
+  [Chunked encryption](/docs/encryption#chunked-encryption) for the
+  derivation). Deterministic: the same `scope_id` yields the same key on push
+  and on pull, which is what lets a puller re-derive it and decrypt. The
+  corollary is that `scope_id` must be stable; a row id that later changes
+  would re-derive a different key and the stored blob would not decrypt.
 
 ## How a blob moves out
 

@@ -172,6 +172,8 @@ In reading order; each page builds on the ones before it:
   restores.
 - [Encryption](/docs/encryption): the keys, what is encrypted, what the
   provider sees.
+- [Keys](/docs/keys): where each key lives on the device, the custody
+  presets, and what a host has to set up per platform.
 - [Schema evolution](/docs/schema-evolution): migrating the synced schema while
   devices upgrade at different times.
 

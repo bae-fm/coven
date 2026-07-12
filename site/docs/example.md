@@ -130,18 +130,34 @@ through `handle.sql_read`, and never build any of the sync machinery below.
 
 ## Turn on sync
 
-Sync needs an encryption key and a cloud provider. Keys come from the OS keyring;
-the host names its keyring service once at startup with
-[`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service), then builds
-the [`KeyService`](rustdoc:struct:coven::keys::KeyService) and
-[`EncryptionService`](rustdoc:struct:coven::encryption::EncryptionService) for the
-store.
+Sync needs a master key and a cloud provider. The master key is protected by
+*custody* — where it's unlocked from, and where it's written when
+established — which defaults to the OS keyring and can be selected on the
+builder with
+[`key_custody`](rustdoc:method:coven::CovenBuilder::key_custody) before
+`open()`; the `open` call above didn't set one, so it got the default. Either
+way, the host names its keyring service once at startup with
+[`set_keyring_service`](rustdoc:fn:coven::set_keyring_service) — coven never
+reads or writes a keyring entry without it. See [Keys](/docs/keys) for every
+preset and what each one protects against.
 
 ```rust
-coven::keys::set_keyring_service("todos");
-let key_service = coven::keys::KeyService::new(store_id.clone());
-let encryption_key = key_service.get_or_create_encryption_key()?;
-let encryption_service = coven::encryption::EncryptionService::new(&encryption_key)?;
+coven::set_keyring_service("todos")?;
+```
+
+A fresh store has no master key yet:
+[`initialize_master_key`](rustdoc:method:coven::CovenHandle::initialize_master_key)
+generates one and establishes it under whatever custody the builder
+selected; coven refuses to run it again once one is established, so a
+corrupt entry is never silently overwritten. This device also needs a
+signing identity — coven never mints one implicitly (see
+[Keys](/docs/keys#no-silent-identity-minting)) —
+[`ensure_device_identity`](rustdoc:fn:coven::ensure_device_identity)
+establishes it explicitly.
+
+```rust
+handle.initialize_master_key()?;
+coven::ensure_device_identity()?;
 ```
 
 Once a provider is connected, start sync through the handle. Which rows carry
@@ -149,7 +165,7 @@ blobs is declared on the synced tables passed to `open` (see
 [Attachments](#attachments)), not here.
 
 ```rust
-handle.connect_sync(Some(encryption_service)).await?;
+handle.connect_sync().await?;
 ```
 
 After a write, nudge the loop with `sync_now` so the local edit goes out

@@ -25,16 +25,11 @@ membership record is sealed under the current generation.
 [Removing a member](/docs/sharing#revocation-is-key-rotation) appends a fresh
 generation that the removed member never receives; older generations stay in
 the keyring so data sealed before the rotation stays readable.
-[`EncryptionService`](rustdoc:struct:coven::encryption::EncryptionService)
-holds the keyring and does the work;
-[`EncryptionService::encrypt`](rustdoc:method:coven::encryption::EncryptionService::encrypt)
-and [`EncryptionService::decrypt`](rustdoc:method:coven::encryption::EncryptionService::decrypt)
-are the round trip. Construct one from a raw key with
-[`from_key`](rustdoc:method:coven::encryption::EncryptionService::from_key) (a
-one-generation keyring) or from a stored string with
-[`new`](rustdoc:method:coven::encryption::EncryptionService::new); a fresh key
-comes from
-[`generate_random_key`](rustdoc:fn:coven::encryption::generate_random_key).
+[`MasterKeyring`](rustdoc:struct:coven::MasterKeyring) is the value type that
+carries these generations — what [custody](/docs/keys) unlocks, persists, and
+forgets. coven builds the cipher that does the actual encrypt/decrypt round
+trip internally from whatever the store's custody supplies; a production
+host never constructs a cipher or touches a raw key directly.
 
 **A per-device Ed25519 identity** signs, it does not encrypt. Each device has one
 [`UserKeypair`](rustdoc:struct:coven::keys::UserKeypair), and its 32-byte public
@@ -128,25 +123,42 @@ public keys in the paths are opaque tokens, not user records.
 
 Every copy of a key is a place it can leak from: a database file rides along
 in backups, an environment variable leaks into logs and child processes. So
-coven does not persist the store key in any database it controls. The key
-lives in the operating system keyring, behind the system's own access
-control. There is
-no environment-variable or file fallback: the keyring is the only place coven
-reads it from. [`KeyService`](rustdoc:struct:coven::keys::KeyService) reads and
-writes it, scoped per store so two stores never share a key.
-[`KeyService::new`](rustdoc:method:coven::keys::KeyService::new) does no I/O: keyring
-reads happen lazily inside the getters, because reading the protected keyring can
-trigger a system password prompt. `get_or_create_encryption_key` returns the
-existing key or mints and stores a new one; the `get_or_create` name is
-deliberate, because the keyring is the only copy. Lose both the keyring entry and
-every member's wrapped copy and the encrypted data is unrecoverable.
+coven never writes the master key into the database it controls, and there
+is no environment-variable or file fallback for it. Where it *does* live is
+a choice a host makes once, on the builder, called
+[custody](/docs/keys) — the default is the OS keyring, behind the system's
+own access control, and a host with a different threat model can choose a
+passphrase-wrapped file or supply its own store instead. [Keys](/docs/keys)
+covers every preset and the tradeoffs between them; this page assumes the
+default.
 
 The host names itself in the keyring once at startup with
-[`set_keyring_service`](rustdoc:fn:coven::keys::set_keyring_service), passing its
+[`set_keyring_service`](rustdoc:fn:coven::set_keyring_service), passing its
 own app identity. That name becomes the first component of every keyring account,
 so two coven-based apps on one machine never read or overwrite each other's keys.
-It is required, not defaulted: a getter called before the host sets it panics
-rather than fall back to a shared name.
+It is required, not defaulted: a key operation attempted before the host calls
+it fails with a typed error rather than falling back to a shared name.
+
+[`CovenHandle::initialize_master_key`](rustdoc:method:coven::CovenHandle::initialize_master_key)
+is the only place coven ever generates a master key; it refuses to run again
+once one is established, so a corrupt entry is never silently overwritten.
+Lose both the established key and every member's wrapped copy of it and the
+encrypted data is unrecoverable.
+
+**The local SQLite database is not encrypted.** coven's encryption is at
+rest *in the cloud* — every object a device pushes is sealed before it
+leaves, as this page describes — but the row data living in the on-device
+`.sqlite` file is plaintext, the same as any local SQLite database. A host
+that keeps its own secret in a row (a password entry's payload, an API
+token) seals it itself with
+[`CovenHandle::seal_app_data`](rustdoc:method:coven::CovenHandle::seal_app_data)
+before writing the row, and reads it back with
+[`CovenHandle::open_app_data`](rustdoc:method:coven::CovenHandle::open_app_data).
+Both run under the store's own master key — the same custody this page
+describes protects them, so there is no second key to manage — and the
+sealed payload records the key generation it was sealed under, so it stays
+readable across any number of later rotations. See [Keys](/docs/keys#sealing-your-own-data)
+for the full API.
 
 ## Opaque and browsable homes
 
@@ -220,12 +232,12 @@ A single authenticated ciphertext has no random access: the whole object
 must be fetched and decrypted to read any part of it. Chunking restores
 random access without giving up authentication. A blob can be large (a
 `todo_attachments` image, a snapshot), and a reader often wants only part of
-it: the first frames of a video, one page of a document. To
-fetch and decrypt a byte range without downloading and decrypting the whole file,
-[`encrypt`](rustdoc:method:coven::encryption::EncryptionService::encrypt) splits
-the plaintext into 64KB chunks (`CHUNK_SIZE`) and encrypts each chunk
-independently. The output is a 24-byte base nonce followed by the encrypted
-chunks back to back:
+it: the first frames of a video, one page of a document. coven's cipher
+splits the plaintext into 64KB chunks
+([`CHUNK_SIZE`](rustdoc:const:coven::CHUNK_SIZE)) and encrypts each chunk
+independently, so a byte range can be fetched and decrypted without touching
+the rest of the file. The output is a 24-byte base nonce followed by the
+encrypted chunks back to back:
 
 ```text
 [base nonce: 24 bytes][chunk 0][chunk 1]...[chunk n]
@@ -233,34 +245,29 @@ chunks back to back:
 
 Each chunk's nonce is the base nonce with the chunk index mixed in (a XOR with
 the little-endian index), so every chunk gets a distinct nonce derived from one
-random base nonce. Because chunk boundaries and nonces are computable from the
-index alone, a reader can decrypt chunk `k` on its own:
-[`decrypt_chunk`](rustdoc:method:coven::encryption::EncryptionService::decrypt_chunk)
-takes the whole object (it reads the base nonce from the first 24 bytes) and the
-chunk index, and returns that one chunk's plaintext.
+random base nonce, and chunk boundaries and nonces are computable from the
+index alone — a reader decrypts chunk `k` without touching the chunks before
+it. This is what makes a [ranged read](/docs/storage#ranged-reads) possible:
+only the encrypted chunks covering the requested plaintext range are fetched
+and decrypted, never the whole object. The base nonce is random per seal, so
+sealing the same plaintext twice produces different ciphertext.
 
-To read a byte range, fetch the 24-byte nonce separately, then use
-[`encrypted_chunk_range`](rustdoc:fn:coven::encryption::encrypted_chunk_range)
-to get the encrypted byte bounds of the chunks covering the plaintext range.
-Those bounds start at the first needed encrypted chunk, not byte 0, so the caller
-passes the nonce, the fetched encrypted chunks, and the first chunk index to
-[`decrypt_range_with_offset`](rustdoc:method:coven::encryption::EncryptionService::decrypt_range_with_offset).
-It returns exactly the requested plaintext bytes. The base nonce is random per
-`encrypt` call, so encrypting the same plaintext twice produces different
-ciphertext; within one call the index-derived nonces keep each chunk distinct.
-
-A scope can get its own key derived from the store key with
-[`derive_scoped`](rustdoc:method:coven::encryption::EncryptionService::derive_scoped),
-which runs HKDF-SHA256 over the store key and a scope label to produce a
-distinct 32-byte key. It is deterministic (same store key and scope always
-yield the same derived key) and one-way (the derived key does not reveal the
-store key), so a blob encrypted under a scoped key cannot be read with the
-store key, only with the same derivation.
+A scope can get its own key derived from the store key, deterministically
+(the same store key and scope always yield the same derived key) and
+one-way (the derived key does not reveal the store key) — coven derives it
+internally with HKDF-SHA256 over the store key and the scope label whenever
+it seals a `Derived`-scoped blob (see [Encryption scope](/docs/blobs#encryption-scope)),
+so a blob encrypted under a scoped key cannot be read with the store key,
+only with the same derivation. None of this cipher machinery — chunks,
+nonces, derivation — is public API; a host never touches it directly.
 
 ## The key fingerprint
 
-[`fingerprint`](rustdoc:method:coven::encryption::EncryptionService::fingerprint)
-returns the first 8 bytes of SHA-256 over the key as 16 hex characters. It is a
+[`MasterKeyring::fingerprint`](rustdoc:method:coven::MasterKeyring::fingerprint)
+returns the first 8 bytes of SHA-256 over the current generation's key as 16
+hex characters — the same value
+[`CovenHandle::master_key_fingerprint`](rustdoc:method:coven::CovenHandle::master_key_fingerprint)
+returns for an open store. It is a
 display hint, short enough to show in a UI so a user can spot that two devices
 hold different keys, long enough that two real keys are very unlikely to collide.
 It is not a cryptographic commitment: it does not bind a ciphertext to a key and
