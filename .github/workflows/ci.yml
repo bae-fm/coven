@@ -15,6 +15,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
+      - name: No new #[allow(dead_code)]
+        # dead_code is denied workspace-wide (see Cargo.toml); an `allow` here
+        # is a silent, permanent way back around that deny at the item it
+        # decorates. The lint is almost always right — delete the item, or
+        # narrow its visibility so the compiler actually knows who calls it.
+        # The rare item kept alive for a reason the compiler can't see (e.g.
+        # a `Drop` guard field never read) should say so in a doc comment
+        # next to the allow, not appear silently.
+        run: |
+          if grep -rnE '#!?\[allow\([^)]*dead_code\b' crates --include='*.rs'; then
+            echo "::error::New #[allow(dead_code)] found above — fix the root cause instead of silencing the lint."
+            exit 1
+          fi
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Lib-only check (production feature sets, no test cfg)
