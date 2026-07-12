@@ -29,3 +29,13 @@ jobs:
         run: cargo clippy -p coven --all-targets --all-features -- -D warnings
       - name: Windows keyring store round-trip
         run: cargo test -p coven --all-features --test windows_keyring
+
+  check-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy -p coven --all-targets --all-features -- -D warnings
+      - name: Apple protected-store entry construction
+        run: cargo test -p coven --all-features --test apple_keyring

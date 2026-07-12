@@ -65,3 +65,14 @@ oauth-providers = ["coven-core/oauth-providers", "dep:open"]
 
 [lints]
 workspace = true
+
+# Needs the `entry_for` test hook, which only exists under `test-utils` (or a
+# `cfg(test)` build of this crate itself, which an integration test binary
+# never is). Without this, `cargo test`/`cargo clippy --all-targets` run with
+# no features would try to build this target and fail; declaring the
+# requirement makes Cargo skip it instead, the same way
+# `apple-native-keyring-store` itself gates its own protected-store examples
+# and tests on its `protected` feature.
+[[test]]
+name = "apple_keyring"
+required-features = ["test-utils"]

@@ -626,6 +626,14 @@ pub use keys::{
     CloudHomeCredentials, DeviceIdentityCustody, DeviceKeys, KeyError, MasterKeyCustody,
     MasterKeyError, StoreKeys, UserKeypair,
 };
+
+// The sole keyring entry-construction chokepoint (`keys::entry_for`), reached
+// across the crate boundary so an integration test can install a specific
+// keyring store and assert which construction path it took, without
+// re-implementing that dispatch. A production host never calls this.
+#[cfg(any(test, feature = "test-utils"))]
+pub use keys::entry_for_test;
+
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;
 pub use storage::cloud::{
