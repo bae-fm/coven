@@ -30,7 +30,20 @@ fn install_bundled_store() -> Result<(), KeyError> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
+#[cfg(target_os = "windows")]
+fn install_bundled_store() -> Result<(), KeyError> {
+    let store = windows_native_keyring_store::Store::new()
+        .map_err(|e| KeyError::Persistence(format!("build windows keyring store: {e}")))?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android",
+    target_os = "windows"
+)))]
 fn install_bundled_store() -> Result<(), KeyError> {
     Err(KeyError::UnsupportedKeyringPlatform)
 }
