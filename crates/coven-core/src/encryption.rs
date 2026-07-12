@@ -121,6 +121,87 @@ struct StoredKeyringGeneration {
     key_hex: String,
 }
 
+/// A store's master key material: every generation, and which one is
+/// current. This is the value custody implementations store, unlock, and
+/// re-protect — never a cipher. coven builds the [`EncryptionService`] cipher
+/// from it internally; custody never touches cipher machinery.
+#[derive(Clone)]
+pub struct MasterKeyring {
+    current_generation: u64,
+    keys: BTreeMap<u64, [u8; 32]>,
+}
+
+impl std::fmt::Debug for MasterKeyring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MasterKeyring")
+            .field("current_generation", &self.current_generation)
+            .field("keys", &"<redacted>")
+            .finish()
+    }
+}
+
+impl MasterKeyring {
+    /// One fresh generation-1 key.
+    pub fn generate() -> Self {
+        let mut keys = BTreeMap::new();
+        keys.insert(INITIAL_KEY_GENERATION, generate_random_key());
+        Self {
+            current_generation: INITIAL_KEY_GENERATION,
+            keys,
+        }
+    }
+
+    /// Serialize to the stored keyring JSON — the same format
+    /// [`EncryptionService::to_keyring_string`] produces, since every
+    /// generation this type holds came from (or feeds) that cipher.
+    pub fn to_serialized(&self) -> String {
+        EncryptionService::from(self.clone())
+            .to_keyring_string()
+            .expect("a MasterKeyring always holds at least one generation")
+    }
+
+    /// Parse a stored master keyring. Accepts both the keyring JSON
+    /// [`Self::to_serialized`] produces and the legacy 64-hex single key, since
+    /// this reads values written by installs that predate the keyring format.
+    pub fn from_serialized(s: &str) -> Result<Self, EncryptionError> {
+        EncryptionService::new(s).map(Self::from)
+    }
+
+    /// SHA-256 fingerprint of the current generation's key, first 8 bytes
+    /// hex-encoded. Short enough to display in UI, long enough to detect wrong
+    /// keys.
+    pub fn fingerprint(&self) -> String {
+        let key = self
+            .keys
+            .get(&self.current_generation)
+            .expect("current generation key exists");
+        key_fingerprint(key)
+    }
+}
+
+impl From<EncryptionService> for MasterKeyring {
+    fn from(service: EncryptionService) -> Self {
+        Self {
+            current_generation: service.current_generation,
+            keys: service.keys,
+        }
+    }
+}
+
+impl From<MasterKeyring> for EncryptionService {
+    fn from(keyring: MasterKeyring) -> Self {
+        EncryptionService {
+            current_generation: keyring.current_generation,
+            keys: keyring.keys,
+        }
+    }
+}
+
+fn key_fingerprint(key: &[u8; 32]) -> String {
+    let hash = Sha256::digest(key);
+    hex::encode(&hash[..8])
+}
+
 /// Manages encryption keys and provides XChaCha20-Poly1305 encryption/decryption
 ///
 /// This implements the security model described in the README:
@@ -291,8 +372,7 @@ impl EncryptionService {
     /// SHA-256 fingerprint of the key, first 8 bytes hex-encoded (16 hex chars).
     /// Short enough to display in UI, long enough to detect wrong keys.
     pub fn fingerprint(&self) -> String {
-        let hash = Sha256::digest(self.key_bytes());
-        hex::encode(&hash[..8])
+        key_fingerprint(&self.key_bytes())
     }
 
     /// Return the raw 32-byte key.
@@ -1227,5 +1307,49 @@ mod tests {
         // Cannot decrypt with wrong release key
         let wrong_enc = master.derive_scoped("rel-999");
         assert!(wrong_enc.decrypt(&encrypted, TEST_AAD).is_err());
+    }
+
+    #[test]
+    fn master_keyring_generate_round_trips_through_serialization() {
+        let keyring = MasterKeyring::generate();
+        let serialized = keyring.to_serialized();
+        let parsed =
+            MasterKeyring::from_serialized(&serialized).expect("parse a generated keyring");
+        assert_eq!(parsed.to_serialized(), serialized);
+        assert_eq!(parsed.fingerprint(), keyring.fingerprint());
+    }
+
+    #[test]
+    fn master_keyring_from_serialized_accepts_legacy_raw_hex() {
+        let raw_hex = hex::encode(test_key());
+        let keyring = MasterKeyring::from_serialized(&raw_hex).expect("legacy hex parses");
+        assert_eq!(
+            keyring.fingerprint(),
+            EncryptionService::from_key(test_key()).fingerprint(),
+        );
+    }
+
+    #[test]
+    fn master_keyring_and_encryption_service_convert_without_losing_generations() {
+        let service = EncryptionService::from_key(test_key())
+            .with_appended_generation(2, [9u8; 32])
+            .expect("append a generation");
+        let keyring: MasterKeyring = service.clone().into();
+        assert_eq!(keyring.fingerprint(), service.fingerprint());
+        assert_eq!(
+            keyring.to_serialized(),
+            service.to_keyring_string().unwrap()
+        );
+
+        let round_tripped: EncryptionService = keyring.into();
+        assert_eq!(round_tripped.current_generation(), 2);
+        assert_eq!(round_tripped.keyring_entries(), service.keyring_entries(),);
+    }
+
+    #[test]
+    fn master_keyring_debug_redacts_keys() {
+        let keyring = MasterKeyring::generate();
+        let debug = format!("{keyring:?}");
+        assert!(debug.contains("<redacted>"), "{debug}");
     }
 }

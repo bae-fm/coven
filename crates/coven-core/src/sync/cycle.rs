@@ -17,7 +17,7 @@ use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
 use crate::config::Config;
 use crate::database::{Database, DbError, PendingChangesetBatch};
-use crate::keys::{KeyPersistence, UserKeypair};
+use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 
@@ -427,7 +427,7 @@ pub async fn run_single_sync_cycle(
     db: &Database,
     cipher: &std::sync::RwLock<CloudCipher>,
     user_keypair: &UserKeypair,
-    key_persistence: Option<&dyn KeyPersistence>,
+    custody: Option<&dyn MasterKeyCustody>,
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
@@ -459,15 +459,8 @@ pub async fn run_single_sync_cycle(
     // aborts the cycle and retries next time — a refresh that can't complete must
     // not also corrupt state.
     if let Some(ch) = cloud_home {
-        refresh_authorization_state(
-            ch,
-            cipher,
-            user_keypair,
-            key_persistence,
-            store_id,
-            &membership,
-        )
-        .await?;
+        refresh_authorization_state(ch, cipher, user_keypair, custody, store_id, &membership)
+            .await?;
     }
 
     // Load persisted sync state — DB errors abort the cycle (a transient SQLite
@@ -997,7 +990,7 @@ async fn refresh_authorization_state(
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
     user_keypair: &UserKeypair,
-    key_persistence: Option<&dyn KeyPersistence>,
+    custody: Option<&dyn MasterKeyCustody>,
     store_id: &str,
     membership: &super::pull::CycleMembership,
 ) -> Result<(), String> {
@@ -1084,15 +1077,12 @@ async fn refresh_authorization_state(
                     accepted_generation, "refresh: ignored non-newer wrapped store key"
                 );
             } else if in_use != new_encryption.keyring_entries() {
-                let key_persistence = key_persistence.ok_or_else(|| {
-                    "refresh: rotated store key needs platform key persistence".to_string()
+                let custody = custody.ok_or_else(|| {
+                    "refresh: rotated store key needs master-key custody".to_string()
                 })?;
-                let fingerprint = super::membership_ops::apply_key_rotation(
-                    new_encryption,
-                    key_persistence,
-                    cipher,
-                )
-                .map_err(|e| format!("refresh: adopt rotated store key: {e}"))?;
+                let fingerprint =
+                    super::membership_ops::apply_key_rotation(new_encryption, custody, cipher)
+                        .map_err(|e| format!("refresh: adopt rotated store key: {e}"))?;
                 info!(%fingerprint, "Adopted rotated store key");
             }
         }

@@ -150,11 +150,13 @@ pub use config::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorag
 // Keys / oauth / keyring bootstrap. The keyring service name has a setter and the
 // two getters that pair with it; the OAuth registration takes/returns its creds
 // and tokens.
-pub use keys::{CloudHomeCredentials, KeyError, KeyPersistence, UserKeypair};
+pub use keys::{CloudHomeCredentials, KeyError, MasterKeyCustody, UserKeypair};
 
 // At-rest crypto the host configures (the host sizes cloud stream reads from
-// `CHUNK_SIZE`), and the store directory the host points coven at.
-pub use encryption::{EncryptionError, EncryptionService, CHUNK_SIZE};
+// `CHUNK_SIZE`), and the store directory the host points coven at. `MasterKeyring`
+// is the master-key custody value type; `EncryptionService` is the cipher coven
+// builds from it internally.
+pub use encryption::{EncryptionError, EncryptionService, MasterKeyring, CHUNK_SIZE};
 pub use store_dir::{StoreDir, StoreLayout};
 
 // Sync vocabulary exposed through the native handle.

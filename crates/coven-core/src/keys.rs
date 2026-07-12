@@ -206,8 +206,26 @@ pub fn ed25519_to_x25519_public_key(
     Ok(vk.to_montgomery().to_bytes())
 }
 
-pub trait KeyPersistence {
-    fn set_encryption_key(&self, value: &str) -> Result<(), KeyError>;
+use crate::encryption::MasterKeyring;
+
+/// A store's master keyring's custody: who unlocks it, where a newly
+/// established or rotated one is written, and how it is removed. Implemented
+/// once per protection policy (the OS keyring, a passphrase-wrapped file, an
+/// in-memory session value, or a host's own).
+pub trait MasterKeyCustody: Send + Sync {
+    /// The store's master keyring for this session. `Ok(None)` means the store
+    /// has never had one established (a fresh store before create/join) —
+    /// distinct from a failure to produce one (wrong passphrase, unreadable
+    /// backing store), which is `Err`.
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError>;
+
+    /// Protect and store `keyring`, replacing whatever is stored. Serves both
+    /// establishment (create/join/restore) and rotation re-protection (member
+    /// removal, the per-cycle refresh adoption). Idempotent.
+    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError>;
+
+    /// Remove the stored keyring. `Ok` when nothing was stored.
+    fn forget(&self) -> Result<(), KeyError>;
 }
 
 #[cfg(test)]

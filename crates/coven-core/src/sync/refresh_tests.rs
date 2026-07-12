@@ -15,7 +15,7 @@ use std::sync::RwLock;
 
 use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
-use crate::keys::{KeyPersistence, UserKeypair};
+use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::cycle::run_single_sync_cycle;
@@ -31,7 +31,7 @@ use crate::sync::membership_ops::{
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     bootstrap_chain, make_linked_entry, open_test_db, pubkey_hex, temp_store_dir, MockSyncStorage,
-    TestKeyPersistence,
+    TestCustody,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
@@ -83,7 +83,7 @@ async fn run_cycle(
     keypair: &UserKeypair,
     device_id: &str,
     ld: &StoreDir,
-    key_persistence: Option<&dyn KeyPersistence>,
+    custody: Option<&dyn MasterKeyCustody>,
 ) -> Result<(), String> {
     let hlc = Hlc::new(device_id.to_string());
     run_single_sync_cycle(
@@ -95,7 +95,7 @@ async fn run_cycle(
         db,
         cipher,
         keypair,
-        key_persistence,
+        custody,
         ld,
         Some(storage as &dyn crate::storage::cloud::CloudHome),
         None,
@@ -161,7 +161,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -306,7 +306,7 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -377,7 +377,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -479,7 +479,7 @@ async fn same_generation_wrapped_key_is_not_adopted() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(current_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         current_key,
@@ -546,7 +546,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -642,7 +642,7 @@ async fn removed_owner_key_is_not_adopted() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(current_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         current_key,
@@ -716,7 +716,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(real_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         real_key,
@@ -781,7 +781,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -852,7 +852,7 @@ async fn one_cycle_lists_membership_once() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let ks_b = TestKeyPersistence::default();
+    let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -919,7 +919,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     upload_chain(&storage, &chain, &owner).await;
 
     // This device's steady state: keyring and live cipher hold the pre-rotation key.
-    let ks = TestKeyPersistence::default();
+    let ks = TestCustody::default();
     ks.set_initial_key(old_key);
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let hlc = Hlc::new("A".to_string());
@@ -982,7 +982,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
             .await
             .unwrap();
-        let ks_refresh = TestKeyPersistence::default();
+        let ks_refresh = TestCustody::default();
         ks_refresh.set_initial_key(old_key);
         let cipher_refresh =
             RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));

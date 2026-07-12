@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::database::{Database, DbError, PendingChangesetBatch};
-use crate::keys::{KeyError, KeyPersistence, UserKeypair};
+use crate::encryption::MasterKeyring;
+use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::migration::Migration;
 use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 use crate::store_dir::StoreDir;
@@ -25,45 +26,62 @@ use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::signed_control::{HeadJson, MinSchemaVersionJson};
 use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
 
-/// In-memory [`KeyPersistence`] for tests, with a switch to force the keyring
-/// write to fail. The switch models a device whose keyring is momentarily
+/// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
+/// to fail. The switch models a device whose keyring is momentarily
 /// unwritable, so a test can drive a key adoption into its failure path and then
-/// clear the switch to prove the retry converges.
+/// clear the switch to prove the retry converges. Stores the serialized form
+/// (like the real `Keyring` preset), so `stored_key` reflects exactly what a
+/// caller wrote — a raw-hex seed from [`Self::set_initial_key`] stays raw hex
+/// until a real `persist` call re-serializes it to the keyring JSON format.
 #[derive(Default)]
-pub struct TestKeyPersistence {
+pub struct TestCustody {
     value: Mutex<Option<String>>,
     fail: std::sync::atomic::AtomicBool,
 }
 
-impl TestKeyPersistence {
+impl TestCustody {
     pub fn set_initial_key(&self, key: [u8; 32]) {
-        self.set_encryption_key(&hex::encode(key))
-            .expect("initial key write succeeds");
+        *self.value.lock().unwrap() = Some(hex::encode(key));
     }
 
     pub fn stored_key(&self) -> Option<String> {
         self.value.lock().unwrap().clone()
     }
 
-    /// Make the next and every subsequent keyring write fail until cleared.
+    /// Make the next and every subsequent `persist` fail until cleared.
     pub fn fail_writes(&self) {
         self.fail.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Let keyring writes succeed again.
+    /// Let `persist` succeed again.
     pub fn allow_writes(&self) {
         self.fail.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-impl KeyPersistence for TestKeyPersistence {
-    fn set_encryption_key(&self, value: &str) -> Result<(), KeyError> {
+impl MasterKeyCustody for TestCustody {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        self.value
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(MasterKeyring::from_serialized)
+            .transpose()
+            .map_err(|e| KeyError::Crypto(e.to_string()))
+    }
+
+    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(KeyError::Persistence(
                 "forced keyring write failure".to_string(),
             ));
         }
-        *self.value.lock().unwrap() = Some(value.to_string());
+        *self.value.lock().unwrap() = Some(keyring.to_serialized());
+        Ok(())
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        *self.value.lock().unwrap() = None;
         Ok(())
     }
 }

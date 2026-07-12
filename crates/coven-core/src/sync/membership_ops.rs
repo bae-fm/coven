@@ -5,8 +5,8 @@
 
 use tracing::{debug, info};
 
-use crate::encryption::{EncryptionError, EncryptionService};
-use crate::keys::{KeyError, KeyPersistence, UserKeypair};
+use crate::encryption::{EncryptionService, MasterKeyring};
+use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 #[cfg(test)]
 use crate::storage::cloud::CloudHome;
 
@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 /// performs the operation, and uploads the result: it preserves the typed error
 /// each step already produces — [`StorageError`], the owner-anchored
 /// [`AnchoredChainError`], the [`InviteError`] the invite/revoke path raises,
-/// [`KeyError`], [`EncryptionError`] — rather than flattening them into a string,
+/// [`KeyError`] — rather than flattening them into a string,
 /// and names the domain rules it enforces in place as their own variants.
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipOpsError {
@@ -51,7 +51,7 @@ pub enum MembershipOpsError {
     )]
     RotationCommittedAdoptionFailed {
         #[source]
-        source: AdoptKeyError,
+        source: KeyError,
     },
     #[error("cannot invite yourself")]
     SelfInvite,
@@ -204,7 +204,7 @@ pub async fn remove_member(
     public_key_hex: &str,
     store_id: &str,
     current_encryption: &EncryptionService,
-    key_persistence: &dyn KeyPersistence,
+    custody: &dyn MasterKeyCustody,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
 ) -> Result<String, MembershipOpsError> {
     // Download existing membership entries and build the chain.
@@ -237,34 +237,21 @@ pub async fn remove_member(
         &public_key_hex[..public_key_hex.len().min(16)]
     );
 
-    // Adopt the rotated key into this device's live cipher and keyring. The cloud
+    // Adopt the rotated key into this device's live cipher and custody. The cloud
     // rotation is already committed, so a failure here is not a generic membership
     // error but the specific half-applied state its own variant names.
-    apply_key_rotation(new_key, key_persistence, cipher_lock)
+    apply_key_rotation(new_key, custody, cipher_lock)
         .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })
 }
 
-/// Why adopting a rotated store key into this device's local state failed. This
-/// is the local half of a key rotation — serialize the keyring and persist it,
-/// then swap the live cipher — kept distinct from the chain and cloud errors
-/// [`MembershipOpsError`] carries because it runs after a cloud rotation is already
-/// committed, so its two failure modes are exactly the two local writes.
-#[derive(Debug, thiserror::Error)]
-pub enum AdoptKeyError {
-    #[error("failed to persist the rotated encryption key: {0}")]
-    KeyPersistence(#[from] KeyError),
-    #[error("failed to serialize the rotated encryption key: {0}")]
-    KeyringSerialize(#[from] EncryptionError),
-}
-
-/// Rotate the in-use encryption key after a member removal: persist it to the
-/// keyring and swap the live cipher in place. Returns the new key's fingerprint
+/// Rotate the in-use encryption key after a member removal: persist it via
+/// custody and swap the live cipher in place. Returns the new key's fingerprint
 /// for the host to record in its own config — coven never writes the host's
 /// config.
 ///
-/// The keyring is persisted before the live cipher is swapped, so a persistence
+/// The key is persisted before the live cipher is swapped, so a persistence
 /// failure leaves the cipher untouched on the superseded generation rather than
-/// live on a key that never reached the keyring. The write is idempotent —
+/// live on a key that never reached custody. The write is idempotent —
 /// persisting the same keyring and swapping to it again converges — so a caller
 /// that failed here can retry adoption alone.
 ///
@@ -272,15 +259,14 @@ pub enum AdoptKeyError {
 /// sharing (and hence member removal) requires an encrypted home.
 pub fn apply_key_rotation(
     new_encryption: EncryptionService,
-    key_persistence: &dyn KeyPersistence,
+    custody: &dyn MasterKeyCustody,
     cipher_lock: &std::sync::RwLock<CloudCipher>,
-) -> Result<String, AdoptKeyError> {
+) -> Result<String, KeyError> {
     let new_fingerprint = {
         let mut cipher = cipher_lock.write().unwrap();
         match &mut *cipher {
             CloudCipher::Encrypted(enc) => {
-                let new_key_hex = new_encryption.to_keyring_string()?;
-                key_persistence.set_encryption_key(&new_key_hex)?;
+                custody.persist(&MasterKeyring::from(new_encryption.clone()))?;
                 *enc = new_encryption;
                 enc.fingerprint()
             }
@@ -695,7 +681,7 @@ mod tests {
     use crate::sync::membership::MembershipAction;
     use crate::sync::test_helpers::{
         append_membership_entry, founder_entry, make_linked_entry, pubkey_hex, MockSyncStorage,
-        TestKeyPersistence,
+        TestCustody,
     };
     use std::sync::RwLock;
 
@@ -837,7 +823,7 @@ mod tests {
 
         assert_eq!(storage.membership_list_count(), 1);
 
-        let key_persistence = TestKeyPersistence::default();
+        let custody = TestCustody::default();
         let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
             [7u8; 32],
         )));
@@ -849,7 +835,7 @@ mod tests {
             &invitee_pk,
             "lib-1",
             &EncryptionService::from_key([7u8; 32]),
-            &key_persistence,
+            &custody,
             &cipher,
         )
         .await
