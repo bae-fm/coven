@@ -37,8 +37,8 @@ features:
       details: 'Devices sync through cloud storage users bring. Nothing to deploy or operate.'
       link: /docs/storage
     - icon:
-          light: /icons/devices-light.svg
-          dark: /icons/devices-dark.svg
+          light: /icons/merge-light.svg
+          dark: /icons/merge-dark.svg
           width: 28
           height: 28
       title: No conflicts
@@ -53,8 +53,8 @@ features:
       details: 'Rows carry files. A file commits in the row''s transaction and streams from the cloud.'
       link: /docs/blobs
     - icon:
-          light: /icons/database-light.svg
-          dark: /icons/database-dark.svg
+          light: /icons/door-light.svg
+          dark: /icons/door-dark.svg
           width: 28
           height: 28
       title: Pick what syncs
