@@ -914,6 +914,70 @@ mod tests {
         assert_eq!(storage.membership_list_count(), 2);
     }
 
+    /// Member removal completes on a home that offers no per-member credential
+    /// revocation — the S3 position, where the bucket key is one static
+    /// credential that cannot be withdrawn from a single member. The home
+    /// reports [`RevokeOutcome::Unsupported`](crate::storage::cloud::RevokeOutcome)
+    /// (`MockSyncStorage` returns it, as [`S3CloudHome`](crate::storage::cloud)
+    /// does), and removal proceeds: the chain Remove and the store-key rotation,
+    /// not the credential withdrawal, are what protect post-removal content, so
+    /// an `Unsupported` outcome must not abort the removal.
+    #[tokio::test]
+    async fn remove_member_completes_when_the_home_reports_no_per_member_revocation() {
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let owner_pk = pubkey_hex(&owner);
+        let member_pk = pubkey_hex(&member);
+        let mut chain = MembershipChain::new();
+
+        let founder = founder_entry(&owner, "0000000001000-0000-f");
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+        let add_member = make_linked_entry(
+            &chain,
+            &owner,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-f",
+        );
+        append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+        publish_membership_head(&storage, &chain, &owner)
+            .await
+            .unwrap();
+
+        let custody = TestCustody::default();
+        let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+            [7u8; 32],
+        )));
+        let hlc = Hlc::new("f".to_string());
+        remove_member(
+            &storage,
+            &storage,
+            &owner,
+            &hlc,
+            &member_pk,
+            "lib-1",
+            &EncryptionService::from_key([7u8; 32]),
+            &custody,
+            &cipher,
+            &crate::sync::cloud_storage::PendingRotation::none(),
+        )
+        .await
+        .expect("remove completes even though the home cannot revoke the credential");
+
+        // The Remove entry was published, so the removed member is no longer a
+        // current member of the reloaded chain.
+        let visible = storage.list_membership_entries().await.unwrap();
+        let reloaded = load_anchored_chain(&storage, &visible, Some(&owner_pk), None)
+            .await
+            .expect("chain reloads after removal");
+        assert!(
+            !reloaded.can_write_now(&member_pk),
+            "the removed member must not read as a current writer",
+        );
+    }
+
     #[tokio::test]
     async fn suppressed_remove_is_detected() {
         let owner = UserKeypair::generate();

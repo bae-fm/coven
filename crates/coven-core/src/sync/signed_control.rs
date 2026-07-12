@@ -245,10 +245,14 @@ fn min_schema_signing_payload(version: u32) -> Vec<u8> {
 /// image and `cursors` bind the metadata, under one signature. A tampered DB no
 /// longer matches `db_hash`; swapped cursors no longer verify.
 ///
-/// `db_hash` is the SHA-256 of the snapshot's **stored** (sealed) bytes — exactly
-/// what the generation's db object holds — so a verifier hashes the bytes it
-/// downloaded and compares, with no decryption needed to detect a substituted
-/// image.
+/// `db_hash` is the SHA-256 of the snapshot's **plaintext** DB image — the bytes
+/// before sealing on publish, and the bytes after opening on bootstrap. Both
+/// ends hash the same plaintext ([`push_snapshot`](crate::sync::snapshot) hashes
+/// the image it is about to seal; bootstrap hashes what it decrypted), so a
+/// verifier that downloads and opens the generation re-hashes the image and
+/// compares to detect a substituted one. The AEAD tag already fails an opened
+/// image that was tampered under a known key; `db_hash` is what binds the image
+/// the verifier opened to the `cursors` signed alongside it.
 ///
 /// `store_id` binds the meta to its store: it is part of the signed payload
 /// but not stored (the reader supplies its own store id to [`Self::verify`]),

@@ -130,6 +130,7 @@ export default defineConfig({
                         { text: 'Bootstrap', link: '/docs/bootstrap' },
                         { text: 'Encryption', link: '/docs/encryption' },
                         { text: 'Keys', link: '/docs/keys' },
+                        { text: 'Threat model', link: '/docs/threat-model' },
                         { text: 'Schema evolution', link: '/docs/schema-evolution' },
                     ],
                 },
