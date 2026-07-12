@@ -41,6 +41,27 @@ pub enum KeyError {
     },
     #[error("invalid host secret name {name:?}: {reason}")]
     InvalidSecretName { name: String, reason: String },
+    /// The OS refused a Keychain data-protection-store operation with
+    /// `errSecMissingEntitlement` (OSStatus -34018). This is not "the binary
+    /// isn't signed" — an ad-hoc or Development-signed binary with no
+    /// `keychain-access-groups` entitlement at all also gets -34018, and a
+    /// signed binary that *does* carry that entitlement with no provisioning
+    /// profile behind it is killed by the kernel at launch instead. The fix is
+    /// a team-prefixed `keychain-access-groups` entitlement backed by an
+    /// embedded provisioning profile — in Xcode, set `DEVELOPMENT_TEAM` so
+    /// automatic signing fetches and embeds one. A build with no team must
+    /// omit the entitlement entirely, which means it also has no access to
+    /// the data-protection keychain and will hit this error on first use.
+    #[error(
+        "the OS refused this keychain operation with errSecMissingEntitlement \
+         (OSStatus -34018): the process has no team-prefixed keychain-access-groups \
+         entitlement backed by an embedded provisioning profile; set DEVELOPMENT_TEAM \
+         so Xcode's automatic signing fetches and embeds one (a keychain-access-groups \
+         entitlement present WITHOUT a provisioning profile is a different failure: the \
+         process is killed by the kernel at launch, not this error) — a build with no \
+         team must omit the entitlement and will hit this same error on first key use"
+    )]
+    MissingKeychainEntitlement,
 }
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.
@@ -422,6 +443,25 @@ mod tests {
         let kp = UserKeypair::generate();
         let result = seal_box_decrypt(&[0u8; 10], &kp.to_x25519_secret_key());
         assert!(result.is_err());
+    }
+
+    /// Pins the actionable content of `MissingKeychainEntitlement`'s message:
+    /// the real OS error and the real fix (a team-prefixed
+    /// `keychain-access-groups` entitlement backed by a provisioning
+    /// profile), not the wrong "must be signed" advice this replaced.
+    #[test]
+    fn missing_keychain_entitlement_message_names_the_real_error_and_fix() {
+        let message = KeyError::MissingKeychainEntitlement.to_string();
+
+        assert!(message.contains("-34018"), "{message}");
+        assert!(message.contains("errSecMissingEntitlement"), "{message}");
+        assert!(message.contains("keychain-access-groups"), "{message}");
+        assert!(message.contains("provisioning profile"), "{message}");
+        assert!(message.contains("DEVELOPMENT_TEAM"), "{message}");
+        assert!(
+            !message.contains("must be signed"),
+            "a bare 'signed binary' is the wrong fix and must not be implied: {message}"
+        );
     }
 
     #[test]

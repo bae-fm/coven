@@ -114,10 +114,34 @@ pub fn ensure_device_identity() -> Result<[u8; SIGN_PUBLICKEYBYTES], KeyError> {
 }
 
 fn map_keyring_error(e: keyring_core::Error) -> KeyError {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    if is_missing_keychain_entitlement(&e) {
+        return KeyError::MissingKeychainEntitlement;
+    }
     match e {
         keyring_core::Error::NoDefaultStore => KeyError::StoreNotInstalled,
         other => KeyError::Persistence(other.to_string()),
     }
+}
+
+/// `errSecMissingEntitlement` (OSStatus -34018) arrives from
+/// `apple-native-keyring-store`'s `protected::decode_error` as
+/// `keyring_core::Error::PlatformFailure`, whose payload is a
+/// `Box<dyn std::error::Error + Send + Sync>` — the OSStatus is not exposed as
+/// a field on `keyring_core::Error` itself. The box's concrete type is always
+/// `security_framework::base::Error` on this path (verified by reading
+/// `apple-native-keyring-store`'s `protected.rs`: every `decode_error` arm
+/// boxes the `security_framework::base::Error` it received), so `downcast_ref`
+/// recovers it and `.code()` reads the real OSStatus — a structured match, not
+/// a string search over the formatted error.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn is_missing_keychain_entitlement(e: &keyring_core::Error) -> bool {
+    let keyring_core::Error::PlatformFailure(inner) = e else {
+        return false;
+    };
+    inner
+        .downcast_ref::<security_framework::base::Error>()
+        .is_some_and(|err| err.code() == -34018)
 }
 
 /// The base account name [`KeyringSlot::DeviceSigningKey`] is stored under —
@@ -595,6 +619,58 @@ pub(crate) mod test_keyring {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Proves `map_keyring_error` — the real chokepoint every keyring
+    /// read/write/delete funnels through — recognizes `errSecMissingEntitlement`
+    /// (OSStatus -34018) when it arrives the way the real protected store
+    /// produces it: a `keyring_core::Error::PlatformFailure` boxing a
+    /// `security_framework::base::Error`. This does not exercise the real
+    /// Keychain — `cargo test` cannot reach it (see the Apple section of
+    /// `site/docs/keys.md`) — it constructs the exact error shape
+    /// `apple-native-keyring-store`'s `protected::decode_error` is documented
+    /// (and read, see `is_missing_keychain_entitlement`'s doc comment) to
+    /// produce for this OSStatus, and checks the mapping honestly, at the seam
+    /// coven controls.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn missing_entitlement_os_status_maps_to_a_typed_actionable_error() {
+        let raw = keyring_core::Error::PlatformFailure(Box::new(
+            security_framework::base::Error::from_code(-34018),
+        ));
+
+        let mapped = map_keyring_error(raw);
+
+        assert!(
+            matches!(mapped, KeyError::MissingKeychainEntitlement),
+            "got {mapped:?}"
+        );
+        let message = mapped.to_string();
+        assert!(message.contains("-34018"), "{message}");
+        assert!(message.contains("errSecMissingEntitlement"), "{message}");
+        assert!(message.contains("keychain-access-groups"), "{message}");
+        assert!(message.contains("provisioning profile"), "{message}");
+        assert!(message.contains("DEVELOPMENT_TEAM"), "{message}");
+        assert!(
+            !message.contains("must be signed"),
+            "a bare 'signed binary' is not the fix and must not be implied: {message}"
+        );
+    }
+
+    /// The match is scoped to exactly -34018, not "any `PlatformFailure`" —
+    /// another OSStatus wrapped the same way must still fall through to the
+    /// generic, stringly-typed `Persistence` error rather than being
+    /// mis-reported as a missing entitlement.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn a_different_platform_failure_os_status_is_not_reported_as_missing_entitlement() {
+        let raw = keyring_core::Error::PlatformFailure(Box::new(
+            security_framework::base::Error::from_code(-25291), // errSecNotAvailable
+        ));
+
+        let mapped = map_keyring_error(raw);
+
+        assert!(matches!(mapped, KeyError::Persistence(_)), "got {mapped:?}");
+    }
 
     #[test]
     fn empty_keyring_entry_is_an_error_not_absence() {

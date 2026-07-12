@@ -260,14 +260,44 @@ silent truncation.
 
 ### Apple
 
-No setup call is required. What is required is a signed binary: a plain
-`cargo test` harness (or any unsigned process) cannot touch the
-data-protection keychain at all — the OS refuses with
-`errSecMissingEntitlement`, because the protected store needs entitlements
-only a signed, provisioned app carries. coven's own tests mock the keyring
-for this reason (`keyring_core::mock::Store`); a real key operation —
-reading, writing, or reprotecting an Apple keyring item — needs a signed
-app, in CI as much as on a device.
+No setup call is required. What is required is a team-prefixed
+`keychain-access-groups` entitlement backed by an embedded provisioning
+profile — signing alone is not enough. In Xcode, the practical way to get
+this is to set `DEVELOPMENT_TEAM` so automatic signing fetches and embeds a
+profile:
+
+```xml
+<!-- YourApp.entitlements -->
+<key>keychain-access-groups</key>
+<array>
+    <string>$(AppIdentifierPrefix)com.yourcompany.yourapp</string>
+</array>
+```
+
+Two distinct failure modes come from getting this wrong, and they look
+nothing alike:
+
+- **The entitlement is missing entirely** — an ad-hoc-signed binary, a plain
+  `cargo test` harness, or an app built with no team. The OS refuses every
+  data-protection-keychain call with `errSecMissingEntitlement` (OSStatus
+  -34018), which coven surfaces as
+  [`KeyError::MissingKeychainEntitlement`](rustdoc:enum:coven::KeyError) —
+  typed, naming the fix above, not a generic string.
+- **The entitlement is present but has no provisioning profile behind
+  it** — e.g. an ad-hoc-signed build that declares `keychain-access-groups`
+  without a team. This is not a keychain error at all: the kernel kills the
+  process at launch (`SIGKILL`, exit 137) before any coven code runs. If a
+  build has no team, the entitlement must be **omitted**, not included —
+  omitting it degrades to the first failure mode (a clear, typed error on
+  first key use) instead of a launch-time kill with no diagnostic.
+
+A plain `cargo test` binary can never carry a provisioning profile (Apple
+doesn't code-sign `cargo test` harnesses), so it can never reach the real
+data-protection keychain — this is a platform limitation, not a coven gap.
+coven's own tests mock the keyring for this reason
+(`keyring_core::mock::Store`); a real key operation — reading, writing, or
+reprotecting an Apple keyring item — needs the entitlement and profile above,
+in CI as much as on a device.
 
 ### Linux
 
