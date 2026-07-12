@@ -2,9 +2,7 @@
 layout: home
 
 hero:
-    name: coven
-    text: Serverless sync
-    tagline: Build private, local-first apps that scale to the cloud with nothing to run
+    text: 'Local-first apps that scale to the cloud with <span style="white-space: nowrap">nothing to run</span>'
     image:
         src: /favicon.svg
         alt: coven
