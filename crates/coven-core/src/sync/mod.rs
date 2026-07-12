@@ -1,4 +1,6 @@
 pub mod apply;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod blob_content_hash_tests;
 // Shared backoff math: the sync loop and blob engine's per-upload wait
 // (`crate::blob::upload`) both count attempts in multiples of one base interval,
 // so the formula is `pub(crate)`.

@@ -934,8 +934,22 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     .await;
     exec(
         &db_owner,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-owner', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
+            crate::blob::content_hash(b"cover-bytes"),
+        ),
+    )
+    .await;
+    // The owner recorded who uploaded the cover when it imported the album; the
+    // snapshot carries this uploader index forward so the restoring device resolves
+    // the blob's prefix from it (there is no listing scan). The cover is keyed under
+    // the owner's own uploader segment on the hashed home.
+    crate::sync::test_helpers::record_blob_uploader(
+        &db_owner,
+        "photos",
+        "photo1",
+        &owner_storage.own_uploader().expect("owner uploader"),
     )
     .await;
 

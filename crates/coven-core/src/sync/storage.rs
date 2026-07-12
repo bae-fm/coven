@@ -266,6 +266,13 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// Download and open a blob into `dest` without holding the whole plaintext in
     /// memory. Same keying, scope, and validation as [`Self::read_blob_range`],
     /// writing exactly `source_size` bytes or failing.
+    ///
+    /// `expected_hash` is the blob's author-signed content hash (see
+    /// [`crate::blob::content_hash`]); the implementation streams the decrypted
+    /// plaintext through an incremental hasher and refuses to commit the file
+    /// unless the whole-blob hash matches — so a tampered or rolled-back object
+    /// never lands in the cache. The cheap `source_size` length check stays as the
+    /// early-out; the hash is the authority.
     async fn read_blob_to_file(
         &self,
         namespace: &str,
@@ -274,22 +281,9 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
+        expected_hash: &str,
         dest: &Path,
     ) -> Result<(), StorageError>;
-
-    /// Find which uploader's prefix holds the blob `{namespace}/*/…/{id}`, by
-    /// listing the namespace and matching the id's shard. The fallback the read
-    /// dispatch uses when the local uploader index has no entry for a blob (a
-    /// re-upload, or a snapshot-backfilled row whose uploader was never recorded):
-    /// the one blob dimension no local state holds is *which* member uploaded it,
-    /// so it is discovered by looking. Returns `None` if no prefix holds it, or for
-    /// a plain-scheme home (which carries no uploader segment).
-    async fn find_blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<Option<String>, StorageError>;
 
     /// The blob-path scheme this home uses. The read dispatch consults it to decide
     /// whether a blob key needs an uploader segment (hashed) or not (plain).
@@ -297,9 +291,10 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
 
     /// This device's own `{uploader}` segment — the hex public key its blob uploads
     /// key under on a hashed home, or `None` on a browsable home (which carries no
-    /// uploader segment). The upload path records it in the local uploader index so
-    /// a later self-read (after a cache eviction) resolves the blob without a
-    /// listing scan.
+    /// uploader segment). The upload path records it in the local uploader index as
+    /// this device's own authoritative uploader for the blobs it introduces, so a
+    /// later self-read (after a cache eviction) resolves the blob straight from that
+    /// index.
     fn own_uploader(&self) -> Option<String>;
 
     /// Upload one snapshot generation's DB image under its publishing device.

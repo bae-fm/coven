@@ -1197,7 +1197,7 @@ mod tests {
         // so plant that Remote state now (a gated `notes` root with the `note_photos`
         // child carrying this id) so the read resolves the blob's locality to Remote
         // and fetches it back out of the home (rather than failing locality resolution).
-        plant_blob_row(&db, "cover-1", true, plaintext.len() as u64).await;
+        plant_blob_row(&db, "cover-1", true, &plaintext).await;
 
         // Read through the handle: a Remote miss resolves back out of the same home.
         let blob = BlobRef {
@@ -1290,6 +1290,11 @@ mod tests {
         test_keyring::install();
         let _guard = test_keyring::SIGNING_KEY_GUARD.lock().unwrap();
 
+        // The hashed (opaque) layout keys a blob under its uploader's signing key,
+        // so the writer storage needs this device's signing identity to seal under
+        // its own prefix — establish it before building that storage.
+        crate::keys::ensure_device_identity().expect("establish this device's signing identity");
+
         let store_id = "ro-encrypted-custody-test";
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
@@ -1336,7 +1341,14 @@ mod tests {
         .await
         .expect("seal and upload the blob");
 
-        plant_blob_row(&db, "cover-1", true, plaintext.len() as u64).await;
+        plant_blob_row(&db, "cover-1", true, &plaintext).await;
+        // The blob was sealed straight into the cloud by the writer storage (no
+        // signed-changeset pull to record its author, and the listing scan is gone),
+        // so record the writer as its uploader — the read resolves this prefix to
+        // fetch it back out of the hashed layout.
+        let uploader = crate::sync::storage::SyncStorage::own_uploader(&writer_storage)
+            .expect("hashed home has an uploader");
+        crate::sync::test_helpers::record_blob_uploader(&db, "images", "cover-1", &uploader).await;
 
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -1523,9 +1535,12 @@ mod tests {
         );
 
         // Plant the Remote locality, then read back: the read resolves the
-        // uploader off the home and decrypts through the same custody-resolved
-        // cipher.
-        plant_blob_row(&db, "cover-1", true, plaintext.len() as u64).await;
+        // uploader off the recorded index and decrypts through the same
+        // custody-resolved cipher. The blob was seeded straight into the home by
+        // the drain (no signed-changeset pull to record its author), so record
+        // this device as its uploader explicitly.
+        plant_blob_row(&db, "cover-1", true, &plaintext).await;
+        crate::sync::test_helpers::record_blob_uploader(&db, "images", "cover-1", &uploader).await;
         let blob = BlobRef {
             namespace: "images".to_string(),
             id: "cover-1".to_string(),

@@ -293,11 +293,25 @@ fn clear_local_only_tables(path: &Path, synced: &[SyncedTable]) -> Result<(), Sn
         .map_err(|(_, e)| SnapshotError::ClearFailed(format!("failed to close snapshot copy: {e}")))
 }
 
+/// The one non-synced table whose rows ride a snapshot. A blob's uploader — which
+/// member's cloud prefix holds it — is a member-global fact identical on every
+/// device (unlike the per-device bookkeeping tables: cursors, outbox, cache
+/// budgets), and it is recorded only from authenticated sources (a signed
+/// changeset's author, or our own upload). A device that bootstraps from a
+/// snapshot never sees the changesets that introduced the store's blobs, so
+/// without this its uploader index would be empty and every blob read would have
+/// no dispatch key — and the fix for the removed listing scan is precisely that
+/// the uploader is authoritative, not searched. Carrying it in the Owner-signed
+/// snapshot gives the bootstrapped device authoritative uploaders. The uploader
+/// pubkeys are public, so nothing sensitive rides along.
+const SNAPSHOT_PRESERVED_NON_SYNCED_TABLE: &str = "blob_uploaders";
+
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
 /// cross devices, then VACUUM to reclaim the freed pages:
 ///
-/// 1. Table-level: DELETE every user table not in `synced` — local-only tables
-///    keep their schema, lose their rows.
+/// 1. Table-level: DELETE every user table not in `synced` (except the
+///    [`SNAPSHOT_PRESERVED_NON_SYNCED_TABLE`]) — local-only tables keep their
+///    schema, lose their rows.
 /// 2. Row-level: within the synced tables, DELETE the rows the gate excludes
 ///    (gated-false roots and their FK-descendants), so a private subtree does
 ///    not ride the snapshot to a restoring peer. This is the same exclusion the
@@ -305,6 +319,9 @@ fn clear_local_only_tables(path: &Path, synced: &[SyncedTable]) -> Result<(), Sn
 fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), SnapshotError> {
     for table in list_user_tables(conn)? {
         if synced.iter().any(|t| t.name() == table) {
+            continue;
+        }
+        if table == SNAPSHOT_PRESERVED_NON_SYNCED_TABLE {
             continue;
         }
         conn.execute_batch(&format!(

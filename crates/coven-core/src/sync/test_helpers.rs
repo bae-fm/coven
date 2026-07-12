@@ -154,13 +154,36 @@ pub fn read_test_db(namespace: &str) -> Database {
 
 /// Plant the backing row [`crate::blob::cache::read_blob`] resolves a blob's locality
 /// from: a gated `notes` root with `shared = remote` and a `note_photos` child whose
-/// id is `blob_id`. `remote = true` ⇒ the blob resolves **Remote** (cache/cloud);
+/// id is `blob_id`, carrying `bytes`'s length and content hash so a download of those
+/// exact bytes verifies. `remote = true` ⇒ the blob resolves **Remote** (cache/cloud);
 /// `remote = false` ⇒ **Local** (and the read then dispatches on the `BlobRef`'s
 /// provenance — external file vs local store). Requires a db whose `note_photos`
 /// carries a blob (e.g. [`read_test_db`] / [`open_test_db_with_blob`]).
-pub async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool, size: u64) {
+pub async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool, bytes: &[u8]) {
+    plant_blob_row_with_size_hash(
+        db,
+        blob_id,
+        remote,
+        bytes.len() as u64,
+        Some(&crate::blob::content_hash(bytes)),
+    )
+    .await;
+}
+
+/// Plant a blob-bearing row with a caller-chosen `size` and `hash`, for the tests
+/// that deliberately declare a size or hash that does not match the bytes served
+/// (the size-mismatch and hash-mismatch refusals) or that never download at all
+/// (a missing-blob row, `hash = None`).
+pub async fn plant_blob_row_with_size_hash(
+    db: &Database,
+    blob_id: &str,
+    remote: bool,
+    size: u64,
+    hash: Option<&str>,
+) {
     let note = format!("note-{blob_id}");
     let blob_id = blob_id.to_string();
+    let hash = hash.map(str::to_string);
     db.call(move |conn| {
         conn.execute(
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
@@ -169,15 +192,27 @@ pub async fn plant_blob_row(db: &Database, blob_id: &str, remote: bool, size: u6
         )
         .map_err(DbError::from)?;
         conn.execute(
-            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-             VALUES (?1, ?2, 'attach', ?3, '0000000001000-0000-dev1', '2026-01-01')",
-            (blob_id.as_str(), note.as_str(), size as i64),
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES (?1, ?2, 'attach', ?3, ?4, '0000000001000-0000-dev1', '2026-01-01')",
+            rusqlite::params![blob_id.as_str(), note.as_str(), size as i64, hash],
         )
         .map_err(DbError::from)?;
         Ok(())
     })
     .await
     .expect("plant blob row");
+}
+
+/// Record `uploader` as the member that uploaded blob `(namespace, id)` — the way
+/// the pull records the signed changeset's author, and the way a snapshot carries
+/// the source's uploader index forward. For tests that seed a Remote blob
+/// directly (no pull, no make_remote) and then read or backfill it, so the read
+/// resolves the blob's prefix from the recorded uploader rather than a listing
+/// scan (which no longer exists).
+pub async fn record_blob_uploader(db: &Database, namespace: &str, id: &str, uploader: &str) {
+    db.record_blob_uploader(namespace, id, uploader)
+        .await
+        .expect("record blob uploader");
 }
 
 /// Flip the gate on a blob's planted `notes` root — `shared = remote` for the row
@@ -243,6 +278,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             note_id TEXT NOT NULL,
             kind TEXT NOT NULL,
             size INTEGER NOT NULL DEFAULT 0,
+            hash TEXT,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             cloud_path TEXT,
@@ -252,6 +288,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             id TEXT PRIMARY KEY,
             note_id TEXT NOT NULL,
             size INTEGER NOT NULL DEFAULT 0,
+            hash TEXT,
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             cloud_path TEXT,
@@ -844,6 +881,35 @@ impl MockSyncStorage {
         changeset_bytes: &[u8],
         schema_version: u32,
     ) {
+        // Sign with the mock's keypair, as production always does: the author is
+        // what the pull records as each introduced blob's uploader (there is no
+        // listing scan), so a blob a signed changeset introduces is downloadable
+        // and later readable. A test that specifically needs an unsigned envelope
+        // (an open-store or unsigned-rejection path) uses
+        // [`store_unsigned_changeset`].
+        let packed = envelope::pack_signed(
+            device_id,
+            seq,
+            schema_version,
+            "",
+            "2026-02-10T00:00:00Z",
+            &self.keypair,
+            None,
+            changeset_bytes,
+        );
+        self.store_packed(device_id, seq, packed);
+    }
+
+    /// Store an unsigned changeset envelope (`author_pubkey`/`signature` both
+    /// `None`), for tests that exercise the open-store unsigned path or assert the
+    /// pull rejects an unsigned changeset once a membership chain exists.
+    pub fn store_unsigned_changeset(
+        &self,
+        device_id: &str,
+        seq: u64,
+        changeset_bytes: &[u8],
+        schema_version: u32,
+    ) {
         let env = ChangesetEnvelope {
             device_id: device_id.to_string(),
             seq,
@@ -1124,6 +1190,7 @@ impl SyncStorage for MockSyncStorage {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
+        expected_hash: &str,
         dest: &std::path::Path,
     ) -> Result<(), StorageError> {
         self.blob_read_to_file_count
@@ -1140,25 +1207,19 @@ impl SyncStorage for MockSyncStorage {
                 source_size,
             )
             .await?;
+        // Verify the content hash before committing the file, the same authority
+        // the real `CloudSyncStorage` streaming download enforces — so a
+        // mock-served blob that does not match its row's hash is refused, not
+        // cached.
+        let actual = crate::blob::content_hash(&bytes);
+        if actual != expected_hash {
+            return Err(StorageError::Storage(format!(
+                "blob {namespace}/{id} content hash mismatch: expected {expected_hash}, got {actual}"
+            )));
+        }
         crate::local_blob::write_atomic(dest, &bytes)
             .await
             .map_err(StorageError::Storage)
-    }
-
-    async fn find_blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<Option<String>, StorageError> {
-        // The mock stores blobs flat, so "which uploader holds it" is answered by
-        // presence: if the blob exists, it is ours (the mock is a single writer).
-        let key = blob_key(namespace, id, cloud_path);
-        if self.objects.lock().unwrap().contains_key(&key) {
-            Ok(Some(hex::encode(self.keypair.public_key())))
-        } else {
-            Ok(None)
-        }
     }
 
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {

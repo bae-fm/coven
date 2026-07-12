@@ -181,15 +181,17 @@ async fn run_cycle(
     .expect("cycle")
 }
 
-/// Insert the gated note + its blob-bearing photo row, `shared` (Remote) or not.
-/// The two seeders below differ only in this flag and where the blob's bytes live.
+/// Insert the gated note + its blob-bearing photo row, `shared` (Remote) or not,
+/// carrying `bytes`'s length and content hash so a peer that later downloads the
+/// blob verifies it. The two seeders below differ only in this flag and where the
+/// blob's bytes live.
 async fn seed_release_rows(
     db: &Database,
     note_id: &str,
     photo_id: &str,
     cloud_path: &str,
     shared: u8,
-    size: usize,
+    bytes: &[u8],
 ) {
     exec(
         db,
@@ -202,8 +204,10 @@ async fn seed_release_rows(
     exec(
         db,
         &format!(
-            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
-             VALUES ('{photo_id}', '{note_id}', 'image', {size}, '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('{photo_id}', '{note_id}', 'image', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')",
+            bytes.len(),
+            crate::blob::content_hash(bytes),
         ),
     )
     .await;
@@ -219,7 +223,7 @@ async fn seed_local_release(
     cloud_path: &str,
     bytes: &[u8],
 ) -> PathBuf {
-    seed_release_rows(db, note_id, photo_id, cloud_path, 0, bytes.len()).await;
+    seed_release_rows(db, note_id, photo_id, cloud_path, 0, bytes).await;
     std::fs::create_dir_all(user_dir).unwrap();
     let src = user_dir.join(format!("{photo_id}.jpg"));
     std::fs::write(&src, bytes).unwrap();
@@ -243,8 +247,10 @@ async fn add_local_photo(
     exec(
         db,
         &format!(
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-             VALUES ('{photo_id}', '{note_id}', 'image', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')"
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('{photo_id}', '{note_id}', 'image', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{cloud_path}')",
+            bytes.len(),
+            crate::blob::content_hash(bytes),
         ),
     )
     .await;
@@ -266,7 +272,7 @@ async fn seed_remote_release(
     cloud_path: &str,
     bytes: &[u8],
 ) {
-    seed_release_rows(db, note_id, photo_id, cloud_path, 1, bytes.len()).await;
+    seed_release_rows(db, note_id, photo_id, cloud_path, 1, bytes).await;
     storage
         .put_blob(
             "photos",
@@ -277,6 +283,13 @@ async fn seed_remote_release(
         )
         .await
         .expect("seed cloud blob");
+    // Record who uploaded it — the pull that introduced the row would record the
+    // changeset author; here the row is seeded directly, so record the mock's
+    // uploader so the read resolves the blob's prefix without a listing scan.
+    let uploader = storage.own_uploader().expect("mock uploader");
+    db.record_blob_uploader("photos", photo_id, &uploader)
+        .await
+        .expect("record seeded blob uploader");
 }
 
 async fn shared_flag(db: &Database, note_id: &str) -> i64 {
@@ -683,8 +696,11 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
-         VALUES ('coveraaa', 'n1', 13, '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+        &format!(
+            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+            crate::blob::content_hash(&cover),
+        ),
     )
     .await;
     local_files::store(&lib_a, "covers", "coveraaa", &cover)
@@ -846,8 +862,11 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
-         VALUES ('coverhost', 'n-host', 15, '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
+        &format!(
+            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
+            crate::blob::content_hash(&cover),
+        ),
     )
     .await;
     local_files::store(&lib_a, "covers", "coverhost", &cover)
@@ -969,9 +988,10 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         exec(
             &db,
             &format!(
-                "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
-                 VALUES ('{cover}', '{note}', {}, '0000000001000-0000-A', '2026-01-01', '{path}')",
-                bytes.len()
+                "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
+                 VALUES ('{cover}', '{note}', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{path}')",
+                bytes.len(),
+                crate::blob::content_hash(bytes),
             ),
         )
         .await;
@@ -1184,8 +1204,11 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
-         VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+            crate::blob::content_hash(&cover),
+        ),
     )
     .await;
     local_files::store(&lib_a, "covers", "coverrrr", &cover)

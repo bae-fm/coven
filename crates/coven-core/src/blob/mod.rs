@@ -103,6 +103,51 @@ pub mod local_files;
 pub mod transition;
 pub mod upload;
 
+use sha2::{Digest, Sha256};
+
+/// The content hash a blob-bearing row carries: the lowercase-hex SHA-256 of the
+/// blob's plaintext bytes, computed at import and stored in the row's blob columns
+/// alongside the declared size. The row is carried in a signed changeset (and in a
+/// signed snapshot), so this hash is signed by the row's author — that is what
+/// makes it authoritative: on download coven hashes the decrypted plaintext and
+/// requires equality with the row's hash, so the bytes are pinned by the author,
+/// not by the cloud key they happened to arrive under. A host computes this over a
+/// blob's plaintext at import and writes it into the row's declared hash column,
+/// the same way it writes the plaintext length into the size column.
+pub fn content_hash(plaintext: &[u8]) -> String {
+    hex::encode(Sha256::digest(plaintext))
+}
+
+/// An incremental SHA-256 over a blob's plaintext, so the streaming download path
+/// verifies a large blob's content hash without ever holding the whole plaintext
+/// in memory — feed each decrypted chunk to [`update`](Self::update) as it is read,
+/// then [`verify`](Self::verify) against the row's hash before the bytes are
+/// committed to the cache. The hex-encoded digest matches [`content_hash`] over the
+/// same bytes.
+pub struct ContentHasher(Sha256);
+
+impl ContentHasher {
+    pub fn new() -> Self {
+        ContentHasher(Sha256::new())
+    }
+
+    /// Fold the next plaintext chunk into the running digest.
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.0.update(chunk);
+    }
+
+    /// The lowercase-hex digest of everything fed so far.
+    pub fn finish(self) -> String {
+        hex::encode(self.0.finalize())
+    }
+}
+
+impl Default for ContentHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // The cache's own tests: real `Database` + `MockSyncStorage` over a temp store
 // dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
 // Native-only because they drive a real temp directory on the filesystem; the

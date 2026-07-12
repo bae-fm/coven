@@ -944,6 +944,7 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 blob_id TEXT,
                 size INTEGER NOT NULL,
+                hash TEXT,
                 _updated_at TEXT NOT NULL
             ) STRICT;",
         )

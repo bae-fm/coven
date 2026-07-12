@@ -963,8 +963,11 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
         &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-             VALUES ('p1ab', 'n1', 'cover', 10, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('p1ab', 'n1', 'cover', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"PHOTOBYTES"),
+            ),
         ],
     )
     .await;
@@ -1021,8 +1024,11 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     store_local(&ld1, "newaaaa", b"NEW-BLOB").await;
     let outgoing = capture_bytes(
         &db1,
-        &["UPDATE note_photos SET cloud_path = 'newaaaa', _updated_at = '0000000002000-0000-dev1' \
-         WHERE id = 'p-row'"],
+        &[&format!(
+            "UPDATE note_photos SET cloud_path = 'newaaaa', hash = '{}', \
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'p-row'",
+            crate::blob::content_hash(b"NEW-BLOB"),
+        )],
     )
     .await;
 
@@ -1608,8 +1614,11 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
-         VALUES ('p1cover', 'n1', 'cover', 8, 'n1/cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
+                 VALUES ('p1cover', 'n1', 'cover', 8, '{}', 'n1/cover.jpg', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(plaintext),
+            ),
         ],
     )
     .await;
@@ -1722,8 +1731,11 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('p1cover', 'n1', 'cover', 15, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('p1cover', 'n1', 'cover', 15, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(plaintext),
+            ),
         ],
     )
     .await;
@@ -1941,8 +1953,12 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-             VALUES ('pdel1234', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('pdel1234', 'n1', 'cover', {}, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                b"COVERBYTES".len(),
+                crate::blob::content_hash(b"COVERBYTES"),
+            ),
         ],
     )
     .await;
@@ -1991,10 +2007,16 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'SharedBlob', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
-             VALUES ('photo-a', 'n1', 'cover', 12, 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, size, cloud_path, _updated_at, created_at) \
-             VALUES ('photo-b', 'n1', 'cover', 12, 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
+                 VALUES ('photo-a', 'n1', 'cover', 12, '{h}', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
+                h = crate::blob::content_hash(b"SHARED-BYTES"),
+            ),
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
+                 VALUES ('photo-b', 'n1', 'cover', 12, '{h}', 'sharedblob', '0000000001000-0000-dev1', '2026-01-01')",
+                h = crate::blob::content_hash(b"SHARED-BYTES"),
+            ),
         ],
     )
     .await;
@@ -2031,9 +2053,12 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         .expect("plant replacement blob");
     let cs2 = capture_bytes(
         &db1,
-        &["UPDATE note_photos \
-             SET cloud_path = 'newblob', size = 9, _updated_at = '0000000002000-0000-dev1' \
-             WHERE id = 'photo-a'"],
+        &[&format!(
+            "UPDATE note_photos \
+             SET cloud_path = 'newblob', size = 9, hash = '{}', \
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'photo-a'",
+            crate::blob::content_hash(b"NEW-BYTES"),
+        )],
     )
     .await;
     storage.store_changeset("dev1", 2, &cs2, SCHEMA_VERSION);
@@ -2084,7 +2109,7 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
         ],
     )
     .await;
-    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    storage.store_unsigned_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
     let db2 = open_test_db();
     let (updated, result) =
@@ -3249,8 +3274,11 @@ mod blob_path_traversal {
             &[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-                "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-                 VALUES ('p1ab', 'n1', 'attach', 10, '0000000001000-0000-dev1', '2026-01-01')",
+                &format!(
+                    "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                     VALUES ('p1ab', 'n1', 'attach', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                    crate::blob::content_hash(b"PHOTOBYTES"),
+                ),
             ],
         )
         .await;

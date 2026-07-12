@@ -173,6 +173,29 @@ pub enum BlobCacheError {
         expected: u64,
         actual: u64,
     },
+    /// A Remote blob fetched from the cloud decrypted to plaintext whose content
+    /// hash disagrees with the author-signed hash on the blob's row. The bytes are
+    /// not the ones the row's author pinned — a tampered object, a rolled-back
+    /// prior version, or a same-size object planted under a different uploader's
+    /// prefix — so they are refused before caching or returning. The row's hash is
+    /// the authority; a mismatch is tamper, never a cache miss to refetch.
+    CloudHashMismatch {
+        namespace: String,
+        id: String,
+        expected: String,
+        actual: String,
+    },
+    /// A blob's row carries no content hash, so a whole-blob download cannot be
+    /// verified against the author's signed value. The hash is a required column,
+    /// so an absent one is bad data (a row that predates the field, or a NULL where
+    /// a hash must be), surfaced rather than serving unverified bytes.
+    MissingContentHash { namespace: String, id: String },
+    /// A Remote blob has no recorded uploader — the member whose cloud prefix holds
+    /// it. The uploader is authoritative state recorded from the signed changeset
+    /// that introduced the blob (or carried in the signed snapshot a device
+    /// bootstraps from), so an absent one is a missing dispatch key surfaced loud,
+    /// never resolved by scanning an untrusted listing.
+    UploaderUnresolved { namespace: String, id: String },
 }
 
 impl std::fmt::Display for BlobCacheError {
@@ -223,6 +246,23 @@ impl std::fmt::Display for BlobCacheError {
             } => write!(
                 f,
                 "cloud blob {namespace}/{id} is {actual} bytes, expected {expected}"
+            ),
+            BlobCacheError::CloudHashMismatch {
+                namespace,
+                id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "cloud blob {namespace}/{id} content hash is {actual}, expected {expected}"
+            ),
+            BlobCacheError::MissingContentHash { namespace, id } => write!(
+                f,
+                "blob {namespace}/{id} has no content hash to verify its bytes against"
+            ),
+            BlobCacheError::UploaderUnresolved { namespace, id } => write!(
+                f,
+                "blob {namespace}/{id} has no recorded uploader to resolve its cloud prefix"
             ),
         }
     }
@@ -523,18 +563,30 @@ async fn read_remote_whole(
     // connected — there is no storage to fetch it from, so surface that fault.
     let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
+    let expected_hash = expected_blob_hash(db, blob).await?;
     let bytes = fetch_from_cloud(db, storage, blob).await?;
-    // Verify the fetched plaintext against the row's declared size before caching or
-    // returning it — the same check the cache-hit ([`cached_blob_path_with_size`]) and
-    // file-download ([`SyncStorage::read_blob_to_file`]) paths run. A wrong-length cloud
-    // object caches nothing here, so it can't poison `cache/<id>` into a read that warns,
-    // refetches, and re-poisons the same object on every later read.
+    // Verify the fetched plaintext against the row before caching or returning it —
+    // the cheap length check first (the same one the cache-hit
+    // [`cached_blob_path_with_size`] path runs), then the author-signed content hash,
+    // which is the authority: it refuses a tampered object, a rolled-back prior
+    // version, or a same-size object planted under another uploader's prefix. A
+    // mismatch caches nothing here, so it can't poison `cache/<id>` into a later
+    // cache hit (which checks only length) serving the wrong bytes.
     if bytes.len() as u64 != expected_size {
         return Err(BlobCacheError::CloudSizeMismatch {
             namespace: blob.namespace.clone(),
             id: blob.id.clone(),
             expected: expected_size,
             actual: bytes.len() as u64,
+        });
+    }
+    let actual_hash = crate::blob::content_hash(&bytes);
+    if actual_hash != expected_hash {
+        return Err(BlobCacheError::CloudHashMismatch {
+            namespace: blob.namespace.clone(),
+            id: blob.id.clone(),
+            expected: expected_hash,
+            actual: actual_hash,
         });
     }
     crate::local_blob::write_atomic(&cache, &bytes)
@@ -745,8 +797,9 @@ pub(crate) async fn materialize_remote_blob_to_file(
 
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     validate_blob_ref(blob)?;
+    let expected_hash = expected_blob_hash(db, blob).await?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
-    match storage
+    storage
         .read_blob_to_file(
             &blob.namespace,
             uploader.as_deref(),
@@ -754,27 +807,10 @@ pub(crate) async fn materialize_remote_blob_to_file(
             blob.scope.clone(),
             blob.cloud_path.as_deref(),
             expected_size,
+            &expected_hash,
             dest,
         )
-        .await
-    {
-        Ok(()) => {}
-        Err(StorageError::NotFound(_)) if uploader.is_some() => {
-            let fresh = reresolve_after_stale_uploader(db, storage, blob).await?;
-            storage
-                .read_blob_to_file(
-                    &blob.namespace,
-                    fresh.as_deref(),
-                    &blob.id,
-                    blob.scope.clone(),
-                    blob.cloud_path.as_deref(),
-                    expected_size,
-                    dest,
-                )
-                .await?;
-        }
-        Err(e) => return Err(BlobCacheError::Storage(e)),
-    }
+        .await?;
     Ok(expected_size)
 }
 
@@ -1227,7 +1263,7 @@ pub(crate) async fn fetch_from_cloud(
 ) -> Result<Vec<u8>, BlobCacheError> {
     validate_blob_ref(blob)?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
-    match storage
+    storage
         .get_blob(
             &blob.namespace,
             uploader.as_deref(),
@@ -1236,70 +1272,17 @@ pub(crate) async fn fetch_from_cloud(
             blob.cloud_path.as_deref(),
         )
         .await
-    {
-        Ok(bytes) => Ok(bytes),
-        Err(StorageError::NotFound(_)) if uploader.is_some() => {
-            let fresh = reresolve_after_stale_uploader(db, storage, blob).await?;
-            storage
-                .get_blob(
-                    &blob.namespace,
-                    fresh.as_deref(),
-                    &blob.id,
-                    blob.scope.clone(),
-                    blob.cloud_path.as_deref(),
-                )
-                .await
-                .map_err(BlobCacheError::Storage)
-        }
-        Err(e) => Err(BlobCacheError::Storage(e)),
-    }
-}
-
-/// The uploader recorded (or last scanned) for `blob` no longer holds it — its copy
-/// was legitimately reclaimed while another member's copy of the same
-/// `(namespace, id)` may survive. Forget the stale record and resolve again, so the
-/// listing scan finds and records a surviving copy. Only a `NotFound` at the read
-/// reaches here: a transport error or a decrypt failure is not evidence the record
-/// is stale (AAD binds the key, so a decoy at the right key fails decryption — an
-/// integrity signal, not a miss) and those still fail loud at the call site.
-async fn reresolve_after_stale_uploader(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    blob: &BlobRef,
-) -> Result<Option<String>, BlobCacheError> {
-    // A read-only handle cannot forget the stale record (its connection refuses
-    // writes) — and re-running `resolve_blob_uploader` would just read the same
-    // stale record back. Bypass it: scan the cloud listing directly for a surviving
-    // copy, without persisting what it finds. A writer forgets the stale record so
-    // the next read skips the scan; a reader re-scans each time, which is correct if
-    // slower.
-    if db.is_read_only() {
-        tracing::debug!(
-            namespace = %blob.namespace,
-            id = %blob.id,
-            "read-only handle: recorded blob uploader is stale; rescanning without forgetting it"
-        );
-        return scan_and_maybe_record(db, storage, blob).await;
-    }
-    db.forget_blob_uploader(&blob.namespace, &blob.id)
-        .await
-        .map_err(|e| BlobCacheError::Io(e.0))?;
-    tracing::debug!(
-        namespace = %blob.namespace,
-        id = %blob.id,
-        "recorded blob uploader no longer holds the blob; forgot it and rescanning for a surviving copy"
-    );
-    resolve_blob_uploader(db, storage, blob).await
+        .map_err(BlobCacheError::Storage)
 }
 
 /// Resolve which uploader's prefix holds `blob`, for a read. Dispatches on the
-/// local uploader index — the authoritative record written atomically at pull
-/// (the changeset author) and at our own enqueue (ourselves). On a miss — the one
-/// blob dimension no local state holds, *which* member uploaded it — it discovers
-/// the uploader by listing the namespace ([`SyncStorage::find_blob_uploader`]) and
-/// records what it found so the next read skips the scan (recording an observed
-/// fact, not repairing wrong state). `None` means a browsable/plain home, whose
-/// keys carry no uploader segment.
+/// local uploader index — the authoritative record written atomically at pull (the
+/// changeset author that introduced the blob), at our own enqueue (ourselves), and
+/// carried into a signed snapshot so a bootstrapped device inherits it. The
+/// uploader is authoritative state tied to the blob's row, never blind-searched:
+/// a miss is a missing dispatch key surfaced loud, not a cue to scan an untrusted
+/// listing (which a member could seed with a same-size decoy under its own prefix).
+/// `None` means a browsable/plain home, whose keys carry no uploader segment.
 pub(crate) async fn resolve_blob_uploader(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -1311,63 +1294,30 @@ pub(crate) async fn resolve_blob_uploader(
     ) {
         return Ok(None);
     }
-    if let Some(uploader) = db
+    match db
         .blob_uploader(&blob.namespace, &blob.id)
         .await
         .map_err(|e| BlobCacheError::Io(e.0))?
     {
-        return Ok(Some(uploader));
-    }
-    scan_and_maybe_record(db, storage, blob).await
-}
-
-/// Discover which uploader's prefix holds `blob` by listing the namespace, and —
-/// unless this is a read-only handle — record it so the next read skips the scan.
-/// A read-only handle cannot write the record (its connection refuses it), so it
-/// resolves the same value but re-scans on the next read; the uploader index is a
-/// scan-avoidance cache, not read correctness. A namespace with no copy under any
-/// prefix is a genuine `NotFound`.
-async fn scan_and_maybe_record(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    blob: &BlobRef,
-) -> Result<Option<String>, BlobCacheError> {
-    match storage
-        .find_blob_uploader(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
-        .await
-        .map_err(BlobCacheError::Storage)?
-    {
-        Some(uploader) => {
-            if db.is_read_only() {
-                tracing::debug!(
-                    namespace = %blob.namespace,
-                    id = %blob.id,
-                    %uploader,
-                    "read-only handle: resolved blob uploader by listing scan; not recording it"
-                );
-            } else {
-                db.record_blob_uploader(&blob.namespace, &blob.id, &uploader)
-                    .await
-                    .map_err(|e| BlobCacheError::Io(e.0))?;
-                tracing::debug!(
-                    namespace = %blob.namespace,
-                    id = %blob.id,
-                    %uploader,
-                    "resolved blob uploader by listing scan; recorded it so later reads skip the scan"
-                );
-            }
-            Ok(Some(uploader))
-        }
-        None => Err(BlobCacheError::Storage(StorageError::NotFound(format!(
-            "no uploader prefix holds blob {}/{}",
-            blob.namespace, blob.id
-        )))),
+        Some(uploader) => Ok(Some(uploader)),
+        None => Err(BlobCacheError::UploaderUnresolved {
+            namespace: blob.namespace.clone(),
+            id: blob.id.clone(),
+        }),
     }
 }
 
 /// Resolve a blob's scope to its encryption key and download + decrypt a plaintext
 /// byte range from the cloud. Shared validation with [`fetch_from_cloud`]; unlike
 /// that whole-blob helper, this never writes cache files.
+///
+/// A range read cannot verify the blob's whole-content hash (it holds only a
+/// slice), so it relies on the per-chunk AEAD, which authenticates each chunk's
+/// bytes under the store key and its position — the existing integrity guarantee
+/// for partial reads. The whole-blob hash is verified by the whole-file paths
+/// ([`read_remote_whole`] and [`SyncStorage::read_blob_to_file`]) before a blob is
+/// cached, so a later ranged read serves a cache file that was already
+/// hash-verified when it landed.
 async fn fetch_range_from_cloud(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -1378,7 +1328,7 @@ async fn fetch_range_from_cloud(
 ) -> Result<Vec<u8>, BlobCacheError> {
     validate_blob_ref(blob)?;
     let uploader = resolve_blob_uploader(db, storage, blob).await?;
-    match storage
+    storage
         .read_blob_range(
             &blob.namespace,
             uploader.as_deref(),
@@ -1390,26 +1340,7 @@ async fn fetch_range_from_cloud(
             len,
         )
         .await
-    {
-        Ok(bytes) => Ok(bytes),
-        Err(StorageError::NotFound(_)) if uploader.is_some() => {
-            let fresh = reresolve_after_stale_uploader(db, storage, blob).await?;
-            storage
-                .read_blob_range(
-                    &blob.namespace,
-                    fresh.as_deref(),
-                    &blob.id,
-                    blob.scope.clone(),
-                    blob.cloud_path.as_deref(),
-                    source_size,
-                    offset,
-                    len,
-                )
-                .await
-                .map_err(BlobCacheError::Storage)
-        }
-        Err(e) => Err(BlobCacheError::Storage(e)),
-    }
+        .map_err(BlobCacheError::Storage)
 }
 
 /// Refuse a blob whose namespace/id is not a safe path token or whose
@@ -1438,6 +1369,30 @@ pub(crate) async fn expected_blob_size(
     .await
     .map_err(BlobCacheError::Metadata)?
     .ok_or_else(|| BlobCacheError::LocalityUnresolved {
+        id: blob.id.clone(),
+    })
+}
+
+/// The author-signed content hash from the row that owns `blob` — the value a
+/// whole-blob download verifies the decrypted plaintext against. An absent hash
+/// (a row with no such column value) is refused rather than serving unverified
+/// bytes: the hash is the authority that pins the bytes to the row's author.
+pub(crate) async fn expected_blob_hash(
+    db: &Database,
+    blob: &BlobRef,
+) -> Result<String, BlobCacheError> {
+    let decls = db.blob_decls();
+    let namespace = blob.namespace.clone();
+    let id = blob.id.clone();
+    db.call(move |conn| {
+        decls
+            .hash_for_blob_in_namespace(conn, &namespace, &id)
+            .map_err(|e| DbError(e.to_string()))
+    })
+    .await
+    .map_err(BlobCacheError::Metadata)?
+    .ok_or_else(|| BlobCacheError::MissingContentHash {
+        namespace: blob.namespace.clone(),
         id: blob.id.clone(),
     })
 }

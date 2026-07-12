@@ -645,6 +645,7 @@ impl SyncStorage for HostWriteInjector {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
+        expected_hash: &str,
         dest: &std::path::Path,
     ) -> Result<(), StorageError> {
         self.inner
@@ -655,18 +656,9 @@ impl SyncStorage for HostWriteInjector {
                 scope,
                 cloud_path,
                 source_size,
+                expected_hash,
                 dest,
             )
-            .await
-    }
-    async fn find_blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<Option<String>, StorageError> {
-        self.inner
-            .find_blob_uploader(namespace, id, cloud_path)
             .await
     }
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {

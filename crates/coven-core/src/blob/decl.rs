@@ -87,6 +87,11 @@ impl From<rusqlite::Error> for BlobDeclError {
     }
 }
 
+/// A blob a changeset row references, paired with the row's declared plaintext
+/// size and content hash when those columns rode with the change — what the eager
+/// pull needs to download and verify a blob before its row is applied.
+pub type ChangesetBlobDownload = (BlobRef, Option<u64>, Option<String>);
+
 /// A blob-bearing table's columns resolved to indices in the live schema (the
 /// same order a changeset reports its columns, so an index reads either source).
 struct TableBlob {
@@ -97,12 +102,16 @@ struct TableBlob {
     id_col: usize,
     /// Index of the plaintext-size column.
     size_col: usize,
+    /// Index of the content-hash column.
+    hash_col: usize,
     /// Name of the blob-id column. The index reads a row top-to-bottom; the name
     /// keys a lookup the other way ([`BlobDecls::row_for_blob_in_namespace`]: which row
     /// carries a given blob id), so both directions resolve off the same declaration.
     id_col_name: String,
     /// Name of the plaintext-size column.
     size_col_name: String,
+    /// Name of the content-hash column.
+    hash_col_name: String,
     /// Index of the readable cloud-path column, if declared.
     cloud_path_col: Option<usize>,
     /// Name of the readable cloud-path column, if declared.
@@ -159,6 +168,15 @@ impl TableBlob {
                 value,
             }
         })?))
+    }
+
+    /// The blob's content hash as carried in a changeset row, or `None` when the
+    /// hash column is absent from the row (an update that did not touch it). Read
+    /// off the changeset row the same way the size is, so the eager pull can carry
+    /// the author-signed hash forward to the download's verification without
+    /// querying DB state that does not exist locally yet.
+    fn hash_from_change(&self, change: &RowChange) -> Option<String> {
+        change.col(self.hash_col).map(str::to_string)
     }
 
     /// Build the [`BlobRef`] for a live `SELECT *` row of this table, or `None` when
@@ -226,6 +244,7 @@ impl BlobDecls {
 
             let id_col = index_of(&decl.id_column)?;
             let size_col = index_of(&decl.size_column)?;
+            let hash_col = index_of(&decl.hash_column)?;
             let cloud_path_col = match &decl.cloud_path_column {
                 Some(c) => Some(index_of(c)?),
                 None => None,
@@ -239,8 +258,10 @@ impl BlobDecls {
                     fill: decl.fill,
                     id_col,
                     size_col,
+                    hash_col,
                     id_col_name: decl.id_column.clone(),
                     size_col_name: decl.size_column.clone(),
+                    hash_col_name: decl.hash_column.clone(),
                     cloud_path_col,
                     cloud_path_col_name: decl.cloud_path_column.clone(),
                     scope: decl.scope.clone(),
@@ -262,14 +283,14 @@ impl BlobDecls {
     }
 
     /// The blob a changeset row references plus the row's declared plaintext size
-    /// when that size is present in the changeset row.
+    /// and content hash when those are present in the changeset row.
     /// Used by eager pull before the row is applied, so the downloader can stream
-    /// the cloud object into the cache and verify the exact length without querying
-    /// DB state that does not exist locally yet.
-    pub fn ref_and_size_from_change(
+    /// the cloud object into the cache and verify the exact length and hash without
+    /// querying DB state that does not exist locally yet.
+    pub fn ref_size_hash_from_change(
         &self,
         change: &RowChange,
-    ) -> Result<Option<(BlobRef, Option<u64>)>, BlobDeclError> {
+    ) -> Result<Option<ChangesetBlobDownload>, BlobDeclError> {
         let Some(tb) = self.tables.get(&change.table) else {
             return Ok(None);
         };
@@ -277,7 +298,8 @@ impl BlobDecls {
             return Ok(None);
         };
         let size = tb.size_from_change(&change.table, change)?;
-        Ok(Some((blob, size)))
+        let hash = tb.hash_from_change(change);
+        Ok(Some((blob, size, hash)))
     }
 
     /// Every blob the rows currently in `conn` reference — the snapshot-bootstrap
@@ -371,6 +393,22 @@ impl BlobDecls {
         pk_carrying_blob_size(conn, table, tb, blob_id)
     }
 
+    /// The author-signed content hash from the row carrying `blob_id` in
+    /// `namespace` — the value a whole-blob download verifies the decrypted
+    /// plaintext against. `None` when no declared table owns `namespace`, that
+    /// table has no row with the id, or the row's hash column is NULL.
+    pub fn hash_for_blob_in_namespace(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<Option<String>, BlobDeclError> {
+        let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
+            return Ok(None);
+        };
+        pk_carrying_blob_hash(conn, table, tb, blob_id)
+    }
+
     /// The `(table, primary key)` of a live row whose declared blob resolves to
     /// `cloud_key`. Hashed homes encode namespace + blob id in the key itself;
     /// readable homes encode namespace + declared `cloud_path`. This is the GC-side
@@ -449,6 +487,24 @@ fn pk_carrying_blob_size(
         })
     })
     .transpose()
+}
+
+fn pk_carrying_blob_hash(
+    conn: &Connection,
+    table: &str,
+    tb: &TableBlob,
+    blob_id: &str,
+) -> Result<Option<String>, BlobDeclError> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE {} = ?1",
+        quote_ident(&tb.hash_col_name),
+        quote_ident(table),
+        quote_ident(&tb.id_col_name),
+    );
+    conn.query_row(&sql, [blob_id], |row| row.get::<_, Option<String>>(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(BlobDeclError::from)
 }
 
 fn pk_carrying_cloud_path(

@@ -101,10 +101,15 @@ macro_rules! coven_tables {
             "
     namespace TEXT NOT NULL,
     blob_id   TEXT NOT NULL,
-    -- Hex public key of the device that uploaded this blob (its cloud key sits
-    -- under `{namespace}/{uploader}/…`). Recorded at pull (the changeset author),
-    -- at our own enqueue (ourselves), or discovered by a listing scan on a read
-    -- miss. Device-local bookkeeping; this table does not sync.
+    -- Hex public key of the member that uploaded this blob (its cloud key sits
+    -- under `{namespace}/{uploader}/…`). Recorded from an authenticated source
+    -- only: at pull (the signed changeset's author, who uploads the blobs its rows
+    -- introduce) and at our own enqueue (ourselves). Never discovered by scanning
+    -- an untrusted listing — a missing record is a fail-loud dispatch error, not a
+    -- cue to search. Not a synced table, but preserved into a snapshot (unlike the
+    -- per-device bookkeeping tables) because a blob's uploader is a member-global
+    -- fact the same for every device, so a snapshot-bootstrapped device inherits
+    -- authoritative uploaders from the Owner-signed snapshot rather than scanning.
     uploader  TEXT NOT NULL,
     PRIMARY KEY (namespace, blob_id)
 "

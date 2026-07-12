@@ -1271,10 +1271,24 @@ fn advance_max_updated_at(
 pub(crate) struct BlobDownload {
     blob: crate::blob::BlobRef,
     size: BlobDownloadSize,
+    hash: BlobDownloadHash,
 }
 
+/// Where the download reads a blob's declared plaintext size and content hash
+/// from. Both ride with the changeset row when the row change carries them
+/// (`Declared`); an update that changed the blob id but not size/hash omits those
+/// columns, so the pre-apply DB row is the lookup key for the unchanged value
+/// (`ExistingRow`); a snapshot backfill reads both from the freshly bootstrapped
+/// DB row (`InstalledRow`).
 enum BlobDownloadSize {
     Declared(u64),
+    ExistingRow(crate::blob::BlobRef),
+    InstalledRow,
+    Missing,
+}
+
+enum BlobDownloadHash {
+    Declared(String),
     ExistingRow(crate::blob::BlobRef),
     InstalledRow,
     Missing,
@@ -1284,20 +1298,27 @@ impl BlobDownload {
     fn from_change(
         blob: crate::blob::BlobRef,
         source_size: Option<u64>,
-        size_lookup_blob: Option<crate::blob::BlobRef>,
+        source_hash: Option<String>,
+        lookup_blob: Option<crate::blob::BlobRef>,
     ) -> Self {
-        let size = match (source_size, size_lookup_blob) {
+        let size = match (source_size, lookup_blob.clone()) {
             (Some(size), _) => BlobDownloadSize::Declared(size),
             (None, Some(blob)) => BlobDownloadSize::ExistingRow(blob),
             (None, None) => BlobDownloadSize::Missing,
         };
-        Self { blob, size }
+        let hash = match (source_hash, lookup_blob) {
+            (Some(hash), _) => BlobDownloadHash::Declared(hash),
+            (None, Some(blob)) => BlobDownloadHash::ExistingRow(blob),
+            (None, None) => BlobDownloadHash::Missing,
+        };
+        Self { blob, size, hash }
     }
 
     pub(crate) fn from_installed_db(blob: crate::blob::BlobRef) -> Self {
         Self {
             blob,
             size: BlobDownloadSize::InstalledRow,
+            hash: BlobDownloadHash::InstalledRow,
         }
     }
 
@@ -1318,6 +1339,28 @@ impl BlobDownload {
                 .map_err(|e| e.to_string()),
             BlobDownloadSize::Missing => Err(format!(
                 "incoming blob {}/{} has no declared size",
+                blob.namespace, blob.id
+            )),
+        }
+    }
+
+    async fn resolve_source_hash(
+        db: &Database,
+        blob: &crate::blob::BlobRef,
+        hash: BlobDownloadHash,
+    ) -> Result<String, String> {
+        match hash {
+            BlobDownloadHash::Declared(hash) => Ok(hash),
+            BlobDownloadHash::ExistingRow(lookup) => {
+                crate::blob::cache::expected_blob_hash(db, &lookup)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            BlobDownloadHash::InstalledRow => crate::blob::cache::expected_blob_hash(db, blob)
+                .await
+                .map_err(|e| e.to_string()),
+            BlobDownloadHash::Missing => Err(format!(
+                "incoming blob {}/{} has no declared content hash",
                 blob.namespace, blob.id
             )),
         }
@@ -1346,10 +1389,12 @@ pub(crate) fn cache_eager_blobs(
         .iter()
         .zip(changes)
         .filter_map(
-            |(old, change)| match blob_decls.ref_and_size_from_change(change) {
-                Ok(Some((blob, size))) if blob.fill == CacheFill::CacheEager => {
+            |(old, change)| match blob_decls.ref_size_hash_from_change(change) {
+                Ok(Some((blob, size, hash))) if blob.fill == CacheFill::CacheEager => {
                     match blob_decls.ref_from_change(old) {
-                        Ok(old_blob) => Some(Ok(BlobDownload::from_change(blob, size, old_blob))),
+                        Ok(old_blob) => {
+                            Some(Ok(BlobDownload::from_change(blob, size, hash, old_blob)))
+                        }
                         Err(e) => Some(Err(e)),
                     }
                 }
@@ -1541,7 +1586,7 @@ pub(crate) async fn download_blobs(
 ) -> bool {
     let mut all_ok = true;
     for download in blobs {
-        let BlobDownload { blob, size } = download;
+        let BlobDownload { blob, size, hash } = download;
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
         // changeset authored by any write-capable member. An id or namespace that is
         // not a single safe path token, or a cloud_path that escapes its prefix,
@@ -1615,6 +1660,19 @@ pub(crate) async fn download_blobs(
             }
         };
 
+        // The author-signed content hash the downloaded plaintext must match. A
+        // blob whose row does not carry one is refused rather than downloaded
+        // unverified — the hash is the authority that pins the bytes to the row's
+        // author, so a missing one is bad data, not a case to skip past.
+        let expected_hash = match BlobDownload::resolve_source_hash(db, &blob, hash).await {
+            Ok(hash) => hash,
+            Err(e) => {
+                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob content hash, skipping download");
+                all_ok = false;
+                continue;
+            }
+        };
+
         // The prefix the blob lives under: the known author for an incremental
         // pull; otherwise resolved from the index, then a listing scan.
         let uploader = match known_uploader {
@@ -1637,6 +1695,7 @@ pub(crate) async fn download_blobs(
                 blob.scope.clone(),
                 blob.cloud_path.as_deref(),
                 source_size,
+                &expected_hash,
                 &dest,
             )
             .await

@@ -1023,8 +1023,21 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-A', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01')",
+            crate::blob::content_hash(b"cover-bytes"),
+        ),
+    )
+    .await;
+    // A recorded who uploaded the cover when it imported the album. The snapshot
+    // carries this uploader index forward (it is member-global, not per-device),
+    // so B resolves the blob's prefix from it — there is no listing scan.
+    crate::sync::test_helpers::record_blob_uploader(
+        &db_a,
+        "photos",
+        "photo1",
+        &storage.own_uploader().expect("mock uploader"),
     )
     .await;
 
@@ -1129,8 +1142,21 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-A', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01')",
+            crate::blob::content_hash(b"cover-bytes"),
+        ),
+    )
+    .await;
+    // A recorded who uploaded the cover when it imported the album. The snapshot
+    // carries this uploader index forward (it is member-global, not per-device),
+    // so B resolves the blob's prefix from it — there is no listing scan.
+    crate::sync::test_helpers::record_blob_uploader(
+        &db_a,
+        "photos",
+        "photo1",
+        &storage.own_uploader().expect("mock uploader"),
     )
     .await;
 
@@ -1223,8 +1249,21 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
     .await;
     exec(
         &db_a,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('photo1', 'n1', 'cover', 11, '0000000001000-0000-A', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01')",
+            crate::blob::content_hash(b"cover-bytes"),
+        ),
+    )
+    .await;
+    // A recorded who uploaded the cover when it imported the album. The snapshot
+    // carries this uploader index forward (it is member-global, not per-device),
+    // so B resolves the blob's prefix from it — there is no listing scan.
+    crate::sync::test_helpers::record_blob_uploader(
+        &db_a,
+        "photos",
+        "photo1",
+        &storage.own_uploader().expect("mock uploader"),
     )
     .await;
 

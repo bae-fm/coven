@@ -64,13 +64,6 @@ struct DatabaseState {
     /// `synced_tables` so the sync layer reads it from the one owner rather than
     /// threading a separately-passed copy that could diverge.
     blob_tombstone_grace: chrono::Duration,
-    /// True for a `SQLITE_OPEN_READONLY` handle opened by
-    /// [`Database::open_read_only`] — a same-store secondary reader. The blob
-    /// read path reads it (via [`Database::is_read_only`]) to skip the
-    /// device-local uploader-index writes it would otherwise make; those writes
-    /// are a listing-scan-avoidance cache, not read correctness, and a read-only
-    /// connection would refuse them. Always false for a writer open.
-    read_only: bool,
 }
 
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
@@ -92,7 +85,6 @@ struct DatabaseCore {
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
-    read_only: bool,
 }
 
 impl DatabaseCore {
@@ -157,7 +149,6 @@ impl DatabaseCore {
             gates,
             blob_decls,
             blob_tombstone_grace,
-            read_only: false,
         };
         let state = core.state();
 
@@ -214,7 +205,6 @@ impl DatabaseCore {
             gates,
             blob_decls,
             blob_tombstone_grace,
-            read_only: true,
         };
         let state = core.state();
         Ok((core, state))
@@ -228,7 +218,6 @@ impl DatabaseCore {
             gates: self.gates.clone(),
             blob_decls: self.blob_decls.clone(),
             blob_tombstone_grace: self.blob_tombstone_grace,
-            read_only: self.read_only,
         }
     }
 
@@ -648,14 +637,6 @@ impl Database {
         })
     }
 
-    /// Whether this handle owns a read-only (`SQLITE_OPEN_READONLY`) connection.
-    /// The blob read path reads it to skip the device-local uploader-index writes
-    /// a read-only connection would refuse — those are a listing-scan-avoidance
-    /// cache, not read correctness.
-    pub(crate) fn is_read_only(&self) -> bool {
-        self.state.read_only
-    }
-
     /// The host's declared synced-table set, the single owner of which tables
     /// participate in changeset sync. Each journaled write's capture session
     /// attaches exactly these, the register-clock seed scanned these, and the
@@ -969,8 +950,8 @@ impl Database {
 
     /// The hex public key of the device that uploaded blob `(namespace, id)`, or
     /// `None` if this device has never recorded one. The read dispatch consults it
-    /// to key a blob under its uploader's prefix; a `None` sends the read to the
-    /// listing-scan fallback ([`SyncStorage::find_blob_uploader`]).
+    /// to key a blob under its uploader's prefix; a `None` is a missing dispatch
+    /// key the read surfaces loud, never a cue to scan an untrusted listing.
     pub(crate) async fn blob_uploader(
         &self,
         namespace: &str,
@@ -993,8 +974,8 @@ impl Database {
     /// caller's transaction so the record commits atomically with the changeset
     /// apply it belongs to (never a later repair). Idempotent — re-recording the
     /// same uploader (a changeset re-applied after an FK-deferred retry) is a
-    /// no-op; a later, authoritative uploader (a re-upload, or a scan that found
-    /// the object) overwrites.
+    /// no-op; a later, authoritative uploader (a re-upload by a different member)
+    /// overwrites.
     pub(crate) fn record_blob_uploader_on(
         conn: &Connection,
         namespace: &str,
@@ -1010,9 +991,10 @@ impl Database {
         .map_err(DbError::from)
     }
 
-    /// Record a discovered uploader outside any caller transaction — used when a
-    /// read miss's listing scan finds which prefix holds a blob, so the next read
-    /// skips the scan. Recording a fact just observed, not repairing wrong state.
+    /// Record blob `(namespace, id)`'s uploader outside any caller transaction —
+    /// used by the inline host-provided upload, which records this device as the
+    /// uploader for a blob it just sealed to the cloud. Recording an authoritative
+    /// fact (who uploaded), not repairing wrong state.
     pub(crate) async fn record_blob_uploader(
         &self,
         namespace: &str,
@@ -1023,27 +1005,6 @@ impl Database {
             (namespace.to_string(), id.to_string(), uploader.to_string());
         self.call(move |conn| Self::record_blob_uploader_on(conn, &namespace, &id, &uploader))
             .await
-    }
-
-    /// Forget blob `(namespace, id)`'s recorded uploader. The read path calls this
-    /// when the recorded prefix returns NotFound — its copy was legitimately
-    /// reclaimed — so a fresh listing scan can find another member's surviving copy
-    /// and record it. A no-op when no record exists.
-    pub(crate) async fn forget_blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-    ) -> Result<(), DbError> {
-        let (namespace, id) = (namespace.to_string(), id.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "DELETE FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2",
-                (namespace, id),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
     }
 
     // ---- Bookkeeping: sync_cursors ----
@@ -2125,9 +2086,9 @@ mod tests {
         };
         let error = open_contract_error(
             "CREATE TABLE covers (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
-             _updated_at TEXT NOT NULL) STRICT;\
+             hash TEXT, _updated_at TEXT NOT NULL) STRICT;\
              CREATE TABLE thumbs (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
-             _updated_at TEXT NOT NULL) STRICT;",
+             hash TEXT, _updated_at TEXT NOT NULL) STRICT;",
             vec![
                 SyncedTable::new("covers").carries_blob(blob("images")),
                 SyncedTable::new("thumbs").carries_blob(blob("images")),

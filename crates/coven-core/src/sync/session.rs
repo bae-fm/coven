@@ -187,6 +187,13 @@ pub struct BlobDecl {
     pub id_column: String,
     /// The column holding the blob's plaintext length in bytes.
     pub size_column: String,
+    /// The column holding the blob's content hash — the lowercase-hex SHA-256 of
+    /// its plaintext, computed at import (see [`crate::blob::content_hash`]). The
+    /// row carries it in a signed changeset, so it is signed by the row's author;
+    /// on download coven hashes the decrypted plaintext and requires equality with
+    /// this value, so the bytes are pinned by the author, not by where they were
+    /// found. Defaults to `hash`.
+    pub hash_column: String,
     /// Cloud namespace for the blob, e.g. `"images"` or `"audio"`.
     pub namespace: String,
     /// The column holding the consumer's readable cloud-relative path, used as the
@@ -218,6 +225,7 @@ impl BlobDecl {
         BlobDecl {
             id_column: "id".to_string(),
             size_column: "size".to_string(),
+            hash_column: "hash".to_string(),
             namespace: namespace.into(),
             cloud_path_column: None,
             scope: crate::blob::BlobScope::Master,
@@ -235,6 +243,12 @@ impl BlobDecl {
     /// Take the plaintext byte length from `column` instead of `size`.
     pub fn with_size_column(mut self, column: impl Into<String>) -> Self {
         self.size_column = column.into();
+        self
+    }
+
+    /// Take the content hash from `column` instead of `hash`.
+    pub fn with_hash_column(mut self, column: impl Into<String>) -> Self {
+        self.hash_column = column.into();
         self
     }
 

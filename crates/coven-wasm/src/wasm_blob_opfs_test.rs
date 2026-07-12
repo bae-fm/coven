@@ -180,10 +180,13 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     // through coven's journaled write path so A's cycle pushes it.
     crate::wasm_test_support::journaled_exec(
         &db_a,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('note-1', 'has a photo', 'body', 1, '0000000001000-0000-device-a', '2026-01-01');\
-         INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('photo-1', 'note-1', 'thumb', 37, '0000000001001-0000-device-a', '2026-01-01');",
+        &format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('note-1', 'has a photo', 'body', 1, '0000000001000-0000-device-a', '2026-01-01');\
+             INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('photo-1', 'note-1', 'thumb', 37, '{}', '0000000001001-0000-device-a', '2026-01-01');",
+            crate::blob::content_hash(&photo_bytes),
+        ),
     )
     .await
     .expect("device A insert");
@@ -258,14 +261,18 @@ async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
     let db_b = open_device("device-b-torn");
     let photo_bytes = b"complete opfs cache payload".to_vec();
 
-    db_b.call(|conn| {
-        conn.execute_batch(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-             VALUES ('note-torn', 'has a photo', 'body', 1, '0000000001000-0000-device-b-torn', '2026-01-01');\
-             INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-             VALUES ('photo-torn', 'note-torn', 'thumb', 27, '0000000001001-0000-device-b-torn', '2026-01-01');",
-        )
-        .map_err(DbError::from)
+    let torn_hash = crate::blob::content_hash(&photo_bytes);
+    db_b.call({
+        let torn_hash = torn_hash.clone();
+        move |conn| {
+            conn.execute_batch(&format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('note-torn', 'has a photo', 'body', 1, '0000000001000-0000-device-b-torn', '2026-01-01');\
+                 INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('photo-torn', 'note-torn', 'thumb', 27, '{torn_hash}', '0000000001001-0000-device-b-torn', '2026-01-01');",
+            ))
+            .map_err(DbError::from)
+        }
     })
     .await
     .expect("device B insert");
@@ -287,6 +294,14 @@ async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
         )
         .await
         .expect("seed cloud blob");
+
+    // The blob was seeded straight into the cloud (no signed-changeset pull to record
+    // its author, and the listing scan is gone), so record B as its uploader — the
+    // refetch resolves this prefix to read it back out of the hashed layout.
+    let uploader = storage_b
+        .own_uploader()
+        .expect("hashed home has an uploader");
+    crate::sync::test_helpers::record_blob_uploader(&db_b, "photos", "photo-torn", &uploader).await;
 
     let cache_path = lib_b
         .cache_blob_path("photos", "photo-torn")

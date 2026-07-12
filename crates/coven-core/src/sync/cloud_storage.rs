@@ -621,17 +621,46 @@ pub struct BlobRangeReader {
     header: OnceCell<RangeHeader>,
 }
 
-struct BlobRangePlaintextReader {
+/// A whole-blob download reader that streams the plaintext front-to-back while
+/// folding each chunk into a content hasher, and — on reaching the end — refuses
+/// to hand the terminal "done" signal to the atomic writer unless the whole-blob
+/// hash matches the blob's author-signed `expected_hash`. Because the writer
+/// commits the file only after this reader returns the empty terminal chunk, a
+/// hash mismatch aborts before the temp file is renamed, so a tampered or
+/// rolled-back object never becomes a cache file a later (hash-unchecked) cache
+/// hit would serve. The per-chunk AEAD already authenticates each chunk's bytes
+/// under the store key; this adds that the *whole* object is the one the row's
+/// author signed.
+struct HashVerifyingPlaintextReader {
     reader: BlobRangeReader,
     offset: u64,
     remaining: u64,
+    hasher: crate::blob::ContentHasher,
+    expected_hash: String,
+    key: String,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl PlatformPlaintextReader for BlobRangePlaintextReader {
+impl PlatformPlaintextReader for HashVerifyingPlaintextReader {
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
-        if self.remaining == 0 || max == 0 {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        if self.remaining == 0 {
+            // End of the plaintext: finalize the running hash and require it to
+            // match the row's signed hash before signalling "done" (an empty
+            // chunk), which is what lets the atomic writer commit the file. A
+            // mismatch returns an error instead, so the write aborts before the
+            // rename and nothing is cached.
+            let hasher = std::mem::take(&mut self.hasher);
+            let actual = hasher.finish();
+            if actual != self.expected_hash {
+                return Err(format!(
+                    "blob {} content hash mismatch: expected {}, got {actual}",
+                    self.key, self.expected_hash
+                ));
+            }
             return Ok(Vec::new());
         }
         let len = self.remaining.min(max as u64);
@@ -647,6 +676,7 @@ impl PlatformPlaintextReader for BlobRangePlaintextReader {
                 chunk.len()
             ));
         }
+        self.hasher.update(&chunk);
         self.offset += chunk.len() as u64;
         self.remaining = self.remaining.saturating_sub(chunk.len() as u64);
         Ok(chunk)
@@ -1032,6 +1062,7 @@ impl SyncStorage for CloudSyncStorage {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_size: u64,
+        expected_hash: &str,
         dest: &std::path::Path,
     ) -> Result<(), StorageError> {
         let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
@@ -1041,14 +1072,21 @@ impl SyncStorage for CloudSyncStorage {
             self.home.clone(),
             &cipher,
             scope,
-            key,
+            key.clone(),
             source_size,
             aad_context,
         );
-        let mut source = BlobRangePlaintextReader {
+        // Stream the plaintext through a content hasher; the reader refuses to
+        // signal "done" (so the writer never commits the file) unless the
+        // whole-blob hash matches the row's signed one — a tampered or rolled-back
+        // object aborts before the rename and is not cached.
+        let mut source = HashVerifyingPlaintextReader {
             reader,
             offset: 0,
             remaining: source_size,
+            hasher: crate::blob::ContentHasher::new(),
+            expected_hash: expected_hash.to_string(),
+            key,
         };
         let written = crate::local_blob::write_stream_atomic(dest, &mut source)
             .await
@@ -1059,38 +1097,6 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         Ok(())
-    }
-
-    async fn find_blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-        _cloud_path: Option<&str>,
-    ) -> Result<Option<String>, StorageError> {
-        // A plain home carries no uploader segment, so there is nothing to find.
-        if !matches!(self.blob_paths, BlobPathScheme::Hashed) {
-            return Ok(None);
-        }
-        crate::store_dir::validate_path_token(namespace)?;
-        // The hashed key is `{namespace}/{uploader}/{ab}/{cd}/{id}`. List the
-        // namespace and take the object whose shard matches this id; the single
-        // segment between the namespace and the shard is the uploader.
-        let shard = crate::store_dir::StoreDir::id_shard(id)?;
-        let prefix = format!("{namespace}/");
-        let suffix = format!("/{shard}");
-        let keys = self.home.list(&prefix).await?;
-        for key in &keys {
-            let Some(uploader) = key
-                .strip_prefix(&prefix)
-                .and_then(|rest| rest.strip_suffix(&suffix))
-            else {
-                continue;
-            };
-            if !uploader.is_empty() && !uploader.contains('/') {
-                return Ok(Some(uploader.to_string()));
-            }
-        }
-        Ok(None)
     }
 
     fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -1588,6 +1594,7 @@ mod tests {
                 BlobScope::Master,
                 None,
                 plaintext.len() as u64,
+                &crate::blob::content_hash(&plaintext),
                 &dest,
             )
             .await
@@ -2224,56 +2231,6 @@ mod tests {
             .await
             .expect("get_blob plain");
         assert_eq!(got, bytes);
-    }
-
-    /// The listing scan resolves which uploader's prefix holds a blob: after a put
-    /// (which keys under this device), `find_blob_uploader` lists the namespace and
-    /// returns that uploader; an absent blob, and an id that does not match, both
-    /// resolve to `None`.
-    #[tokio::test]
-    async fn find_blob_uploader_locates_the_prefix_holding_a_blob() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Encrypted(EncryptionService::from_key([9u8; 32])),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-        );
-        assert_eq!(
-            storage
-                .find_blob_uploader("photos", "cover1", None)
-                .await
-                .expect("scan"),
-            None,
-            "nothing is uploaded yet",
-        );
-        storage
-            .put_blob(
-                "photos",
-                "cover1",
-                BlobScope::Master,
-                None,
-                b"bytes".to_vec(),
-            )
-            .await
-            .expect("put blob");
-        assert_eq!(
-            storage
-                .find_blob_uploader("photos", "cover1", None)
-                .await
-                .expect("scan"),
-            Some(storage.self_uploader()),
-            "the scan finds the prefix the blob was uploaded under",
-        );
-        assert_eq!(
-            storage
-                .find_blob_uploader("photos", "absent", None)
-                .await
-                .expect("scan"),
-            None,
-            "a different id under the same namespace is not matched",
-        );
     }
 
     /// A plain-scheme home with no `cloud_path` is a surfaced error, never a
