@@ -1116,8 +1116,11 @@ impl SyncStorage for CloudSyncStorage {
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<bool, StorageError> {
-        // Preflight for our own push: a device checks whether its own copy of a
-        // blob it references is already uploaded, so it keys under itself.
+        // Whether an object stands at the key this device would write the blob to, so
+        // it keys under itself. Presence, not content: under the plain scheme the key
+        // is the host's readable path and the object there can be a previous blob's
+        // bytes, which is why the push pairs this with its own record of what it last
+        // wrote to the key.
         let uploader = self.self_uploader();
         let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
         self.home.exists(&key).await.map_err(StorageError::from)

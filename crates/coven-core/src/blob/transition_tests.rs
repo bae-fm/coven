@@ -2602,22 +2602,23 @@ async fn tombstoned_host_cover(
 
 /// A host re-shares a tombstoned host-provided blob by flipping the gate column true
 /// directly (host-gated roots are host-writable). The cover is still in the cloud
-/// within its grace, so the inline push takes the exists-skip arm — which must still
-/// cancel the standing tombstone, or a GC past the grace reclaims the re-shared blob.
+/// within its grace and still holds this blob's bytes, so the inline push skips the
+/// upload — and must still cancel the standing tombstone, or a GC past the grace
+/// reclaims the re-shared blob.
 #[tokio::test]
-async fn inline_reshare_cancels_tombstone_on_the_exists_skip_arm() {
+async fn inline_reshare_cancels_the_tombstone_of_a_blob_it_skips_uploading() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
     let kp = UserKeypair::generate();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp, lib) = temp_store_dir();
-    let cover = b"HOST-COVER-exists-skip".to_vec();
+    let cover = b"HOST-COVER-RESHARED".to_vec();
 
     tombstoned_host_cover(&storage, &enc, &kp, &hlc, &db, &lib, &cover).await;
     assert!(
         storage.exists("covers/cv/cover.jpg").await.unwrap(),
-        "the cover's cloud copy is still present within the grace (exists-skip arm)"
+        "the cover's cloud copy is still present within the grace, so the push skips it"
     );
 
     // The host flips the gate true directly — no make_remote intent, so the inline push
@@ -2635,7 +2636,7 @@ async fn inline_reshare_cancels_tombstone_on_the_exists_skip_arm() {
             .exists("blob_tombstones/covers/cv/cover.jpg")
             .await
             .unwrap(),
-        "the inline push cancelled the tombstone on the exists-skip arm"
+        "the inline push cancelled the tombstone of the blob it skipped uploading"
     );
     assert!(
         storage.exists("covers/cv/cover.jpg").await.unwrap(),
