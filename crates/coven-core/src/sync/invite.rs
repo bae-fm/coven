@@ -221,6 +221,84 @@ async fn upload_membership_entry(
     Ok(())
 }
 
+/// Undo the durable writes a pre-commit invite failure leaves once the
+/// wrapped-key slot has been written but the Add entry has not committed: put the
+/// slot back — the prior object restored for a current member, the slot deleted
+/// otherwise — and, for an invitee this invitation first granted access to,
+/// revoke that access. Dispatched on committed chain membership, not slot
+/// presence: a current member keeps the access they held before this invite and
+/// gets their prior slot back; a non-member has both this invite's grant and slot
+/// undone. Returns the rollback failures so the caller can surface them alongside
+/// the original error.
+///
+/// Every failure between the slot write and the commit point (the head publish)
+/// exits through here, so they all land on the same clean state a retry rebuilds
+/// from: the guard that refuses a stale head, and the entry upload itself.
+async fn rollback_written_invite(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    author_pubkey_hex: &str,
+    invitee_ed25519_pubkey: &str,
+    invitee_is_current_member: bool,
+    prior_wrapped_key: Option<Vec<u8>>,
+    revoke: CloudAccessRevoke,
+) -> Vec<String> {
+    let mut rollback_errors = Vec::new();
+    if invitee_is_current_member {
+        // Keep the member's cloud access untouched — they held it before this
+        // invitation — and put their wrapped-key slot back the way it stood.
+        match prior_wrapped_key {
+            // Restore the exact prior signed object. If the restore write itself
+            // fails the slot is left holding this invitation's key — surface it
+            // loud, naming the slot; retrying the whole invitation overwrites the
+            // slot again and is idempotent.
+            Some(prior) => {
+                if let Err(restore) = storage
+                    .put_wrapped_key(author_pubkey_hex, invitee_ed25519_pubkey, prior)
+                    .await
+                {
+                    rollback_errors.push(format!(
+                        "restore wrapped key for {invitee_ed25519_pubkey}: {restore}"
+                    ));
+                }
+            }
+            // The member had no slot before (an interrupted earlier invite could
+            // leave it absent); delete the wrap just written so the slot returns to
+            // absent, which the member's next refresh re-wraps.
+            None => {
+                if let Err(rollback) = storage
+                    .delete_wrapped_key(author_pubkey_hex, invitee_ed25519_pubkey)
+                    .await
+                {
+                    rollback_errors.push(rollback.to_string());
+                }
+            }
+        }
+    } else {
+        // The invitee is not a member: this invitation both granted access and
+        // wrote the slot, so undo both. A slot already present belongs to no
+        // authorized member, so delete rather than restore it — an unauthorized
+        // slot must not be rewritten; note the anomaly.
+        if prior_wrapped_key.is_some() {
+            tracing::warn!(
+                slot = invitee_ed25519_pubkey,
+                "invite rollback found a wrapped-key slot for a non-member; \
+                 deleting it rather than restoring an unauthorized slot"
+            );
+        }
+        if let Err(rollback) = storage
+            .delete_wrapped_key(author_pubkey_hex, invitee_ed25519_pubkey)
+            .await
+        {
+            rollback_errors.push(rollback.to_string());
+        }
+        if let Err(rollback) = cloud_home.revoke_access(revoke).await {
+            rollback_errors.push(rollback.to_string());
+        }
+    }
+    rollback_errors
+}
+
 /// Create an invitation for a new member.
 ///
 /// This grants access on the cloud home, wraps the store encryption key
@@ -367,64 +445,46 @@ pub async fn create_invitation_with_encryption(
 
     // The head governs commitment, so re-check right before writing the entry: if
     // another owner device advanced this author's head to our seq while we were
-    // preparing, its committed entry must not be overwritten. Fail loud; the retry
-    // recomputes the seq from the now-newer head.
-    guard_extends_committed_head(storage, &author_pubkey_hex, entry_coord.seq).await?;
+    // preparing, its committed entry must not be overwritten. Fail loud — and roll
+    // back the same way the entry-upload failure below does, so a stale-head loss
+    // never leaves a durable cloud grant plus an owner-signed wrapped key behind
+    // for an Add that never committed (the wrap authenticates against the current
+    // Owner set, so the invitee could otherwise read the store while peers reject
+    // their writes). The retry recomputes the seq from the now-newer head.
+    if let Err(original) =
+        guard_extends_committed_head(storage, &author_pubkey_hex, entry_coord.seq).await
+    {
+        let rollback_errors = rollback_written_invite(
+            storage,
+            cloud_home,
+            &author_pubkey_hex,
+            invitee_ed25519_pubkey,
+            invitee_is_current_member,
+            prior_wrapped_key,
+            revoke,
+        )
+        .await;
+        if !rollback_errors.is_empty() {
+            return Err(InviteError::Rollback {
+                operation: "stale membership head guard",
+                original: original.to_string(),
+                rollback: rollback_errors.join("; "),
+            });
+        }
+        return Err(original);
+    }
 
     if let Err(original) = upload_membership_entry(storage, &entry_coord, &entry).await {
-        let mut rollback_errors = Vec::new();
-        if invitee_is_current_member {
-            // Keep the member's cloud access untouched — they held it before this
-            // invitation — and put their wrapped-key slot back the way it stood.
-            match prior_wrapped_key {
-                // Restore the exact prior signed object. If the restore write itself
-                // fails the slot is left holding this invitation's key — surface it
-                // loud, naming the slot; retrying the whole invitation overwrites the
-                // slot again and is idempotent.
-                Some(prior) => {
-                    if let Err(restore) = storage
-                        .put_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey, prior)
-                        .await
-                    {
-                        rollback_errors.push(format!(
-                            "restore wrapped key for {invitee_ed25519_pubkey}: {restore}"
-                        ));
-                    }
-                }
-                // The member had no slot before (an interrupted earlier invite could
-                // leave it absent); delete the wrap just written so the slot returns
-                // to absent, which the member's next refresh re-wraps.
-                None => {
-                    if let Err(rollback) = storage
-                        .delete_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey)
-                        .await
-                    {
-                        rollback_errors.push(rollback.to_string());
-                    }
-                }
-            }
-        } else {
-            // The invitee is not a member: this invitation both granted access and
-            // wrote the slot, so undo both. A slot already present belongs to no
-            // authorized member, so delete rather than restore it — an unauthorized
-            // slot must not be rewritten; note the anomaly.
-            if prior_wrapped_key.is_some() {
-                tracing::warn!(
-                    slot = invitee_ed25519_pubkey,
-                    "invite rollback found a wrapped-key slot for a non-member; \
-                     deleting it rather than restoring an unauthorized slot"
-                );
-            }
-            if let Err(rollback) = storage
-                .delete_wrapped_key(&author_pubkey_hex, invitee_ed25519_pubkey)
-                .await
-            {
-                rollback_errors.push(rollback.to_string());
-            }
-            if let Err(rollback) = cloud_home.revoke_access(revoke).await {
-                rollback_errors.push(rollback.to_string());
-            }
-        }
+        let rollback_errors = rollback_written_invite(
+            storage,
+            cloud_home,
+            &author_pubkey_hex,
+            invitee_ed25519_pubkey,
+            invitee_is_current_member,
+            prior_wrapped_key,
+            revoke,
+        )
+        .await;
         if !rollback_errors.is_empty() {
             return Err(InviteError::Rollback {
                 operation: "upload membership entry",
@@ -3227,6 +3287,113 @@ mod tests {
         assert!(members
             .iter()
             .any(|(pk, _)| pk == &pubkey_hex(&second_invitee)));
+    }
+
+    /// The stale-head guard rolls back like the entry-upload path that follows it.
+    /// A second device of the same owner, acting from a head the first has already
+    /// advanced, grants access and writes the wrapped-key slot before the guard
+    /// observes the committed head at its computed seq. The invite fails loud with
+    /// `StaleMembershipHead`, and — because the Add never committed — the grant is
+    /// revoked and the slot deleted, so no durable state lets a never-added invitee
+    /// read the store while peers reject their writes.
+    #[tokio::test]
+    async fn stale_head_guard_failure_rolls_back_grant_and_slot() {
+        use crate::sync::membership_ops::{load_anchored_chain, write_founder_entry};
+
+        let owner = gen_keypair();
+        let committed_invitee = gen_keypair();
+        let guard_victim = gen_keypair();
+        let owner_pk = pubkey_hex(&owner);
+        let key: [u8; 32] = [44u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let cloud = RecordingCloudHome::new();
+        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
+            .await
+            .unwrap();
+
+        let load = |visible: Vec<(String, u64)>| {
+            let owner_pk = owner_pk.clone();
+            let storage = &storage;
+            async move {
+                load_anchored_chain(storage, &visible, Some(&owner_pk), None)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Both devices observe the founder head; device two keeps that stale view.
+        let mut device_one = load(storage.list_membership_entries().await.unwrap()).await;
+        let mut device_two_stale = device_one.clone();
+
+        // Device one invites and commits at seq 2, advancing the owner's head.
+        create_invitation(
+            &storage,
+            &cloud,
+            &mut device_one,
+            &owner,
+            &pubkey_hex(&committed_invitee),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000002000-0000-dev1",
+        )
+        .await
+        .expect("device one commits");
+
+        // Device two, still at the founder head, computes the same seq 2. Its grant
+        // and wrapped-key slot are written before the guard sees the advanced head.
+        let stale = create_invitation(
+            &storage,
+            &cloud,
+            &mut device_two_stale,
+            &owner,
+            &pubkey_hex(&guard_victim),
+            None,
+            MemberRole::Member,
+            &key,
+            LIB_ID,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+        assert!(
+            matches!(
+                stale,
+                Err(InviteError::StaleMembershipHead { attempted: 2, .. })
+            ),
+            "the stale-seq invite must fail loud, got {stale:?}",
+        );
+
+        // The never-committed invitee's wrapped-key slot was deleted on rollback.
+        assert!(
+            storage
+                .get_wrapped_key(&owner_pk, &pubkey_hex(&guard_victim))
+                .await
+                .is_err(),
+            "a stale-head failure must delete the slot it wrote for a non-member",
+        );
+
+        // The access this invite granted was revoked, so no dangling grant remains.
+        assert_eq!(
+            cloud.last_revoke(),
+            Some(CloudAccessRevoke {
+                member_pubkey: pubkey_hex(&guard_victim),
+                provider_account_email: None,
+            }),
+            "a stale-head failure must revoke the access it granted a non-member",
+        );
+
+        // The committed invitee is untouched; the guard victim never joined.
+        let loaded = load(storage.list_membership_entries().await.unwrap()).await;
+        assert!(loaded
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&committed_invitee)));
+        assert!(!loaded
+            .current_members()
+            .iter()
+            .any(|(pk, _)| pk == &pubkey_hex(&guard_victim)));
     }
 
     /// Re-inviting a current member overwrites their wrapped-key slot before the
