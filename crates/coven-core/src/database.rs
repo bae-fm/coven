@@ -1048,9 +1048,11 @@ impl Database {
     /// Enqueue a blob upload. `scope` names which key the blob is encrypted
     /// under (master or a derived scope); coven persists it on the row and
     /// resolves it to a key at drain, long after the enqueue site is gone.
-    /// Idempotent on `(operation, cloud_key)`. Queuing an
-    /// upload also cancels any pending delete of the same key — latest intent wins,
-    /// so a re-upload isn't tombstoned in the same cycle.
+    /// At most one upload per `(operation, cloud_key)`; a re-enqueue for the same key
+    /// overwrites the row's source path, scope, and pin choice with this call's values
+    /// (latest enqueue decides). Queuing an upload also cancels any pending delete of
+    /// the same key — latest intent wins, so a re-upload isn't tombstoned in the same
+    /// cycle.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn enqueue_upload(
         &self,
@@ -1105,10 +1107,23 @@ impl Database {
             [cloud_key],
         )
         .map_err(DbError::from)?;
+        // Latest enqueue wins for the row's parameters too, not just its existence. A
+        // second make_remote on the same still-Local root re-registers the source path
+        // and pin choice; the queued row must adopt them, or the drain would upload the
+        // stale path (retrying a dead path forever) or miss the new pin. Reset the
+        // attempt counter and backoff so a corrected path retries immediately rather
+        // than waiting out the failed old path's window.
         conn.execute(
-            "INSERT OR IGNORE INTO cloud_outbox \
+            "INSERT INTO cloud_outbox \
              (operation, file_id, cloud_key, source_path, scope, retain_pinned, created_at) \
-             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6)",
+             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(operation, cloud_key) DO UPDATE SET \
+                 source_path = excluded.source_path, \
+                 scope = excluded.scope, \
+                 retain_pinned = excluded.retain_pinned, \
+                 attempt_count = 0, \
+                 last_error = NULL, \
+                 last_attempt_at = NULL",
             (
                 file_id,
                 cloud_key,

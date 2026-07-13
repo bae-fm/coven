@@ -18,4 +18,10 @@ pub struct OutgoingChangeset {
     /// Local-store blob cleanup that must wait until this changeset is durably
     /// published.
     pub deferred_local_blob_drops: Vec<super::service::DeferredLocalBlobDrop>,
+    /// make_remote intents this changeset's inline host-blob uploads consumed. Their
+    /// deletion is deferred to the same transaction that durably records the drop
+    /// intents, so a crash before that commit leaves the intent live (carrying its
+    /// `retain_pinned`) and the retry re-derives the disposition from it instead of
+    /// defaulting it.
+    pub consumed_make_remote_intents: Vec<(String, String)>,
 }

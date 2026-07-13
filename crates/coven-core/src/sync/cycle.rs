@@ -213,8 +213,10 @@ async fn persist_staged_push_state(
     seq: u64,
     pending_changeset_max_id: i64,
     deferred_local_blob_drops: &[super::service::DeferredLocalBlobDrop],
+    consumed_make_remote_intents: &[(String, String)],
 ) -> Result<(), String> {
     let drops = deferred_local_blob_drops.to_vec();
+    let consumed = consumed_make_remote_intents.to_vec();
     db.call(move |conn| {
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         tx.execute(
@@ -234,6 +236,13 @@ async fn persist_staged_push_state(
         .map_err(DbError::from)?;
         for drop in &drops {
             insert_published_blob_drop_intent(&tx, seq, drop)?;
+        }
+        // Consume the make_remote intents in the same transaction that records the
+        // drop intents carrying their pin choice: the intent's deletion and the
+        // disposition record commit together, so no crash can drop the intent while
+        // leaving the disposition unrecorded (the retry would then default it).
+        for (root_table, root_id) in &consumed {
+            Database::delete_make_remote_intent_on(&tx, root_table, root_id)?;
         }
         tx.commit().map_err(DbError::from)
     })
@@ -710,6 +719,7 @@ pub async fn run_single_sync_cycle(
                 seq,
                 pending_changeset_max_id,
                 &outgoing.deferred_local_blob_drops,
+                &outgoing.consumed_make_remote_intents,
             )
             .await?;
 

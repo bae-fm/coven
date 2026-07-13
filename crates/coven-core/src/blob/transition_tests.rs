@@ -181,6 +181,37 @@ async fn run_cycle(
     .expect("cycle")
 }
 
+/// Like [`run_cycle`] but surfaces the cycle result instead of unwrapping it, so a
+/// test can drive a cycle expected to fail (e.g. a pull rejected by a schema floor).
+#[allow(clippy::too_many_arguments)]
+async fn try_run_cycle(
+    storage: &MockSyncStorage,
+    device: &str,
+    hlc: &Hlc,
+    db: &Database,
+    cipher: &RwLock<CloudCipher>,
+    kp: &UserKeypair,
+    lib: &StoreDir,
+) -> Result<SyncCycleResult, String> {
+    let pending_rotation = PendingRotation::none();
+    run_single_sync_cycle(
+        storage,
+        "test-lib",
+        device,
+        hlc,
+        &SystemClock,
+        db,
+        cipher,
+        &pending_rotation,
+        kp,
+        None,
+        lib,
+        Some(storage as &dyn crate::storage::cloud::CloudHome),
+        None,
+    )
+    .await
+}
+
 /// Insert the gated note + its blob-bearing photo row, `shared` (Remote) or not,
 /// carrying `bytes`'s length and content hash so a peer that later downloads the
 /// blob verifies it. The two seeders below differ only in this flag and where the
@@ -478,6 +509,334 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     .await
     .expect("B fetches the CacheLazy blob");
     assert_eq!(fetched, bytes, "B reads the original photo from the cloud");
+}
+
+/// Whether the blob `(namespace, id)` has a pending upload row in the outbox whose
+/// `retain_pinned` is set — the per-row pin the drain honors.
+async fn upload_retains_pin(db: &Database, id: &str) -> bool {
+    use rusqlite::OptionalExtension;
+    let id = id.to_string();
+    db.call(move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT retain_pinned FROM cloud_outbox \
+                 WHERE operation = 'upload' AND file_id = ?1",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    })
+    .await
+    .unwrap()
+}
+
+/// The `source_path` recorded on the blob's pending upload row.
+async fn upload_source_path(db: &Database, id: &str) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    let id = id.to_string();
+    db.call(move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT source_path FROM cloud_outbox \
+                 WHERE operation = 'upload' AND file_id = ?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    })
+    .await
+    .unwrap()
+}
+
+/// A second make_remote on the same still-Local root, before any cycle drains the
+/// first one's queued upload, must carry its new pin choice through to the queued
+/// blob: the enqueue upserts the row's `retain_pinned` rather than leaving the stale
+/// value, so the drained upload pins.
+#[tokio::test]
+async fn re_enqueue_updates_the_pending_upload_pin() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"PHOTO-repin".to_vec();
+
+    seed_local_release(
+        &db,
+        &tmp.path().join("user"),
+        "n1",
+        "photoaaa",
+        "cv/photoaaa.jpg",
+        &bytes,
+    )
+    .await;
+
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        false,
+    )
+    .await
+    .expect("make_remote pin=false");
+    assert!(
+        !upload_retains_pin(&db, "photoaaa").await,
+        "the first make_remote queued the upload unpinned",
+    );
+
+    // A second make_remote with a pin, before the upload drains.
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect("make_remote pin=true");
+    assert!(
+        upload_retains_pin(&db, "photoaaa").await,
+        "the re-enqueue must update the queued upload's pin to the new call's value",
+    );
+
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert_eq!(shared_flag(&db, "n1").await, 1, "the release is Remote");
+    assert!(
+        lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
+        "the drained upload pins, honoring the second make_remote's choice",
+    );
+}
+
+/// Re-registering a blob's external source before the upload drains, then a second
+/// make_remote, must repoint the queued upload at the new path: the enqueue upserts
+/// `source_path`, so the drain reads the current file rather than the stale (here
+/// removed) one it would otherwise retry forever.
+#[tokio::test]
+async fn re_enqueue_updates_the_pending_upload_source_path() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"PHOTO-relocate".to_vec();
+    let user_dir = tmp.path().join("user");
+
+    let src1 =
+        seed_local_release(&db, &user_dir, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        false,
+    )
+    .await
+    .expect("first make_remote");
+    assert_eq!(
+        upload_source_path(&db, "photoaaa").await.as_deref(),
+        src1.to_str(),
+        "the upload is queued against the original source",
+    );
+
+    // The user moves the file: re-register it at a new path and remove the old one.
+    let src2 = user_dir.join("relocated.jpg");
+    std::fs::write(&src2, &bytes).unwrap();
+    db.register_external_blob("photoaaa", "photos", &src2, bytes.len() as u64)
+        .await
+        .expect("re-register external blob");
+    std::fs::remove_file(&src1).unwrap();
+
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        false,
+    )
+    .await
+    .expect("second make_remote");
+    assert_eq!(
+        upload_source_path(&db, "photoaaa").await.as_deref(),
+        src2.to_str(),
+        "the re-enqueue repoints the queued upload at the new source",
+    );
+
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert_eq!(
+        shared_flag(&db, "n1").await,
+        1,
+        "the drain read the re-registered path and completed the make_remote",
+    );
+    assert!(
+        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
+        "the blob uploaded from the new path",
+    );
+}
+
+/// Record a make_remote intent directly, for the state a peer's independent flip
+/// leaves: the root's gate is already true while this device's intent (with its pin
+/// choice) is still live, which `make_remote` itself would refuse as AlreadyRemote.
+async fn insert_intent(db: &Database, root_table: &str, root_id: &str, pin: bool) {
+    let (rt, ri) = (root_table.to_string(), root_id.to_string());
+    db.call(move |conn| Database::insert_make_remote_intent_on(conn, &rt, &ri, pin))
+        .await
+        .expect("insert make_remote intent");
+}
+
+/// Queue a user-provided upload and push it deep into backoff so the drain skips it
+/// every cycle — a make_remote whose user blob never lands, keeping the intent live
+/// and the pre-capture completion path (which requires no pending user upload) out
+/// of the picture, so the inline push is the intent's consumer.
+async fn queue_stuck_upload(db: &Database, file_id: &str, cloud_key: &str) {
+    db.enqueue_upload(
+        file_id,
+        cloud_key,
+        Some("/nonexistent"),
+        BlobScope::Master,
+        false,
+        "0000000001000-0000-A",
+    )
+    .await
+    .expect("enqueue upload");
+    let file_id = file_id.to_string();
+    db.call(move |conn| {
+        conn.execute(
+            "UPDATE cloud_outbox SET attempt_count = 9, last_attempt_at = '2999-01-01T00:00:00Z' \
+             WHERE operation = 'upload' AND file_id = ?1",
+            [file_id],
+        )
+        .map(|_| ())
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("force upload into backoff");
+}
+
+/// The inline-push path consumes a make_remote intent when it uploads a
+/// host-provided blob whose root's intent is still live. That consumption must not
+/// commit before the cycle durably records the pin disposition: it is deferred to the
+/// push-state transaction. A cycle that fails after the inline upload (here a pull
+/// rejected by a schema floor) must therefore leave the intent live, and the retry
+/// records the pinned disposition and clears it.
+#[tokio::test]
+async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
+    let (_tmp, lib) = temp_store_dir();
+    let photo = b"PHOTO-stuck".to_vec();
+    let cover = b"COVER-inline".to_vec();
+
+    // A published Remote release with a user photo already in the cloud (no external
+    // ref). The gate is on; nothing here has a cover yet.
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Release', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('photoaaa', 'n1', 'image', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/photoaaa.jpg')",
+            photo.len(),
+            crate::blob::content_hash(&photo),
+        ),
+    )
+    .await;
+    storage
+        .put_blob(
+            "photos",
+            "photoaaa",
+            BlobScope::Master,
+            Some("cv/photoaaa.jpg"),
+            photo.clone(),
+        )
+        .await
+        .expect("seed cloud photo");
+    let uploader = storage.own_uploader().expect("mock uploader");
+    db.record_blob_uploader("photos", "photoaaa", &uploader)
+        .await
+        .expect("record photo uploader");
+
+    // Baseline: publish the release. Nothing is deferred (no cover, no intent).
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    // The state a peer's flip + a live local make_remote leaves: a live pinned intent
+    // and a stuck user upload that keeps the pre-capture completion path skipping this
+    // root. Then the host adds a cover (host-provided) under the already-shared root.
+    insert_intent(&db, "notes", "n1", true).await;
+    queue_stuck_upload(&db, "photoaaa", "photos/cv/photoaaa.jpg").await;
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('coveraaa', 'n1', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+            cover.len(),
+            crate::blob::content_hash(&cover),
+        ),
+    )
+    .await;
+    local_files::store(&lib, "covers", "coveraaa", &cover)
+        .await
+        .expect("store host-provided cover");
+
+    // The cycle fails at the pull: a schema floor above this device's version. The
+    // inline push has already uploaded the cover and consumed the intent in memory.
+    storage
+        .set_min_schema_version(db.schema_version() + 1)
+        .await
+        .expect("set schema floor");
+    let failed = try_run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib).await;
+    assert!(failed.is_err(), "the cycle fails at the pull");
+
+    assert!(
+        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        "the inline push uploaded the cover before the pull failed",
+    );
+    assert!(
+        has_intent(&db, "notes", "n1").await,
+        "the intent survives a cycle that failed before recording the disposition",
+    );
+    assert!(
+        !lib.pinned_blob_path("covers", "coveraaa").unwrap().exists(),
+        "the pin disposition was not recorded, so nothing pinned the cover yet",
+    );
+
+    // Retry with the floor lifted: the cycle completes, records the pin disposition in
+    // the same transaction it consumes the intent, and the drain applies the pin.
+    storage
+        .set_min_schema_version(db.schema_version())
+        .await
+        .expect("lift schema floor");
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert!(
+        !has_intent(&db, "notes", "n1").await,
+        "the completed retry consumed the intent",
+    );
+    assert!(
+        lib.pinned_blob_path("covers", "coveraaa").unwrap().exists(),
+        "the retry recorded and applied the pinned disposition",
+    );
 }
 
 #[tokio::test]

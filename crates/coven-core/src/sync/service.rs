@@ -183,6 +183,7 @@ pub async fn sync(
     // upload. After a successful upload the outgoing changeset carries the
     // local-store cleanup that runs only after the changeset is published.
     let mut deferred_local_blob_drops = Vec::new();
+    let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
     if let Some(ref cs) = outgoing_cs {
         let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
         let blob_decls = db.blob_decls();
@@ -190,7 +191,6 @@ pub async fn sync(
         let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes)
             .map_err(|e| SyncCycleError::AssetScan(e.to_string()))?;
         let make_remote_intents = make_remote_intents_for_blobs(db, &host_blobs).await?;
-        let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
         for blob in host_blobs {
             let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
             let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
@@ -213,9 +213,6 @@ pub async fn sync(
             {
                 deferred_local_blob_drops.push(deferred);
             }
-        }
-        if !consumed_intents.is_empty() {
-            delete_make_remote_intents(db, consumed_intents).await?;
         }
         ensure_publishable_blobs(db, storage, &publish_blobs)
             .await
@@ -248,6 +245,7 @@ pub async fn sync(
             packed,
             seq: next_seq,
             deferred_local_blob_drops,
+            consumed_make_remote_intents: consumed_intents.into_iter().collect(),
         }
     });
 
@@ -731,21 +729,6 @@ async fn make_remote_intents_for_blobs(
     })
     .await
     .map_err(|e| SyncCycleError::AssetScan(e.0))
-}
-
-async fn delete_make_remote_intents(
-    db: &Database,
-    roots: HashSet<(String, String)>,
-) -> Result<(), SyncCycleError> {
-    db.call(move |conn| {
-        let tx = conn.unchecked_transaction()?;
-        for (root_table, root_id) in roots {
-            Database::delete_make_remote_intent_on(&tx, &root_table, &root_id)?;
-        }
-        tx.commit().map_err(crate::database::DbError::from)
-    })
-    .await
-    .map_err(|e| SyncCycleError::AssetUpload(e.0))
 }
 
 #[derive(Debug)]
