@@ -102,9 +102,11 @@ pub fn test_synced_tables() -> Vec<SyncedTable> {
 }
 
 /// [`test_synced_tables`] with `note_photos` declared blob-bearing per `decl`, for
-/// tests exercising the blob push/pull/backfill paths. The blob id is the
+/// tests exercising the blob push/pull/backfill paths. The blob id defaults to the
 /// `note_photos` primary key; `note_photos.cloud_path` holds a readable key for
-/// plain-scheme tests.
+/// plain-scheme tests, and `note_photos.blob_id` is there for a decl that names a
+/// blob id apart from the PK — the shape a row repointed at a new blob needs, since
+/// the row keeps its primary key.
 pub fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes").gated_by("shared"),
@@ -282,6 +284,7 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
             _updated_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             cloud_path TEXT,
+            blob_id TEXT,
             FOREIGN KEY (note_id) REFERENCES notes (id) ON DELETE CASCADE
         ) STRICT;
         CREATE TABLE note_covers (

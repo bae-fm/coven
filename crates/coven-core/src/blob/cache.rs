@@ -1397,6 +1397,32 @@ pub(crate) async fn expected_blob_hash(
     })
 }
 
+/// The readable cloud path from the row that owns `blob` — the key a browsable home
+/// stores it at.
+///
+/// A [`BlobRef`] derived from a changeset row can be missing it even when the row has
+/// one: a changeset UPDATE reports only the columns whose values changed, so a row
+/// repointed at a new blob carries the new blob id and not the (unchanged) cloud path.
+/// The row that owns the blob always has it, which is why the size and content hash are
+/// read from the row too. `None` for a table declaring no cloud-path column (an opaque
+/// home's blob, keyed by id) or a row whose value is NULL — which a browsable home then
+/// surfaces as the error it is, never a silent fall back to the hashed layout.
+pub(crate) async fn row_cloud_path(
+    db: &Database,
+    blob: &BlobRef,
+) -> Result<Option<String>, BlobCacheError> {
+    let decls = db.blob_decls();
+    let namespace = blob.namespace.clone();
+    let id = blob.id.clone();
+    db.call(move |conn| {
+        decls
+            .cloud_path_for_blob_in_namespace(conn, &namespace, &id)
+            .map_err(|e| DbError(e.to_string()))
+    })
+    .await
+    .map_err(BlobCacheError::Metadata)
+}
+
 /// Move a blob file from one cache folder to the other (`cache/`↔`pinned/`). Both
 /// roots are under `storage/`, so on native the `rename` is within one filesystem
 /// and atomic — the blob is never visible in both folders or neither. Creates the

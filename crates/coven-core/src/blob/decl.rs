@@ -409,6 +409,25 @@ impl BlobDecls {
         pk_carrying_blob_hash(conn, table, tb, blob_id)
     }
 
+    /// The readable cloud path from the row carrying `blob_id` in `namespace` — the key
+    /// a browsable home stores the blob at. `None` when no declared table owns
+    /// `namespace`, that table declares no cloud-path column (an opaque home's blob is
+    /// keyed by id), that table has no row with the id, or the row's value is NULL.
+    pub fn cloud_path_for_blob_in_namespace(
+        &self,
+        conn: &Connection,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<Option<String>, BlobDeclError> {
+        let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
+            return Ok(None);
+        };
+        let Some(cloud_path_col_name) = &tb.cloud_path_col_name else {
+            return Ok(None);
+        };
+        pk_carrying_blob_cloud_path(conn, table, tb, cloud_path_col_name, blob_id)
+    }
+
     /// The `(table, primary key)` of a live row whose declared blob resolves to
     /// `cloud_key`. Hashed homes encode namespace + blob id in the key itself;
     /// readable homes encode namespace + declared `cloud_path`. This is the GC-side
@@ -498,6 +517,25 @@ fn pk_carrying_blob_hash(
     let sql = format!(
         "SELECT {} FROM {} WHERE {} = ?1",
         quote_ident(&tb.hash_col_name),
+        quote_ident(table),
+        quote_ident(&tb.id_col_name),
+    );
+    conn.query_row(&sql, [blob_id], |row| row.get::<_, Option<String>>(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(BlobDeclError::from)
+}
+
+fn pk_carrying_blob_cloud_path(
+    conn: &Connection,
+    table: &str,
+    tb: &TableBlob,
+    cloud_path_col_name: &str,
+    blob_id: &str,
+) -> Result<Option<String>, BlobDeclError> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE {} = ?1",
+        quote_ident(cloud_path_col_name),
         quote_ident(table),
         quote_ident(&tb.id_col_name),
     );

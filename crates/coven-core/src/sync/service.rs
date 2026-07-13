@@ -513,6 +513,7 @@ async fn upload_host_provided_blob(
     blob: &BlobRef,
     cancel: Option<&HostUploadCloud<'_>>,
 ) -> Result<UploadedHostBlob, SyncCycleError> {
+    let blob = &with_row_cloud_path(db, blob).await?;
     let expected_size = expected_blob_size(db, blob).await?;
     let declared_hash = declared_blob_hash(db, blob).await?;
     let cloud_key = storage
@@ -643,6 +644,25 @@ async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCy
             "cannot read expected size for blob {}/{}: no carrying row",
             blob.namespace, blob.id
         ))
+    })
+}
+
+/// `blob` with its readable cloud path — the key a browsable home stores it at — read
+/// off its carrying row, the same source its size and content hash come from. A ref
+/// derived from a changeset row can be missing one the row has: a changeset UPDATE
+/// reports only the columns whose values changed, so a row repointed at a new blob
+/// carries the new blob id and not the (unchanged) cloud path. The row is the one
+/// source that always holds it.
+pub(super) async fn with_row_cloud_path(
+    db: &Database,
+    blob: &BlobRef,
+) -> Result<BlobRef, SyncCycleError> {
+    let cloud_path = crate::blob::cache::row_cloud_path(db, blob)
+        .await
+        .map_err(|e| SyncCycleError::AssetScan(e.to_string()))?;
+    Ok(BlobRef {
+        cloud_path,
+        ..blob.clone()
     })
 }
 

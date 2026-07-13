@@ -375,6 +375,41 @@ The two schemes at a glance:
 | Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
 | Blob with no `cloud_path` | keyed by id | surfaced error |
 
+### Replacing a blob at a readable path
+
+A hashed key contains the blob's id, so its cloud object is immutable: replacing a blob
+means a new id, which means a new key, and the old object stands until its
+[tombstone](#deleting-a-blob) is reclaimed. A readable path is the consumer's own, and it
+normally outlives the blob standing at it — `attachments/Project Plan/diagram.png` names
+the current diagram, whichever one that is. So on a browsable home the row is repointed
+at a new blob and the *same* cloud object is overwritten, which means an object's
+presence at a key says nothing about which blob's bytes it holds.
+
+coven records the content hash it last wrote to each cloud key, and the push uploads
+unless that record names the blob being pushed — a sealed cloud object cannot be asked
+what it contains, so the writer's own record is what answers it. The record is written
+after the upload lands, never before, so it can only lag the bucket: lagging costs a
+repeat upload of identical bytes, while leading would skip an upload that was needed.
+
+Two consequences follow from the one root — a readable path's cloud object holds only its
+current content — and a consumer choosing readable paths should know both:
+
+- **Two devices replacing the same blob at once leave the bucket disagreeing with the
+  row.** They write the same key, so the object is the bucket's last writer's, while the
+  row is last-writer-wins' winner, and the two need not be the same device. Peers then
+  hold a row whose content hash no object matches, and no retry resolves it — each
+  device's record says it wrote its own bytes, which it did.
+- **A changeset older than a replacement can no longer be replayed with its blob.** The
+  bytes that changeset's row names are gone from the key. This reaches a device only if
+  it pulls that changeset *after* the replacement: a device that pulled the row earlier
+  holds the blob's cache copy and drops it when the replacement arrives, and a device
+  that [bootstraps from a snapshot](/docs/bootstrap) starts from current rows and
+  backfills current blobs.
+
+A consumer that wants neither gives the path a segment that changes with the blob —
+`attachments/Project Plan/{blob_id}.png` — which makes every cloud object immutable again
+while keeping the bucket readable.
+
 ## Where a blob's bytes come from
 
 coven uploads a blob from whichever local copy its [provenance](#provenance) names.

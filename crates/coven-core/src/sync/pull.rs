@@ -1306,6 +1306,7 @@ pub(crate) struct BlobDownload {
     blob: crate::blob::BlobRef,
     size: BlobDownloadSize,
     hash: BlobDownloadHash,
+    cloud_path: BlobDownloadCloudPath,
 }
 
 /// Where the download reads a blob's declared plaintext size and content hash
@@ -1328,6 +1329,18 @@ enum BlobDownloadHash {
     Missing,
 }
 
+/// Where the download reads a blob's readable cloud path from — the key a browsable
+/// home stores it at. The same three sources the size and hash have, with one
+/// difference: a blob legitimately has no cloud path at all (`Absent`) on an opaque
+/// home, which keys by id, so its absence is a value rather than an error. An update
+/// that repointed a row at a new blob left its cloud path alone, so the column is
+/// missing from the change and the pre-apply row holds the (unchanged) value.
+enum BlobDownloadCloudPath {
+    Declared(String),
+    ExistingRow(crate::blob::BlobRef),
+    Absent,
+}
+
 impl BlobDownload {
     fn from_change(
         blob: crate::blob::BlobRef,
@@ -1340,19 +1353,35 @@ impl BlobDownload {
             (None, Some(blob)) => BlobDownloadSize::ExistingRow(blob),
             (None, None) => BlobDownloadSize::Missing,
         };
-        let hash = match (source_hash, lookup_blob) {
+        let hash = match (source_hash, lookup_blob.clone()) {
             (Some(hash), _) => BlobDownloadHash::Declared(hash),
             (None, Some(blob)) => BlobDownloadHash::ExistingRow(blob),
             (None, None) => BlobDownloadHash::Missing,
         };
-        Self { blob, size, hash }
+        let cloud_path = match (blob.cloud_path.clone(), lookup_blob) {
+            (Some(path), _) => BlobDownloadCloudPath::Declared(path),
+            (None, Some(blob)) => BlobDownloadCloudPath::ExistingRow(blob),
+            (None, None) => BlobDownloadCloudPath::Absent,
+        };
+        Self {
+            blob,
+            size,
+            hash,
+            cloud_path,
+        }
     }
 
     pub(crate) fn from_installed_db(blob: crate::blob::BlobRef) -> Self {
+        // A row read whole out of the bootstrapped DB carries its cloud path already.
+        let cloud_path = match blob.cloud_path.clone() {
+            Some(path) => BlobDownloadCloudPath::Declared(path),
+            None => BlobDownloadCloudPath::Absent,
+        };
         Self {
             blob,
             size: BlobDownloadSize::InstalledRow,
             hash: BlobDownloadHash::InstalledRow,
+            cloud_path,
         }
     }
 
@@ -1397,6 +1426,21 @@ impl BlobDownload {
                 "incoming blob {}/{} has no declared content hash",
                 blob.namespace, blob.id
             )),
+        }
+    }
+
+    async fn resolve_cloud_path(
+        db: &Database,
+        cloud_path: BlobDownloadCloudPath,
+    ) -> Result<Option<String>, String> {
+        match cloud_path {
+            BlobDownloadCloudPath::Declared(path) => Ok(Some(path)),
+            BlobDownloadCloudPath::ExistingRow(lookup) => {
+                crate::blob::cache::row_cloud_path(db, &lookup)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            BlobDownloadCloudPath::Absent => Ok(None),
         }
     }
 }
@@ -1620,7 +1664,12 @@ pub(crate) async fn download_blobs(
 ) -> bool {
     let mut all_ok = true;
     for download in blobs {
-        let BlobDownload { blob, size, hash } = download;
+        let BlobDownload {
+            blob,
+            size,
+            hash,
+            cloud_path,
+        } = download;
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
         // changeset authored by any write-capable member. An id or namespace that is
         // not a single safe path token, or a cloud_path that escapes its prefix,
@@ -1629,7 +1678,8 @@ pub(crate) async fn download_blobs(
         // same posture as any other failed blob in this loop. The id check makes
         // local traversal unrepresentable: the destination path below is built from
         // the validated id by coven, so there is no host-supplied local path left to
-        // independently re-check.
+        // independently re-check. The cloud path is checked below, once resolved,
+        // because that resolved value is the one the read keys with.
         if let Err(e) = crate::store_dir::validate_path_token(&blob.namespace) {
             error!(id = %blob.id, namespace = %blob.namespace, "blob namespace is not a safe path token ({e}); refusing");
             all_ok = false;
@@ -1639,13 +1689,6 @@ pub(crate) async fn download_blobs(
             error!(id = %blob.id, namespace = %blob.namespace, "blob id is not a safe path token ({e}); refusing");
             all_ok = false;
             continue;
-        }
-        if let Some(cloud_path) = blob.cloud_path.as_deref() {
-            if let Err(e) = crate::store_dir::validate_cloud_path(cloud_path) {
-                error!(id = %blob.id, cloud_path = %cloud_path, "blob cloud_path escapes its prefix ({e}); refusing");
-                all_ok = false;
-                continue;
-            }
         }
 
         // The coven-built destination: the evictable cache
@@ -1707,6 +1750,26 @@ pub(crate) async fn download_blobs(
             }
         };
 
+        // The readable key a browsable home stores the blob at. A row repointed at a
+        // new blob leaves its cloud path alone, so the change omits the column and the
+        // path comes from the pre-apply row instead — which is the same value, that
+        // being what "the change did not touch it" means.
+        let cloud_path = match BlobDownload::resolve_cloud_path(db, cloud_path).await {
+            Ok(path) => path,
+            Err(e) => {
+                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob cloud path, skipping download");
+                all_ok = false;
+                continue;
+            }
+        };
+        if let Some(path) = cloud_path.as_deref() {
+            if let Err(e) = crate::store_dir::validate_cloud_path(path) {
+                error!(id = %blob.id, cloud_path = %path, "blob cloud_path escapes its prefix ({e}); refusing");
+                all_ok = false;
+                continue;
+            }
+        }
+
         // The prefix the blob lives under: the known author for an incremental
         // pull; otherwise resolved from the index, then a listing scan.
         let uploader = match known_uploader {
@@ -1727,7 +1790,7 @@ pub(crate) async fn download_blobs(
                 uploader.as_deref(),
                 &blob.id,
                 blob.scope.clone(),
-                blob.cloud_path.as_deref(),
+                cloud_path.as_deref(),
                 source_size,
                 &expected_hash,
                 &dest,
