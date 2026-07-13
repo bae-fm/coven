@@ -469,7 +469,7 @@ impl CloudSyncStorage {
         cursors: &std::collections::HashMap<String, u64>,
         timestamp: &str,
     ) -> Result<(), StorageError> {
-        self.put_head(device_id, 0, None, timestamp).await?;
+        self.put_head(device_id, 0, timestamp).await?;
         let cursors: std::collections::BTreeMap<String, u64> =
             cursors.iter().map(|(id, seq)| (id.clone(), *seq)).collect();
         let ack = AckJson::signed(device_id, cursors, &self.keypair);
@@ -1026,7 +1026,6 @@ impl SyncStorage for CloudSyncStorage {
             heads.push(DeviceHead {
                 device_id: device_id.to_string(),
                 seq: head_json.seq,
-                snapshot_seq: head_json.snapshot_seq,
                 last_sync: head_json.last_sync,
                 author_pubkey: head_json.author_pubkey,
             });
@@ -1055,16 +1054,9 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         device_id: &str,
         seq: u64,
-        snapshot_seq: Option<u64>,
         timestamp: &str,
     ) -> Result<(), StorageError> {
-        let head = HeadJson::signed(
-            device_id,
-            seq,
-            snapshot_seq,
-            Some(timestamp.to_string()),
-            &self.keypair,
-        );
+        let head = HeadJson::signed(device_id, seq, Some(timestamp.to_string()), &self.keypair);
         let json = serde_json::to_vec(&head)
             .map_err(|e| StorageError::Parse(format!("serialize head: {e}")))?;
         let key = format!("heads/{device_id}.json{}", self.suffix());
@@ -1951,7 +1943,7 @@ mod tests {
             UserKeypair::generate(),
         );
         storage
-            .put_head("ours", 5, None, "2026-01-01T00:00:00Z")
+            .put_head("ours", 5, "2026-01-01T00:00:00Z")
             .await
             .expect("put our head");
 
@@ -1998,7 +1990,7 @@ mod tests {
             UserKeypair::generate(),
         );
         storage
-            .put_head("ours", 5, None, "2026-01-01T00:00:00Z")
+            .put_head("ours", 5, "2026-01-01T00:00:00Z")
             .await
             .expect("put our head");
 
@@ -2045,7 +2037,7 @@ mod tests {
 
         // Our own head is written signed by our keypair.
         storage
-            .put_head("ours", 9, Some(4), "2026-01-01T00:00:00Z")
+            .put_head("ours", 9, "2026-01-01T00:00:00Z")
             .await
             .expect("put our head");
 
@@ -2055,7 +2047,6 @@ mod tests {
         // check, not the cipher.
         let forged = HeadJson {
             seq: 100,
-            snapshot_seq: None,
             last_sync: None,
             author_pubkey: hex::encode(UserKeypair::generate().public_key()),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
@@ -2111,7 +2102,7 @@ mod tests {
         );
 
         storage
-            .put_head("ours", 7, None, "2026-01-01T00:00:00Z")
+            .put_head("ours", 7, "2026-01-01T00:00:00Z")
             .await
             .expect("put our head");
 
@@ -2218,7 +2209,7 @@ mod tests {
 
         // Head: bare key present, `.enc` key absent, and it reads back.
         storage
-            .put_head("dev1", 7, Some(3), "2026-01-01T00:00:00Z")
+            .put_head("dev1", 7, "2026-01-01T00:00:00Z")
             .await
             .expect("put_head");
         assert!(

@@ -161,14 +161,11 @@ pub(crate) async fn push_changeset(
     device_id: &str,
     seq: u64,
     packed: Vec<u8>,
-    snapshot_seq: Option<u64>,
     timestamp: &str,
 ) -> Result<(), ChangesetPublishError> {
     ensure_publishable_changeset_blobs(db, storage, &packed).await?;
     storage.put_changeset(device_id, seq, packed).await?;
-    storage
-        .put_head(device_id, seq, snapshot_seq, timestamp)
-        .await?;
+    storage.put_head(device_id, seq, timestamp).await?;
     Ok(())
 }
 
@@ -614,17 +611,7 @@ pub async fn run_single_sync_cycle(
         } else if let Some(staged_data) = read_staged_changeset(store_dir).await {
             info!(seq, "Retrying staged changeset push");
 
-            match push_changeset(
-                storage,
-                db,
-                device_id,
-                seq,
-                staged_data,
-                snapshot_seq,
-                &sync_time,
-            )
-            .await
-            {
+            match push_changeset(storage, db, device_id, seq, staged_data, &sync_time).await {
                 Ok(()) => {
                     info!(seq, "Staged changeset push succeeded");
                     commit_push_success(
@@ -752,7 +739,6 @@ pub async fn run_single_sync_cycle(
                 device_id,
                 seq,
                 outgoing.packed.clone(),
-                snapshot_seq,
                 &sync_time,
             )
             .await
@@ -817,10 +803,7 @@ pub async fn run_single_sync_cycle(
     // keeps that current. Best-effort: a transient failure leaves last cycle's
     // head, and the next cycle republishes unconditionally, so we log rather
     // than abort.
-    if let Err(e) = storage
-        .put_head(device_id, local_seq, snapshot_seq, &sync_time)
-        .await
-    {
+    if let Err(e) = storage.put_head(device_id, local_seq, &sync_time).await {
         warn!("Failed to republish head after pull: {e}");
     }
 

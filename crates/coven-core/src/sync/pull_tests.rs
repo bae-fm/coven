@@ -1109,7 +1109,6 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
         "dev1",
         outgoing.seq,
         outgoing.packed,
-        None,
         "2026-01-01T00:00:00Z",
     )
     .await
@@ -1284,7 +1283,6 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         "dev1",
         outgoing.seq,
         outgoing.packed,
-        None,
         "2026-01-01T00:00:00Z",
     )
     .await
@@ -1511,7 +1509,6 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         "dev1",
         outgoing.seq,
         outgoing.packed,
-        None,
         "2026-01-01T00:00:00Z",
     )
     .await
@@ -1571,7 +1568,6 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
         "dev1",
         outgoing.seq,
         outgoing.packed,
-        None,
         "2026-01-01T00:00:00Z",
     )
     .await
@@ -1701,7 +1697,6 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         "dev1",
         outgoing.seq,
         outgoing.packed,
-        None,
         "2026-01-01T00:00:00Z",
     )
     .await
@@ -1817,7 +1812,6 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         "dev1",
         outgoing.seq,
         outgoing.packed,
-        None,
         "2026-01-01T00:00:00Z",
     )
     .await

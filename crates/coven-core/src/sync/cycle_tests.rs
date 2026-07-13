@@ -122,7 +122,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     // this peer M would be the only device and the snapshot-covered changeset would
     // be reclaimed, which is correct but not what this gate-focused test asserts.
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
 
@@ -569,12 +569,9 @@ impl SyncStorage for HostWriteInjector {
         &self,
         device_id: &str,
         seq: u64,
-        snapshot_seq: Option<u64>,
         timestamp: &str,
     ) -> Result<(), StorageError> {
-        self.inner
-            .put_head(device_id, seq, snapshot_seq, timestamp)
-            .await
+        self.inner.put_head(device_id, seq, timestamp).await
     }
     async fn put_blob(
         &self,
@@ -929,7 +926,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     )));
     let storage = MockSyncStorage::new();
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
@@ -1199,7 +1196,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     )));
     let storage = MockSyncStorage::new();
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
@@ -1285,7 +1282,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     )));
     let storage = MockSyncStorage::new();
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
@@ -1334,7 +1331,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     )));
     let storage = MockSyncStorage::new();
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
@@ -1426,7 +1423,7 @@ async fn push_cycle_writes_rfc3339_head_timestamps() {
     // snapshot the cycle also creates (local_seq 1, no snapshot yet), so the
     // main-push head writer's changeset is still present to assert against.
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
     host_exec(
@@ -1484,7 +1481,7 @@ async fn staged_retry_writes_rfc3339_head_timestamp() {
     // A lagging peer keeps the retried changeset from being reclaimed by the
     // snapshot the retry cycle also creates, so it is still present to assert on.
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
     host_exec(
@@ -1613,7 +1610,7 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     storage
-        .put_head("peer-lagging", 0, None, T0)
+        .put_head("peer-lagging", 0, T0)
         .await
         .expect("seed an un-acked peer head");
 
@@ -1791,7 +1788,7 @@ async fn cycle_keeps_a_behind_peers_changeset() {
     // reports it has pulled A only through seq 1. Both are signed by the mock's
     // keypair so B's ack author matches B's head author.
     storage
-        .put_head("B", 0, None, T0)
+        .put_head("B", 0, T0)
         .await
         .expect("seed behind peer head");
     let b_ack = AckJson::signed("B", BTreeMap::from([("A".to_string(), 1u64)]), &keypair);

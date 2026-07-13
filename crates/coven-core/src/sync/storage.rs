@@ -74,9 +74,6 @@ use std::path::Path;
 pub struct DeviceHead {
     pub device_id: String,
     pub seq: u64,
-    /// The seq up to which the latest snapshot covers. None if no snapshot
-    /// has been created by this device.
-    pub snapshot_seq: Option<u64>,
     /// RFC 3339 timestamp of when this head was last updated (i.e., when
     /// the device last synced). None for heads written before this field
     /// was added.
@@ -191,15 +188,12 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     ) -> Result<(), StorageError>;
 
     /// Update the head pointer for a device.
-    /// Writes to `heads/{device_id}.json{suffix}`.
-    /// If `snapshot_seq` is Some, the head records that a snapshot covers
-    /// all changesets up to that seq. `timestamp` is the RFC 3339 time of this
-    /// sync (used by the sync status UI).
+    /// Writes to `heads/{device_id}.json{suffix}`. `timestamp` is the RFC 3339
+    /// time of this sync (used by the sync status UI).
     async fn put_head(
         &self,
         device_id: &str,
         seq: u64,
-        snapshot_seq: Option<u64>,
         timestamp: &str,
     ) -> Result<(), StorageError>;
 

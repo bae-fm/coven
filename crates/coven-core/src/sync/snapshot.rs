@@ -399,8 +399,7 @@ fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
 /// pointer but then failed (its `snapshot_seq` never persisted, so policy re-fires)
 /// gets a *new* publish id, so `put_snapshot` writes a new object and never
 /// overwrites the DB image the live pointer still commits to. The covered changeset
-/// seq (`current_seq`) is unrelated to the key — it travels in the meta's cursors
-/// and the head's `snapshot_seq`.
+/// seq (`current_seq`) is unrelated to the key — it travels in the meta's cursors.
 ///
 /// The publish is atomic by construction. Until the pointer flips, every reader
 /// still resolves the *previous* generation (or none), which is itself complete.
@@ -514,13 +513,10 @@ pub async fn push_snapshot(
         serde_json::to_vec(&pointer).map_err(|e| SnapshotError::Parse(e.to_string()))?;
     storage.put_snapshot_pointer(pointer_json).await?;
 
-    // Update the head to record this snapshot's coverage (snapshot_seq, the covered
-    // changeset seq — not the publish id). The head's `last_sync` stamp is the only
-    // thing here that still needs the wall clock.
+    // Advance the head to the covered changeset seq. The head's `last_sync`
+    // stamp is the only thing here that still needs the wall clock.
     let timestamp = clock.now().to_rfc3339();
-    storage
-        .put_head(device_id, current_seq, Some(current_seq), &timestamp)
-        .await?;
+    storage.put_head(device_id, current_seq, &timestamp).await?;
 
     // The pointer now names `publish_id`; older generations this device published
     // are superseded. Reclaim them — listing only this device's own keyspace, so a
@@ -1868,11 +1864,10 @@ mod tests {
         // Snapshot should be stored.
         assert_eq!(storage.current_snapshot_db().await, Some(data));
 
-        // Head should be updated with snapshot_seq.
+        // Head should be updated to the covered seq.
         let heads = storage.list_heads().await.unwrap().heads;
         let dev1_head = heads.iter().find(|h| h.device_id == "dev-1").unwrap();
         assert_eq!(dev1_head.seq, 42);
-        assert_eq!(dev1_head.snapshot_seq, Some(42));
 
         // Snapshot metadata reflects the applied cursors plus our own seq.
         let meta_json = storage
@@ -2291,7 +2286,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .put_head("dev-1", 20, Some(15), "2026-02-10T00:00:00Z")
+            .put_head("dev-1", 20, "2026-02-10T00:00:00Z")
             .await
             .unwrap();
 

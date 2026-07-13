@@ -943,14 +943,14 @@ impl MockSyncStorage {
     fn store_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
         let key = format!("changes/{device_id}/{seq}");
         self.objects.lock().unwrap().insert(key, packed);
-        self.publish_head(device_id, seq, None);
+        self.publish_head(device_id, seq);
     }
 
     /// Publish a signed head for `device_id` at `seq`, exactly as `put_head` does,
     /// but reusable by the changeset-fabrication helpers. Signs with the mock's
     /// keypair and stores the resulting `HeadJson` JSON bytes.
-    fn publish_head(&self, device_id: &str, seq: u64, snapshot_seq: Option<u64>) {
-        let head = HeadJson::signed(device_id, seq, snapshot_seq, None, &self.keypair);
+    fn publish_head(&self, device_id: &str, seq: u64) {
+        let head = HeadJson::signed(device_id, seq, None, &self.keypair);
         let bytes = serde_json::to_vec(&head).expect("serialize head");
         self.heads
             .lock()
@@ -969,7 +969,7 @@ impl MockSyncStorage {
     /// changeset-GC test give each device a head attributed to its own membership
     /// key (the author changeset reclamation matches each device's ack against).
     pub fn publish_head_as(&self, device_id: &str, seq: u64, keypair: &UserKeypair) {
-        let head = HeadJson::signed(device_id, seq, None, None, keypair);
+        let head = HeadJson::signed(device_id, seq, None, keypair);
         let bytes = serde_json::to_vec(&head).expect("serialize head");
         self.heads
             .lock()
@@ -1016,7 +1016,6 @@ impl SyncStorage for MockSyncStorage {
             out.push(DeviceHead {
                 device_id: device_id.clone(),
                 seq: head.seq,
-                snapshot_seq: head.snapshot_seq,
                 last_sync: head.last_sync,
                 author_pubkey: head.author_pubkey,
             });
@@ -1065,7 +1064,6 @@ impl SyncStorage for MockSyncStorage {
         &self,
         device_id: &str,
         seq: u64,
-        snapshot_seq: Option<u64>,
         timestamp: &str,
     ) -> Result<(), StorageError> {
         self.head_puts
@@ -1075,13 +1073,7 @@ impl SyncStorage for MockSyncStorage {
         // Record the timestamp on the head the way the cloud does, so `list_heads`
         // returns it as the device's `last_sync` — the field the sync-status view
         // reads.
-        let head = HeadJson::signed(
-            device_id,
-            seq,
-            snapshot_seq,
-            Some(timestamp.to_string()),
-            &self.keypair,
-        );
+        let head = HeadJson::signed(device_id, seq, Some(timestamp.to_string()), &self.keypair);
         let bytes = serde_json::to_vec(&head).expect("serialize head");
         self.heads
             .lock()

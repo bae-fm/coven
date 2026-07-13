@@ -926,7 +926,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     // the snapshot-covered changeset would be reclaimed, leaving nothing for B's
     // incremental pull.
     storage
-        .put_head("B", 0, None, "2024-01-01T00:00:00Z")
+        .put_head("B", 0, "2024-01-01T00:00:00Z")
         .await
         .expect("seed peer head");
 
@@ -1575,7 +1575,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .expect("store host-provided blob");
 
     storage
-        .put_head("B", 0, None, "2024-01-01T00:00:00Z")
+        .put_head("B", 0, "2024-01-01T00:00:00Z")
         .await
         .expect("seed peer head");
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;

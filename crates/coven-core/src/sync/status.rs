@@ -76,14 +76,12 @@ mod tests {
             DeviceHead {
                 device_id: "dev-1".into(),
                 seq: 5,
-                snapshot_seq: None,
                 last_sync: Some("2026-02-10T12:00:00Z".into()),
                 author_pubkey: String::new(),
             },
             DeviceHead {
                 device_id: "dev-2".into(),
                 seq: 3,
-                snapshot_seq: None,
                 last_sync: Some("2026-02-10T11:55:00Z".into()),
                 author_pubkey: "abcd".into(),
             },
@@ -105,7 +103,6 @@ mod tests {
         let heads = vec![DeviceHead {
             device_id: "dev-2".into(),
             seq: 10,
-            snapshot_seq: None,
             last_sync: None,
             author_pubkey: String::new(),
         }];
