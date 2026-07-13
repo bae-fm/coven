@@ -1420,6 +1420,94 @@ async fn make_remote_rejects_already_remote_root() {
     );
 }
 
+/// make_remote verifies every user-provided source before enqueuing a single
+/// upload: if a source file's on-disk length no longer matches the size recorded
+/// on its blob row (truncated after registration — an interrupted copy, a partial
+/// write), the whole transition aborts with `MakeRemoteError::Source` and queues
+/// nothing. Without this up-front check the drain would upload a short, corrupt
+/// blob and flip the gate over it. Proves the abort is atomic: no upload is
+/// enqueued, no intent is recorded, the gate stays Local (row and causal stamp
+/// untouched), and the user's source file is left in place — neither consumed nor
+/// deleted. coven's own-layer counterpart to bae's
+/// `test_manage_truncated_source_aborts_before_enqueue`.
+#[tokio::test]
+async fn make_remote_aborts_when_source_size_no_longer_matches() {
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, _lib) = temp_store_dir();
+    let bytes = b"PHOTO-BYTES-full-length".to_vec();
+
+    let src = seed_local_release(
+        &db,
+        &tmp.path().join("user"),
+        "n1",
+        "photoaaa",
+        "cv/photoaaa.jpg",
+        &bytes,
+    )
+    .await;
+
+    // Truncate the source on disk so its length no longer matches the size the
+    // blob row recorded at registration — the drift the pre-enqueue check catches.
+    let truncated_len = 5u64;
+    let f = std::fs::OpenOptions::new().write(true).open(&src).unwrap();
+    f.set_len(truncated_len).unwrap();
+    drop(f);
+    assert_eq!(src.metadata().unwrap().len(), truncated_len);
+
+    let stamp_before = gate_stamp(&db, "n1").await;
+
+    let err = make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect_err("a source whose length drifted from its blob row aborts make_remote");
+    assert!(
+        matches!(
+            &err,
+            crate::blob::transition::MakeRemoteError::Source { blob_id, .. }
+                if blob_id.as_str() == "photoaaa"
+        ),
+        "make_remote aborts on the source-verification check for the drifted blob: {err:?}"
+    );
+
+    // The abort is atomic: nothing was enqueued and the gate never flipped.
+    assert_eq!(
+        pending_uploads(&db).await,
+        0,
+        "the source check aborts before a single upload is enqueued",
+    );
+    assert!(
+        !has_intent(&db, "notes", "n1").await,
+        "an aborted make_remote records no intent",
+    );
+    assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
+    assert_eq!(
+        gate_stamp(&db, "n1").await,
+        stamp_before,
+        "the gate row and its causal stamp are untouched",
+    );
+
+    // The failed transition neither consumed nor deleted the user's source, and
+    // left its external ref registered — the release is exactly as it was.
+    assert!(src.exists(), "the source file is left in place");
+    assert_eq!(
+        src.metadata().unwrap().len(),
+        truncated_len,
+        "the source file is untouched by the aborted transition",
+    );
+    assert!(
+        db.external_blob("photoaaa").await.unwrap().is_some(),
+        "the external blob ref survives the aborted transition",
+    );
+}
+
 /// make_local on a root already Local is refused at the API before any
 /// materialization: nothing is registered, no delete is queued, the gate row is
 /// untouched. Without the precondition, make_local would try to read the blob from
