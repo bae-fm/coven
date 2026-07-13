@@ -50,7 +50,18 @@
 //! fails, a durable `cancel` outbox row is queued and [`drain_tombstone_cancels`]
 //! retries it each cycle until the tombstone is gone, so the cancel survives cloud
 //! errors and restarts: once a blob is successfully (re-)uploaded to a key, the
-//! tombstone for that key is removed eventually, and the GC never reclaims it.
+//! tombstone for that key is removed eventually, and this device's own GC never
+//! reclaims it (the sync cycle skips its GC while any cancel is pending).
+//!
+//! That skip is **device-local** — the pending-cancel queue lives in this device's
+//! database, and a *peer's* GC cannot see it. A blob re-uploaded to a key whose
+//! tombstone is already past its grace can therefore be reclaimed by a peer whose
+//! database has seen the deletion but not yet the re-share, before this device's
+//! cancel lands. The grace period bounds the race (a within-grace tombstone is
+//! never reclaimed), and the failure is loud, never silent: the re-uploader's push
+//! refuses to publish a row whose blob is missing remotely and retries every
+//! cycle. Hosts that write new content at new (content-addressed or versioned)
+//! blob keys never re-enter a tombstoned key and avoid the race entirely.
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};

@@ -10,8 +10,13 @@ re-derived each time.
 Two mechanisms carry most of the defense, and the sections below refer back to
 them:
 
-- **The store keyring.** One symmetric key per generation, shared by every
-  member, used with XChaCha20-Poly1305 (see [Encryption](/docs/encryption)).
+- **The store keyring.** A set of symmetric keys shared by every member, each
+  identified by its fingerprint and ordered by a generation number, used with
+  XChaCha20-Poly1305 (see [Encryption](/docs/encryption)). Every sealed object
+  names the key that sealed it by fingerprint, adoption merges keyrings rather
+  than replacing them, and every device seals new content under the same
+  deterministically chosen key — so two owners rotating concurrently converge
+  instead of splitting the store.
   Every changeset, snapshot, blob, and membership record is sealed under it. The
   cipher is authenticated: a flipped byte fails to open. The associated data of
   each sealed object binds it to its `(store_id, cloud_key)` position, so an
@@ -181,8 +186,30 @@ one store it names.
 
 ## Accepted risks
 
-Two positions above are worth stating on their own, as deliberate scope
-decisions rather than gaps to close later.
+Four positions are worth stating on their own, as deliberate scope decisions
+rather than gaps to close later.
+
+**Credential revocation runs before the removal commits.** Removing a member
+withdraws their provider credential (where the provider supports withdrawal at
+all) *before* the chain's Remove entry and the key rotation commit. A failure
+after the withdrawal leaves the member locked out of storage while the committed
+chain still lists them — visible as a contradiction until the removing owner
+retries, which converges. The ordering is deliberate: locked-out-but-listed is
+the safe direction (the alternative window, removed-but-credentialed, hands a
+just-revoked member live storage access), the failure is loud to the initiator,
+and retrying the removal is idempotent.
+
+**A peer's tombstone GC can outrace a re-upload's cancel.** When a blob is
+re-uploaded to a cloud key whose deletion tombstone has already passed its grace
+(seven days), the re-uploader cancels the tombstone — but a *peer* whose database
+has seen the deletion and not yet the re-share judges the blob dead, and its GC
+can reclaim it before the cancel lands. The device-local pending-cancel gate
+cannot cover this: it lives in each device's own database. The grace period is
+the bound — the race needs a tombstone already past it at re-upload time — and
+the failure is loud, never silent: the re-uploader's push refuses to publish a
+row whose blob is missing remotely and retries every cycle. Hosts that write new
+content at new (content-addressed or versioned) blob keys never re-enter a
+tombstoned key and avoid the race entirely.
 
 **The member list display is not anchored.**
 [`get_members`](rustdoc:fn:coven::CovenHandle::get_members) loads the chain
