@@ -130,13 +130,9 @@ where
 }
 
 async fn delete_sync_state(db: &Database, key: &'static str) -> Result<(), String> {
-    db.call(move |conn| {
-        conn.execute("DELETE FROM sync_state WHERE key = ?1", [key])
-            .map(|_| ())
-            .map_err(DbError::from)
-    })
-    .await
-    .map_err(|e| format!("Failed to delete {key}: {e}"))
+    db.delete_sync_state(key)
+        .await
+        .map_err(|e| format!("Failed to delete {key}: {e}"))
 }
 
 fn parse_sync_state<T>(key: &str, value: &str) -> Result<T, String>
@@ -482,6 +478,7 @@ pub async fn run_single_sync_cycle(
             ch,
             cipher,
             pending_rotation,
+            db,
             user_keypair,
             custody,
             store_id,
@@ -1086,10 +1083,12 @@ pub async fn run_single_sync_cycle(
 /// can't be resolved at all (an invisible activation, a read failure) still
 /// aborts: those mean this device doesn't reliably know the current state, which
 /// is a different condition from "knows the state and can't adopt it yet".
+#[allow(clippy::too_many_arguments)]
 async fn refresh_authorization_state(
     cloud_home: &dyn CloudHome,
     cipher: &std::sync::RwLock<CloudCipher>,
     pending_rotation: &PendingRotation,
+    db: &Database,
     user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
     store_id: &str,
@@ -1155,8 +1154,8 @@ async fn refresh_authorization_state(
     //    If the decrypted keyring carries a strictly newer generation, swap the
     //    live cipher (and persist to the keyring) via `apply_key_rotation`, so
     //    this same cycle's push/pull/blob ops use it.
-    let (in_use, accepted_generation) = match &*cipher.read().unwrap() {
-        CloudCipher::Encrypted(enc) => (enc.keyring_entries(), enc.current_generation()),
+    let live_keyring = match &*cipher.read().unwrap() {
+        CloudCipher::Encrypted(enc) => enc.clone(),
         CloudCipher::Plaintext => {
             return Err("refresh: encrypted store became plaintext during key refresh".to_string())
         }
@@ -1171,27 +1170,26 @@ async fn refresh_authorization_state(
     .await
     {
         Ok(new_encryption) => {
-            let incoming_generation = new_encryption.current_generation();
-            if incoming_generation <= accepted_generation {
-                // Not newer than what this device already accepted — but that does
-                // NOT mean nothing is pending: a decoy wrap from a non-rotating
-                // owner can be the one this scan happened to resolve (see
-                // `unwrap_store_keyring_for_owners_with_activation`'s per-owner
-                // scan) while a genuinely newer generation, discovered on an
-                // earlier cycle, is still un-adopted. `pending_rotation` is only
-                // ever cleared by a successful adoption, never by this branch, so
-                // an earlier mark survives a scan that re-resolves to something
-                // older.
-                debug!(
-                    incoming_generation,
-                    accepted_generation, "refresh: ignored non-newer wrapped store key"
-                );
-            } else if in_use != new_encryption.keyring_entries() {
+            // Key identity is the key itself, not its generation number: adopt if
+            // the scan resolved any key the live keyring does not already hold —
+            // including a fork at the SAME generation number two owners minted at
+            // once, which a generation comparison would wrongly ignore. Merging
+            // (not comparing generations) is what makes a concurrent-rotation fork
+            // converge instead of partition.
+            let merged = live_keyring.merged_with(&new_encryption);
+            if merged.key_count() == live_keyring.key_count() {
+                // Every key this scan resolved is already held. Not adopted — and,
+                // crucially, `pending_rotation` is NOT cleared here (only a
+                // successful adoption clears it), so an earlier mark that a stale
+                // rescan (a decoy wrap from a non-rotating owner, or a LIST lag)
+                // can't re-observe still survives.
+                debug!("refresh: wrapped store key adds nothing new; keeping the live keyring");
+            } else {
                 match custody {
                     None => {
-                        pending_rotation.mark_committed(incoming_generation);
+                        pending_rotation.mark_committed(merged.current_generation());
                         info!(
-                            incoming_generation,
+                            committed_generation = merged.current_generation(),
                             "refresh: found a rotated store key but this cycle has no \
                              master-key custody to adopt it; sealing is paused until a \
                              cycle with custody adopts it"
@@ -1206,7 +1204,6 @@ async fn refresh_authorization_state(
                         ) {
                             Ok(fingerprint) => info!(%fingerprint, "Adopted rotated store key"),
                             Err(e) => warn!(
-                                incoming_generation,
                                 "refresh: could not adopt a rotated store key ({e}); sealing \
                                  is paused until adoption succeeds"
                             ),
@@ -1235,6 +1232,14 @@ async fn refresh_authorization_state(
         Err(e) => return Err(format!("refresh: read this device's wrapped key: {e}")),
     }
 
+    // Durably record whatever the marker now holds — a newly-marked pending
+    // rotation, or its clearing on adoption — before this cycle seals anything.
+    // A restart mid-pause must not forget the pause and seal under the superseded
+    // generation just because a fresh cloud scan happens to lag behind it.
+    super::cloud_storage::persist_pending_rotation(db, pending_rotation)
+        .await
+        .map_err(|e| format!("refresh: persist pending rotation: {e}"))?;
+
     Ok(())
 }
 
@@ -1244,6 +1249,8 @@ pub enum InitSyncError {
     NoSyncedTables,
     #[error("membership chain bootstrap/anchor failed: {0}")]
     MembershipAnchor(String),
+    #[error("restoring the persisted pending rotation failed: {0}")]
+    PendingRotationRestore(String),
 }
 
 /// Bootstrap sync over an already-built [`CloudSyncStorage`], returning the
@@ -1265,6 +1272,19 @@ pub async fn init_sync_over_storage(
     }
 
     let cipher_lock = storage.shared_cipher();
+
+    // Restore any durably-recorded pending rotation into this connection's marker
+    // before the first cycle seals anything, so a restart that interrupted an
+    // unadopted rotation resumes paused rather than sealing under the superseded
+    // generation.
+    if !cipher.is_plaintext() {
+        crate::sync::cloud_storage::restore_pending_rotation(
+            db,
+            &storage.shared_pending_rotation(),
+        )
+        .await
+        .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
+    }
 
     // Opaque (encrypted) home: every store has an owner-anchored membership
     // chain from creation. Establish it on first connect, and on every connect

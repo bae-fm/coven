@@ -595,10 +595,11 @@ async fn decrypt_wrapped_store_key_unverified(
     // The candidate is untrusted — it only has to decrypt the sealed membership
     // chain, whose authenticated Owner set the caller then re-derives the real key
     // against. A rotation before the join may have re-wrapped this slot under a
-    // non-founder owner, leaving the founder's original invite wrap a stale, older
-    // generation, so take the highest-generation wrap that opens: it carries the
-    // most key generations and so reads the furthest into the sealed chain.
-    let mut best: Option<EncryptionService> = None;
+    // non-founder owner, and two owners may have rotated concurrently, so MERGE
+    // every wrap that opens: the union holds every key generation any owner wrote,
+    // reading the furthest into the sealed chain regardless of which owner sealed
+    // a given entry.
+    let mut merged: Option<EncryptionService> = None;
     for owner in &owners {
         let wrapped = match fetch_wrapped_key(cloud_home, owner, &recipient_hex).await {
             Ok(wrapped) => wrapped,
@@ -628,14 +629,12 @@ async fn decrypt_wrapped_store_key_unverified(
                 continue;
             }
         };
-        if best
-            .as_ref()
-            .is_none_or(|best| candidate.current_generation() > best.current_generation())
-        {
-            best = Some(candidate);
-        }
+        merged = Some(match merged {
+            Some(existing) => existing.merged_with(&candidate),
+            None => candidate,
+        });
     }
-    best.ok_or_else(|| {
+    merged.ok_or_else(|| {
         InviteError::CloudHome(CloudHomeError::NotFound(format!(
             "keys/*/{recipient_hex}.enc"
         )))
@@ -651,12 +650,14 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
 ) -> Result<EncryptionService, InviteError> {
     let recipient_hex = hex::encode(keypair.public_key());
 
-    // Scan each current owner's prefix for this recipient's wrap and adopt the
-    // highest-generation one an owner's signature authenticates. An owner writes
-    // only into its own prefix, so `keys/{owner}/{recipient}` is authenticated
-    // against THAT owner; a wrap another owner rotated more recently supersedes an
-    // older one by its keyring generation.
-    let mut best: Option<EncryptionService> = None;
+    // Scan each current owner's prefix for this recipient's wrap and MERGE every
+    // one an owner's signature authenticates. An owner writes only into its own
+    // prefix, so `keys/{owner}/{recipient}` is authenticated against THAT owner.
+    // Two owners rotating at once each wrap a distinct key at the same generation
+    // number; merging holds both, so this device can decrypt content sealed by
+    // either and, via deterministic seal selection, converges on one seal key
+    // rather than partitioning on whichever it happened to read first.
+    let mut merged: Option<EncryptionService> = None;
     // Remember why non-adoptable wraps were rejected, so "no wrap adopted" reports
     // the real reason rather than a bare not-found (which the caller treats as
     // "this device has no wrapped key").
@@ -713,15 +714,13 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
                 continue;
             }
         };
-        if best
-            .as_ref()
-            .is_none_or(|best| keyring.current_generation() > best.current_generation())
-        {
-            best = Some(keyring);
-        }
+        merged = Some(match merged {
+            Some(existing) => existing.merged_with(&keyring),
+            None => keyring,
+        });
     }
 
-    if let Some(keyring) = best {
+    if let Some(keyring) = merged {
         return Ok(keyring);
     }
     if let Some(activation) = saw_inactive {
@@ -841,12 +840,46 @@ pub async fn revoke_member(
     let mut validated_chain = chain.clone();
     validated_chain.add_entry_at(remove_coord.clone(), entry.clone())?;
 
-    // Generate a new random encryption key.
-    let new_key = encryption::generate_random_key();
-    let new_generation = current_encryption.current_generation() + 1;
-    let new_keyring = current_encryption
-        .with_appended_generation(new_generation, new_key)
-        .map_err(|e| InviteError::Crypto(format!("append key generation: {e}")))?;
+    // A prior attempt of this same removal may have already minted a rotation and
+    // durably wrapped it to every remaining member — including this owner's own
+    // slot at keys/{self}/{self} — before crashing short of publishing the head
+    // (which is why the revokee still reads as current here). Re-adopt that prior
+    // key rather than minting a second one at the same generation: a member whose
+    // cycle already ran adopted the prior key, so minting fresh would fork the
+    // fleet across two keys for one generation. Read this owner's own slot back and
+    // authenticate it against this owner; reuse it only if it carries a generation
+    // above the one this device still holds (a genuine prior attempt, not just its
+    // own pre-rotation wrap). Anything else — no prior wrap, an activation not yet
+    // visible — falls through to a fresh mint.
+    let visible_coords = membership_coords(&entry_keys);
+    let prior_attempt = match unwrap_store_keyring_for_owners_with_activation(
+        cloud_home,
+        owner_keypair,
+        store_id,
+        std::iter::once(author_pubkey_hex.as_str()),
+        Some(&visible_coords),
+    )
+    .await
+    {
+        Ok(keyring) if keyring.current_generation() > current_encryption.current_generation() => {
+            Some(keyring)
+        }
+        Ok(_) => None,
+        Err(InviteError::CloudHome(CloudHomeError::NotFound(_)))
+        | Err(InviteError::InactiveWrappedKey { .. }) => None,
+        Err(e) => return Err(e),
+    };
+
+    let new_keyring = match prior_attempt {
+        Some(prior) => current_encryption.merged_with(&prior),
+        None => {
+            let new_key = encryption::generate_random_key();
+            let new_generation = current_encryption.current_generation() + 1;
+            current_encryption
+                .with_appended_generation(new_generation, new_key)
+                .map_err(|e| InviteError::Crypto(format!("append key generation: {e}")))?
+        }
+    };
 
     // Re-wrap the new key to all remaining members, each signed so a joiner that
     // later adopts it can authenticate the signer against the current Owner set.
@@ -1646,6 +1679,201 @@ mod tests {
             .collect();
         // 1 for invite + 1 for revoke = 2
         assert_eq!(owner_entries.len(), 2);
+    }
+
+    /// Crash-retry converges on one seal key, and every interim changeset stays
+    /// decryptable. A first removal attempt mints a rotation and durably wraps it
+    /// to every remaining member — including this owner's own `keys/{self}/{self}`
+    /// slot — then crashes before publishing the head, so the revokee still reads
+    /// as current. A member whose cycle already ran adopted that first key. The
+    /// owner's retry must re-adopt its own durable prior wrap rather than minting a
+    /// second key at the same generation: minting fresh would fork the fleet.
+    #[tokio::test]
+    async fn revoke_retry_readopts_prior_attempt_instead_of_minting_a_fork() {
+        let owner = gen_keypair();
+        let member = gen_keypair(); // stays
+        let victim = gen_keypair(); // removed
+        let owner_pk = pubkey_hex(&owner);
+        let old_key: [u8; 32] = [30u8; 32];
+        let attempt1_key: [u8; 32] = [31u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let mut chain = bootstrap_chain(&owner);
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &member,
+            &old_key,
+            "0000000002000-0000-dev1",
+        )
+        .await;
+        invite_member_for_test(
+            &storage,
+            &mut chain,
+            &owner,
+            &victim,
+            &old_key,
+            "0000000003000-0000-dev1",
+        )
+        .await;
+
+        // Reconstruct the durable state a crashed first attempt would leave: the
+        // Remove entry uploaded (so it is listed) but the head NOT advanced, plus
+        // the first attempt's generation-2 keyring wrapped to the owner's own slot
+        // and to the remaining member's, each activated by that Remove entry.
+        let remove_coord = MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: next_membership_seq(&chain, &owner_pk),
+        };
+        let mut remove_entry = MembershipEntry {
+            action: MembershipAction::Remove,
+            user_pubkey: pubkey_hex(&victim),
+            provider_account_email: None,
+            prev_hash: chain.latest_author_hash(&owner_pk),
+            role: MemberRole::Member,
+            timestamp: "0000000004000-0000-dev1".to_string(),
+            author_pubkey: String::new(),
+            signature: String::new(),
+        };
+        sign_membership_entry(&mut remove_entry, &owner);
+        upload_membership_entry(&storage, &remove_coord, &remove_entry)
+            .await
+            .unwrap();
+
+        let attempt1 = EncryptionService::from_key(old_key)
+            .with_appended_generation(2, attempt1_key)
+            .unwrap();
+        for recipient in [&owner, &member] {
+            let recipient_x = recipient.to_x25519_public_key();
+            let wrapped = signed_wrapped_keyring_for_test(
+                LIB_ID,
+                &pubkey_hex(recipient),
+                &recipient_x,
+                &attempt1,
+                &owner,
+                Some(remove_coord.clone()),
+            );
+            storage
+                .put_wrapped_key(&owner_pk, &pubkey_hex(recipient), wrapped)
+                .await
+                .unwrap();
+        }
+
+        // The member's cycle already adopted the first attempt's key.
+        let visible = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let member_adopted = unwrap_store_keyring_for_owners_with_activation(
+            &storage as &dyn CloudHome,
+            &member,
+            LIB_ID,
+            std::iter::once(owner_pk.as_str()),
+            Some(&visible),
+        )
+        .await
+        .unwrap();
+        assert_eq!(member_adopted.key_bytes(), attempt1_key);
+
+        // The owner retries the removal from its pre-rotation cipher (its head
+        // never advanced, so the victim still reads as current).
+        // The storage and the cloud home are one bucket in production (the
+        // CloudSyncStorage delegates to the same CloudHome), so the retry's read of
+        // its own prior wrap hits the same objects it wrote — pass the mock as both.
+        let retried = revoke_member(
+            &storage,
+            &storage,
+            &mut chain,
+            storage.list_membership_entries().await.unwrap(),
+            &owner,
+            &pubkey_hex(&victim),
+            LIB_ID,
+            "0000000004000-0000-dev1",
+            &EncryptionService::from_key(old_key),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            retried.key_bytes(),
+            attempt1_key,
+            "the retry re-adopts its own durable prior wrap, not a fresh fork",
+        );
+        // The interim changeset the member sealed under the first attempt's key is
+        // still decryptable to the owner's retried keyring.
+        let interim = attempt1.seal_app_data(b"interim changeset", b"ctx");
+        assert_eq!(
+            retried.open_app_data(&interim, b"ctx").unwrap(),
+            b"interim changeset",
+        );
+    }
+
+    /// Two owners rotating at once each wrap a distinct key at the same generation
+    /// number, under their own prefix. The reader merges both wraps rather than
+    /// picking one, so it holds both keys — content sealed by either owner stays
+    /// decryptable, and deterministic seal selection converges the fleet.
+    #[tokio::test]
+    async fn unwrap_merges_concurrent_same_generation_wraps_from_two_owners() {
+        let owner_a = gen_keypair();
+        let owner_b = gen_keypair();
+        let recipient = gen_keypair();
+        let base_key: [u8; 32] = [70u8; 32];
+        let key_a: [u8; 32] = [0xA1u8; 32];
+        let key_b: [u8; 32] = [0xB2u8; 32];
+
+        let storage = MockSyncStorage::new();
+        let r_x = recipient.to_x25519_public_key();
+
+        let keyring_a = EncryptionService::from_key(base_key)
+            .with_appended_generation(2, key_a)
+            .unwrap();
+        let keyring_b = EncryptionService::from_key(base_key)
+            .with_appended_generation(2, key_b)
+            .unwrap();
+        let wrapped_a = signed_wrapped_keyring_for_test(
+            LIB_ID,
+            &pubkey_hex(&recipient),
+            &r_x,
+            &keyring_a,
+            &owner_a,
+            None,
+        );
+        let wrapped_b = signed_wrapped_keyring_for_test(
+            LIB_ID,
+            &pubkey_hex(&recipient),
+            &r_x,
+            &keyring_b,
+            &owner_b,
+            None,
+        );
+        storage
+            .put_wrapped_key(&pubkey_hex(&owner_a), &pubkey_hex(&recipient), wrapped_a)
+            .await
+            .unwrap();
+        storage
+            .put_wrapped_key(&pubkey_hex(&owner_b), &pubkey_hex(&recipient), wrapped_b)
+            .await
+            .unwrap();
+
+        let owners = [pubkey_hex(&owner_a), pubkey_hex(&owner_b)];
+        let merged = unwrap_store_keyring_for_owners_with_activation(
+            &storage as &dyn CloudHome,
+            &recipient,
+            LIB_ID,
+            owners.iter().map(String::as_str),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            merged.key_count(),
+            3,
+            "base key plus both owners' rotations"
+        );
+        assert_eq!(merged.current_generation(), 2);
+        let sealed_a = keyring_a.seal_app_data(b"A", b"ctx");
+        let sealed_b = keyring_b.seal_app_data(b"B", b"ctx");
+        assert_eq!(merged.open_app_data(&sealed_a, b"ctx").unwrap(), b"A");
+        assert_eq!(merged.open_app_data(&sealed_b, b"ctx").unwrap(), b"B");
     }
 
     #[tokio::test]

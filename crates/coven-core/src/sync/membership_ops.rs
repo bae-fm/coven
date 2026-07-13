@@ -309,14 +309,31 @@ pub fn apply_key_rotation(
     cipher_lock: &std::sync::RwLock<CloudCipher>,
     pending_rotation: &PendingRotation,
 ) -> Result<String, KeyError> {
+    // Mark first, so a seal that clones the live cipher during the persist+swap
+    // below refuses under the superseded generation until the swap lands.
     pending_rotation.mark_committed(new_encryption.current_generation());
     let new_fingerprint = {
         let mut cipher = cipher_lock.write().unwrap();
         match &mut *cipher {
-            CloudCipher::Encrypted(enc) => {
-                custody.persist(&MasterKeyring::from(new_encryption.clone()))?;
-                *enc = new_encryption;
-                enc.fingerprint()
+            CloudCipher::Encrypted(live) => {
+                // Merge, never replace: fold the incoming keyring into the live
+                // one so a key once adopted is never dropped. Re-check, under this
+                // same write lock, that the merge genuinely extends what is live —
+                // a concurrent member op may have committed and adopted a newer
+                // rotation between the caller's is-it-newer check (an earlier,
+                // separate read lock, with a network scan in between) and here.
+                // Adopting a keyring that adds nothing would regress the seal key
+                // and custody, so a stale apply fails loud instead. A persistence
+                // failure returns early with the mark left set — the rotation is
+                // committed on the cloud and this device is still on the old key.
+                let merged = live.merged_with(&new_encryption);
+                if merged.key_count() == live.key_count() {
+                    None
+                } else {
+                    custody.persist(&MasterKeyring::from(merged.clone()))?;
+                    *live = merged;
+                    Some(live.fingerprint())
+                }
             }
             // Both callers confirm an encrypted home before rotating: the sync
             // manager's `require_encrypted_home` gate (surfacing NotEncryptedHome)
@@ -330,8 +347,14 @@ pub fn apply_key_rotation(
             }
         }
     };
-    pending_rotation.clear();
-    Ok(new_fingerprint)
+    // Re-derive the pause from the live cipher: a merge (or an already-covered
+    // stale apply) that now covers everything committed clears it; a strictly
+    // newer generation still pending stays paused.
+    pending_rotation.resolve(&cipher_lock.read().unwrap());
+    match new_fingerprint {
+        Some(fingerprint) => Ok(fingerprint),
+        None => Err(KeyError::StaleKeyRotation),
+    }
 }
 
 /// Write a store's founder entry: chain entry #1, a self-signed Owner `Add` of
@@ -753,6 +776,47 @@ mod tests {
         TestCustody,
     };
     use std::sync::RwLock;
+
+    /// Adopting a rotated key re-checks under the write lock that the incoming
+    /// keyring genuinely extends the live one. A concurrent member op may have
+    /// committed and adopted a newer rotation between the caller's is-it-newer
+    /// check and here; adopting a keyring that adds nothing would regress the seal
+    /// key and custody. A stale (non-extending) apply fails loud and touches
+    /// neither the live cipher nor custody.
+    #[test]
+    fn apply_key_rotation_refuses_a_nonextending_keyring_and_leaves_custody_untouched() {
+        let live = EncryptionService::from_key([1u8; 32])
+            .with_appended_generation(2, [2u8; 32])
+            .unwrap();
+        let custody = TestCustody::default();
+        custody
+            .persist(&MasterKeyring::from(live.clone()))
+            .expect("seed custody with the live keyring");
+        let cipher = RwLock::new(CloudCipher::Encrypted(live.clone()));
+        let pending = PendingRotation::none();
+
+        // A strict subset of the live keyring — only its generation-1 key. Adopting
+        // it would drop generation 2 and regress the seal key.
+        let stale = EncryptionService::from_key([1u8; 32]);
+        let error = apply_key_rotation(stale, &custody, &cipher, &pending)
+            .expect_err("a non-extending keyring must fail loud");
+        assert!(matches!(error, KeyError::StaleKeyRotation), "{error:?}");
+
+        assert_eq!(
+            custody.unlock().unwrap().unwrap().fingerprint(),
+            live.fingerprint(),
+            "a stale apply must not rewrite custody",
+        );
+        let guard = cipher.read().unwrap();
+        match &*guard {
+            CloudCipher::Encrypted(enc) => assert_eq!(
+                enc.fingerprint(),
+                live.fingerprint(),
+                "a stale apply must not swap the live cipher",
+            ),
+            CloudCipher::Plaintext => panic!("cipher must stay encrypted"),
+        }
+    }
 
     /// The invite anchors the joiner to the store FOUNDER, regardless of which
     /// Owner sends it. A second Owner inviting must still hand over the founder's

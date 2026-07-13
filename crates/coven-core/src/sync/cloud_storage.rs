@@ -19,8 +19,13 @@ use crate::keys::UserKeypair;
 use crate::local_blob::PlatformPlaintextReader;
 use crate::storage::cloud::{BlobBody, CloudHome};
 
-const GENERATION_TAG_MAGIC: &[u8; 4] = b"CKG1";
-const GENERATION_TAG_LEN: usize = GENERATION_TAG_MAGIC.len() + std::mem::size_of::<u64>();
+/// Every encrypted object carries this cleartext prefix naming the key it was
+/// sealed under, by 8-byte fingerprint: magic, then the fingerprint. A read
+/// resolves that exact key from the keyring rather than trusting a generation
+/// number a fork could reuse.
+const KEY_TAG_MAGIC: &[u8; 4] = b"CKF1";
+const KEY_FINGERPRINT_LEN: usize = 8;
+const KEY_TAG_LEN: usize = KEY_TAG_MAGIC.len() + KEY_FINGERPRINT_LEN;
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
 /// every object under the store key (the default); a `Plaintext` home stores
@@ -94,6 +99,17 @@ impl PendingRotation {
         *self.0.write().unwrap() = None;
     }
 
+    /// Clear the mark only if `cipher`'s live seal key now covers the committed
+    /// generation; a higher generation still pending stays marked. The adoption
+    /// counterpart of [`Self::mark_committed`] — a merge that adopts a same- or
+    /// higher-generation key resolves the pause, but one that leaves a strictly
+    /// newer committed generation unadopted does not.
+    pub fn resolve(&self, cipher: &CloudCipher) {
+        if self.check(cipher).is_ok() {
+            self.clear();
+        }
+    }
+
     /// The recorded committed generation, if any is pending — for status
     /// reporting independent of a specific cipher snapshot.
     pub fn pending_generation(&self) -> Option<u64> {
@@ -117,6 +133,46 @@ impl PendingRotation {
             }
         }
         Ok(())
+    }
+}
+
+/// The `sync_state` key under which a device durably records that a committed
+/// store-key rotation is outstanding (the committed generation as decimal). Set
+/// when [`PendingRotation`] is marked, deleted when the mark resolves. Restored
+/// into the in-memory marker at open so a restart cannot forget an unadopted
+/// rotation and resume sealing under the superseded generation — the removed
+/// member still holds a key for it — even if a fresh cloud scan, lagging, does
+/// not re-surface the rotation.
+pub const PENDING_ROTATION_STATE_KEY: &str = "pending_rotation_generation";
+
+/// Restore the in-memory [`PendingRotation`] from its durable `sync_state`
+/// record, if one is set. Called at open, before the first cycle seals anything.
+pub async fn restore_pending_rotation(
+    db: &crate::database::Database,
+    pending_rotation: &PendingRotation,
+) -> Result<(), crate::database::DbError> {
+    if let Some(value) = db.get_sync_state(PENDING_ROTATION_STATE_KEY).await? {
+        match value.parse::<u64>() {
+            Ok(generation) => pending_rotation.mark_committed(generation),
+            Err(_) => warn!("ignoring malformed persisted pending-rotation generation {value:?}"),
+        }
+    }
+    Ok(())
+}
+
+/// Write the in-memory [`PendingRotation`]'s current state to its durable
+/// `sync_state` record: the committed generation while a rotation is pending, or
+/// a delete once it has resolved.
+pub async fn persist_pending_rotation(
+    db: &crate::database::Database,
+    pending_rotation: &PendingRotation,
+) -> Result<(), crate::database::DbError> {
+    match pending_rotation.pending_generation() {
+        Some(generation) => {
+            db.set_sync_state(PENDING_ROTATION_STATE_KEY, &generation.to_string())
+                .await
+        }
+        None => db.delete_sync_state(PENDING_ROTATION_STATE_KEY).await,
     }
 }
 
@@ -233,9 +289,7 @@ impl CloudCipher {
     /// encrypted home, the plaintext length verbatim for a browsable one.
     pub fn body_len(&self, plaintext_len: u64) -> u64 {
         match self {
-            CloudCipher::Encrypted(_) => {
-                chunked_encrypted_len(plaintext_len) + GENERATION_TAG_LEN as u64
-            }
+            CloudCipher::Encrypted(_) => chunked_encrypted_len(plaintext_len) + KEY_TAG_LEN as u64,
             CloudCipher::Plaintext => plaintext_len,
         }
     }
@@ -563,54 +617,52 @@ pub(crate) fn cloud_aad_context(store_id: &str, cloud_key: &str) -> Vec<u8> {
     context
 }
 
-fn generation_tag(generation: u64) -> Vec<u8> {
-    let mut tag = Vec::with_capacity(GENERATION_TAG_LEN);
-    tag.extend_from_slice(GENERATION_TAG_MAGIC);
-    tag.extend_from_slice(&generation.to_be_bytes());
+fn key_tag(fingerprint: &[u8; KEY_FINGERPRINT_LEN]) -> Vec<u8> {
+    let mut tag = Vec::with_capacity(KEY_TAG_LEN);
+    tag.extend_from_slice(KEY_TAG_MAGIC);
+    tag.extend_from_slice(fingerprint);
     tag
 }
 
-fn read_generation_tag(stored: &[u8]) -> Result<(u64, &[u8]), EncryptionError> {
-    if stored.len() < GENERATION_TAG_LEN {
+fn read_key_tag(stored: &[u8]) -> Result<([u8; KEY_FINGERPRINT_LEN], &[u8]), EncryptionError> {
+    if stored.len() < KEY_TAG_LEN {
         return Err(EncryptionError::Decryption(
-            "ciphertext too short for generation tag".to_string(),
+            "ciphertext too short for key tag".to_string(),
         ));
     }
-    if &stored[..GENERATION_TAG_MAGIC.len()] != GENERATION_TAG_MAGIC {
+    if &stored[..KEY_TAG_MAGIC.len()] != KEY_TAG_MAGIC {
         return Err(EncryptionError::Decryption(
-            "ciphertext missing generation tag".to_string(),
+            "ciphertext missing key tag".to_string(),
         ));
     }
-    let mut generation_bytes = [0u8; std::mem::size_of::<u64>()];
-    generation_bytes.copy_from_slice(&stored[GENERATION_TAG_MAGIC.len()..GENERATION_TAG_LEN]);
-    Ok((
-        u64::from_be_bytes(generation_bytes),
-        &stored[GENERATION_TAG_LEN..],
-    ))
+    let mut fingerprint = [0u8; KEY_FINGERPRINT_LEN];
+    fingerprint.copy_from_slice(&stored[KEY_TAG_MAGIC.len()..KEY_TAG_LEN]);
+    Ok((fingerprint, &stored[KEY_TAG_LEN..]))
 }
 
-/// The key `scope` seals under plus the cleartext generation-tag prefix every
-/// encrypted object carries (the current store-key generation, so a later
-/// read knows which generation to open with).
+/// The key `scope` seals under plus the cleartext key-tag prefix every encrypted
+/// object carries (the master seal key's fingerprint, so a later read resolves
+/// the exact key to open with — for a derived scope it re-derives from that
+/// master key).
 fn sealing_encryption_for_scope(
     scope: crate::blob::BlobScope,
     master: &EncryptionService,
 ) -> (EncryptionService, Vec<u8>) {
     (
         encryption_for_scope(scope, master),
-        generation_tag(master.current_generation()),
+        key_tag(&master.seal_fingerprint()),
     )
 }
 
 fn opening_encryption_for_scope(
     scope: crate::blob::BlobScope,
     master: &EncryptionService,
-    generation: u64,
+    fingerprint: &[u8; KEY_FINGERPRINT_LEN],
 ) -> Result<EncryptionService, EncryptionError> {
     match scope {
-        crate::blob::BlobScope::Master => master.service_for_generation(generation),
+        crate::blob::BlobScope::Master => master.service_for_fingerprint(fingerprint),
         crate::blob::BlobScope::Derived(scope_id) => {
-            master.derive_scoped_for_generation(generation, &scope_id)
+            master.derive_scoped_for_fingerprint(fingerprint, &scope_id)
         }
     }
 }
@@ -632,8 +684,8 @@ fn open_scoped_encrypted(
     stored: &[u8],
     aad_context: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
-    let (generation, ciphertext) = read_generation_tag(stored)?;
-    opening_encryption_for_scope(scope, master, generation)?.decrypt(ciphertext, aad_context)
+    let (fingerprint, ciphertext) = read_key_tag(stored)?;
+    opening_encryption_for_scope(scope, master, &fingerprint)?.decrypt(ciphertext, aad_context)
 }
 
 /// Reads plaintext byte ranges from a single stored blob without fetching the
@@ -840,30 +892,30 @@ impl BlobRangeReader {
             .get_or_try_init(|| async {
                 let header = self
                     .home
-                    .read_range(&self.key, 0, (GENERATION_TAG_LEN + NONCE_SIZE) as u64)
+                    .read_range(&self.key, 0, (KEY_TAG_LEN + NONCE_SIZE) as u64)
                     .await
                     .map_err(StorageError::from)?;
-                if header.len() < GENERATION_TAG_LEN + NONCE_SIZE {
+                if header.len() < KEY_TAG_LEN + NONCE_SIZE {
                     return Err(StorageError::Decryption(format!(
                         "blob header too short: expected {}, got {}",
-                        GENERATION_TAG_LEN + NONCE_SIZE,
+                        KEY_TAG_LEN + NONCE_SIZE,
                         header.len()
                     )));
                 }
-                let (generation, nonce_and_chunks) = read_generation_tag(&header)
-                    .map_err(|e| StorageError::Decryption(format!("blob generation tag: {e}")))?;
+                let (fingerprint, nonce_and_chunks) = read_key_tag(&header)
+                    .map_err(|e| StorageError::Decryption(format!("blob key tag: {e}")))?;
                 let service = opening_encryption_for_scope(
                     encryption.scope.clone(),
                     &encryption.master,
-                    generation,
+                    &fingerprint,
                 )
                 .map_err(|e| {
-                    StorageError::Decryption(format!("blob generation {generation}: {e}"))
+                    StorageError::Decryption(format!("blob key {}: {e}", hex::encode(fingerprint)))
                 })?;
                 Ok(RangeHeader {
                     encryption: service,
                     nonce: nonce_and_chunks[..NONCE_SIZE].to_vec(),
-                    chunk_base: (GENERATION_TAG_LEN + NONCE_SIZE) as u64,
+                    chunk_base: (KEY_TAG_LEN + NONCE_SIZE) as u64,
                 })
             })
             .await
@@ -1439,7 +1491,55 @@ mod tests {
         BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHomeError, CloudHomeJoinInfo,
         RevokeOutcome,
     };
+    use crate::sync::test_helpers::open_test_db;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A committed rotation this device has not adopted survives a restart. A
+    /// prior run marks it and persists to `sync_state`; a fresh run restores it
+    /// into a new in-memory marker, so sealing stays paused rather than resuming
+    /// under the superseded generation a removed member still holds — even though
+    /// the fresh marker started empty. Adopting the rotation and re-persisting
+    /// clears the durable record so a later restart no longer pauses.
+    #[tokio::test]
+    async fn persisted_pending_rotation_pauses_sealing_across_restart() {
+        let db = open_test_db();
+
+        // Prior run: generation 2 is committed but unadopted; record it durably.
+        let marked = PendingRotation::none();
+        marked.mark_committed(2);
+        persist_pending_rotation(&db, &marked).await.unwrap();
+
+        // Fresh run: a brand-new marker restores the pause from sync_state.
+        let restored = PendingRotation::none();
+        restore_pending_rotation(&db, &restored).await.unwrap();
+        let live_gen_1 = CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32]));
+        assert!(
+            matches!(
+                restored.check(&live_gen_1),
+                Err(RotationPending {
+                    committed_generation: 2,
+                    live_generation: 1,
+                })
+            ),
+            "a restored pause must still refuse sealing under the superseded generation",
+        );
+
+        // Adopt the rotation and re-persist: the durable record clears.
+        let adopted = CloudCipher::Encrypted(
+            EncryptionService::from_key([1u8; 32])
+                .with_appended_generation(2, [2u8; 32])
+                .unwrap(),
+        );
+        restored.resolve(&adopted);
+        persist_pending_rotation(&db, &restored).await.unwrap();
+
+        let after_restart = PendingRotation::none();
+        restore_pending_rotation(&db, &after_restart).await.unwrap();
+        assert!(
+            after_restart.check(&live_gen_1).is_ok(),
+            "a resolved rotation leaves no durable pause behind",
+        );
+    }
 
     #[derive(Clone)]
     struct RecordingCloudHome {
@@ -1714,7 +1814,7 @@ mod tests {
             .await
             .expect("write generation one membership");
 
-        let keyring = EncryptionService::from_keyring(2, [(1, [1u8; 32]), (2, [2u8; 32])]).unwrap();
+        let keyring = EncryptionService::from_keyring([(1, [1u8; 32]), (2, [2u8; 32])]).unwrap();
         *storage.shared_cipher().write().unwrap() = CloudCipher::Encrypted(keyring);
 
         assert_eq!(

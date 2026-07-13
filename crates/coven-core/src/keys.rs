@@ -45,6 +45,12 @@ pub enum KeyError {
     NoPendingIdentity { request_public_key_hex: String },
     #[error("invalid host secret name {name:?}: {reason}")]
     InvalidSecretName { name: String, reason: String },
+    /// Adopting a rotated store key found, under the write lock, that the
+    /// incoming keyring adds nothing to the live one — a concurrent op already
+    /// adopted a keyring that covers it. Failing loud keeps the delayed apply
+    /// from regressing the seal key or custody.
+    #[error("stale key rotation: the incoming keyring does not extend the live one")]
+    StaleKeyRotation,
     /// The OS refused a Keychain data-protection-store operation with
     /// `errSecMissingEntitlement` (OSStatus -34018). This is not "the binary
     /// isn't signed" — an ad-hoc or Development-signed binary with no

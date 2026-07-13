@@ -915,6 +915,16 @@ impl Database {
         .await
     }
 
+    pub async fn delete_sync_state(&self, key: &str) -> Result<(), DbError> {
+        let key = key.to_string();
+        self.call(move |conn| {
+            conn.execute("DELETE FROM sync_state WHERE key = ?1", [key])
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
     /// `namespace`'s device-local cache-size budget in bytes, or `None` if the host
     /// has not set one for it. `None` means unlimited — eviction is off for that
     /// namespace and its cache grows without bound; the host opts a namespace into a

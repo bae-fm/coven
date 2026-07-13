@@ -115,6 +115,16 @@ pub(crate) struct SyncManager {
     // Mutable sync state — updated when providers are connected/disconnected
     sync_loop_handle: RwLock<Option<Arc<SyncLoopHandle>>>,
     cloud_home: RwLock<Option<Arc<dyn CloudHome>>>,
+
+    /// Serializes the membership operations that mint or rotate the store key —
+    /// invite (wraps the key to a new member) and remove (mints a fresh key and
+    /// re-wraps it to everyone remaining). Each clones the live cipher at entry
+    /// and builds a new keyring on top of it; without this, two rapid ops on one
+    /// device would both clone the SAME base generation and the second would
+    /// overwrite the first's wraps before the first's head guard could catch it,
+    /// forking the fleet. Held for the whole operation so the second waits and
+    /// builds on the first's committed state.
+    member_ops_lock: tokio::sync::Mutex<()>,
 }
 
 impl SyncManager {
@@ -154,6 +164,7 @@ impl SyncManager {
             status_tx,
             sync_loop_handle: RwLock::new(None),
             cloud_home: RwLock::new(None),
+            member_ops_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -673,6 +684,9 @@ impl SyncManager {
         invitee_email: Option<&str>,
         role: MemberRole,
     ) -> Result<String, SyncError> {
+        // Serialize with any other key-minting/rotating member op on this device.
+        let _member_ops = self.member_ops_lock.lock().await;
+
         let sync_loop = self
             .sync_loop_handle
             .read()
@@ -711,6 +725,11 @@ impl SyncManager {
     }
 
     pub(crate) async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
+        // Serialize with any other key-minting/rotating member op on this device,
+        // so a second removal builds on this one's committed state rather than
+        // cloning the same base cipher and overwriting its wraps.
+        let _member_ops = self.member_ops_lock.lock().await;
+
         let sync_loop = self
             .sync_loop_handle
             .read()
@@ -736,7 +755,7 @@ impl SyncManager {
         // half-applied state and its remedies — and, structurally, this device
         // seals nothing new for the cloud until one of those remedies adopts it
         // (`pending_rotation`, shared with the sync loop this same store runs).
-        let fingerprint = crate::sync::membership_ops::remove_member(
+        let outcome = crate::sync::membership_ops::remove_member(
             storage,
             cloud_home,
             sync_loop.user_keypair(),
@@ -748,9 +767,16 @@ impl SyncManager {
             sync_loop.cipher(),
             &pending_rotation,
         )
-        .await
-        .map_err(SyncError::Membership)?;
+        .await;
 
+        // Durably record the marker's state whether adoption succeeded or failed:
+        // on a failed adoption the rotation is committed on the cloud but this
+        // device is still sealing under the superseded generation, so a restart
+        // must remember the pause; on success the marker is already cleared and
+        // this deletes the durable record.
+        crate::sync::cloud_storage::persist_pending_rotation(&self.db, &pending_rotation).await?;
+
+        let fingerprint = outcome.map_err(SyncError::Membership)?;
         Ok(fingerprint)
     }
 }
