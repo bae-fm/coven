@@ -1745,6 +1745,161 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     );
 }
 
+/// Replacing a blob-bearing row on a browsable home puts the new bytes at the readable
+/// cloud key the replaced row also used.
+///
+/// The cloud key is `{namespace}/{cloud_path}` — the host's readable path — so it is
+/// stable across a replacement by construction: it carries no blob id. An object
+/// already at that key is the *replaced* blob's bytes, and the push must overwrite it
+/// rather than read its presence as "this blob is already uploaded".
+///
+/// Device A publishes a cover and device B pulls it; A then replaces the row with a
+/// fresh one — a new blob id, new bytes staged in the local store, the same readable
+/// cloud path — and B pulls again. The bytes at the cloud key must be the new ones, and
+/// B, whose download verifies the object against the new row's content hash, must end
+/// up serving them.
+#[tokio::test]
+async fn plain_scheme_blob_replaced_at_the_same_cloud_path_uploads_the_new_bytes() {
+    // A browsable home: readable keys, objects stored in the clear (the two are one
+    // choice), so the test reads the cloud object back as plaintext.
+    let home = InMemoryCloudHome::new();
+    let keypair = UserKeypair::generate();
+    let storage = CloudSyncStorage::new(
+        std::sync::Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        keypair.clone(),
+    );
+    const COVER_KEY: &str = "photos/n1/cover.jpg";
+
+    let old_bytes = b"OLD-COVER-BYTES";
+    let new_bytes = b"NEW-COVER-BYTES";
+
+    let db1 = open_test_db_with_blob(readable_photo_decl());
+    let tables = test_synced_tables_with_blob(readable_photo_decl());
+    let (_t1, ld1) = temp_store_dir();
+    store_local(&ld1, "p1cover", old_bytes).await;
+    let outgoing = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
+                 VALUES ('p1cover', 'n1', 'cover', {}, '{}', 'n1/cover.jpg', \
+                 '0000000001000-0000-dev1', '2026-01-01')",
+                old_bytes.len(),
+                crate::blob::content_hash(old_bytes),
+            ),
+        ],
+    )
+    .await;
+    push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    assert_eq!(
+        home.get(COVER_KEY).as_deref(),
+        Some(old_bytes.as_slice()),
+        "the first push puts the cover at its readable key",
+    );
+
+    // Device B takes the cover before the replacement, so it is a peer holding the
+    // replaced blob when the new one arrives.
+    let db2 = open_test_db_with_blob(readable_photo_decl());
+    let (_t2, ld2) = temp_store_dir();
+    let (cursors, _) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+
+    // Replace the cover: a new blob, whose bytes the host stages in the local store,
+    // carried by a fresh row at the same readable cloud path; the replaced row and its
+    // local copy go away.
+    store_local(&ld1, "p2cover", new_bytes).await;
+    local_files::drop_blob(&ld1, "photos", "p1cover")
+        .await
+        .expect("drop the replaced blob's local copy");
+    let outgoing = capture_bytes(
+        &db1,
+        &[
+            "DELETE FROM note_photos WHERE id = 'p1cover'",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
+                 VALUES ('p2cover', 'n1', 'cover', {}, '{}', 'n1/cover.jpg', \
+                 '0000000002000-0000-dev1', '2026-01-01')",
+                new_bytes.len(),
+                crate::blob::content_hash(new_bytes),
+            ),
+        ],
+    )
+    .await;
+    push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
+
+    assert_eq!(
+        home.get(COVER_KEY).as_deref(),
+        Some(new_bytes.as_slice()),
+        "the replacement must overwrite the object standing at its cloud key",
+    );
+
+    // Device B pulls the replacement. Its download verifies the object against the new
+    // row's content hash, so an object still holding the replaced bytes fails the pull.
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &cursors, &ld2).await;
+
+    assert!(
+        !result.asset_downloads_failed,
+        "device B must download a cover matching the row's hash",
+    );
+    assert_eq!(result.changesets_applied, 1);
+    let cached = std::fs::read(
+        ld2.cache_blob_path("photos", "p2cover")
+            .expect("cache path"),
+    )
+    .expect("device B cached the replacement cover");
+    assert_eq!(
+        cached,
+        new_bytes.as_slice(),
+        "device B serves the replacement bytes, not the cover it replaced",
+    );
+}
+
+/// Push one cycle's captured changeset the way the sync loop does: `service::sync`
+/// prepares (and uploads the host-provided blobs of) the gated changeset, then
+/// `push_changeset` publishes it.
+async fn push_cycle(
+    db: &crate::database::Database,
+    tables: &[SyncedTable],
+    storage: &CloudSyncStorage,
+    outgoing: Vec<u8>,
+    local_seq: u64,
+    keypair: &UserKeypair,
+    store_dir: &crate::store_dir::StoreDir,
+) {
+    let result = sync_for_test(
+        "dev1",
+        db,
+        tables,
+        outgoing,
+        local_seq,
+        &HashMap::new(),
+        storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        keypair,
+        store_dir,
+    )
+    .await
+    .expect("sync");
+    let outgoing = result.outgoing.expect("outgoing changeset");
+    cycle::push_changeset(
+        storage,
+        db,
+        "dev1",
+        outgoing.seq,
+        outgoing.packed,
+        "2026-01-01T00:00:00Z",
+    )
+    .await
+    .expect("push_changeset");
+}
+
 /// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
 /// shared `CloudHome`. Device A publishes a note plus its cover photo via the real
 /// `service::sync`; the blob lands ciphertext at rest. Device B — a fresh DB

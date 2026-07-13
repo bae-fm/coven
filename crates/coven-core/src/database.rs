@@ -1017,6 +1017,53 @@ impl Database {
             .await
     }
 
+    // ---- Bookkeeping: blob_cloud_contents (what coven wrote to a cloud key) ----
+
+    /// The content hash of the bytes coven last wrote to `cloud_key`, or `None` if it
+    /// has never written there. The push consults it to decide whether the object
+    /// standing at a blob's key holds *that blob's* bytes: a browsable home's key is
+    /// the host's readable path, which does not change when the row's blob does, so the
+    /// object's presence answers nothing about its content and the object itself cannot
+    /// be asked.
+    pub(crate) async fn blob_cloud_content(
+        &self,
+        cloud_key: &str,
+    ) -> Result<Option<String>, DbError> {
+        let cloud_key = cloud_key.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT content_hash FROM blob_cloud_contents WHERE cloud_key = ?1",
+                [cloud_key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// Record that coven wrote the bytes hashing to `content_hash` to `cloud_key`.
+    /// Called only after the upload has landed, so the record can lag the bucket but
+    /// never lead it; a failure here fails the push, whose retry re-runs the whole
+    /// idempotent upload and re-records. A later write to the same key overwrites.
+    pub(crate) async fn record_blob_cloud_content(
+        &self,
+        cloud_key: &str,
+        content_hash: &str,
+    ) -> Result<(), DbError> {
+        let (cloud_key, content_hash) = (cloud_key.to_string(), content_hash.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO blob_cloud_contents (cloud_key, content_hash) VALUES (?1, ?2) \
+                 ON CONFLICT(cloud_key) DO UPDATE SET content_hash = excluded.content_hash",
+                (cloud_key, content_hash),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
     // ---- Bookkeeping: sync_cursors ----
 
     pub(crate) async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {

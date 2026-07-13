@@ -1,12 +1,12 @@
 //! coven's bookkeeping schema and the cloud-outbox row types.
 //!
-//! coven owns nine device-local bookkeeping tables — `sync_cursors`,
+//! coven owns ten device-local bookkeeping tables — `sync_cursors`,
 //! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
 //! `local_cleanup_intents`, `published_blob_drop_intents`, `pending_changesets`,
-//! `blob_uploaders` — all created STRICT by [`apply_coven_schema`], which coven
-//! runs against the connection it owns during open. The host does not implement
-//! any of this; native app SQL goes through [`crate::CovenHandle::sql`] or
-//! [`crate::CovenHandle::write`].
+//! `blob_uploaders`, `blob_cloud_contents` — all created STRICT by
+//! [`apply_coven_schema`], which coven runs against the connection it owns during
+//! open. The host does not implement any of this; native app SQL goes through
+//! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 
 macro_rules! coven_tables {
     ($visit:ident) => {
@@ -112,6 +112,25 @@ macro_rules! coven_tables {
     -- authoritative uploaders from the Owner-signed snapshot rather than scanning.
     uploader  TEXT NOT NULL,
     PRIMARY KEY (namespace, blob_id)
+"
+        );
+        $visit!(
+            blob_cloud_contents,
+            "
+    -- The cloud object key, exactly as the home produced it
+    -- (`SyncStorage::blob_cloud_key`).
+    cloud_key TEXT PRIMARY KEY,
+    -- The content hash of the bytes coven last wrote to that key. A browsable home
+    -- keys a blob at the host's readable path, which is stable across a change of the
+    -- row's blob, so the object standing at a key can be a previous blob's bytes and
+    -- its presence proves nothing about its content. The object is sealed and cannot
+    -- be asked what it holds, so the upload records what it put there, and the push
+    -- skips an upload only when this names the blob's own hash. Written after the
+    -- upload lands, never before, so it can only lag the bucket — and lagging costs a
+    -- redundant upload of identical bytes, never a skipped one. It says nothing about
+    -- whether the object still exists (a tombstone GC can reclaim it); the push checks
+    -- that separately.
+    content_hash TEXT NOT NULL
 "
         );
     };
