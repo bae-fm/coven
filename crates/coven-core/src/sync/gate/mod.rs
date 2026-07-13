@@ -1290,6 +1290,49 @@ mod tests {
     }
 
     #[test]
+    fn flip_reverted_before_gate_emits_no_insert() {
+        let c = conn();
+        create_album_schema(&c);
+        let tables = album_tables();
+
+        // A private graph: artist, album, and an unmanaged release. Nothing has
+        // ever reached a peer.
+        exec(&c, "INSERT INTO artists (id, name, _updated_at) VALUES ('AR', 'Artist', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO albums (id, artist_id, _updated_at) VALUES ('AL', 'AR', '0000000001000-0000-dev1')");
+        exec(&c, "INSERT INTO releases (id, album_id, managed, _updated_at) VALUES ('R', 'AL', 0, '0000000001000-0000-dev1')");
+
+        // The journal batch captures the release flipping managed false→true.
+        let bytes = capture(
+            &c,
+            &tables,
+            &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
+        );
+
+        // A host write lands between the batch load and the gate run, flipping the
+        // gate back false. The live db now reads managed=0 for R, so nothing in its
+        // component is currently kept.
+        exec(&c, "UPDATE releases SET managed = 0, _updated_at = '0000000003000-0000-dev1' WHERE id = 'R'");
+
+        let gates = Gates::from_tables(&c, &tables).expect("build gates");
+        let out = gate_outbound(&c, &bytes, &gates).expect("gate outbound");
+        let changes = walk(&out).expect("walk");
+
+        assert!(
+            !has_row(&changes, "releases", "R"),
+            "a root re-flipped false before the gate runs must not leak its private \
+             row values as an INSERT"
+        );
+        assert!(
+            !has_row(&changes, "albums", "AL"),
+            "the now-childless ancestor album must not be re-emitted"
+        );
+        assert!(
+            !has_row(&changes, "artists", "AR"),
+            "the now-childless ancestor artist must not be re-emitted"
+        );
+    }
+
+    #[test]
     fn reparent_onto_a_cut_ancestor_reemits_it_to_peer() {
         let c = conn();
         create_album_schema(&c);

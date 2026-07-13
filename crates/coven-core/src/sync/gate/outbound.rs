@@ -257,7 +257,22 @@ unsafe fn reemit_subtrees(
     // parent's whole kept component lands on peers.
     let mut seeds = flipped_roots.clone();
     seeds.extend(reparent_seeds.iter().cloned());
-    let reemit_ids = connected_component(conn, gates, &seeds, true)?;
+    let component = connected_component(conn, gates, &seeds, true)?;
+
+    // Filter the component by the live kept-state, mirroring the retract path's
+    // symmetric `!row_kept` filter. `connected_component` inserts every seed
+    // unconditionally, so a root whose gate was captured flipping false→true but
+    // flipped back false before this runs (a host write landing between the
+    // batch load and the gate) would otherwise re-emit its now-private row (and
+    // any now-childless kept ancestor) as a full-state INSERT to every peer.
+    // Over-emitting a kept row is safe (LWW dedup on apply); emitting an unkept
+    // row is the leak this closes.
+    let mut reemit_ids: HashSet<(String, String)> = HashSet::new();
+    for (table, id) in component {
+        if gates.row_kept(conn, &table, &id)? {
+            reemit_ids.insert((table, id));
+        }
+    }
 
     let diff_bytes = full_state_diff(conn, gates, FullStateDirection::Inserts)?;
     if diff_bytes.is_empty() {
