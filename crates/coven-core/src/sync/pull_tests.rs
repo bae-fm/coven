@@ -135,6 +135,49 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
         .any(|c| c.table == "notes" && c.pk() == Some("n1")));
 }
 
+/// A changeset whose object was reclaimed (deleted as superseded) past this
+/// device's cursor surfaces a `MissingChangeset` held reason and holds the
+/// cursor at the gap — the host reports reclaimed history rather than a generic
+/// stall, and the device stream never advances over a changeset it did not apply.
+#[tokio::test]
+async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
+    let storage = MockSyncStorage::new();
+
+    // The source device's head advertises seq 1, but the changeset object is
+    // gone: reclamation deleted it as superseded. `store_changeset` both writes
+    // the object and advances the head to seq 1; deleting the object leaves the
+    // head pointing past a hole.
+    let db1 = open_test_db();
+    let cs = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'First', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    storage
+        .delete_changeset("dev1", 1)
+        .await
+        .expect("reclaim the changeset object");
+
+    let db2 = open_test_db();
+    let (_tmp, ld) = temp_store_dir();
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.held_changesets.len(), 1);
+    assert_eq!(result.held_changesets[0].device_id, "dev1");
+    assert_eq!(result.held_changesets[0].seq, 1);
+    assert_eq!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::MissingChangeset,
+    );
+    // The cursor holds at the gap: dev1 never advances over the unapplied seq.
+    assert_eq!(updated.get("dev1").copied().unwrap_or(0), 0);
+}
+
 #[tokio::test]
 async fn uniqueness_conflict_is_surfaced_not_retried() {
     let storage = MockSyncStorage::new();
@@ -1342,7 +1385,12 @@ async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() 
         "local user-provided blob must fail as BlobMissing: {err:?}",
     );
     assert!(
-        storage.list_heads().await.expect("list heads").is_empty(),
+        storage
+            .list_heads()
+            .await
+            .expect("list heads")
+            .heads
+            .is_empty(),
         "sync returned no outgoing changeset for a caller to publish"
     );
 }
@@ -1395,7 +1443,12 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         "missing remote user-provided blob must fail as BlobMissing: {err:?}",
     );
     assert!(
-        storage.list_heads().await.expect("list heads").is_empty(),
+        storage
+            .list_heads()
+            .await
+            .expect("list heads")
+            .heads
+            .is_empty(),
         "sync returned no outgoing changeset for a caller to publish"
     );
 }
@@ -1463,7 +1516,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     .expect("push changeset");
 
     assert_eq!(
-        storage.list_heads().await.expect("list heads")[0].seq,
+        storage.list_heads().await.expect("list heads").heads[0].seq,
         1,
         "publish advances the head after the remote blob exists",
     );
@@ -1523,7 +1576,7 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
     .expect("push delete changeset");
 
     assert_eq!(
-        storage.list_heads().await.expect("list heads")[0].seq,
+        storage.list_heads().await.expect("list heads").heads[0].seq,
         1,
         "delete publishes even when the removed blob is absent remotely",
     );

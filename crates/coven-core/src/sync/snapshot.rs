@@ -802,7 +802,28 @@ pub async fn reclaim_superseded_changesets(
     // The current devices: verified heads whose author is a current member (every
     // head when chain-less). For each, its verified ack supplies the pull cursors
     // that feed the floor; a missing/invalid ack contributes cursor 0 everywhere.
-    let heads = storage.list_heads().await?;
+    let listing = storage.list_heads().await?;
+
+    // Fail closed on any head slot the listing could not read (undecryptable,
+    // unparseable, or forged). Reclamation is a destructive fleet-wide decision:
+    // an unreadable head is a real device whose ack it cannot see, so its floor
+    // would be computed without that reader and could delete a changeset the
+    // reader still needs. A head can be unreadable for a benign, transient reason
+    // — e.g. rewritten under a store-key rotation this reclaimer has not adopted
+    // mid-cycle — so skipping the whole run (one warn, zero deletes) is the same
+    // safe posture a missing ack already takes; the next cycle retries. The pull,
+    // by contrast, tolerates the same bad head and drives on.
+    if listing.unreadable > 0 {
+        warn!(
+            unreadable = listing.unreadable,
+            "skipping changeset reclamation: one or more device heads are unreadable"
+        );
+        return Ok(GcResult {
+            deleted: 0,
+            errors: 0,
+        });
+    }
+    let heads = listing.heads;
     let mut devices: Vec<AckedDevice> = Vec::new();
     let mut errors = 0u64;
     for head in heads {
@@ -1750,7 +1771,7 @@ mod tests {
         assert_eq!(storage.current_snapshot_db().await, Some(data));
 
         // Head should be updated with snapshot_seq.
-        let heads = storage.list_heads().await.unwrap();
+        let heads = storage.list_heads().await.unwrap().heads;
         let dev1_head = heads.iter().find(|h| h.device_id == "dev-1").unwrap();
         assert_eq!(dev1_head.seq, 42);
         assert_eq!(dev1_head.snapshot_seq, Some(42));
@@ -1841,7 +1862,12 @@ mod tests {
             "local user-provided blob must fail during snapshot preflight: {err:?}",
         );
         assert!(storage.current_snapshot_db().await.is_none());
-        assert!(storage.list_heads().await.expect("list heads").is_empty());
+        assert!(storage
+            .list_heads()
+            .await
+            .expect("list heads")
+            .heads
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1875,7 +1901,12 @@ mod tests {
             "missing remote user-provided blob must fail during snapshot preflight: {err:?}",
         );
         assert!(storage.current_snapshot_db().await.is_none());
-        assert!(storage.list_heads().await.expect("list heads").is_empty());
+        assert!(storage
+            .list_heads()
+            .await
+            .expect("list heads")
+            .heads
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1937,7 +1968,10 @@ mod tests {
         .expect("snapshot is publishable once user and host blobs are remote");
 
         assert_eq!(storage.current_snapshot_db().await, Some(snapshot.db_image));
-        assert_eq!(storage.list_heads().await.expect("list heads")[0].seq, 7);
+        assert_eq!(
+            storage.list_heads().await.expect("list heads").heads[0].seq,
+            7
+        );
     }
 
     // ---- bootstrap_from_snapshot tests ----
@@ -4013,5 +4047,65 @@ mod reclaim_tests {
         let result = reclaim(&storage, &owner).await;
         assert_eq!(result.deleted, 4);
         assert_eq!(storage.list_changesets("A").await.unwrap(), vec![5]);
+    }
+
+    /// 9. A device that just bootstrapped is a reader with a head at seq 0 (it has
+    ///    authored no changesets) and an ack seeded at its bootstrap cursors. Even
+    ///    though the live snapshot covers A->5, that reader's ack of A->2 pins A's
+    ///    floor at 2, so the changesets it still needs (A/3..=5) survive and only
+    ///    A/1..=2 are reclaimed. This is the protection fix that publishing the
+    ///    reader's head+ack before the store commits buys.
+    #[tokio::test]
+    async fn bootstrapping_reader_ack_pins_the_floor() {
+        let storage = MockSyncStorage::new();
+        let (owner, mut chain) = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        // B has authored nothing: head at seq 0, no changeset log of its own.
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
+        // B's ack is seeded at the cursors it consumed when it bootstrapped: A->2.
+        publish_ack(&storage, &b, &[("A", 2)]).await;
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 2);
+        assert_eq!(storage.list_changesets("A").await.unwrap(), vec![3, 4, 5]);
+    }
+
+    /// 10. An unreadable head (an object in a head slot the reader cannot open,
+    ///     parse, or verify) is a real device whose ack cannot be seen. Because
+    ///     reclamation deletes fleet-wide, a single unreadable head fails the whole
+    ///     run closed — one warn, zero deletes — rather than computing a floor that
+    ///     omits that reader. Here the acks otherwise agree on A->5 (a full reclaim),
+    ///     so the unreadable head is the only thing standing between the log and
+    ///     deletion.
+    #[tokio::test]
+    async fn unreadable_head_fails_reclamation_closed() {
+        let storage = MockSyncStorage::new();
+        let (owner, mut chain) = found_chain(&storage).await;
+        let a = Device::new("A");
+        let b = Device::new("B");
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &a, 2).await;
+        append_entry(&storage, &mut chain, &owner, MembershipAction::Add, &b, 3).await;
+        add_log(&storage, "A", 5).await;
+        storage.publish_head_as("A", 5, &a.kp);
+        storage.publish_head_as("B", 0, &b.kp);
+        publish_signed_generation(&storage, 1, [("A", 5)], vec![0u8], &owner).await;
+        publish_ack(&storage, &b, &[("A", 5)]).await;
+        // A third device's head slot holds an object that cannot be read. Its ack
+        // is therefore invisible, so reclamation must not proceed.
+        storage.publish_unreadable_head("C");
+
+        let result = reclaim(&storage, &owner).await;
+        assert_eq!(result.deleted, 0);
+        assert_eq!(
+            storage.list_changesets("A").await.unwrap(),
+            vec![1, 2, 3, 4, 5],
+            "an unreadable head fails the whole run closed",
+        );
     }
 }

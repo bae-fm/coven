@@ -505,7 +505,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 
-use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError};
+use crate::sync::storage::{MinSchemaVersion, StorageError};
 
 /// A [`SyncStorage`] that injects a host write at a cycle `await` point — the
 /// moment the cycle fetches an incoming changeset to apply — by running a host
@@ -547,7 +547,7 @@ impl SyncStorage for HostWriteInjector {
         self.inner.get_changeset(device_id, seq).await
     }
 
-    async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
+    async fn list_heads(&self) -> Result<crate::sync::storage::HeadListing, StorageError> {
         self.inner.list_heads().await
     }
     async fn put_changeset(
@@ -1390,6 +1390,7 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
             .list_heads()
             .await
             .expect("list heads")
+            .heads
             .into_iter()
             .all(|head| head.seq == 0),
         "the retry aborts before advancing a head"

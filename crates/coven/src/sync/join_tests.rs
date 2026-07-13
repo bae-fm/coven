@@ -388,6 +388,7 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
         identity_custody,
         cloud_home,
         &ids,
+        &SystemClock,
         |_| {},
         &never_cancelled(),
     )
@@ -548,6 +549,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         "Joined Store",
         &store_keys,
         custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -1325,5 +1327,255 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         !expected_blob.exists(),
         "a cancelled reconcile must not materialize the blob at {}",
         expected_blob.display(),
+    );
+}
+
+/// Everything `bootstrap_and_save_store` needs to bootstrap a joiner: an owner
+/// has published a founder chain and a snapshot into one in-memory cloud, and a
+/// joiner storage is built over that same cloud. Each reader-publish test supplies
+/// only the custody whose success or failure it exercises.
+struct JoinerFixture {
+    joiner_storage: crate::sync::cloud_storage::CloudSyncStorage,
+    cipher: CloudCipher,
+    master_key: crate::encryption::MasterKeyring,
+    owner_pk: String,
+    author_heads: Vec<crate::sync::membership::MembershipCoord>,
+    store_keys: crate::keys::StoreKeys,
+    join_info: CloudHomeJoinInfo,
+    tables: Vec<crate::sync::session::SyncedTable>,
+    _tmp: tempfile::TempDir,
+    store_dir: crate::store_dir::StoreDir,
+    store_id: String,
+}
+
+async fn joiner_fixture() -> JoinerFixture {
+    crate::keys::test_keyring::install();
+
+    let store_id = "join-reader-publish-test".to_string();
+    let cloud = crate::InMemoryCloudHome::new();
+    let owner_keypair = UserKeypair::generate();
+    let master_key = crate::encryption::MasterKeyring::generate();
+    let cipher = CloudCipher::Encrypted(master_key.clone().into());
+    let blob_paths =
+        crate::sync::cloud_storage::BlobPathScheme::for_storage(crate::config::HomeStorage::Opaque);
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.clone(),
+        owner_keypair.clone(),
+    );
+
+    // `BootstrapContext::Join` pins the owner before the pull, so bootstrap's
+    // authorization check needs a real, owner-anchored chain.
+    let owner_pk = crate::sync::test_helpers::pubkey_hex(&owner_keypair);
+    let mut chain = crate::sync::membership::MembershipChain::new();
+    let founder = crate::sync::test_helpers::founder_entry(&owner_keypair, "0000000001000-0000-A");
+    chain
+        .add_entry_at(
+            crate::sync::membership::MembershipCoord {
+                author_pubkey: owner_pk.clone(),
+                seq: 1,
+            },
+            founder.clone(),
+        )
+        .expect("valid founder entry");
+    crate::sync::storage::SyncStorage::put_membership_entry(
+        &owner_storage,
+        &owner_pk,
+        1,
+        serde_json::to_vec(&founder).expect("serialize founder entry"),
+    )
+    .await
+    .expect("upload founder entry");
+    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
+        .await
+        .expect("publish founder membership head");
+
+    let tables = test_synced_tables();
+    let db = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("create owner snapshot");
+    push_snapshot(
+        &owner_storage,
+        &store_id,
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db.schema_version(),
+        &owner_keypair,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push owner snapshot");
+
+    let joiner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        cipher.clone(),
+        blob_paths,
+        store_id.clone(),
+        UserKeypair::generate(),
+    );
+    let (_tmp, store_dir) = temp_store_dir();
+    let store_keys = crate::keys::StoreKeys::new(store_id.clone());
+
+    JoinerFixture {
+        joiner_storage,
+        cipher,
+        master_key,
+        owner_pk,
+        author_heads: chain.author_heads(),
+        store_keys,
+        join_info: CloudHomeJoinInfo::CloudKit,
+        tables,
+        _tmp,
+        store_dir,
+        store_id,
+    }
+}
+
+/// A successful bootstrap publishes the joiner's own head (at seq 0 — it has
+/// authored nothing) and pull-ack BEFORE the store commits, so a peer's changeset
+/// reclamation running during the join sees this reader and pins every floor at
+/// what it still needs. Without this a joiner is invisible to reclamation for the
+/// whole join window and any peer that reclaims can strand it.
+#[tokio::test]
+async fn bootstrap_publishes_the_joiners_head_and_ack() {
+    let f = joiner_fixture().await;
+    let custody = Arc::new(RecordingCustody::default());
+
+    crate::sync::join::bootstrap_and_save_store(
+        &f.joiner_storage,
+        &f.cipher,
+        Some(&f.master_key),
+        &f.store_dir,
+        &f.store_id,
+        "device-b",
+        crate::sync::join::BootstrapContext::Join {
+            owner_pubkey: &f.owner_pk,
+        },
+        &f.author_heads,
+        &f.tables,
+        &test_migrations(),
+        &f.join_info,
+        "Joined Store",
+        &f.store_keys,
+        custody.as_ref(),
+        &SystemClock,
+        &|_status: &str| {},
+        &never_cancelled(),
+    )
+    .await
+    .expect("bootstrap succeeds");
+
+    let listing = crate::sync::storage::SyncStorage::list_heads(&f.joiner_storage)
+        .await
+        .expect("list heads");
+    let head = listing
+        .heads
+        .iter()
+        .find(|h| h.device_id == "device-b")
+        .expect("the joiner published its own head");
+    assert_eq!(
+        head.seq, 0,
+        "a joiner has authored nothing, so its head is 0"
+    );
+
+    let ack_bytes = crate::sync::storage::SyncStorage::get_ack(&f.joiner_storage, "device-b")
+        .await
+        .expect("the joiner published its ack");
+    let ack: crate::sync::signed_control::AckJson =
+        serde_json::from_slice(&ack_bytes).expect("ack parses");
+    assert!(
+        ack.verify("device-b"),
+        "the published ack is signed for the joiner's slot",
+    );
+}
+
+/// A bootstrap that fails after publishing the reader deletes both the head and
+/// the ack, so a never-completed join leaves no reader pinning a peer's
+/// reclamation. The failure is induced at the custody-persist step, which runs
+/// after the reader publish.
+#[tokio::test]
+async fn bootstrap_failure_removes_the_published_head_and_ack() {
+    let f = joiner_fixture().await;
+
+    /// A custody whose persist always fails, to fail the bootstrap after the
+    /// reader publish.
+    struct FailPersistCustody;
+    impl crate::keys::MasterKeyCustody for FailPersistCustody {
+        fn unlock(
+            &self,
+        ) -> Result<Option<crate::encryption::MasterKeyring>, crate::keys::KeyError> {
+            Ok(None)
+        }
+        fn persist(
+            &self,
+            _keyring: &crate::encryption::MasterKeyring,
+        ) -> Result<(), crate::keys::KeyError> {
+            Err(crate::keys::KeyError::Persistence("induced".to_string()))
+        }
+        fn forget(&self) -> Result<(), crate::keys::KeyError> {
+            Ok(())
+        }
+    }
+
+    let result = crate::sync::join::bootstrap_and_save_store(
+        &f.joiner_storage,
+        &f.cipher,
+        Some(&f.master_key),
+        &f.store_dir,
+        &f.store_id,
+        "device-b",
+        crate::sync::join::BootstrapContext::Join {
+            owner_pubkey: &f.owner_pk,
+        },
+        &f.author_heads,
+        &f.tables,
+        &test_migrations(),
+        &f.join_info,
+        "Joined Store",
+        &f.store_keys,
+        &FailPersistCustody,
+        &SystemClock,
+        &|_status: &str| {},
+        &never_cancelled(),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(BootstrapError::Key(_))),
+        "the induced persist failure surfaces as a Key error, got {result:?}",
+    );
+
+    let listing = crate::sync::storage::SyncStorage::list_heads(&f.joiner_storage)
+        .await
+        .expect("list heads");
+    assert!(
+        listing.heads.iter().all(|h| h.device_id != "device-b"),
+        "the joiner's head must be deleted after a failed bootstrap",
+    );
+    assert_eq!(
+        listing.unreadable, 0,
+        "the deleted head leaves no unreadable slot behind",
+    );
+    assert!(
+        matches!(
+            crate::sync::storage::SyncStorage::get_ack(&f.joiner_storage, "device-b").await,
+            Err(crate::sync::storage::StorageError::NotFound(_)),
+        ),
+        "the joiner's ack must be deleted after a failed bootstrap",
     );
 }

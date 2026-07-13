@@ -237,7 +237,7 @@ pub async fn restore_from_cloud(
 
         let blob_paths = BlobPathScheme::for_storage(storage);
 
-        let (join_info, cloud_home) = build_cloud_home(source, store_id, clock).await?;
+        let (join_info, cloud_home) = build_cloud_home(source, store_id, clock.clone()).await?;
 
         let storage = CloudSyncStorage::new(
             std::sync::Arc::from(cloud_home),
@@ -268,6 +268,7 @@ pub async fn restore_from_cloud(
             store_name,
             &store_keys,
             custody.as_ref(),
+            clock.as_ref(),
             &on_status,
             cancel,
         )

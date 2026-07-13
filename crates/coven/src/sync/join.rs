@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
 use crate::database::Database;
@@ -45,6 +45,8 @@ pub enum BootstrapError {
     Snapshot(#[from] SnapshotError),
     #[error("pull: {0}")]
     Pull(#[from] PullError),
+    #[error("storage: {0}")]
+    Storage(#[from] crate::sync::storage::StorageError),
     #[error("config: {0}")]
     Config(#[from] ConfigError),
     #[error("keyring: {0}")]
@@ -363,7 +365,7 @@ pub async fn join_from_invite_code(
             &store_keys,
             oauth_tokens,
             cloudkit_ops,
-            clock,
+            clock.clone(),
         )
         .await?;
 
@@ -377,6 +379,7 @@ pub async fn join_from_invite_code(
             identity_custody.clone(),
             cloud_home,
             ids.as_ref(),
+            clock.as_ref(),
             &on_status,
             cancel,
         )
@@ -416,6 +419,7 @@ pub(crate) async fn join_store(
     identity_custody: Arc<dyn DeviceIdentityCustody>,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
+    clock: &dyn crate::clock::Clock,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -513,6 +517,7 @@ pub(crate) async fn join_store(
             &code.store_name,
             &store_keys,
             custody.as_ref(),
+            clock,
             &on_status,
             cancel,
         )
@@ -573,6 +578,7 @@ pub(crate) async fn bootstrap_and_save_store(
     store_name: &str,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
+    clock: &dyn crate::clock::Clock,
     on_status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -604,48 +610,72 @@ pub(crate) async fn bootstrap_and_save_store(
         bootstrap_result.cursors.len()
     );
 
-    // Step 6: Pull changesets since the snapshot.
-    error_if_cancelled(cancel)?;
-    on_status("Applying recent changes...");
     let cursors = bootstrap_result.cursors;
 
-    let changesets_applied = open_db_and_pull(
-        &db_path,
-        synced_tables,
-        migrations,
-        device_id,
-        owner_pubkey,
-        membership_floor,
-        bucket_dyn,
-        &cursors,
-        store_dir,
-        cancel,
-    )
-    .await?;
+    // Everything from the reader publish through the config save is one unit: if
+    // any step fails, delete the head/ack this bootstrap published so a
+    // never-completed join leaves no reader pinning a peer's reclamation. The
+    // reader must be visible before the pull and before the store commits (see
+    // `publish_bootstrap_reader`), so it is the first step inside the unit; the
+    // delete tolerates a partial publish and is idempotent.
+    let committed = async {
+        // Publish this device's head (seq 0) and ack (seeded at the snapshot
+        // cursors) so a peer's changeset reclamation sees this reader and pins
+        // every floor at what it still needs to pull.
+        storage
+            .publish_bootstrap_reader(device_id, &cursors, &clock.now().to_rfc3339())
+            .await?;
 
-    if changesets_applied > 0 {
-        info!("Applied {changesets_applied} changesets since snapshot");
+        // Step 6: Pull changesets since the snapshot.
+        error_if_cancelled(cancel)?;
+        on_status("Applying recent changes...");
+        let changesets_applied = open_db_and_pull(
+            &db_path,
+            synced_tables,
+            migrations,
+            device_id,
+            owner_pubkey,
+            membership_floor,
+            bucket_dyn,
+            &cursors,
+            store_dir,
+            cancel,
+        )
+        .await?;
+
+        if changesets_applied > 0 {
+            info!("Applied {changesets_applied} changesets since snapshot");
+        }
+
+        // Step 7: Persist the master key via custody.
+        on_status("Saving configuration...");
+        if let Some(keyring) = master_key {
+            custody.persist(keyring)?;
+        }
+
+        // Step 8: Save cloud credentials to keyring.
+        if let Some(credentials) = derive_credentials(join_info) {
+            key_service.set_cloud_home_credentials(&credentials)?;
+        }
+
+        // Step 9: Create and save config.
+        let config = build_config(
+            store_id, device_id, store_dir, store_name, join_info, cipher,
+        );
+        config.save_to_config_yaml()?;
+        Ok(config)
     }
+    .await;
 
-    // Step 7: Persist the master key via custody.
-    on_status("Saving configuration...");
-    if let Some(keyring) = master_key {
-        custody.persist(keyring)?;
+    match committed {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            if let Err(cleanup) = storage.delete_bootstrap_reader(device_id).await {
+                warn!("failed to delete bootstrap head/ack after a failed join: {cleanup}");
+            }
+            Err(e)
+        }
     }
-
-    // Step 8: Save cloud credentials to keyring.
-    if let Some(credentials) = derive_credentials(join_info) {
-        key_service.set_cloud_home_credentials(&credentials)?;
-    }
-
-    // Step 9: Create and save config.
-    let config = build_config(
-        store_id, device_id, store_dir, store_name, join_info, cipher,
-    );
-
-    config.save_to_config_yaml()?;
-
-    Ok(config)
 }
 
 /// Open a [`Database`] over the bootstrapped db file and pull changesets since

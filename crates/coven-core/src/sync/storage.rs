@@ -88,6 +88,27 @@ pub struct DeviceHead {
     pub author_pubkey: String,
 }
 
+/// The outcome of listing device heads: the fully verified heads, plus a count of
+/// head slots that held an object the reader could not turn into a verified head
+/// (present but undecryptable, unparseable, or failing its signature). A slot key
+/// that does not name a device head at all (an unexpected key format) is not a
+/// slot and is not counted.
+///
+/// The two consumers read this differently on purpose. The pull uses `heads` and
+/// ignores `unreadable`: one member's bad head must never wedge every device's
+/// sync — the slot's owner republishes a good head on its next cycle. Changeset
+/// reclamation uses both: an unreadable head is a real device whose ack it cannot
+/// see, so any unreadable slot makes reclamation fail closed rather than compute a
+/// floor that could delete a changeset that device still needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadListing {
+    /// Heads whose object opened, parsed, and verified against their slot.
+    pub heads: Vec<DeviceHead>,
+    /// How many head slots held an object that could not be opened, parsed, or
+    /// verified.
+    pub unreadable: usize,
+}
+
 /// A verified `min_schema_version`: the version plus the public key its
 /// signature verified against. [`SyncStorage::get_min_schema_version`] returns
 /// this only when the embedded signature checks out, so the caller can decide
@@ -145,8 +166,11 @@ impl From<crate::store_dir::PathTokenError> for StorageError {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait SyncStorage: crate::MaybeThreadSafe {
-    /// List all device heads (one LIST call to `heads/`).
-    async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError>;
+    /// List all device heads (one LIST call to `heads/`). Returns the verified
+    /// heads alongside a count of slots holding an object that could not be
+    /// verified — see [`HeadListing`] for why the pull and reclamation read that
+    /// count differently.
+    async fn list_heads(&self) -> Result<HeadListing, StorageError>;
 
     /// Fetch a single changeset by device_id and seq.
     ///

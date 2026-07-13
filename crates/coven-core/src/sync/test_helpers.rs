@@ -24,7 +24,7 @@ use crate::sync::membership::{
 use crate::sync::pull::pull_changes;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::signed_control::{HeadJson, MinSchemaVersionJson};
-use crate::sync::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
+use crate::sync::storage::{DeviceHead, HeadListing, MinSchemaVersion, StorageError, SyncStorage};
 
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
 /// to fail. The switch models a device whose keyring is momentarily
@@ -973,21 +973,41 @@ impl MockSyncStorage {
             .unwrap()
             .insert(device_id.to_string(), bytes);
     }
+
+    /// Place an object in a device's head slot that cannot be parsed as a
+    /// `HeadJson`, mirroring a slot the cloud reader can't open/parse/verify. The
+    /// slot is a valid device-head key, so `list_heads` counts it toward
+    /// `unreadable` — letting a test exercise reclamation failing closed.
+    pub fn publish_unreadable_head(&self, device_id: &str) {
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), b"not a head".to_vec());
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for MockSyncStorage {
-    async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
+    async fn list_heads(&self) -> Result<HeadListing, StorageError> {
         let heads = self.heads.lock().unwrap();
         let mut out = Vec::new();
+        let mut unreadable = 0usize;
         for (device_id, bytes) in heads.iter() {
-            let head: HeadJson = serde_json::from_slice(bytes)
-                .map_err(|e| StorageError::Parse(format!("parse head {device_id}: {e}")))?;
-            // Mirror the cloud: a head whose signature doesn't verify against its
-            // slot is skipped, not returned — and logged, like production.
+            // Mirror the cloud: a head that can't be parsed or verified is skipped
+            // (not fatal) and counted, so reclamation can fail closed on a
+            // present-but-unreadable slot while the pull stays tolerant.
+            let head: HeadJson = match serde_json::from_slice(bytes) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!("skipping head {device_id} that does not parse: {e}");
+                    unreadable += 1;
+                    continue;
+                }
+            };
             if !head.verify(device_id) {
                 tracing::warn!("skipping head {device_id} with an invalid signature");
+                unreadable += 1;
                 continue;
             }
             out.push(DeviceHead {
@@ -999,7 +1019,10 @@ impl SyncStorage for MockSyncStorage {
             });
         }
         out.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-        Ok(out)
+        Ok(HeadListing {
+            heads: out,
+            unreadable,
+        })
     }
 
     async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {

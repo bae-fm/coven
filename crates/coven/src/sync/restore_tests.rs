@@ -443,6 +443,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         "Late Step Test",
         &store_keys,
         custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
@@ -607,6 +608,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         "Restored Store",
         &store_keys,
         custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
@@ -1034,6 +1036,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         "Restored Store",
         &store_keys,
         custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )

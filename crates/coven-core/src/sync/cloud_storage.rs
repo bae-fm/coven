@@ -12,8 +12,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
-use super::signed_control::{HeadJson, MinSchemaVersionJson};
-use super::storage::{DeviceHead, MinSchemaVersion, StorageError, SyncStorage};
+use super::signed_control::{AckJson, HeadJson, MinSchemaVersionJson};
+use super::storage::{DeviceHead, HeadListing, MinSchemaVersion, StorageError, SyncStorage};
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
 use crate::local_blob::PlatformPlaintextReader;
@@ -391,6 +391,50 @@ impl CloudSyncStorage {
         self.cipher()
             .open(stored, &self.aad_context(key))
             .map_err(|e| StorageError::Decryption(format!("{label}: {e}")))
+    }
+
+    /// Publish this device's head (at `seq` 0 — a joiner has authored nothing) and
+    /// its pull-ack (seeded at `cursors`, the snapshot positions bootstrap adopted)
+    /// so a peer's changeset reclamation sees this reader before the local store
+    /// commits and pins every floor at what this device still needs to pull.
+    ///
+    /// Written head-first, then ack: a window with the head present but the ack
+    /// absent makes reclamation treat this device as un-acked (cursor 0), which
+    /// only pauses reclamation — the safe direction. The reverse order would leave
+    /// a window in which reclamation cannot see the device at all and could delete
+    /// a changeset it still needs.
+    ///
+    /// [`Self::delete_bootstrap_reader`] removes both on a handled bootstrap
+    /// failure. A hard crash (or a rollback after bootstrap already reported
+    /// success) can leave them behind: that stale ack pins reclamation at the
+    /// bootstrap cursors — storage growth, never a stranded reader. An owner can
+    /// delete a dead device's head/ack objects (owners retain bucket-wide delete).
+    pub async fn publish_bootstrap_reader(
+        &self,
+        device_id: &str,
+        cursors: &std::collections::HashMap<String, u64>,
+        timestamp: &str,
+    ) -> Result<(), StorageError> {
+        self.put_head(device_id, 0, None, timestamp).await?;
+        let cursors: std::collections::BTreeMap<String, u64> =
+            cursors.iter().map(|(id, seq)| (id.clone(), *seq)).collect();
+        let ack = AckJson::signed(device_id, cursors, &self.keypair);
+        let bytes = serde_json::to_vec(&ack)
+            .map_err(|e| StorageError::Parse(format!("serialize bootstrap ack: {e}")))?;
+        self.put_ack(device_id, bytes).await
+    }
+
+    /// Delete the head and ack [`Self::publish_bootstrap_reader`] wrote. Deletes
+    /// the ack first so any window leaves the head present and the device counted
+    /// as un-acked (reclamation paused — the safe direction) rather than invisible.
+    /// A missing object is not an error, so this is safe to call whether or not the
+    /// publish had written either object yet.
+    pub async fn delete_bootstrap_reader(&self, device_id: &str) -> Result<(), StorageError> {
+        let ack_key = format!("acks/{device_id}.json{}", self.suffix());
+        self.home.delete(&ack_key).await?;
+        let head_key = format!("heads/{device_id}.json{}", self.suffix());
+        self.home.delete(&head_key).await?;
+        Ok(())
     }
 
     fn aad_context(&self, key: &str) -> Vec<u8> {
@@ -863,10 +907,14 @@ pub(crate) fn parse_membership_entry_keys(keys: &[String], suffix: &str) -> Vec<
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for CloudSyncStorage {
-    async fn list_heads(&self) -> Result<Vec<DeviceHead>, StorageError> {
+    async fn list_heads(&self) -> Result<HeadListing, StorageError> {
         let suffix = self.suffix();
         let keys = self.home.list("heads/").await?;
         let mut heads = Vec::new();
+        // Slots that held an object we could not open, parse, or verify. Counted
+        // (not just skipped) because changeset reclamation must fail closed on a
+        // present-but-unreadable head — see [`HeadListing`].
+        let mut unreadable = 0usize;
 
         for key in &keys {
             // key = "heads/{device_id}.json{suffix}"
@@ -875,25 +923,30 @@ impl SyncStorage for CloudSyncStorage {
                 .and_then(|s| s.strip_suffix(suffix))
                 .and_then(|s| s.strip_suffix(".json"))
             else {
+                // Not a device-head slot at all — a stray key, not an unreadable
+                // head — so it neither drives the pull nor blocks reclamation.
                 warn!("skipping head with unexpected key format: {key}");
                 continue;
             };
 
             let stored = self.home.read(key).await?;
-            // A head we can't open, can't parse, or can't verify is skipped, not
-            // fatal. The bucket is untrusted: any member with the credential can
-            // seal garbage into their own head slot under the store key, and a
-            // different store reusing this bucket writes heads under its own
-            // key. Aborting on any one of them would wedge every sync cycle for
-            // this store — it would never pull, push its catalog or snapshot,
-            // or publish its own head. Skipping excludes the bad head and lets
-            // the rest drive the pull; the slot's owner republishes a good head
-            // on its next successful cycle. A transient read error above still
-            // propagates (it retries next cycle).
+            // A head we can't open, can't parse, or can't verify is skipped from
+            // the returned heads, not fatal. The bucket is untrusted: any member
+            // with the credential can seal garbage into their own head slot under
+            // the store key, and a different store reusing this bucket writes
+            // heads under its own key. Aborting on any one of them would wedge
+            // every sync cycle for this store — it would never pull, push its
+            // catalog or snapshot, or publish its own head. Skipping excludes the
+            // bad head and lets the rest drive the pull; the slot's owner
+            // republishes a good head on its next successful cycle. Each such slot
+            // is counted so reclamation, which reads the same listing for a
+            // destructive decision, can fail closed. A transient read error above
+            // still propagates (it retries next cycle).
             let decoded = match self.open_stored(key, stored, &format!("head {device_id}")) {
                 Ok(d) => d,
                 Err(e) => {
                     warn!("skipping head {device_id} this store cannot decrypt: {e}");
+                    unreadable += 1;
                     continue;
                 }
             };
@@ -902,6 +955,7 @@ impl SyncStorage for CloudSyncStorage {
                 Ok(h) => h,
                 Err(e) => {
                     warn!("skipping head {device_id} that does not parse: {e}");
+                    unreadable += 1;
                     continue;
                 }
             };
@@ -913,6 +967,7 @@ impl SyncStorage for CloudSyncStorage {
             // caller can run the membership (authorization) check.
             if !head_json.verify(device_id) {
                 warn!("skipping head {device_id} with an invalid signature");
+                unreadable += 1;
                 continue;
             }
 
@@ -925,7 +980,7 @@ impl SyncStorage for CloudSyncStorage {
             });
         }
 
-        Ok(heads)
+        Ok(HeadListing { heads, unreadable })
     }
 
     async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
@@ -1791,11 +1846,15 @@ mod tests {
             .list_heads()
             .await
             .expect("list_heads must not abort on a head it cannot decrypt");
-        let ids: Vec<&str> = heads.iter().map(|h| h.device_id.as_str()).collect();
+        let ids: Vec<&str> = heads.heads.iter().map(|h| h.device_id.as_str()).collect();
         assert_eq!(
             ids,
             vec!["ours"],
             "the decryptable head is returned; the foreign one is skipped",
+        );
+        assert_eq!(
+            heads.unreadable, 1,
+            "the undecryptable head is counted so reclamation can fail closed",
         );
     }
 
@@ -1833,8 +1892,12 @@ mod tests {
             .list_heads()
             .await
             .expect("list_heads must not abort on stray head keys");
-        let ids: Vec<&str> = heads.iter().map(|h| h.device_id.as_str()).collect();
+        let ids: Vec<&str> = heads.heads.iter().map(|h| h.device_id.as_str()).collect();
         assert_eq!(ids, vec!["ours"]);
+        assert_eq!(
+            heads.unreadable, 0,
+            "a stray key is not a device-head slot, so it is not an unreadable head",
+        );
     }
 
     /// A head with a valid signature round-trips through `put_head` / `list_heads`
@@ -1886,13 +1949,21 @@ mod tests {
             .expect("write forged head");
 
         let heads = storage.list_heads().await.expect("list_heads");
-        assert_eq!(heads.len(), 1, "only the validly signed head is returned");
-        assert_eq!(heads[0].device_id, "ours");
-        assert_eq!(heads[0].seq, 9);
         assert_eq!(
-            heads[0].author_pubkey,
+            heads.heads.len(),
+            1,
+            "only the validly signed head is returned"
+        );
+        assert_eq!(heads.heads[0].device_id, "ours");
+        assert_eq!(heads.heads[0].seq, 9);
+        assert_eq!(
+            heads.heads[0].author_pubkey,
             hex::encode(keypair.public_key()),
             "the verified author is surfaced to the caller",
+        );
+        assert_eq!(
+            heads.unreadable, 1,
+            "the forged head is counted so reclamation can fail closed",
         );
     }
 
@@ -1938,11 +2009,15 @@ mod tests {
             .list_heads()
             .await
             .expect("list_heads must not abort on an unparseable head");
-        let ids: Vec<&str> = heads.iter().map(|h| h.device_id.as_str()).collect();
+        let ids: Vec<&str> = heads.heads.iter().map(|h| h.device_id.as_str()).collect();
         assert_eq!(
             ids,
             vec!["ours"],
             "the parseable head is returned; the unparseable one is skipped",
+        );
+        assert_eq!(
+            heads.unreadable, 1,
+            "the unparseable head is counted so reclamation can fail closed",
         );
     }
 
@@ -2029,9 +2104,9 @@ mod tests {
             "no .enc head key"
         );
         let heads = storage.list_heads().await.expect("list_heads");
-        assert_eq!(heads.len(), 1);
-        assert_eq!(heads[0].device_id, "dev1");
-        assert_eq!(heads[0].seq, 7);
+        assert_eq!(heads.heads.len(), 1);
+        assert_eq!(heads.heads[0].device_id, "dev1");
+        assert_eq!(heads.heads[0].seq, 7);
 
         // Changeset: at rest the bytes are the literal plaintext.
         let cs = b"changeset-plaintext-bytes".to_vec();

@@ -22,7 +22,7 @@ use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
 use super::membership::{MemberRole, MembershipChain, MembershipCoord, MembershipEntry};
 use super::session::SyncedTable;
-use super::storage::{DeviceHead, SyncStorage};
+use super::storage::{DeviceHead, StorageError, SyncStorage};
 use crate::blob::decl::BlobDecls;
 use crate::blob::{CacheFill, Provenance};
 use crate::changeset::RowChange;
@@ -121,6 +121,15 @@ pub enum HeldChangesetReason {
     ApplyFailed {
         error: String,
     },
+    /// The object at this seq is absent from storage: its changeset was reclaimed
+    /// (deleted as superseded) past this device's cursor. The cursor holds at the
+    /// gap rather than advancing over it, and this device stream stops here;
+    /// surfaced so the host reports reclaimed history instead of a generic stall.
+    /// Reclamation pins its floor at every current reader's cursors and fails
+    /// closed on a head it cannot read, so a reader that still needs this seq never
+    /// has it deleted — this state should therefore be unreachable, and surfacing
+    /// it loudly is what proves that.
+    MissingChangeset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,7 +389,14 @@ pub async fn pull_changes(
     // through the same gate — its author is this device, a current member, so it is
     // kept (and dropped if this device was removed, which is correct). With no chain
     // (browsable) every head is kept, as before.
-    let heads = storage.list_heads().await.map_err(PullError::Storage)?;
+    // The pull uses the verified heads and ignores the unreadable-slot count: one
+    // member's bad head must not wedge every device's sync. (Changeset reclamation
+    // reads that same count to fail closed — a different, destructive decision.)
+    let heads = storage
+        .list_heads()
+        .await
+        .map_err(PullError::Storage)?
+        .heads;
     let heads: Vec<DeviceHead> = heads
         .into_iter()
         .filter(|head| match membership_members.as_ref() {
@@ -455,6 +471,24 @@ pub async fn pull_changes(
             // contract. Implementations handle download + decryption internally.
             let envelope_bytes = match storage.get_changeset(&head.device_id, seq).await {
                 Ok(data) => data,
+                Err(StorageError::NotFound(_)) => {
+                    // The changeset is gone — history was reclaimed past this
+                    // device's cursor. Hold the cursor at the gap (never advance
+                    // over a changeset this device has not applied) and name it, so
+                    // the host reports reclaimed history rather than a generic
+                    // stall. Other device streams continue.
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        "changeset missing — history reclaimed past this cursor; holding"
+                    );
+                    result.held_changesets.push(HeldChangeset {
+                        device_id: head.device_id.clone(),
+                        seq,
+                        reason: HeldChangesetReason::MissingChangeset,
+                    });
+                    break;
+                }
                 Err(e) => {
                     warn!(
                         device_id = %head.device_id,
