@@ -1192,6 +1192,25 @@ impl Database {
         .map_err(DbError::from)
     }
 
+    /// Enqueue a durable tombstone-cancel for `cloud_key`: the tombstone-cancel drain
+    /// ([`crate::blob::delete::drain_tombstone_cancels`]) retries removing the
+    /// tombstone until it is gone, so a re-uploaded blob is never reclaimed by a GC
+    /// that outraces an inline cancel. Backs a failed inline cancel on every upload
+    /// path. Idempotent on `(operation, cloud_key)`.
+    pub async fn enqueue_cancel(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
+        let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO cloud_outbox (operation, cloud_key, scope, created_at) \
+                 VALUES ('cancel', ?1, NULL, ?2)",
+                (cloud_key, created_at),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
     /// Pending upload entries, oldest first. The host reads these to drive its
     /// own upload-status UI; coven's sync loop reads them to do the uploads.
     pub async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {

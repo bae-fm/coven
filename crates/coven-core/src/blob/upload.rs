@@ -368,26 +368,30 @@ pub async fn drain_uploads(
                 // A successful write wins over any pending deletion: remove the
                 // tombstone a prior cycle (possibly another device) wrote for this
                 // key, so the GC won't reclaim the blob we just re-uploaded — the
-                // round-trip re-make_remote case (a prior make_local tombstoned this key).
-                // The enqueue layer already drops a same-device pending delete row;
-                // this covers a tombstone already committed to the cloud. The cancel
-                // must not be lost if it fails (a surviving tombstone past its grace
-                // deletes this live blob), so on failure the post-upload commit below
-                // persists a durable `cancel` row atomically with removing the upload
-                // row; the tombstone-cancel drain retries until the tombstone is gone.
+                // round-trip re-make_remote case (a prior make_local tombstoned this
+                // key). The enqueue layer already drops a same-device pending delete
+                // row; this covers a tombstone already committed to the cloud. On an
+                // inline-cancel failure a durable `cancel` row is enqueued (before the
+                // outbox row is removed below), so the tombstone-cancel drain retries
+                // until the tombstone is gone. If even that enqueue fails, leave the
+                // outbox row so next cycle's idempotent re-upload retries — never remove
+                // the row and strand the tombstone.
                 let suffix = cipher.read().unwrap().suffix();
-                let cancel_failed = if let Err(e) =
-                    crate::blob::delete::cancel_tombstone(cloud_home, suffix, &entry.cloud_key)
-                        .await
+                if let Err(e) = crate::blob::delete::cancel_tombstone_or_enqueue(
+                    db,
+                    cloud_home,
+                    suffix,
+                    &entry.cloud_key,
+                    &now_rfc,
+                )
+                .await
                 {
                     warn!(
-                        "tombstone cancel for {} failed ({e}); queuing a durable cancel for retry",
+                        "recording a durable tombstone cancel for {} failed ({e}); leaving the upload queued for retry",
                         entry.cloud_key
                     );
-                    true
-                } else {
-                    false
-                };
+                    continue;
+                }
 
                 // The post-upload commit: mint the gate-flip stamp off coven's HLC
                 // (the same register the host stamps rows from, so the flip sorts
@@ -402,7 +406,6 @@ pub async fn drain_uploads(
                     file_id.to_string(),
                     entry.cloud_key.clone(),
                     entry.id,
-                    cancel_failed,
                     stamp,
                     now_rfc.clone(),
                 )
@@ -513,7 +516,6 @@ async fn commit_after_upload(
     blob_id: String,
     cloud_key: String,
     final_outbox_id: i64,
-    cancel_failed: bool,
     stamp: String,
     now_rfc: String,
 ) -> Result<PostUpload, DbError> {
@@ -536,7 +538,7 @@ async fn commit_after_upload(
             None => None,
         };
         let Some((root_table, root_id)) = root else {
-            commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+            commit_finish(conn, final_outbox_id)?;
             return Ok(PostUpload::Continued);
         };
 
@@ -569,7 +571,7 @@ async fn commit_after_upload(
             .any(|b| b.provenance == Provenance::HostProvided);
         if crate::blob::transition::pending_upload_exists(conn, &blob_ids, Some(final_outbox_id))? {
             // Not the last blob: remove this row, leave the gate off until the rest land.
-            commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+            commit_finish(conn, final_outbox_id)?;
             return Ok(PostUpload::Continued);
         }
 
@@ -579,7 +581,7 @@ async fn commit_after_upload(
         // gate and clears the external refs. Removing this final outbox row is safe:
         // the intent remains as the durable driver for the remaining completion.
         if has_host_provided {
-            commit_finish(conn, final_outbox_id, &cloud_key, cancel_failed, &now_rfc)?;
+            commit_finish(conn, final_outbox_id)?;
             return Ok(PostUpload::Continued);
         }
 
@@ -602,9 +604,6 @@ async fn commit_after_upload(
             &blob_ids,
             crate::blob::transition::MakeRemoteCompletion::FinalOutboxRow {
                 id: final_outbox_id,
-                cloud_key,
-                cancel_failed,
-                now_rfc,
             },
         )?;
         Ok(PostUpload::MadeRemote {
@@ -615,45 +614,23 @@ async fn commit_after_upload(
     .await
 }
 
-/// The non-completing post-upload outcome: remove the upload's outbox row (and, on a
-/// failed tombstone-cancel, its durable `cancel` row) in one transaction, so the two
-/// statements commit together. The `Continued` branches — a plain upload with no
-/// gated root, and a non-final make_remote upload — share this single commit shape.
-fn commit_finish(
-    conn: &Connection,
-    id: i64,
-    cloud_key: &str,
-    cancel_failed: bool,
-    now_rfc: &str,
-) -> Result<(), DbError> {
+/// The non-completing post-upload outcome: remove the upload's outbox row in its own
+/// transaction. The `Continued` branches — a plain upload with no gated root, and a
+/// non-final make_remote upload — share this single commit shape. The tombstone cancel
+/// is handled before this by [`crate::blob::delete::cancel_tombstone_or_enqueue`], so
+/// the cancel is durably queued before the upload row is removed.
+fn commit_finish(conn: &Connection, id: i64) -> Result<(), DbError> {
     let tx = conn.unchecked_transaction()?;
-    finish_outbox_row(&tx, id, cloud_key, cancel_failed, now_rfc)?;
+    finish_outbox_row(&tx, id)?;
     tx.commit().map_err(DbError::from)
 }
 
-/// Remove a completed upload's outbox row. If the inline tombstone-cancel failed,
-/// also enqueue a durable `cancel` row so the tombstone-cancel drain retries. Every
-/// caller runs this inside its own transaction, so the row removal and the cancel
-/// row commit together — a crash can't drop the upload while leaving the tombstone.
-/// Shared with the make_remote completion commit
-/// ([`crate::blob::transition::commit_make_remote_flip`]), which removes the final
-/// upload's row inside the flip.
-pub(crate) fn finish_outbox_row(
-    conn: &Connection,
-    id: i64,
-    cloud_key: &str,
-    cancel_failed: bool,
-    now_rfc: &str,
-) -> Result<(), DbError> {
+/// Remove a completed upload's outbox row. Shared with the make_remote completion
+/// commit ([`crate::blob::transition::commit_make_remote_flip`]), which removes the
+/// final upload's row inside the flip. The tombstone cancel is queued separately by
+/// [`crate::blob::delete::cancel_tombstone_or_enqueue`] before this runs.
+pub(crate) fn finish_outbox_row(conn: &Connection, id: i64) -> Result<(), DbError> {
     conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
         .map_err(DbError::from)?;
-    if cancel_failed {
-        conn.execute(
-            "INSERT OR IGNORE INTO cloud_outbox (operation, cloud_key, scope, created_at) \
-             VALUES ('cancel', ?1, NULL, ?2)",
-            (cloud_key, now_rfc),
-        )
-        .map_err(DbError::from)?;
-    }
     Ok(())
 }

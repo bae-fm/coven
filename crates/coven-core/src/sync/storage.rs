@@ -313,6 +313,18 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// whether a blob key needs an uploader segment (hashed) or not (plain).
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme;
 
+    /// The cloud object key this home stores `(namespace, id, cloud_path)` under — the
+    /// same key [`Self::put_blob_from_file`] writes and beside which a tombstone for the
+    /// blob is keyed. The inline host-provided upload path uses it to cancel a pending
+    /// tombstone at the exact key its (re-)upload wrote, rather than re-deriving the
+    /// scheme (which the home alone authoritatively knows).
+    fn blob_cloud_key(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, StorageError>;
+
     /// This device's own `{uploader}` segment — the hex public key its blob uploads
     /// key under on a hashed home, or `None` on a browsable home (which carries no
     /// uploader segment). The upload path records it in the local uploader index as

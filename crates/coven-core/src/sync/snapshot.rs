@@ -1929,9 +1929,15 @@ mod tests {
             )
             .await
             .expect("plant remote user-provided blob");
-        crate::sync::service::upload_snapshot_host_blobs(&db, &storage, &ld, &snapshot.host_blobs)
-            .await
-            .expect("upload host-provided snapshot blobs");
+        crate::sync::service::upload_snapshot_host_blobs(
+            &db,
+            &storage,
+            &ld,
+            &snapshot.host_blobs,
+            None,
+        )
+        .await
+        .expect("upload host-provided snapshot blobs");
         // The upload path records this device as the blob's uploader in the local
         // index, so a later self-read keys it under us without a listing scan.
         assert_eq!(

@@ -664,6 +664,14 @@ impl SyncStorage for HostWriteInjector {
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
         self.inner.blob_path_scheme()
     }
+    fn blob_cloud_key(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, crate::sync::storage::StorageError> {
+        self.inner.blob_cloud_key(namespace, id, cloud_path)
+    }
     fn own_uploader(&self) -> Option<String> {
         self.inner.own_uploader()
     }

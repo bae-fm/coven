@@ -2516,3 +2516,175 @@ async fn round_trip_make_remote_make_local_make_remote() {
         "the blob is back in the cloud",
     );
 }
+
+/// Seed a host-provided-only release, make it Remote (the cover uploads inline and the
+/// gate flips), then make it Local (the cover returns to the local store and its cloud
+/// copy is tombstoned). Returns with the release gated off, the tombstone standing, and
+/// the cover in the local store — the state a re-share by a direct host gate flip must
+/// recover from without leaving the tombstone to reclaim the re-shared blob.
+async fn tombstoned_host_cover(
+    storage: &MockSyncStorage,
+    enc: &RwLock<CloudCipher>,
+    kp: &UserKeypair,
+    hlc: &Hlc,
+    db: &Database,
+    lib: &StoreDir,
+    cover: &[u8],
+) {
+    exec(
+        db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Release', NULL, 0, '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    exec(
+        db,
+        &format!(
+            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('coveraaa', 'n1', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+            cover.len(),
+            crate::blob::content_hash(cover),
+        ),
+    )
+    .await;
+    local_files::store(lib, "covers", "coveraaa", cover)
+        .await
+        .expect("store host-provided cover");
+
+    make_remote(
+        db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        hlc,
+        "notes",
+        "n1",
+        false,
+    )
+    .await
+    .expect("make_remote");
+    run_cycle(storage, "A", hlc, db, enc, kp, lib, None).await;
+    assert_eq!(shared_flag(db, "n1").await, 1, "Remote after make_remote");
+    assert!(
+        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        "the cover is uploaded to the cloud"
+    );
+
+    let dest: HashMap<String, PathBuf> = HashMap::new();
+    let (_cancel_tx, cancel) = watch::channel(false);
+    make_local(
+        db,
+        storage,
+        lib,
+        BlobPathScheme::Plain,
+        hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect("make_local");
+    run_cycle(storage, "A", hlc, db, enc, kp, lib, None).await;
+    assert_eq!(shared_flag(db, "n1").await, 0, "Local after make_local");
+    assert!(
+        storage
+            .exists("blob_tombstones/covers/cv/cover.jpg")
+            .await
+            .unwrap(),
+        "make_local tombstoned the cover"
+    );
+    assert!(
+        lib.local_blob_path("covers", "coveraaa").unwrap().exists(),
+        "the host-provided cover is back in the local store"
+    );
+}
+
+/// A host re-shares a tombstoned host-provided blob by flipping the gate column true
+/// directly (host-gated roots are host-writable). The cover is still in the cloud
+/// within its grace, so the inline push takes the exists-skip arm — which must still
+/// cancel the standing tombstone, or a GC past the grace reclaims the re-shared blob.
+#[tokio::test]
+async fn inline_reshare_cancels_tombstone_on_the_exists_skip_arm() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
+    let (_tmp, lib) = temp_store_dir();
+    let cover = b"HOST-COVER-exists-skip".to_vec();
+
+    tombstoned_host_cover(&storage, &enc, &kp, &hlc, &db, &lib, &cover).await;
+    assert!(
+        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        "the cover's cloud copy is still present within the grace (exists-skip arm)"
+    );
+
+    // The host flips the gate true directly — no make_remote intent, so the inline push
+    // (not the pre-capture completion) re-emits and re-uploads the cover.
+    exec(
+        &db,
+        "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-A' WHERE id = 'n1'",
+    )
+    .await;
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert_eq!(shared_flag(&db, "n1").await, 1, "re-shared");
+    assert!(
+        !storage
+            .exists("blob_tombstones/covers/cv/cover.jpg")
+            .await
+            .unwrap(),
+        "the inline push cancelled the tombstone on the exists-skip arm"
+    );
+    assert!(
+        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        "the re-shared cover survives — no tombstone remains to reclaim it"
+    );
+}
+
+/// The same re-share when the cover's cloud copy is already gone (the host re-provided
+/// the local-store bytes) but the tombstone still stands. The inline push takes the
+/// fresh-upload arm, which must also cancel the tombstone.
+#[tokio::test]
+async fn inline_reshare_cancels_tombstone_on_the_fresh_upload_arm() {
+    let storage = MockSyncStorage::new();
+    let enc = plaintext();
+    let kp = UserKeypair::generate();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
+    let (_tmp, lib) = temp_store_dir();
+    let cover = b"HOST-COVER-fresh-upload".to_vec();
+
+    tombstoned_host_cover(&storage, &enc, &kp, &hlc, &db, &lib, &cover).await;
+
+    // The cloud blob is gone while the tombstone still stands, so the inline push must
+    // re-upload from the local store rather than skip.
+    crate::storage::cloud::CloudHome::delete(&storage, "covers/cv/cover.jpg")
+        .await
+        .expect("remove the cloud blob object");
+    assert!(
+        !storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        "the cover's cloud copy is absent (fresh-upload arm)"
+    );
+
+    exec(
+        &db,
+        "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-A' WHERE id = 'n1'",
+    )
+    .await;
+    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+
+    assert_eq!(shared_flag(&db, "n1").await, 1, "re-shared");
+    assert!(
+        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        "the inline push re-uploaded the cover"
+    );
+    assert!(
+        !storage
+            .exists("blob_tombstones/covers/cv/cover.jpg")
+            .await
+            .unwrap(),
+        "the inline push cancelled the tombstone on the fresh-upload arm"
+    );
+}

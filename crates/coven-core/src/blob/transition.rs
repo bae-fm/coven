@@ -501,14 +501,9 @@ pub(crate) enum MakeRemoteCompletion {
     /// user-provided blob of the subtree, so its outbox row is removed inside the
     /// flip. Removing it here (not before) is the crash-safety invariant — until the
     /// commit the row is present, so a crash re-runs the idempotent upload and retries
-    /// the flip. On a failed inline tombstone-cancel, a durable `cancel` row is
-    /// enqueued in the same commit so the tombstone-cancel drain retries.
-    FinalOutboxRow {
-        id: i64,
-        cloud_key: String,
-        cancel_failed: bool,
-        now_rfc: String,
-    },
+    /// the flip. The tombstone cancel is queued before this commit by
+    /// [`crate::blob::delete::cancel_tombstone_or_enqueue`].
+    FinalOutboxRow { id: i64 },
     /// The sync cycle's host-provided path: the local-store dispositions for the
     /// host-provided blobs this cycle uploaded are committed inside the flip, keyed by
     /// the sequence the flip's re-emitted changeset publishes at. The insert's `ON
@@ -548,19 +543,8 @@ pub(crate) fn commit_make_remote_flip(
             Database::clear_external_blob_on(tx, id)?;
         }
         match &completion {
-            MakeRemoteCompletion::FinalOutboxRow {
-                id,
-                cloud_key,
-                cancel_failed,
-                now_rfc,
-            } => {
-                crate::blob::upload::finish_outbox_row(
-                    tx,
-                    *id,
-                    cloud_key,
-                    *cancel_failed,
-                    now_rfc,
-                )?;
+            MakeRemoteCompletion::FinalOutboxRow { id } => {
+                crate::blob::upload::finish_outbox_row(tx, *id)?;
             }
             MakeRemoteCompletion::Dispositions { intent_seq, drops } => {
                 for drop in drops {

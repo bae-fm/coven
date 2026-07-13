@@ -535,6 +535,16 @@ pub async fn run_single_sync_cycle(
     // orders causally and must not be confused with this display time.
     let sync_time = clock.now().to_rfc3339();
 
+    // The cloud handle + object-key suffix the inline host-provided upload path uses to
+    // cancel a pending tombstone after a (re-)upload — the same invariant the outbox
+    // drain holds. `None` on a cloud-less run, which has no tombstones to cancel.
+    let blob_object_suffix = cipher.read().unwrap().suffix();
+    let host_upload_cancel = cloud_home.map(|ch| super::service::HostUploadCloud {
+        cloud_home: ch,
+        suffix: blob_object_suffix,
+        now_rfc: &sync_time,
+    });
+
     // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
     // the gate column: a root being made Remote stays gated off until its last
     // user-provided blob lands, and coven flips it on inside the drain (the
@@ -648,7 +658,13 @@ pub async fn run_single_sync_cycle(
     let timestamp = hlc.now().to_string();
 
     if super::service::complete_host_provided_make_remotes(
-        db, tables, storage, &timestamp, store_dir, local_seq,
+        db,
+        tables,
+        storage,
+        &timestamp,
+        store_dir,
+        local_seq,
+        host_upload_cancel.as_ref(),
     )
     .await
     .map_err(|e| format!("Host-provided make_remote completion failed: {e}"))?
@@ -680,6 +696,7 @@ pub async fn run_single_sync_cycle(
         store_dir,
         membership.chain.as_ref(),
         membership.pinned_owner.as_deref(),
+        host_upload_cancel.as_ref(),
     )
     .await
     .map_err(|e| format!("Sync cycle error: {e}"))?;
@@ -963,6 +980,7 @@ pub async fn run_single_sync_cycle(
                     storage,
                     store_dir,
                     &snapshot.host_blobs,
+                    host_upload_cancel.as_ref(),
                 )
                 .await
                 .map_err(|e| format!("Snapshot host-provided blob upload failed: {e}"))?;

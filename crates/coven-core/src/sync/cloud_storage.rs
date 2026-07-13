@@ -1210,6 +1210,21 @@ impl SyncStorage for CloudSyncStorage {
         self.blob_paths
     }
 
+    fn blob_cloud_key(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, StorageError> {
+        Self::blob_key(
+            self.blob_paths,
+            namespace,
+            self.own_uploader().as_deref(),
+            id,
+            cloud_path,
+        )
+    }
+
     fn own_uploader(&self) -> Option<String> {
         match self.blob_paths {
             BlobPathScheme::Hashed => Some(self.self_uploader()),

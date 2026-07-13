@@ -1249,6 +1249,18 @@ impl SyncStorage for MockSyncStorage {
         crate::sync::cloud_storage::BlobPathScheme::Hashed
     }
 
+    fn blob_cloud_key(
+        &self,
+        namespace: &str,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, StorageError> {
+        // The mock keys objects flatly (namespace/cloud_path or namespace/id),
+        // regardless of the scheme it reports — so a tombstone cancel targets the same
+        // key the object was stored under.
+        Ok(blob_key(namespace, id, cloud_path))
+    }
+
     fn own_uploader(&self) -> Option<String> {
         Some(hex::encode(self.keypair.public_key()))
     }

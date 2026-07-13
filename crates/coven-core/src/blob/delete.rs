@@ -38,10 +38,12 @@
 //! A blob re-uploaded after a deletion was queued must not be deleted. This is
 //! enforced at two layers: at enqueue ([`crate::database::Database::enqueue_upload`]
 //! drops any pending delete row for the same key, and vice versa — latest intent
-//! wins within a device), and at upload completion ([`cancel_tombstone`], called
-//! from [`crate::blob::upload::drain_uploads`] after a successful write, removes any
-//! tombstone a *prior* cycle — possibly on another device — already wrote). A
-//! re-upload thus wins over a pending deletion by construction.
+//! wins within a device), and after a successful (re-)upload
+//! ([`cancel_tombstone_or_enqueue`] removes any tombstone a *prior* cycle — possibly
+//! on another device — already wrote). Every upload path runs that cancel: the outbox
+//! drain ([`crate::blob::upload::drain_uploads`]) and the inline host-provided push
+//! (the changeset push, the make_remote host-blob completion, and the snapshot). A
+//! re-upload thus wins over a pending deletion by construction, on every path.
 //!
 //! The completion cancel must not be lost if it fails, or a surviving tombstone
 //! past its grace would delete the live re-uploaded blob. When the inline cancel
@@ -810,6 +812,31 @@ pub async fn cancel_tombstone(
         .delete(&key)
         .await
         .map_err(|e| format!("failed to cancel tombstone for {cloud_key}: {e}"))
+}
+
+/// Cancel any tombstone for `cloud_key` after a successful (re-)upload, so a later GC
+/// can't reclaim the live blob — a re-upload wins over a pending deletion. Attempt the
+/// inline [`cancel_tombstone`]; on failure, enqueue a durable `cancel` outbox row so
+/// [`drain_tombstone_cancels`] retries the removal until it lands. Every upload path
+/// calls this — the outbox drain and the inline host-provided push — so the invariant
+/// holds uniformly rather than only on the drain.
+///
+/// The durable row is enqueued in its own commit before the caller records the upload
+/// as done (removes its outbox row, or publishes the changeset the inline push
+/// uploaded for), so a crash after this never leaves the tombstone standing with no
+/// retry queued.
+pub(crate) async fn cancel_tombstone_or_enqueue(
+    db: &Database,
+    cloud_home: &dyn CloudHome,
+    suffix: &str,
+    cloud_key: &str,
+    now_rfc: &str,
+) -> Result<(), crate::database::DbError> {
+    if let Err(e) = cancel_tombstone(cloud_home, suffix, cloud_key).await {
+        warn!("tombstone cancel for {cloud_key} failed ({e}); queuing a durable cancel for retry");
+        db.enqueue_cancel(cloud_key, now_rfc).await?;
+    }
+    Ok(())
 }
 
 /// Drain the queued tombstone-cancels: for each, remove the tombstone object for
