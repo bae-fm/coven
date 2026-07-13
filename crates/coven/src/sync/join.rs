@@ -15,7 +15,7 @@ use crate::encryption::{EncryptionError, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
 use crate::join_code::InviteCode;
 use crate::keys::{
-    CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys,
+    CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
 use crate::migration::{supported_version, Migration};
 use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
@@ -57,6 +57,11 @@ pub enum BootstrapError {
     InvalidCode(String),
     #[error("store already exists locally: {0}")]
     StoreExists(String),
+    /// A hard crash left a store directory with no saved config, and clearing
+    /// that torn-bootstrap residue before retrying failed — so the retry can't
+    /// proceed over the leftover directory or keyring entries.
+    #[error("could not clear a torn bootstrap for {store_id}: {failures}")]
+    TornBootstrapCleanup { store_id: String, failures: String },
     #[error("provider: {0}")]
     Provider(String),
     #[error("membership: {0}")]
@@ -83,24 +88,14 @@ pub enum BootstrapError {
     },
 }
 
-/// Undo everything a bootstrap attempt may have durably written, then return
-/// the error to propagate. The exists-guard at the top of every join/restore
-/// entry point establishes that this invocation owns everything under the
-/// store id — no live store existed when it started, so the store-scoped
-/// directory, custody, and keyring accounts are this invocation's alone to
-/// remove, which makes total removal unconditionally safe here. Four steps,
-/// each best-effort so one failing doesn't skip the others: the store
-/// directory (tolerating it never having existed — a failure before
-/// `create_dir_all` leaves nothing to remove; also covers a Passphrase
-/// custody's wrapped-file, which lives inside it), the master key via custody
-/// (idempotent regardless of policy), this store's identity via its own
-/// custody (idempotent the same way — a no-op if a join never got as far as
-/// promoting its pending identity), and the cloud-home credentials (OAuth
-/// tokens are stored *as* credentials — see
-/// `StoreKeys::set_cloud_home_oauth_tokens` — so this one delete covers both).
-/// On a clean run the original `cause` is returned unchanged; if any step
-/// fails, every failure is carried in a [`BootstrapError::Cleanup`] so none is
-/// lost. Shared by join and restore.
+/// Undo everything a bootstrap attempt may have durably written (see
+/// [`remove_bootstrap_residue`]), then return the error to propagate. The
+/// completion-marker guard at the top of every join/restore entry point
+/// establishes that this invocation owns everything under the store id — no
+/// completed store existed when it started — which makes total removal
+/// unconditionally safe here. On a clean run the original `cause` is returned
+/// unchanged; if any removal step fails, every failure is carried in a
+/// [`BootstrapError::Cleanup`] so none is lost. Shared by join and restore.
 pub(crate) fn cleanup_after_bootstrap_failure(
     store_dir: &StoreDir,
     store_keys: &StoreKeys,
@@ -108,6 +103,35 @@ pub(crate) fn cleanup_after_bootstrap_failure(
     identity_custody: &dyn DeviceIdentityCustody,
     cause: BootstrapError,
 ) -> BootstrapError {
+    let failures = remove_bootstrap_residue(store_dir, store_keys, custody, identity_custody);
+    if failures.is_empty() {
+        cause
+    } else {
+        BootstrapError::Cleanup {
+            cleanup: failures.join("; "),
+            cause: Box::new(cause),
+        }
+    }
+}
+
+/// Remove everything a bootstrap attempt may have durably written under this
+/// store id, returning a message for each step that failed (empty ⇒ a clean
+/// removal). Four steps, each best-effort so one failing doesn't skip the
+/// others: the store directory (tolerating it never having existed, and also
+/// covering a Passphrase custody's wrapped file, which lives inside it), the
+/// master key via custody (idempotent regardless of policy), this store's
+/// identity via its own custody (idempotent the same way — a no-op if the
+/// identity was never established), and the cloud-home credentials (OAuth tokens
+/// are stored *as* credentials — see `StoreKeys::set_cloud_home_oauth_tokens` —
+/// so this one delete covers both). Shared by the post-failure cleanup and the
+/// torn-bootstrap guard: both own everything under the store id, because the
+/// completion-marker guard establishes no completed store exists at that id.
+fn remove_bootstrap_residue(
+    store_dir: &StoreDir,
+    store_keys: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
+    identity_custody: &dyn DeviceIdentityCustody,
+) -> Vec<String> {
     let mut failures: Vec<String> = Vec::new();
 
     match std::fs::remove_dir_all(&**store_dir) {
@@ -128,14 +152,64 @@ pub(crate) fn cleanup_after_bootstrap_failure(
         failures.push(format!("cloud home credentials: {e}"));
     }
 
-    if failures.is_empty() {
-        cause
-    } else {
-        BootstrapError::Cleanup {
-            cleanup: failures.join("; "),
-            cause: Box::new(cause),
+    failures
+}
+
+/// Dispatch a join or restore on the completion marker rather than bare
+/// directory existence.
+///
+/// A store is *complete* once its `config.yaml` — the last durable write of a
+/// successful bootstrap — exists. If it does, the directory holds real data:
+/// refuse with [`BootstrapError::StoreExists`], leaving it untouched. A store
+/// directory *without* that config is the residue of a bootstrap a hard crash
+/// (power loss, kill) interrupted before the config save. The host records a
+/// store only on `Ok`, so nothing references that residue and it is this
+/// retry's to clear: remove the directory and the same store-scoped keyring
+/// entries a failed bootstrap's cleanup removes, then let the caller proceed
+/// with a fresh attempt. A residue-removal failure blocks the retry (the
+/// leftovers would collide), so it surfaces as
+/// [`BootstrapError::TornBootstrapCleanup`] rather than a silent proceed.
+///
+/// The bootstrap head/ack a torn attempt may have published
+/// ([`CloudSyncStorage::publish_bootstrap_reader`], which runs before the pull)
+/// are *not* deleted here: every guard site runs before the cloud home is built
+/// — the store key is unwrapped later, from the invite or restore code — so no
+/// storage handle exists to delete them through, and threading one this far up
+/// just for this would be ceremony. Leaving them is exactly the disposition
+/// `publish_bootstrap_reader` already documents for a hard crash: a stale ack
+/// (keyed by the abandoned attempt's device id, which the retry does not reuse)
+/// pins reclamation at its bootstrap cursors — storage growth, the safe
+/// direction, never a stranded reader — and an owner can delete a dead device's
+/// head/ack.
+pub(crate) fn refuse_completed_or_clear_torn_store(
+    store_dir: &StoreDir,
+    store_keys: &StoreKeys,
+    custody: &dyn MasterKeyCustody,
+    identity_custody: &dyn DeviceIdentityCustody,
+    store_id: &str,
+) -> Result<(), BootstrapError> {
+    if store_dir.config_path().exists() {
+        return Err(BootstrapError::StoreExists(store_id.to_string()));
+    }
+
+    if store_dir.exists() {
+        warn!(
+            store_dir = %store_dir.display(),
+            "clearing a torn bootstrap: a store directory with no saved config, left by a join or restore a crash interrupted before completion"
+        );
+        // The directory and keyring entries are this retry's to clear; the
+        // head/ack this attempt may have published are left in place (see the
+        // fn doc — no storage handle is built at the guard).
+        let failures = remove_bootstrap_residue(store_dir, store_keys, custody, identity_custody);
+        if !failures.is_empty() {
+            return Err(BootstrapError::TornBootstrapCleanup {
+                store_id: store_id.to_string(),
+                failures: failures.join("; "),
+            });
         }
     }
+
+    Ok(())
 }
 
 /// Fail with [`BootstrapError::Cancelled`] if the caller's cancel signal has
@@ -151,15 +225,25 @@ fn error_if_cancelled(cancel: &watch::Receiver<bool>) -> Result<(), BootstrapErr
 }
 
 pub(crate) enum BootstrapContext<'a> {
+    /// Join pins the store owner from the invite. Its signing identity is a
+    /// *pending* identity (minted for the join request, held in a consumable
+    /// keyring slot); it is promoted into the store's own custody only after
+    /// the whole join commits — see [`join_store`] — so promoting it is not
+    /// part of `bootstrap_and_save_store`'s pre-marker sequence.
     Join { owner_pubkey: &'a str },
-    Restore,
+    /// Restore adopts the owner from the chain founder. Its signing identity
+    /// comes from the restore code the user still holds, so importing it is
+    /// *re-suppliable*: `bootstrap_and_save_store` imports it as the last step
+    /// before the config marker, making a saved config imply a resolvable
+    /// identity.
+    Restore { keypair: &'a UserKeypair },
 }
 
 impl BootstrapContext<'_> {
     fn owner_pubkey(&self) -> Option<&str> {
         match self {
             BootstrapContext::Join { owner_pubkey } => Some(*owner_pubkey),
-            BootstrapContext::Restore => None,
+            BootstrapContext::Restore { .. } => None,
         }
     }
 }
@@ -340,24 +424,32 @@ pub async fn join_from_invite_code(
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?
         .public_key;
 
-    // Refuse a store already present locally before any keyring or provider side
-    // effect. Re-joining a store you already have adds nothing — the existing
-    // store is the data. `join_store` below is the authoritative guard against
-    // the destructive failure-cleanup; this check exists so a refused join also
-    // leaves no residue from `build_cloud_home_for_join`, which runs first and
-    // saves OAuth tokens to the keyring and can accept a CloudKit share.
     let store_dir = layout.store_dir(&code.store_id);
-    if store_dir.exists() {
-        return Err(BootstrapError::StoreExists(code.store_id));
-    }
 
     // Hoisted here, before any durable write below, so a failure at any step —
     // including `build_cloud_home_for_join`'s OAuth persist, which runs before
     // `join_store` even creates the store directory — funnels through the same
-    // rollback instead of escaping via `?`.
+    // rollback instead of escaping via `?`. Resolving custody has no side
+    // effect, so it is safe ahead of the completion-marker guard, which itself
+    // may remove torn-bootstrap keyring residue through these handles.
     let store_keys = StoreKeys::new(code.store_id.clone());
     let custody = key_custody.resolve(&code.store_id, &store_dir);
     let identity_custody = identity_custody.resolve(&code.store_id, &store_dir);
+
+    // Refuse a *completed* store (config present) and clear a torn one before
+    // any keyring or provider side effect. Re-joining a store you already have
+    // adds nothing — the existing store is the data. `join_store` below is the
+    // authoritative guard against the destructive failure-cleanup; this check
+    // exists so a refused join also leaves no residue from
+    // `build_cloud_home_for_join`, which runs first and saves OAuth tokens to
+    // the keyring and can accept a CloudKit share.
+    refuse_completed_or_clear_torn_store(
+        &store_dir,
+        &store_keys,
+        custody.as_ref(),
+        identity_custody.as_ref(),
+        &code.store_id,
+    )?;
 
     let result = async {
         let cloud_home = build_cloud_home_for_join(
@@ -430,24 +522,28 @@ pub(crate) async fn join_store(
     crate::store_dir::validate_path_token(&code.store_id)
         .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
 
-    // Refuse a store already present locally before any keyring or filesystem
-    // side effect, independent of whatever `join_from_invite_code` (or any
-    // other caller) already checked. Re-joining a store you already have adds
-    // nothing — the existing store is the data — and letting the join proceed
-    // would, on any bootstrap failure below, delete that store's database and
-    // blobs during cleanup. This is the authoritative guard: it makes the
-    // failure-cleanup below only ever remove a directory this invocation
-    // created.
     let store_dir = layout.store_dir(&code.store_id);
-    if store_dir.exists() {
-        return Err(BootstrapError::StoreExists(code.store_id));
-    }
 
     // Hoisted here, before any durable write below, so every step through the
     // end of this function — keypair load, invitation accept, directory
     // creation, bootstrap — funnels a failure through the same rollback
     // instead of a bare `?` escaping it.
     let store_keys = StoreKeys::new(code.store_id.clone());
+
+    // Refuse a *completed* store (config present) and clear a torn one,
+    // independent of whatever `join_from_invite_code` (or any other caller)
+    // already checked. Re-joining a store you already have adds nothing — the
+    // existing store is the data — and letting the join proceed would, on any
+    // bootstrap failure below, delete that store's database and blobs during
+    // cleanup. This is the authoritative guard: it makes the failure-cleanup
+    // below only ever remove a directory this invocation created.
+    refuse_completed_or_clear_torn_store(
+        &store_dir,
+        &store_keys,
+        custody.as_ref(),
+        identity_custody.as_ref(),
+        &code.store_id,
+    )?;
 
     let result = async {
         // Load the pending identity this join's request minted (the inviter
@@ -517,6 +613,7 @@ pub(crate) async fn join_store(
             &code.store_name,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             clock,
             &on_status,
             cancel,
@@ -578,6 +675,7 @@ pub(crate) async fn bootstrap_and_save_store(
     store_name: &str,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
+    identity_custody: &dyn DeviceIdentityCustody,
     clock: &dyn crate::clock::Clock,
     on_status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
@@ -658,7 +756,20 @@ pub(crate) async fn bootstrap_and_save_store(
             key_service.set_cloud_home_credentials(&credentials)?;
         }
 
-        // Step 9: Create and save config.
+        // Establish restore's signing identity BEFORE the config save, so the
+        // saved config — the completion marker — always implies a resolvable
+        // identity: a crash before the save is a torn bootstrap the retry
+        // clears and re-imports from the restore code the user still holds.
+        // Inside the unit, so a later failure deletes the bootstrap reader the
+        // same as any other. Join's identity is a consumable pending slot
+        // promoted only after the whole join commits (see `join_store`), so it
+        // is deliberately not established here.
+        if let BootstrapContext::Restore { keypair } = &context {
+            crate::keys::import_identity(identity_custody, &keypair.to_keypair_bytes())?;
+        }
+
+        // Step 9: Create and save config — the last durable write and the
+        // store's completion marker.
         let config = build_config(
             store_id, device_id, store_dir, store_name, join_info, cipher,
         );
@@ -955,6 +1066,102 @@ pub(crate) fn build_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store whose `config.yaml` marker is present is a completed store: the
+    /// guard refuses it with `StoreExists` and touches nothing — neither the
+    /// directory nor the keyring entries a live store depends on.
+    #[test]
+    fn guard_refuses_a_completed_store_and_leaves_it_untouched() {
+        crate::keys::test_keyring::install();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(tmp.path().join("completed"));
+        std::fs::create_dir_all(&*store_dir).expect("create store dir");
+        std::fs::write(store_dir.config_path(), b"store_id: completed\n")
+            .expect("seed completion marker");
+        let store_keys = StoreKeys::new("guard-completed-test".to_string());
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve("guard-completed-test", &store_dir);
+        custody
+            .persist(&MasterKeyring::generate())
+            .expect("seed the master key");
+        let identity_custody = IdentityCustody::Keyring.resolve("guard-completed-test", &store_dir);
+
+        let result = refuse_completed_or_clear_torn_store(
+            &store_dir,
+            &store_keys,
+            custody.as_ref(),
+            identity_custody.as_ref(),
+            "guard-completed-test",
+        );
+
+        assert!(
+            matches!(result, Err(BootstrapError::StoreExists(ref id)) if id == "guard-completed-test"),
+            "a completed store must be refused with StoreExists, got {result:?}",
+        );
+        assert!(store_dir.config_path().exists(), "the marker is untouched");
+        assert!(
+            custody.unlock().expect("read master key").is_some(),
+            "a refused completed store keeps its keyring entries",
+        );
+    }
+
+    /// A store directory with no `config.yaml` marker is a torn bootstrap a
+    /// crash interrupted before completion: the guard clears it — the directory
+    /// and the store-scoped keyring entries — and returns `Ok` so the caller
+    /// retries from a clean slate.
+    #[test]
+    fn guard_clears_a_torn_bootstrap_and_lets_the_retry_proceed() {
+        crate::keys::test_keyring::install();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new(tmp.path().join("torn"));
+        std::fs::create_dir_all(&*store_dir).expect("create store dir");
+        // Partial bootstrap residue: a torn database image, no config marker.
+        std::fs::write(store_dir.db_path(), b"half-written-db").expect("seed torn db");
+        let store_keys = StoreKeys::new("guard-torn-test".to_string());
+        let custody = crate::custody::KeyCustody::Keyring.resolve("guard-torn-test", &store_dir);
+        custody
+            .persist(&MasterKeyring::generate())
+            .expect("seed the master key");
+        let identity_custody = IdentityCustody::Keyring.resolve("guard-torn-test", &store_dir);
+        identity_custody
+            .persist(&UserKeypair::generate())
+            .expect("seed the identity");
+        store_keys
+            .set_cloud_home_credentials(&CloudHomeCredentials::S3 {
+                access_key: "ak".to_string(),
+                secret_key: "sk".to_string(),
+            })
+            .expect("seed cloud home credentials");
+
+        let result = refuse_completed_or_clear_torn_store(
+            &store_dir,
+            &store_keys,
+            custody.as_ref(),
+            identity_custody.as_ref(),
+            "guard-torn-test",
+        );
+
+        assert!(
+            result.is_ok(),
+            "a torn bootstrap clears and proceeds, got {result:?}"
+        );
+        assert!(!store_dir.exists(), "the torn directory was removed");
+        assert!(
+            custody.unlock().expect("read master key").is_none(),
+            "the torn store's master key was cleared",
+        );
+        assert!(
+            identity_custody.unlock().expect("read identity").is_none(),
+            "the torn store's identity was cleared",
+        );
+        assert!(
+            store_keys
+                .get_cloud_home_credentials()
+                .expect("read keyring")
+                .is_none(),
+            "the torn store's cloud home credentials were cleared",
+        );
+    }
 
     /// When the post-failure directory cleanup itself fails, both failures are
     /// carried: `cleanup` records why the removal failed and `cause` preserves

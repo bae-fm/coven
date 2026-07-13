@@ -190,23 +190,29 @@ pub async fn restore_from_cloud(
     crate::store_dir::validate_path_token(store_id)
         .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
 
-    // Refuse a store already present locally before any provider side effect. The
-    // decode guaranteed the id is a safe single component, so the directory is a
-    // direct child of the layout's stores dir and cannot escape it. Re-running a
-    // restore for a store you already have adds nothing — the existing store is
-    // the data — and letting it proceed would, on any bootstrap failure below,
-    // delete that store's database and blobs during cleanup. Refusing here makes
-    // the failure-cleanup only ever remove a directory this invocation created.
     let store_dir = layout.store_dir(store_id);
-    if store_dir.exists() {
-        return Err(BootstrapError::StoreExists(store_id.to_string()));
-    }
 
     // Hoisted here, before any durable write below, so a failure at any step —
     // including `build_cloud_home`'s OAuth persist, which runs before the store
     // directory is created — funnels through the same rollback instead of a
     // bare `?` escaping it.
     let store_keys = StoreKeys::new(store_id.to_string());
+
+    // Refuse a *completed* store (config present) and clear a torn one before
+    // any provider side effect. The decode guaranteed the id is a safe single
+    // component, so the directory is a direct child of the layout's stores dir
+    // and cannot escape it. Re-running a restore for a store you already have
+    // adds nothing — the existing store is the data — and letting it proceed
+    // would, on any bootstrap failure below, delete that store's database and
+    // blobs during cleanup. Dispatching here makes the failure-cleanup only
+    // ever remove a directory this invocation created.
+    crate::sync::join::refuse_completed_or_clear_torn_store(
+        &store_dir,
+        &store_keys,
+        custody.as_ref(),
+        identity_custody.as_ref(),
+        store_id,
+    )?;
 
     let result = async {
         on_status("Preparing restore...");
@@ -260,7 +266,7 @@ pub async fn restore_from_cloud(
             &store_dir,
             store_id,
             &device_id,
-            crate::sync::join::BootstrapContext::Restore,
+            crate::sync::join::BootstrapContext::Restore { keypair },
             membership_floor,
             synced_tables,
             migrations,
@@ -268,6 +274,7 @@ pub async fn restore_from_cloud(
             store_name,
             &store_keys,
             custody.as_ref(),
+            identity_custody.as_ref(),
             clock.as_ref(),
             &on_status,
             cancel,
@@ -324,15 +331,14 @@ pub async fn restore_from_code(
     let custody = key_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
     let identity_custody = identity_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
 
-    // `decode_restore_code` already validated the field; convert it to bytes so
-    // restore can rebuild and later import the signing identity.
-    let signing_key_bytes = hex::decode(&parsed.sk)
-        .map_err(|e| BootstrapError::InvalidSigningKey(format!("invalid encoding: {e}")))?;
-    // This store's restored identity. Rebuilt here (not imported yet) so the
-    // storage can sign its control objects during restore, while the keyring
-    // import still happens only after restore succeeds.
-    let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
-        signing_key_bytes.clone().try_into().map_err(|_| {
+    // `decode_restore_code` already validated the field; rebuild this store's
+    // restored signing identity from it. The storage signs its control objects
+    // with this keypair during restore, and `restore_from_cloud` imports it into
+    // custody just before saving the config.
+    let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(&parsed.sk)
+        .map_err(|e| BootstrapError::InvalidSigningKey(format!("invalid encoding: {e}")))?
+        .try_into()
+        .map_err(|_| {
             BootstrapError::InvalidSigningKey(format!(
                 "Signing key must be {} bytes",
                 crate::keys::SIGN_SECRETKEYBYTES
@@ -349,7 +355,10 @@ pub async fn restore_from_code(
         cloudkit_ops,
     };
 
-    let config = restore_from_cloud(
+    // `restore_from_cloud` imports this store's signing identity as the step
+    // before it saves the config, so a saved config always has its identity in
+    // custody. Nothing identity-related is left for this caller to do.
+    restore_from_cloud(
         &parsed.sid,
         parsed.ek.as_deref(),
         &parsed.name,
@@ -366,27 +375,7 @@ pub async fn restore_from_code(
         on_status,
         cancel,
     )
-    .await?;
-
-    // Import this store's signing key after restore succeeds so we don't
-    // overwrite an existing identity if the restore fails. `restore_from_code`
-    // returns `Ok` with everything durable, or `Err` with nothing durable —
-    // never a store left behind that a retry can't reach, so an import
-    // failure here rolls back the store `restore_from_cloud` just committed
-    // the same way a bootstrap failure does.
-    if let Err(e) = crate::keys::import_identity(identity_custody.as_ref(), &signing_key_bytes) {
-        let store_dir = layout.store_dir(&parsed.sid);
-        let store_keys = StoreKeys::new(parsed.sid.clone());
-        return Err(cleanup_after_bootstrap_failure(
-            &store_dir,
-            &store_keys,
-            custody.as_ref(),
-            identity_custody.as_ref(),
-            BootstrapError::Key(e),
-        ));
-    }
-
-    Ok(config)
+    .await
 }
 
 // The only test here exercises the OAuth-provider arms of `build_cloud_home`,

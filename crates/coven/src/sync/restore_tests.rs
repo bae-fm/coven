@@ -147,23 +147,28 @@ async fn restore_rejects_traversal_lid_at_decode() {
     }
 }
 
-/// A store already present locally is the data — re-running a restore for it adds
-/// nothing, and the old code would delete its database and blobs during the
-/// failure-cleanup once the snapshot download failed. The restore now refuses up
-/// front with a typed error naming the store and leaves the existing files
-/// untouched. The endpoint is unreachable so that, absent the guard, execution would
-/// reach the snapshot download and the destructive cleanup — the guard stops it first.
+/// A completed store already present locally is the data — re-running a restore
+/// for it adds nothing, and the old code would delete its database and blobs
+/// during the failure-cleanup once the snapshot download failed. The restore
+/// refuses up front with a typed error naming the store and leaves the existing
+/// files untouched. "Completed" is what the saved `config.yaml` marks: the guard
+/// dispatches on that marker, so the store carries one here. The endpoint is
+/// unreachable so that, absent the guard, execution would reach the snapshot
+/// download and the destructive cleanup — the guard stops it first.
 #[tokio::test]
-async fn restore_refuses_when_store_exists_and_leaves_it_untouched() {
+async fn restore_refuses_when_completed_store_exists_and_leaves_it_untouched() {
     let encoded = restore_code_with_sid("abc-123");
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
 
-    // A store with this id is already present locally, holding a database file
-    // and a blob the restore must not touch.
+    // A completed store with this id is already present locally, holding a saved
+    // config (the completion marker), a database file, and a blob the restore
+    // must not touch.
     let store_dir = app_dir.join("stores").join("abc-123");
     std::fs::create_dir_all(store_dir.join("storage")).expect("create existing store dir");
+    std::fs::write(store_dir.join("config.yaml"), b"store_id: abc-123\n")
+        .expect("seed completion marker");
     let db_path = store_dir.join("store.db");
     let blob_path = store_dir.join("storage").join("cover.blob");
     std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
@@ -183,6 +188,43 @@ async fn restore_refuses_when_store_exists_and_leaves_it_untouched() {
         std::fs::read(&blob_path).expect("existing blob still present"),
         b"existing-blob-bytes",
         "the existing blob must be left untouched",
+    );
+}
+
+/// A store directory with no saved config is a torn bootstrap a crash left
+/// behind, not a completed store: the restore must NOT refuse it with
+/// `StoreExists`. It clears the torn residue and proceeds — here reaching the
+/// (unreachable) cloud endpoint and failing at the snapshot download — and the
+/// torn directory is gone, so a real retry could complete. Without the fix the
+/// config-less directory would block every retry forever.
+#[tokio::test]
+async fn restore_clears_a_torn_bootstrap_and_proceeds() {
+    crate::keys::test_keyring::install();
+    let encoded = restore_code_with_sid("torn-restore-123");
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+
+    // A torn bootstrap: a store directory with a half-written database and a
+    // blob, but no `config.yaml` marker — what a crash mid-restore leaves.
+    let store_dir = app_dir.join("stores").join("torn-restore-123");
+    std::fs::create_dir_all(store_dir.join("storage")).expect("create torn store dir");
+    std::fs::write(store_dir.join("store.db"), b"half-written-db").expect("seed torn db");
+    std::fs::write(
+        store_dir.join("storage").join("cover.blob"),
+        b"partial-blob",
+    )
+    .expect("seed torn blob");
+
+    let result = restore_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(result, Err(BootstrapError::Snapshot(_))),
+        "a torn bootstrap must not be refused — the restore clears it and reaches the snapshot download, got {result:?}",
+    );
+    assert!(
+        !store_dir.exists(),
+        "the torn directory must be gone at {}, not left to block retries",
+        store_dir.display(),
     );
 }
 
@@ -313,10 +355,11 @@ async fn restore_cancelled_via_status_callback_leaves_no_residue() {
 
 /// A failed restore must not leave a store directory behind that blocks a
 /// retry: a second `restore_from_code` attempt for the same `sid` must reach
-/// the same failure again, never `StoreExists`. `restore_from_code`'s signing-
-/// key import runs only after `restore_from_cloud` returns `Ok`, so an import
-/// failure needs this exact postcondition too — nothing durable survives a
-/// failed attempt, so the next attempt starts clean.
+/// the same failure again, never `StoreExists`. The failure here is before the
+/// config marker is ever written, so the directory the first attempt created is
+/// removed by its own cleanup and — even had a crash skipped that cleanup — the
+/// config-less directory the second attempt finds is a torn bootstrap it clears
+/// rather than a completed store it refuses.
 #[tokio::test]
 async fn failed_restore_does_not_block_a_retry_with_store_exists() {
     let encoded = restore_code_with_sid("retry-postcondition-test");
@@ -339,13 +382,15 @@ async fn failed_restore_does_not_block_a_retry_with_store_exists() {
 
 /// A failure at the very last step of bootstrap — saving `config.yaml`, after
 /// the encryption key and the cloud-home credentials are already written to the
-/// keyring (steps 7 and 8) — must roll back both keyring accounts, not just
-/// whichever the OLD code happened to reach. The public entry points
-/// (`join_store`, `restore_from_cloud`) refuse to run at all when the store
-/// directory already exists, so there is no way to pre-seed a conflicting path
-/// inside it before calling them; this drives `bootstrap_and_save_store`
-/// directly — the same function those entry points call — and blocks its
-/// final write by seeding a directory at the exact path `config.yaml` needs.
+/// keyring (steps 7 and 8) and restore's identity is imported (the step right
+/// before the save) — must roll back all of them, not just whichever the OLD
+/// code happened to reach. The public entry points (`join_store`,
+/// `restore_from_cloud`) refuse a store whose config marker already exists, and
+/// otherwise clear the directory, so there is no way to pre-seed a conflicting
+/// path inside a completed store before calling them; this drives
+/// `bootstrap_and_save_store` directly — the same function those entry points
+/// call — and blocks its final write by seeding a directory at the exact path
+/// `config.yaml` needs.
 ///
 /// The store is chain-less (no membership entries published), so `open_db_and_pull`
 /// takes the no-owner-to-pin path and this test needs no invite/membership
@@ -406,12 +451,13 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     .await
     .expect("push owner snapshot");
 
+    let joiner_keypair = UserKeypair::generate();
     let joiner_storage = CloudSyncStorage::new(
         Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
         cipher.clone(),
         blob_paths,
         store_id.to_string(),
-        UserKeypair::generate(),
+        joiner_keypair.clone(),
     );
     let store_keys = StoreKeys::new(store_id.to_string());
     let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &store_dir);
@@ -435,7 +481,9 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         &store_dir,
         store_id,
         "device-late",
-        BootstrapContext::Restore,
+        BootstrapContext::Restore {
+            keypair: &joiner_keypair,
+        },
         &[],
         &tables,
         &test_migrations(),
@@ -443,6 +491,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         "Late Step Test",
         &store_keys,
         custody.as_ref(),
+        identity_custody.as_ref(),
         &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
@@ -452,13 +501,22 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     let err = result.expect_err("the blocked config.yaml write must fail bootstrap");
 
     // The meaningful precondition: steps 7 and 8 ran and wrote both keyring
-    // accounts before the failure at step 9.
+    // accounts, and restore imported its identity, all before the failure at
+    // the config save.
     assert!(
         store_keys
             .get_encryption_key()
             .expect("read keyring")
             .is_some(),
         "the encryption key must have been written before the late failure",
+    );
+    assert_eq!(
+        identity_custody
+            .unlock()
+            .expect("read identity custody")
+            .map(|kp| kp.public_key()),
+        Some(joiner_keypair.public_key()),
+        "restore's identity import runs before the config save, so it is present when the save fails",
     );
     assert!(
         store_keys
@@ -496,6 +554,13 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             .expect("read keyring")
             .is_none(),
         "the cloud home credentials must be rolled back",
+    );
+    assert!(
+        identity_custody
+            .unlock()
+            .expect("read identity custody")
+            .is_none(),
+        "the imported identity must be rolled back",
     );
 }
 
@@ -591,6 +656,8 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
     );
     let store_keys = StoreKeys::new(store_id.to_string());
     let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &lib_b);
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &lib_b);
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     bootstrap_and_save_store(
@@ -600,7 +667,9 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         &lib_b,
         store_id,
         "device-b",
-        BootstrapContext::Restore,
+        BootstrapContext::Restore {
+            keypair: &joiner_keypair,
+        },
         &[],
         &tables,
         &test_migrations(),
@@ -608,12 +677,24 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         "Restored Store",
         &store_keys,
         custody.as_ref(),
+        identity_custody.as_ref(),
         &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
     .await
     .expect("restore bootstrap");
+
+    // The config is saved, and a saved config implies the identity was imported
+    // before it — the restored device's signing identity resolves in custody.
+    assert_eq!(
+        identity_custody
+            .unlock()
+            .expect("read restored identity")
+            .map(|kp| kp.public_key()),
+        Some(joiner_keypair.public_key()),
+        "a completed restore has its signing identity in custody",
+    );
 
     let (db_b, _stamper) = Database::open(
         &lib_b.db_path(),
@@ -1010,15 +1091,18 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
 
+    let joiner_keypair = UserKeypair::generate();
     let joiner_storage = CloudSyncStorage::new(
         Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
         cipher.clone(),
         blob_paths,
         store_id.to_string(),
-        UserKeypair::generate(),
+        joiner_keypair.clone(),
     );
     let store_keys = StoreKeys::new(store_id.to_string());
     let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &lib_b);
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &lib_b);
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     bootstrap_and_save_store(
@@ -1028,7 +1112,9 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         &lib_b,
         store_id,
         "device-b",
-        BootstrapContext::Restore,
+        BootstrapContext::Restore {
+            keypair: &joiner_keypair,
+        },
         &[],
         &tables,
         &test_migrations(),
@@ -1036,6 +1122,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         "Restored Store",
         &store_keys,
         custody.as_ref(),
+        identity_custody.as_ref(),
         &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,

@@ -184,21 +184,26 @@ async fn join_accepts_a_normal_store_id_past_decode() {
     );
 }
 
-/// A store already present locally is the data — re-joining it adds nothing, and
-/// the old code would delete its database and blobs during the failure-cleanup once
-/// bootstrap failed. The join now refuses up front with a typed error naming the
-/// store and leaves the existing files untouched.
+/// A completed store already present locally is the data — re-joining it adds
+/// nothing, and the old code would delete its database and blobs during the
+/// failure-cleanup once bootstrap failed. The join refuses up front with a typed
+/// error naming the store and leaves the existing files untouched. "Completed"
+/// is what the saved `config.yaml` marks: the guard dispatches on that marker,
+/// so the store carries one here.
 #[tokio::test]
-async fn join_refuses_when_store_exists_and_leaves_it_untouched() {
+async fn join_refuses_when_completed_store_exists_and_leaves_it_untouched() {
     let encoded = encode(&invite_code_with_store_id("abc-123"));
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let app_dir = tmp.path();
 
-    // A store with this id is already present locally, holding a database file
-    // and a blob the join must not touch.
+    // A completed store with this id is already present locally, holding a saved
+    // config (the completion marker), a database file, and a blob the join must
+    // not touch.
     let store_dir = app_dir.join("stores").join("abc-123");
     std::fs::create_dir_all(store_dir.join("storage")).expect("create existing store dir");
+    std::fs::write(store_dir.join("config.yaml"), b"store_id: abc-123\n")
+        .expect("seed completion marker");
     let db_path = store_dir.join("store.db");
     let blob_path = store_dir.join("storage").join("cover.blob");
     std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
@@ -218,6 +223,42 @@ async fn join_refuses_when_store_exists_and_leaves_it_untouched() {
         std::fs::read(&blob_path).expect("existing blob still present"),
         b"existing-blob-bytes",
         "the existing blob must be left untouched",
+    );
+}
+
+/// A store directory with no saved config is a torn bootstrap a crash left
+/// behind, not a completed store: the join must NOT refuse it with
+/// `StoreExists`. It clears the torn residue and proceeds — here reaching the
+/// (bogus) cloud endpoint and failing there — and the torn directory is gone,
+/// so a real retry could complete. Without the fix the config-less directory
+/// would block every retry forever.
+#[tokio::test]
+async fn join_clears_a_torn_bootstrap_and_proceeds() {
+    let encoded = encode(&invite_code_with_store_id("torn-123"));
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let app_dir = tmp.path();
+
+    // A torn bootstrap: a store directory with a half-written database and a
+    // blob, but no `config.yaml` marker — what a crash mid-bootstrap leaves.
+    let store_dir = app_dir.join("stores").join("torn-123");
+    std::fs::create_dir_all(store_dir.join("storage")).expect("create torn store dir");
+    std::fs::write(store_dir.join("store.db"), b"half-written-db").expect("seed torn db");
+    std::fs::write(
+        store_dir.join("storage").join("cover.blob"),
+        b"partial-blob",
+    )
+    .expect("seed torn blob");
+
+    let result = join_result_for(&encoded, app_dir).await;
+    assert!(
+        matches!(result, Err(BootstrapError::Invite(_))),
+        "a torn bootstrap must not be refused — the join clears it and reaches the cloud read, got {result:?}",
+    );
+    assert!(
+        !store_dir.exists(),
+        "the torn directory must be gone at {}, not left to block retries",
+        store_dir.display(),
     );
 }
 
@@ -333,14 +374,14 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
 }
 
 /// `join_store` is the lower-level, reusable function `join_from_invite_code`
-/// delegates to after its own exists-check — any other direct caller reaches
+/// delegates to after its own marker-check — any other direct caller reaches
 /// `join_store` without that check. Its failure-cleanup removes the store
-/// directory unconditionally, so `join_store` must refuse a store already
-/// present locally itself, independent of any check a wrapper does or doesn't
-/// do around it. Nothing here ever reaches the pending-identity read — the
-/// exists-check refuses first — so no join request needs to be seeded.
+/// directory unconditionally, so `join_store` must refuse a completed store
+/// itself, independent of any check a wrapper does or doesn't do around it.
+/// Nothing here ever reaches the pending-identity read — the completion marker
+/// refuses first — so no join request needs to be seeded.
 #[tokio::test]
-async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
+async fn join_store_refuses_when_completed_store_exists_and_leaves_it_untouched() {
     let code = invite_code_with_store_id("abc-123");
 
     crate::keys::test_keyring::install();
@@ -348,10 +389,13 @@ async fn join_store_refuses_when_store_exists_and_leaves_it_untouched() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let data_dir = tmp.path();
 
-    // A store with this id is already present locally, holding a database file
-    // and a blob join_store must not touch.
+    // A completed store with this id is already present locally, holding a saved
+    // config (the completion marker), a database file, and a blob join_store
+    // must not touch.
     let store_dir = data_dir.join("stores").join("abc-123");
     std::fs::create_dir_all(store_dir.join("storage")).expect("create existing store dir");
+    std::fs::write(store_dir.join("config.yaml"), b"store_id: abc-123\n")
+        .expect("seed completion marker");
     let db_path = store_dir.join("store.db");
     let blob_path = store_dir.join("storage").join("cover.blob");
     std::fs::write(&db_path, b"existing-db-bytes").expect("seed existing db");
@@ -530,6 +574,8 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
     let (_tmp_b, store_dir) = temp_store_dir();
     let store_keys = crate::keys::StoreKeys::new(store_id.to_string());
     let custody = Arc::new(RecordingCustody::default());
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     crate::sync::join::bootstrap_and_save_store(
@@ -549,6 +595,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         "Joined Store",
         &store_keys,
         custody.as_ref(),
+        identity_custody.as_ref(),
         &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
@@ -1455,6 +1502,8 @@ async fn joiner_fixture() -> JoinerFixture {
 async fn bootstrap_publishes_the_joiners_head_and_ack() {
     let f = joiner_fixture().await;
     let custody = Arc::new(RecordingCustody::default());
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
 
     crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
@@ -1473,6 +1522,7 @@ async fn bootstrap_publishes_the_joiners_head_and_ack() {
         "Joined Store",
         &f.store_keys,
         custody.as_ref(),
+        identity_custody.as_ref(),
         &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
@@ -1532,6 +1582,8 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
         }
     }
 
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
     let result = crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
         &f.cipher,
@@ -1549,6 +1601,7 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
         "Joined Store",
         &f.store_keys,
         &FailPersistCustody,
+        identity_custody.as_ref(),
         &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
