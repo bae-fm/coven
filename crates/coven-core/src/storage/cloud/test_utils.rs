@@ -6,6 +6,7 @@
 //! that enable the `test-utils` feature.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -18,10 +19,19 @@ use super::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink}
 /// clones act as separate devices reading and writing the same cloud bucket, and
 /// a test can keep its own handle for direct at-rest assertions while each device
 /// owns a `Box<dyn CloudHome>` clone.
+///
+/// Beyond the happy path it carries fault-injection knobs
+/// ([`arm_write_failures`](Self::arm_write_failures),
+/// [`fail_next_range_reads`](Self::fail_next_range_reads),
+/// [`remove`](Self::remove)) so a host test can drive upload-failure,
+/// read-retry, and missing-blob paths without a bespoke `CloudHome` impl. The
+/// arming state is shared across clones, like the backing store.
 #[derive(Clone)]
 pub struct InMemoryCloudHome {
     writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     deletes: Arc<Mutex<Vec<String>>>,
+    fail_writes: Arc<AtomicBool>,
+    fail_next_range_reads: Arc<AtomicUsize>,
 }
 
 impl InMemoryCloudHome {
@@ -29,7 +39,32 @@ impl InMemoryCloudHome {
         Self {
             writes: Arc::new(Mutex::new(HashMap::new())),
             deletes: Arc::new(Mutex::new(Vec::new())),
+            fail_writes: Arc::new(AtomicBool::new(false)),
+            fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Arm every subsequent write (`put_object` and `open_multipart`) to fail
+    /// with a retryable transport error. A test can let a home's setup writes
+    /// land and then arm this before driving the path whose uploads must fail;
+    /// it stays armed for the store's lifetime.
+    pub fn arm_write_failures(&self) {
+        self.fail_writes.store(true, Ordering::SeqCst);
+    }
+
+    /// Make the next `n` `read_range` calls fail with a retryable transport
+    /// error before any serves bytes, to exercise a caller's read-retry path.
+    /// Each failed call consumes one; once `n` are spent, ranges serve
+    /// normally.
+    pub fn fail_next_range_reads(&self, n: usize) {
+        self.fail_next_range_reads.store(n, Ordering::SeqCst);
+    }
+
+    /// Drop `key`'s bytes out of band — as if the object vanished from the
+    /// bucket on its own, without a `delete` (which `deletes_seen` would
+    /// record). Drives missing-blob read failures.
+    pub fn remove(&self, key: &str) {
+        self.writes.lock().unwrap().remove(key);
     }
 
     /// Snapshot of every key currently in the cloud. Useful for assertions
@@ -103,6 +138,11 @@ impl PartSink for InMemoryPartSink {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CloudHome for InMemoryCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CloudHomeError::Transport(
+                "InMemoryCloudHome: armed write failure".into(),
+            ));
+        }
         self.writes.lock().unwrap().insert(key.to_string(), data);
         Ok(())
     }
@@ -112,6 +152,13 @@ impl CloudHome for InMemoryCloudHome {
         key: &str,
         _total_len: u64,
     ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        // Gate multipart too, so `arm_write_failures` fails a write whatever its
+        // size — `write_blob` routes blobs above `multipart_threshold` here.
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CloudHomeError::Transport(
+                "InMemoryCloudHome: armed write failure".into(),
+            ));
+        }
         Ok(Box::new(InMemoryPartSink {
             writes: self.writes.clone(),
             key: key.to_string(),
@@ -135,6 +182,18 @@ impl CloudHome for InMemoryCloudHome {
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
+        // An armed range read fails before touching the store. `checked_sub`
+        // returns `None` at zero, so `fetch_update` only succeeds (and errors)
+        // while the countdown is positive.
+        if self
+            .fail_next_range_reads
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(CloudHomeError::Transport(
+                "InMemoryCloudHome: armed range-read failure".into(),
+            ));
+        }
         let data = self.read(key).await?;
         let s = start as usize;
         let e = (end as usize).min(data.len());
@@ -267,5 +326,65 @@ mod tests {
             Err(CloudHomeError::NotFound(_))
         ));
         assert_eq!(h.deletes_seen(), vec!["k".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn arm_write_failures_fails_writes_after_arming() {
+        let h = InMemoryCloudHome::new();
+        // Writes land before arming.
+        h.write("before", BlobBody::from_bytes(vec![1]), &no_progress())
+            .await
+            .unwrap();
+
+        h.arm_write_failures();
+        let err = h
+            .write("after", BlobBody::from_bytes(vec![2]), &no_progress())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CloudHomeError::Transport(_)));
+        assert!(err.is_retryable());
+        // Nothing was stored for the failed write, and the earlier one survives.
+        assert!(h.get("after").is_none());
+        assert_eq!(h.get("before"), Some(vec![1]));
+    }
+
+    #[tokio::test]
+    async fn fail_next_range_reads_fails_the_next_n_then_recovers() {
+        let h = InMemoryCloudHome::new();
+        h.write(
+            "k",
+            BlobBody::from_bytes(b"0123456789".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        h.fail_next_range_reads(2);
+        assert!(matches!(
+            h.read_range("k", 0, 4).await,
+            Err(CloudHomeError::Transport(_))
+        ));
+        assert!(matches!(
+            h.read_range("k", 0, 4).await,
+            Err(CloudHomeError::Transport(_))
+        ));
+        // The third serves real bytes — the countdown is spent.
+        assert_eq!(h.read_range("k", 0, 4).await.unwrap(), b"0123");
+    }
+
+    #[tokio::test]
+    async fn remove_drops_a_key_out_of_band() {
+        let h = InMemoryCloudHome::new();
+        h.write("k", BlobBody::from_bytes(vec![1]), &no_progress())
+            .await
+            .unwrap();
+
+        h.remove("k");
+        assert!(matches!(
+            h.read("k").await,
+            Err(CloudHomeError::NotFound(_))
+        ));
+        // Out-of-band removal is not a delete, so it leaves no delete record.
+        assert!(h.deletes_seen().is_empty());
     }
 }
