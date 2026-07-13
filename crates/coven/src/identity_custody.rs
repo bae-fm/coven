@@ -34,11 +34,13 @@ impl IdentityCustody {
     /// the store's identity: `store_id` for [`IdentityCustody::Keyring`] (the
     /// keyring account name), `store_dir` for [`IdentityCustody::Passphrase`]
     /// (the wrapped-file path).
-    pub(crate) fn resolve(
-        self,
-        store_id: &str,
-        store_dir: &StoreDir,
-    ) -> Arc<dyn DeviceIdentityCustody> {
+    ///
+    /// Public to match [`KeyCustody::resolve`](crate::KeyCustody::resolve): the
+    /// low-level [`restore_from_cloud`](crate::restore_from_cloud) takes the
+    /// already-resolved `Arc<dyn DeviceIdentityCustody>`, so a host restoring by
+    /// a directly-supplied key (no restore code) must be able to resolve a preset
+    /// itself, the same way it already resolves its `KeyCustody`.
+    pub fn resolve(self, store_id: &str, store_dir: &StoreDir) -> Arc<dyn DeviceIdentityCustody> {
         match self {
             IdentityCustody::Keyring => Arc::new(KeyringIdentityCustody::new(store_id.to_string())),
             IdentityCustody::Passphrase(passphrase) => {
