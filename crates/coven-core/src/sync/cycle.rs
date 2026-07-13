@@ -619,11 +619,15 @@ pub async fn run_single_sync_cycle(
                 Err(e) => return Err(format!("Staged changeset push failed: {e}")),
             }
         } else {
-            // staged_seq set but the file is absent: the stage write failed and
-            // the push never committed (the success path persists local_seq
-            // before clearing the file, so it can't produce this state). The seq
-            // was never consumed on the remote — drop the marker, keep local_seq.
-            // Abnormal: the changeset those bytes held is gone, so surface it.
+            // staged_seq set but the file is absent: the push never committed.
+            // The staging write is directory-durable (its parent is fsynced
+            // after the rename), so a committed stage always leaves a
+            // recoverable file — this branch cannot be reached by power loss
+            // dropping the rename's directory entry, only by a stage that never
+            // completed. The success path persists local_seq before clearing the
+            // file, so it can't produce this state either. The seq was never
+            // consumed on the remote — drop the marker, keep local_seq. Abnormal:
+            // the changeset those bytes held is gone, so surface it.
             warn!(
                 seq,
                 "Stale staged_seq with no staged file; dropping the marker"
@@ -691,7 +695,14 @@ pub async fn run_single_sync_cycle(
             let pending_changeset_max_id = pending_changeset_max_id
                 .ok_or_else(|| "outgoing changeset without pending journal rows".to_string())?;
 
-            crate::local_blob::write_atomic(&staging_path(store_dir), &outgoing.packed)
+            // The staged file is the sole record that seq N's exact bytes may
+            // already be on the remote, so it must be directory-durable: the
+            // recovery branch below reads its presence to decide whether the
+            // push committed, and that inference has to hold across power loss,
+            // not only a process crash. (Cache blobs are re-fetchable and use
+            // the cheaper `write_atomic`, which skips the parent-directory
+            // fsync.)
+            crate::local_blob::write_atomic_durable(&staging_path(store_dir), &outgoing.packed)
                 .await
                 .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
             persist_staged_push_state(

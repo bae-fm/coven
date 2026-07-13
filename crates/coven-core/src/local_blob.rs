@@ -48,6 +48,29 @@ pub trait PlatformLocalBlobBackend: crate::MaybeThreadSafe {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, String>;
     async fn read_range(&self, path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String>;
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
+    /// Like [`write_atomic`](Self::write_atomic), but the committed directory
+    /// entry also survives power loss: after the atomic rename, the parent
+    /// directory is fsynced so the entry that now names the new bytes is itself
+    /// durable, not only the bytes inside the file.
+    ///
+    /// [`write_atomic`](Self::write_atomic) deliberately skips that
+    /// parent-directory fsync because a cache blob mirrors a cloud object —
+    /// losing the post-rename entry to a crash only means a re-fetchable blob is
+    /// absent. A caller whose file is the *sole* record of a fact that cannot be
+    /// re-derived after reboot needs the entry to survive, and uses this.
+    ///
+    /// The default composes the two operations, which is correct on every
+    /// backend. On a backend whose storage writes whole objects in place, with
+    /// no temp-file/rename split and so no separate directory entry that can be
+    /// lost, [`sync_parent_dir`](Self::sync_parent_dir) is a no-op and this is
+    /// identical to [`write_atomic`](Self::write_atomic): the OPFS `wasm`
+    /// backend rewrites the file the path already names through one
+    /// sync-access-handle write, so the write is already durable through the
+    /// operation.
+    async fn write_atomic_durable(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        self.write_atomic(path, bytes).await?;
+        self.sync_parent_dir(path).await
+    }
     async fn exists(&self, path: &Path) -> Result<bool, String>;
     async fn rename(&self, from: &Path, to: &Path) -> Result<(), String>;
     async fn remove_file(&self, path: &Path) -> Result<bool, String>;
@@ -88,6 +111,10 @@ pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, S
 
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     backend().write_atomic(path, bytes).await
+}
+
+pub async fn write_atomic_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    backend().write_atomic_durable(path, bytes).await
 }
 
 pub async fn exists(path: &Path) -> Result<bool, String> {

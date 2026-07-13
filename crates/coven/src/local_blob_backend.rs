@@ -380,3 +380,28 @@ fn mtime_millis(metadata: &std::fs::Metadata) -> Result<u64, String> {
         .map_err(|e| format!("modified time predates Unix epoch: {e}"))?
         .as_millis() as u64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The durable variant runs the real native atomic write plus a real
+    /// parent-directory fsync and leaves a correct, readable file. The fsync
+    /// itself isn't observable from a normal filesystem, so this pins the same
+    /// contract the make_local durability path relies on: after the durable
+    /// write returns, the destination holds exactly the written bytes.
+    #[tokio::test]
+    async fn write_atomic_durable_leaves_a_readable_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("nested").join("sync_staging.bin");
+        let bytes = b"packed outgoing changeset".to_vec();
+
+        NativeLocalBlobBackend
+            .write_atomic_durable(&path, &bytes)
+            .await
+            .expect("durable write");
+
+        let read_back = NativeLocalBlobBackend.read(&path).await.expect("read back");
+        assert_eq!(read_back, bytes);
+    }
+}

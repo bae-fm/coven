@@ -248,3 +248,104 @@ fn mtime_millis(metadata: &std::fs::Metadata) -> Result<u64, String> {
         .map_err(|e| format!("modified time predates Unix epoch: {e}"))?
         .as_millis() as u64)
 }
+
+#[cfg(test)]
+mod durable_write_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records what the default [`PlatformLocalBlobBackend::write_atomic_durable`]
+    /// calls, so the test can assert the variant makes the directory entry
+    /// durable — it performs the atomic write and then fsyncs the same path's
+    /// parent. Every other method is unreachable through the durable variant.
+    #[derive(Default)]
+    struct RecordingBackend {
+        wrote: Mutex<Option<(PathBuf, Vec<u8>)>>,
+        synced_parent_of: Mutex<Option<PathBuf>>,
+    }
+
+    #[async_trait]
+    impl PlatformLocalBlobBackend for RecordingBackend {
+        async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+            *self.wrote.lock().unwrap() = Some((path.to_path_buf(), bytes.to_vec()));
+            Ok(())
+        }
+
+        async fn sync_parent_dir(&self, path: &Path) -> Result<(), String> {
+            *self.synced_parent_of.lock().unwrap() = Some(path.to_path_buf());
+            Ok(())
+        }
+
+        async fn open_reader(
+            &self,
+            _path: &Path,
+        ) -> Result<Box<dyn PlatformPlaintextReader>, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn file_len(&self, _path: &Path) -> Result<u64, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn copy_atomic(&self, _src: &Path, _dst: &Path) -> Result<(), String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn write_stream_atomic(
+            &self,
+            _path: &Path,
+            _source: &mut dyn PlatformPlaintextReader,
+        ) -> Result<u64, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn read(&self, _path: &Path) -> Result<Vec<u8>, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn read_range(
+            &self,
+            _path: &Path,
+            _offset: u64,
+            _len: u64,
+        ) -> Result<Vec<u8>, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn exists(&self, _path: &Path) -> Result<bool, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn rename(&self, _from: &Path, _to: &Path) -> Result<(), String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn remove_file(&self, _path: &Path) -> Result<bool, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn remove_dir_all(&self, _path: &Path) -> Result<bool, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn create_dir_all(&self, _path: &Path) -> Result<(), String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+        async fn walk_files(&self, _dir: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
+            unimplemented!("not exercised by write_atomic_durable")
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_write_fsyncs_the_written_file_s_parent() {
+        let backend = RecordingBackend::default();
+        let path = Path::new("/store/sync_staging.bin");
+
+        backend
+            .write_atomic_durable(path, b"packed changeset")
+            .await
+            .expect("durable write");
+
+        assert_eq!(
+            *backend.wrote.lock().unwrap(),
+            Some((path.to_path_buf(), b"packed changeset".to_vec())),
+            "the durable variant performs the atomic write"
+        );
+        assert_eq!(
+            *backend.synced_parent_of.lock().unwrap(),
+            Some(path.to_path_buf()),
+            "the durable variant fsyncs the written file's parent so the rename's \
+             directory entry survives power loss"
+        );
+    }
+}
