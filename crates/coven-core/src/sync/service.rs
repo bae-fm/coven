@@ -403,58 +403,6 @@ async fn cancel_host_blob_tombstone(
     .map_err(|e| SyncCycleError::AssetUpload(e.0))
 }
 
-/// What coven knows about the cloud object a blob's key names.
-enum CloudBlobObject {
-    /// Nothing is at the key.
-    Absent,
-    /// An object is at the key, and the content coven last wrote there is this blob's.
-    HoldsThisBlob,
-    /// An object is at the key, but coven cannot attribute its bytes to this blob: it
-    /// last wrote different content there, or never wrote there at all.
-    Unattributed,
-}
-
-/// Resolve what the cloud object at `cloud_key` is, for `blob`. Two questions, and the
-/// bucket can only answer the first.
-///
-/// **Is an object there?** [`SyncStorage::blob_exists`], the authority on presence — a
-/// tombstone GC can have reclaimed an object coven once wrote.
-///
-/// **Does it hold this blob's bytes?** The object is sealed and cannot be asked, so
-/// coven reads back what it recorded writing to that key (`blob_cloud_contents`). Under
-/// the hashed scheme the key carries the blob id, so presence would settle this on its
-/// own; under the plain scheme it does not — a browsable home keys a blob at the host's
-/// readable path, which stays put when the row is repointed at a new blob, so the
-/// object standing there can be the replaced blob's bytes. One rule covers both: the
-/// object holds this blob only when coven's own record of the key names the blob's
-/// content hash. A row with no content hash can never be attributed, and is never
-/// skipped.
-async fn cloud_blob_object(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    blob: &BlobRef,
-    cloud_key: &str,
-    declared_hash: Option<&str>,
-) -> Result<CloudBlobObject, SyncCycleError> {
-    let exists = storage
-        .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
-        .await
-        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-    if !exists {
-        return Ok(CloudBlobObject::Absent);
-    }
-    let written = db
-        .blob_cloud_content(cloud_key)
-        .await
-        .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
-    match (written.as_deref(), declared_hash) {
-        (Some(written), Some(declared)) if written == declared => {
-            Ok(CloudBlobObject::HoldsThisBlob)
-        }
-        _ => Ok(CloudBlobObject::Unattributed),
-    }
-}
-
 /// Where this device holds a host-provided blob's plaintext, if it holds it at all.
 enum LocalHostBlob {
     /// coven's local store — the blob's Local home, where the host put it. Once the
@@ -515,25 +463,31 @@ async fn upload_host_provided_blob(
 ) -> Result<UploadedHostBlob, SyncCycleError> {
     let blob = &with_row_cloud_path(db, blob).await?;
     let expected_size = expected_blob_size(db, blob).await?;
-    let declared_hash = declared_blob_hash(db, blob).await?;
-    let cloud_key = storage
-        .blob_cloud_key(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
-        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
 
     let local = local_host_blob(store_dir, blob, expected_size).await?;
-    let object = cloud_blob_object(db, storage, blob, &cloud_key, declared_hash.as_deref()).await?;
+    // Every cloud key names the blob standing at it — the hashed scheme carries the id in
+    // the key, and a browsable home's readable path is required to name it
+    // ([`crate::sync::cloud_storage::CloudSyncStorage::blob_key`]). So no two blobs share
+    // a key, no object is ever overwritten by a different blob, and an object standing at
+    // THIS blob's key holds THIS blob's bytes: presence is proof of content, and there is
+    // nothing to upload. A repointed row whose cloud path did not move fails to key at
+    // all, so it never reaches this skip.
+    let uploaded = storage
+        .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
+        .await
+        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
 
-    // Upload iff the cloud object does not already hold this blob AND coven holds the
-    // bytes to put there. The two absences are different: a blob coven does not hold
-    // was never coven's to publish — a host-provided blob's bytes live in coven's own
-    // local store or cache while this device owns them, so a device with no copy did
-    // not author this content. Its row came from a peer, and a peer uploads a blob
-    // before publishing the row that names it, so the object standing at the key IS the
-    // row's content and there is nothing to push. With no object either, the row would
-    // publish pointing at nothing, which is the abort below.
-    match (&local, &object) {
-        (_, CloudBlobObject::HoldsThisBlob) => {}
-        (Some(local), CloudBlobObject::Absent | CloudBlobObject::Unattributed) => {
+    // Upload iff the blob is not in the cloud AND coven holds the bytes to put there.
+    // The two absences are different: a blob coven does not hold was never coven's to
+    // publish — a host-provided blob's bytes live in coven's own local store or cache
+    // while this device owns them, so a device with no copy did not author this content.
+    // Its row came from a peer, and a peer uploads a blob before publishing the row that
+    // names it, so the object standing at the key IS the row's content and there is
+    // nothing to push. With no object either, the row would publish pointing at nothing,
+    // which is the abort below.
+    match (&local, uploaded) {
+        (_, true) => {}
+        (Some(local), false) => {
             storage
                 .put_blob_from_file(
                     &blob.namespace,
@@ -545,18 +499,8 @@ async fn upload_host_provided_blob(
                 .await
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
-            record_cloud_content(db, &cloud_key, blob, declared_hash.as_deref()).await?;
         }
-        (None, CloudBlobObject::Unattributed) => {
-            debug!(
-                id = %blob.id,
-                namespace = %blob.namespace,
-                cloud_key = %cloud_key,
-                "host-provided blob has no local copy on this device, so its bytes are \
-                 the peer's that published the row; leaving the cloud object as it is"
-            );
-        }
-        (None, CloudBlobObject::Absent) => {
+        (None, false) => {
             error!(
                 id = %blob.id,
                 "host-provided blob is in neither the local store nor the cache; \
@@ -580,34 +524,6 @@ async fn upload_host_provided_blob(
         expected_size,
         cleanup_local_store_after_publish: local.is_some_and(|local| local.in_local_store()),
     })
-}
-
-/// Record the content this device just wrote to `cloud_key`, so a later push can tell
-/// whether the object standing there is still this blob's bytes. Runs only after the
-/// upload succeeded, so the record never claims content the cloud does not hold; a
-/// failure fails the push loudly and the retry re-runs the whole (idempotent) upload.
-///
-/// A blob whose row carries no content hash has nothing to record. It is already
-/// unpullable — a peer refuses a blob it cannot verify — so this does not degrade it;
-/// it just means the blob re-uploads on every push of its row rather than skipping.
-async fn record_cloud_content(
-    db: &Database,
-    cloud_key: &str,
-    blob: &BlobRef,
-    declared_hash: Option<&str>,
-) -> Result<(), SyncCycleError> {
-    let Some(hash) = declared_hash else {
-        warn!(
-            id = %blob.id,
-            namespace = %blob.namespace,
-            "uploaded a blob whose row carries no content hash; no peer can verify it, \
-             and this device cannot tell later whether the cloud object is still its bytes"
-        );
-        return Ok(());
-    };
-    db.record_blob_cloud_content(cloud_key, hash)
-        .await
-        .map_err(|e| SyncCycleError::AssetUpload(e.0))
 }
 
 /// Record in the local uploader index that this device uploaded `blob`, so a later
@@ -664,25 +580,6 @@ pub(super) async fn with_row_cloud_path(
         cloud_path,
         ..blob.clone()
     })
-}
-
-/// The blob's author-signed content hash, read off its carrying row the same way its
-/// size is. `None` when the row's hash column is NULL — bad data a peer's download
-/// already refuses, surfaced by the upload path rather than made fatal here.
-async fn declared_blob_hash(
-    db: &Database,
-    blob: &BlobRef,
-) -> Result<Option<String>, SyncCycleError> {
-    let decls = db.blob_decls();
-    let namespace = blob.namespace.clone();
-    let id = blob.id.clone();
-    db.call(move |conn| {
-        decls
-            .hash_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| crate::database::DbError(e.to_string()))
-    })
-    .await
-    .map_err(|e| SyncCycleError::AssetScan(e.0))
 }
 
 pub async fn apply_deferred_local_blob_drop(

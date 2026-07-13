@@ -789,7 +789,7 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         &db,
         &format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('coveraaa', 'n1', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+             VALUES ('coveraaa', 'n1', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
             cover.len(),
             crate::blob::content_hash(&cover),
         ),
@@ -809,7 +809,10 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
     assert!(failed.is_err(), "the cycle fails at the pull");
 
     assert!(
-        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/cover-coveraaa.jpg")
+            .await
+            .unwrap(),
         "the inline push uploaded the cover before the pull failed",
     );
     assert!(
@@ -1057,7 +1060,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         &db_a,
         &format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+             VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
             crate::blob::content_hash(&cover),
         ),
     )
@@ -1086,7 +1089,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 
     assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
     assert!(
-        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/cover-coveraaa.jpg")
+            .await
+            .unwrap(),
         "the host-provided cover is uploaded to the cloud",
     );
     assert!(
@@ -1131,7 +1137,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
             &db_b,
             &lib_b,
             Some(&storage),
-            &cover_ref("coveraaa", "cv/cover.jpg")
+            &cover_ref("coveraaa", "cv/cover-coveraaa.jpg")
         )
         .await
         .expect("B reads the cover"),
@@ -1190,7 +1196,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     assert_eq!(
         deletes,
         vec![
-            "covers/cv/cover.jpg".to_string(),
+            "covers/cv/cover-coveraaa.jpg".to_string(),
             "photos/cv/photoaaa.jpg".to_string(),
         ],
         "both cloud copies are tombstoned in the make_local commit",
@@ -1223,7 +1229,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         &db_a,
         &format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
+             VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
             crate::blob::content_hash(&cover),
         ),
     )
@@ -1236,7 +1242,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         &db_a,
         &lib_a,
         Some(&storage),
-        &cover_ref("coverhost", "cv/host.jpg"),
+        &cover_ref("coverhost", "cv/host-coverhost.jpg"),
     )
     .await
     .expect("read Local host-provided cover");
@@ -1264,7 +1270,10 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     );
     assert_eq!(pending_uploads(&db_a).await, 0);
     assert!(
-        !storage.exists("covers/cv/host.jpg").await.unwrap(),
+        !storage
+            .exists("covers/cv/host-coverhost.jpg")
+            .await
+            .unwrap(),
         "the host-provided blob is not published before the cycle uploads it"
     );
 
@@ -1276,7 +1285,10 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         "the gate flips after the host-provided blob lands"
     );
     assert!(
-        storage.exists("covers/cv/host.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/host-coverhost.jpg")
+            .await
+            .unwrap(),
         "inline push uploads the host-provided blob"
     );
     assert_eq!(
@@ -1306,7 +1318,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         &db_a,
         &lib_a,
         Some(&storage),
-        &cover_ref("coverhost", "cv/host.jpg"),
+        &cover_ref("coverhost", "cv/host-coverhost.jpg"),
     )
     .await
     .expect("read Remote host-provided cover");
@@ -1333,8 +1345,8 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     // Two host-provided-only releases: one made Remote with a pin (Pin disposition),
     // one without (Drop disposition, because the cover is CacheLazy).
     for (note, cover, path, bytes) in [
-        ("n-pin", "cover-pin", "cv/pin.jpg", &pin_bytes),
-        ("n-drop", "cover-drop", "cv/drop.jpg", &drop_bytes),
+        ("n-pin", "cover-pin", "cv/cover-pin.jpg", &pin_bytes),
+        ("n-drop", "cover-drop", "cv/cover-drop.jpg", &drop_bytes),
     ] {
         exec(
             &db,
@@ -1447,8 +1459,8 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the dropped cover is not pinned",
     );
     assert!(
-        storage.exists("covers/cv/pin.jpg").await.unwrap()
-            && storage.exists("covers/cv/drop.jpg").await.unwrap(),
+        storage.exists("covers/cv/cover-pin.jpg").await.unwrap()
+            && storage.exists("covers/cv/cover-drop.jpg").await.unwrap(),
         "both covers are published to the cloud",
     );
 }
@@ -1565,7 +1577,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         &db_a,
         &format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+             VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
             crate::blob::content_hash(&cover),
         ),
     )
@@ -1580,7 +1592,10 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .expect("seed peer head");
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     assert!(
-        storage.exists("covers/cv/remote-root.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/remote-root-coverrrr.jpg")
+            .await
+            .unwrap(),
         "the host-provided blob is uploaded before the row changeset is pushed"
     );
 
@@ -1602,7 +1617,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         &db_b,
         &lib_b,
         Some(&storage),
-        &cover_ref("coverrrr", "cv/remote-root.jpg"),
+        &cover_ref("coverrrr", "cv/remote-root-coverrrr.jpg"),
     )
     .await
     .expect("peer reads the remote-root blob");
@@ -1623,7 +1638,7 @@ async fn make_remote_rejects_remote_root() {
     exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
     )
     .await;
     local_files::store(&lib, "covers", "coverrrr", b"REMOTE-ROOT")
@@ -1662,7 +1677,7 @@ async fn make_local_rejects_remote_root() {
     exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root.jpg')",
+         VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
     )
     .await;
     storage
@@ -1670,7 +1685,7 @@ async fn make_local_rejects_remote_root() {
             "covers",
             "coverrrr",
             BlobScope::Master,
-            Some("cv/remote-root.jpg"),
+            Some("cv/remote-root-coverrrr.jpg"),
             b"REMOTE-ROOT".to_vec(),
         )
         .await
@@ -1742,7 +1757,7 @@ async fn make_remote_rejects_already_remote_root() {
     exec(
         &db,
         "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at, cloud_path) \
-         VALUES ('coverhost', 'n-host', 15, '0000000001000-0000-A', '2026-01-01', 'cv/host.jpg')",
+         VALUES ('coverhost', 'n-host', 15, '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
     )
     .await;
 
@@ -2541,7 +2556,7 @@ async fn tombstoned_host_cover(
         db,
         &format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('coveraaa', 'n1', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover.jpg')",
+             VALUES ('coveraaa', 'n1', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
             cover.len(),
             crate::blob::content_hash(cover),
         ),
@@ -2565,7 +2580,10 @@ async fn tombstoned_host_cover(
     run_cycle(storage, "A", hlc, db, enc, kp, lib, None).await;
     assert_eq!(shared_flag(db, "n1").await, 1, "Remote after make_remote");
     assert!(
-        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/cover-coveraaa.jpg")
+            .await
+            .unwrap(),
         "the cover is uploaded to the cloud"
     );
 
@@ -2589,7 +2607,7 @@ async fn tombstoned_host_cover(
     assert_eq!(shared_flag(db, "n1").await, 0, "Local after make_local");
     assert!(
         storage
-            .exists("blob_tombstones/covers/cv/cover.jpg")
+            .exists("blob_tombstones/covers/cv/cover-coveraaa.jpg")
             .await
             .unwrap(),
         "make_local tombstoned the cover"
@@ -2617,7 +2635,10 @@ async fn inline_reshare_cancels_the_tombstone_of_a_blob_it_skips_uploading() {
 
     tombstoned_host_cover(&storage, &enc, &kp, &hlc, &db, &lib, &cover).await;
     assert!(
-        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/cover-coveraaa.jpg")
+            .await
+            .unwrap(),
         "the cover's cloud copy is still present within the grace, so the push skips it"
     );
 
@@ -2633,13 +2654,16 @@ async fn inline_reshare_cancels_the_tombstone_of_a_blob_it_skips_uploading() {
     assert_eq!(shared_flag(&db, "n1").await, 1, "re-shared");
     assert!(
         !storage
-            .exists("blob_tombstones/covers/cv/cover.jpg")
+            .exists("blob_tombstones/covers/cv/cover-coveraaa.jpg")
             .await
             .unwrap(),
         "the inline push cancelled the tombstone of the blob it skipped uploading"
     );
     assert!(
-        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/cover-coveraaa.jpg")
+            .await
+            .unwrap(),
         "the re-shared cover survives — no tombstone remains to reclaim it"
     );
 }
@@ -2661,11 +2685,14 @@ async fn inline_reshare_cancels_tombstone_on_the_fresh_upload_arm() {
 
     // The cloud blob is gone while the tombstone still stands, so the inline push must
     // re-upload from the local store rather than skip.
-    crate::storage::cloud::CloudHome::delete(&storage, "covers/cv/cover.jpg")
+    crate::storage::cloud::CloudHome::delete(&storage, "covers/cv/cover-coveraaa.jpg")
         .await
         .expect("remove the cloud blob object");
     assert!(
-        !storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        !storage
+            .exists("covers/cv/cover-coveraaa.jpg")
+            .await
+            .unwrap(),
         "the cover's cloud copy is absent (fresh-upload arm)"
     );
 
@@ -2678,12 +2705,15 @@ async fn inline_reshare_cancels_tombstone_on_the_fresh_upload_arm() {
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "re-shared");
     assert!(
-        storage.exists("covers/cv/cover.jpg").await.unwrap(),
+        storage
+            .exists("covers/cv/cover-coveraaa.jpg")
+            .await
+            .unwrap(),
         "the inline push re-uploaded the cover"
     );
     assert!(
         !storage
-            .exists("blob_tombstones/covers/cv/cover.jpg")
+            .exists("blob_tombstones/covers/cv/cover-coveraaa.jpg")
             .await
             .unwrap(),
         "the inline push cancelled the tombstone on the fresh-upload arm"

@@ -994,6 +994,90 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
     );
 }
 
+/// A replaced blob's cloud object is reclaimed, and the blob that replaced it is not.
+///
+/// On a browsable home the GC resolves a tombstone's cloud key back to a live row by the
+/// row's readable `cloud_path`. Since that path names its blob, a replacement moves it —
+/// so the replaced blob's key matches no live row and is collected, while the live blob's
+/// key matches its row and is protected. Under a path that did not name its blob the two
+/// keys would be one, and the GC could not tell "reclaim the blob the row dropped" from
+/// "keep the blob the row holds".
+#[tokio::test]
+async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_it() {
+    let (storage, founder, member) = storage_with_chain().await;
+    let owner = pubkey_hex(&founder);
+    let cipher = plaintext_cipher();
+    let db = open_test_db_with_blob(
+        BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
+            .with_id_column("blob_id")
+            .with_cloud_path_column("cloud_path"),
+    );
+    // A browsable home keys a blob at `{namespace}/{cloud_path}` with no uploader segment.
+    let replaced_key = "photos/n1/cover-p1cover.jpg";
+    let live_key = "photos/n1/cover-p2cover.jpg";
+
+    // The row has been repointed: it carries the replacement, and its path names it.
+    exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Replaced', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
+         INSERT INTO note_photos (id, note_id, kind, blob_id, cloud_path, _updated_at, created_at) \
+         VALUES ('ph1', 'n1', 'cover', 'p2cover', 'n1/cover-p2cover.jpg', \
+         '0000000002000-0000-dev1', '2026-01-01')",
+    )
+    .await;
+    for key in [replaced_key, live_key] {
+        storage
+            .write(
+                key,
+                crate::storage::cloud::BlobBody::from_bytes(b"cover contents".to_vec()),
+                &no_progress(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // The replacement tombstoned the blob it replaced. A tombstone also stands for the
+    // live blob's key — a stale one the GC must cancel, not act on.
+    let deleted_at = "2024-06-01T00:00:00+00:00";
+    for key in [replaced_key, live_key] {
+        let tombstone =
+            BlobTombstoneJson::signed("test-lib", key.to_string(), deleted_at.to_string(), &member);
+        plant_tombstone(&storage, &tombstone).await;
+    }
+
+    let past = FixedClock(at(&past_grace_instant(deleted_at)));
+    let reclaimed = gc_tombstones_anchored(
+        &db,
+        &storage,
+        &storage,
+        &cipher,
+        "test-lib",
+        Some(&owner),
+        &past,
+        BLOB_TOMBSTONE_GRACE,
+    )
+    .await
+    .expect("gc");
+
+    assert_eq!(reclaimed, 1, "exactly the replaced blob is reclaimed");
+    assert!(
+        storage.read(replaced_key).await.is_err(),
+        "the replaced blob's object is collected — no live row names its key",
+    );
+    assert!(
+        storage.read(live_key).await.is_ok(),
+        "the blob the row now holds is protected by the live-row check",
+    );
+    assert!(
+        storage
+            .read(&format!("blob_tombstones/{live_key}"))
+            .await
+            .is_err(),
+        "the stale tombstone over the live blob is canceled",
+    );
+}
+
 /// A lagging peer's cycle is pull→GC. If it pulled just before the writer pushed the
 /// retraction but ran GC just after the tombstone was written, its db still reads the
 /// blob's row live+remote while the tombstone is fresh. Within the grace the tombstone

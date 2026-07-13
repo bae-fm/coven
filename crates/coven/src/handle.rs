@@ -747,7 +747,9 @@ impl CovenHandle {
     /// [`BlobRef`] and never reconstructs the cloud layout. The host enqueues a
     /// blob's cloud removal under this key (its delete drains to a tombstone; see
     /// [`crate::blob::delete`]), and a test asserts an upload's key matches the
-    /// read key with it. A `Plain` home with no `cloud_path` is a surfaced error.
+    /// read key with it. A `Plain` home whose `cloud_path` is absent, or does not
+    /// name the blob it carries, is a surfaced error — see
+    /// [`CloudSyncStorage::blob_key`].
     pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
         let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
         // This device's own blobs key under its own public key (the host asks for
@@ -1211,7 +1213,9 @@ mod tests {
         let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
         let source = tmp.path().join("cover-source.jpg");
         std::fs::write(&source, &plaintext).expect("write source file");
-        let cloud_key = "images/cover.jpg"; // {namespace}/{cloud_path} under the plain scheme.
+        // {namespace}/{cloud_path} under the plain scheme. The readable path names the blob
+        // it carries, which is what keeps a cloud object from ever being rewritten.
+        let cloud_key = "images/cover-cover-1.jpg";
         db.enqueue_upload(
             "cover-1",
             cloud_key,
@@ -1247,7 +1251,7 @@ mod tests {
             namespace: "images".to_string(),
             id: "cover-1".to_string(),
             scope: BlobScope::Master,
-            cloud_path: Some("cover.jpg".to_string()),
+            cloud_path: Some("cover-cover-1.jpg".to_string()),
             provenance: Provenance::UserProvided,
             fill: CacheFill::CacheLazy,
         };

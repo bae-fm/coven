@@ -83,7 +83,8 @@ host never names where a blob file lives.
 
 `cloud_path` is consulted only by a [browsable home](#browsable-home-blob-paths);
 an opaque home (the default) ignores it, so leave the `cloud_path_column` unset
-unless the home is browsable.
+unless the home is browsable. A browsable home requires the path to
+[name the blob it carries](#a-readable-path-must-name-its-blob).
 
 ### Cache fill
 
@@ -374,41 +375,60 @@ The two schemes at a glance:
 | `cloud_path_column` | ignored (leave unset) | required |
 | Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
 | Blob with no `cloud_path` | keyed by id | surfaced error |
+| Key names its blob | by the `{id}` in the key | [required of `cloud_path`](#a-readable-path-must-name-its-blob) |
 
-### Replacing a blob at a readable path
+### A readable path must name its blob
 
-A hashed key contains the blob's id, so its cloud object is immutable: replacing a blob
-means a new id, which means a new key, and the old object stands until its
-[tombstone](#deleting-a-blob) is reclaimed. A readable path is the consumer's own, and it
-normally outlives the blob standing at it — `attachments/Project Plan/diagram.png` names
-the current diagram, whichever one that is. So on a browsable home the row is repointed
-at a new blob and the *same* cloud object is overwritten, which means an object's
-presence at a key says nothing about which blob's bytes it holds.
+A cloud object is never rewritten with different bytes. A blob id names one immutable
+byte-string and is minted fresh for every stored blob, so **a blob's cloud key carries its
+blob id** — and replacing a blob writes a *new* object at a *new* key, leaving the one it
+replaced standing until its [tombstone](#deleting-a-blob) is collected. A hashed key gets
+this for free: the id is right there in `{namespace}/{ab}/{cd}/{id}`. A readable path is
+the consumer's own, and coven will not rewrite the consumer's names, so it requires the
+property of them instead:
 
-coven records the content hash it last wrote to each cloud key, and the push uploads
-unless that record names the blob being pushed — a sealed cloud object cannot be asked
-what it contains, so the writer's own record is what answers it. The record is written
-after the upload lands, never before, so it can only lag the bucket: lagging costs a
-repeat upload of identical bytes, while leading would skip an upload that was needed.
+> A blob's `cloud_path` must name its blob. The path's file name — its last `/`-segment,
+> extension stripped — must be the blob id, or end with `-{blob_id}`.
 
-Two consequences follow from the one root — a readable path's cloud object holds only its
-current content — and a consumer choosing readable paths should know both:
+```
+covers/Live at Leeds/cover-0ef7a1c9.jpg     ✓ names its blob
+covers/Live at Leeds/0ef7a1c9.jpg           ✓ names its blob
+covers/Live at Leeds/cover.jpg              ✗ surfaced error — names no blob
+covers/Live at Leeds/0ef7a1c9/cover.jpg     ✗ surfaced error — the id must name the object,
+                                              not a directory above it
+```
 
-- **Two devices replacing the same blob at once leave the bucket disagreeing with the
-  row.** They write the same key, so the object is the bucket's last writer's, while the
-  row is last-writer-wins' winner, and the two need not be the same device. Peers then
-  hold a row whose content hash no object matches, and no retry resolves it — each
-  device's record says it wrote its own bytes, which it did.
-- **A changeset older than a replacement can no longer be replayed with its blob.** The
-  bytes that changeset's row names are gone from the key. This reaches a device only if
-  it pulls that changeset *after* the replacement: a device that pulled the row earlier
-  holds the blob's cache copy and drops it when the replacement arrives, and a device
-  that [bootstraps from a snapshot](/docs/bootstrap) starts from current rows and
-  backfills current blobs.
+A path that does not name its blob cannot be keyed, so it is refused at the write that
+produced it rather than silently written to the bucket. The delimiter matters: the id must
+*end* the file name's stem, so that blob `1` cannot satisfy blob `11`'s path and the two be
+keyed at one object.
 
-A consumer that wants neither gives the path a segment that changes with the blob —
-`attachments/Project Plan/{blob_id}.png` — which makes every cloud object immutable again
-while keeping the bucket readable.
+This is what makes a replacement safe. `cover.jpg` looks like the natural name, but it is a
+name the *next* cover would take too — so the row would be repointed at a new blob, the same
+cloud object would be overwritten, and two things no retry can repair would follow:
+
+- **Two devices replacing the same blob at once** would write one key. The object would hold
+  whichever device the bucket saw last, while the row holds whichever device
+  last-write-wins picked, and they need not be the same one — leaving peers with a row whose
+  content hash no object matches.
+- **A changeset written before the replacement** could never be applied again, because the
+  bytes its row names were overwritten at the reused key. A device that pulls it late is
+  stuck on it for good: its cursor cannot advance past a changeset whose blob it cannot
+  verify.
+
+Neither is expressible once the key names the blob. Two replacements mint two blob ids, so
+they are two keys and two objects, and the superseded object stands at its own key until its
+tombstone is collected — which is the same convergence window coven already promises a
+device that has been away.
+
+It is also what lets the push skip an upload on presence alone: an object standing at a
+blob's key *is* that blob's bytes, because nothing else can be keyed there. A sealed cloud
+object never has to be asked what it holds, and coven keeps no record of what it wrote where.
+
+The cost is that a browsable bucket's file names carry an id — `cover-0ef7a1c9.jpg` rather
+than `cover.jpg`. The directory structure above them is untouched and is still the
+consumer's, so the bucket is still browsable by the names that matter; what a readable path
+cannot be is *reused*.
 
 ## Where a blob's bytes come from
 
