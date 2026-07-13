@@ -11,9 +11,9 @@
 /// heads/{device_id}.json{suffix}                 -- head pointers
 /// {namespace}/{uploader}/{ab}/{cd}/{id}          -- blobs, hashed scheme (opaque home)
 /// {namespace}/{cloud_path}                       -- blobs, plain scheme (browsable home)
-/// snapshot/{author}/{seq}.db{suffix}             -- a generation's full DB snapshot
-/// snapshot/{author}/{seq}_meta.json{suffix}      -- a generation's per-device cursors
-/// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, seq}
+/// snapshot/{author}/{publish_id}.db{suffix}      -- a generation's full DB snapshot
+/// snapshot/{author}/{publish_id}_meta.json{suffix} -- a generation's per-device cursors
+/// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, publish_id}
 /// membership/{author_pubkey}/{seq}{suffix}       -- membership entries
 /// membership/{author_pubkey}/head{suffix}        -- that author's signed head
 /// keys/{owner_pubkey}/{recipient_pubkey}{suffix} -- store key wrapped by an owner for a member
@@ -41,17 +41,18 @@
 /// one from and no rotation to defend, so the per-member ACL does not apply there.
 ///
 /// A snapshot is published as a generation under the publishing device's
-/// `{author}` (its hex public key): the `{author}/{seq}.db` and then the
-/// `{author}/{seq}_meta.json` object are written first, then the single
+/// `{author}` (its hex public key): the `{author}/{publish_id}.db` and then the
+/// `{author}/{publish_id}_meta.json` object are written first, then the single
 /// `current.json` pointer last. The pointer carries the live generation's
-/// `{author_pubkey, seq}`, so a reader resolves the pointer, then the generation
-/// it names — always a whole, self-consistent generation. Keying each device's
-/// generations under its own `{author}` makes them globally unique: two devices
-/// publishing at the same `seq` (each `seq` is the publisher's own `local_seq`,
-/// not a global id) write distinct objects, so a publish can never overwrite a
-/// peer's generation. Superseded generations are reclaimed by their author: a
-/// device lists and deletes only objects under its own `{author}` prefix, so
-/// ownership is structural — it never touches a peer's keyspace.
+/// `{author_pubkey, publish_id}`, so a reader resolves the pointer, then the
+/// generation it names — always a whole, self-consistent generation. `publish_id`
+/// is the author's per-publish monotonic counter (bumped before each attempt's
+/// first write), so a retry after a failed publish keys a fresh object and never
+/// overwrites the DB image the live pointer still names; keying under `{author}`
+/// keeps two devices' generations distinct even at the same publish id. Superseded
+/// generations are reclaimed by their author: a device lists and deletes only
+/// objects under its own `{author}` prefix, so ownership is structural — it never
+/// touches a peer's keyspace.
 ///
 /// Blob keys follow the home's
 /// [`BlobPathScheme`](crate::sync::cloud_storage::BlobPathScheme): the default
@@ -334,17 +335,23 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     fn own_uploader(&self) -> Option<String>;
 
     /// Upload one snapshot generation's DB image under its publishing device.
-    /// Writes to `snapshot/{author}/{seq}.db{suffix}`. Written before the
-    /// generation's metadata, and the pointer names `{author, seq}` only after
-    /// both, so a reader never resolves a half-written generation. Keying under
-    /// `{author}` (the publisher's hex public key) makes the object globally
-    /// unique, so a publish never overwrites a peer's generation at the same `seq`.
-    async fn put_snapshot(&self, author: &str, seq: u64, data: Vec<u8>)
-        -> Result<(), StorageError>;
+    /// Writes to `snapshot/{author}/{publish_id}.db{suffix}`. Written before the
+    /// generation's metadata, and the pointer names `{author, publish_id}` only
+    /// after both, so a reader never resolves a half-written generation.
+    /// `publish_id` is the author's per-publish monotonic counter, so each attempt
+    /// keys a fresh object and a retry never overwrites the live pointer's
+    /// generation; keying under `{author}` (the publisher's hex public key) keeps a
+    /// publish from ever touching a peer's generation.
+    async fn put_snapshot(
+        &self,
+        author: &str,
+        publish_id: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError>;
 
     /// Download a snapshot generation's DB image.
-    /// Returns bytes from `snapshot/{author}/{seq}.db{suffix}`.
-    async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError>;
+    /// Returns bytes from `snapshot/{author}/{publish_id}.db{suffix}`.
+    async fn get_snapshot(&self, author: &str, publish_id: u64) -> Result<Vec<u8>, StorageError>;
 
     /// Delete a single changeset from storage.
     /// Removes `changes/{device_id}/{seq}{suffix}`. Driven by changeset GC
@@ -461,9 +468,9 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     ) -> Result<(), StorageError>;
 
     /// Upload one snapshot generation's metadata (plaintext -- the implementation
-    /// seals it). Writes to `snapshot/{author}/{seq}_meta.json{suffix}`. Written
-    /// *after* the DB image and *before* the pointer: the meta is what keys a
-    /// generation in
+    /// seals it). Writes to `snapshot/{author}/{publish_id}_meta.json{suffix}`.
+    /// Written *after* the DB image and *before* the pointer: the meta is what keys
+    /// a generation in
     /// [`list_own_snapshot_generations`](Self::list_own_snapshot_generations), so a
     /// listed generation always has its DB image already whole. The `{author}`
     /// prefix is the publishing device's hex public key, so a device's own sweep
@@ -471,14 +478,18 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     async fn put_snapshot_meta(
         &self,
         author: &str,
-        seq: u64,
+        publish_id: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError>;
 
     /// Download a snapshot generation's metadata (opened).
-    /// Reads from `snapshot/{author}/{seq}_meta.json{suffix}`. Returns NotFound if
-    /// that generation's metadata does not exist.
-    async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError>;
+    /// Reads from `snapshot/{author}/{publish_id}_meta.json{suffix}`. Returns
+    /// NotFound if that generation's metadata does not exist.
+    async fn get_snapshot_meta(
+        &self,
+        author: &str,
+        publish_id: u64,
+    ) -> Result<Vec<u8>, StorageError>;
 
     /// Publish the snapshot pointer (plaintext -- the implementation seals it).
     /// Writes to `snapshot/current.json{suffix}`. This is the commit of an atomic
@@ -491,24 +502,28 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// has been published yet.
     async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError>;
 
-    /// List the sequences of every snapshot generation `author` has published,
+    /// List the publish ids of every snapshot generation `author` has published,
     /// including superseded ones the pointer no longer names. A generation is keyed
-    /// by its `snapshot/{author}/{seq}_meta.json{suffix}` object (written after the
-    /// DB image), so a generation appears here only once its DB image is already
-    /// whole. The sweep lists under its OWN `{author}` prefix, so ownership is
-    /// structural: it only ever sees generations it published and never a peer's,
+    /// by its `snapshot/{author}/{publish_id}_meta.json{suffix}` object (written
+    /// after the DB image), so a generation appears here only once its DB image is
+    /// already whole. The sweep lists under its OWN `{author}` prefix, so ownership
+    /// is structural: it only ever sees generations it published and never a peer's,
     /// which live under a different prefix.
     async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError>;
 
     /// Delete one snapshot generation's objects
-    /// (`snapshot/{author}/{seq}.db{suffix}` then
-    /// `snapshot/{author}/{seq}_meta.json{suffix}` — the DB image first, the meta
-    /// last, since the meta is what keys the generation in
+    /// (`snapshot/{author}/{publish_id}.db{suffix}` then
+    /// `snapshot/{author}/{publish_id}_meta.json{suffix}` — the DB image first, the
+    /// meta last, since the meta is what keys the generation in
     /// [`list_own_snapshot_generations`](Self::list_own_snapshot_generations), so a
     /// crash between the two leaves it still listed and re-deletable, never a
     /// meta-less db). The caller passes its own `{author}` and must have confirmed
-    /// `seq` is neither the live generation nor the one it just published, so a
-    /// delete never strands a generation a reader could adopt. A device can only
+    /// `publish_id` is neither the live generation nor the one it just published, so
+    /// a delete never strands a generation a reader could adopt. A device can only
     /// name objects under its own prefix, so it structurally cannot delete a peer's.
-    async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError>;
+    async fn delete_snapshot_generation(
+        &self,
+        author: &str,
+        publish_id: u64,
+    ) -> Result<(), StorageError>;
 }

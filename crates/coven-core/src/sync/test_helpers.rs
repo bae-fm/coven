@@ -596,10 +596,11 @@ pub struct MockSyncStorage {
     /// format the trait's `put_head` contract specifies.
     head_puts: Mutex<Vec<(String, String)>>,
     /// Snapshot generations and their pointer, keyed exactly as the cloud lays
-    /// them out (`snapshot/{author}/{seq}.db`, `snapshot/{author}/{seq}_meta.json`,
-    /// `snapshot/current.json`). Keying each device's generations under its own
-    /// `{author}` — not a flat seq — is what lets a test exercise the real
-    /// globally-unique keyspace and atomic-publish behavior.
+    /// them out (`snapshot/{author}/{publish_id}.db`,
+    /// `snapshot/{author}/{publish_id}_meta.json`, `snapshot/current.json`). Keying
+    /// each device's generations under its own `{author}` — not a flat id — is what
+    /// lets a test exercise the real globally-unique keyspace and atomic-publish
+    /// behavior.
     snapshot_objects: Mutex<HashMap<String, Vec<u8>>>,
     /// Signed `min_schema_version.json` bytes (None = no minimum set).
     min_schema_version: Mutex<Option<Vec<u8>>>,
@@ -829,18 +830,18 @@ impl MockSyncStorage {
 
     /// The DB image of the live snapshot generation — the one the pointer names —
     /// or None if no snapshot has been published. Lets a test assert what
-    /// `bootstrap_from_snapshot` would adopt without re-deriving the pointer→seq→db
-    /// resolution itself.
+    /// `bootstrap_from_snapshot` would adopt without re-deriving the
+    /// pointer→publish_id→db resolution itself.
     pub async fn current_snapshot_db(&self) -> Option<Vec<u8>> {
-        let (author, seq) = self.current_snapshot_target().await?;
+        let (author, publish_id) = self.current_snapshot_target().await?;
         self.snapshot_objects
             .lock()
             .unwrap()
-            .get(&format!("snapshot/{author}/{seq}.db"))
+            .get(&format!("snapshot/{author}/{publish_id}.db"))
             .cloned()
     }
 
-    /// The live snapshot generation's author and sequence, or None if no pointer
+    /// The live snapshot generation's author and publish id, or None if no pointer
     /// has been published.
     pub async fn current_snapshot_target(&self) -> Option<(String, u64)> {
         let pointer_bytes = self
@@ -851,23 +852,25 @@ impl MockSyncStorage {
             .cloned()?;
         let pointer: crate::sync::signed_control::SnapshotPointerJson =
             serde_json::from_slice(&pointer_bytes).expect("parse pointer");
-        Some((pointer.author_pubkey, pointer.seq))
+        Some((pointer.author_pubkey, pointer.publish_id))
     }
 
-    /// The sequence the live snapshot pointer names, or None if no pointer has
+    /// The publish id the live snapshot pointer names, or None if no pointer has
     /// been published.
-    pub async fn current_snapshot_seq(&self) -> Option<u64> {
-        self.current_snapshot_target().await.map(|(_, seq)| seq)
+    pub async fn current_snapshot_publish_id(&self) -> Option<u64> {
+        self.current_snapshot_target()
+            .await
+            .map(|(_, publish_id)| publish_id)
     }
 
     /// The metadata of the live snapshot generation — the one the pointer names —
     /// or None if no snapshot has been published.
     pub async fn current_snapshot_meta(&self) -> Option<Vec<u8>> {
-        let (author, seq) = self.current_snapshot_target().await?;
+        let (author, publish_id) = self.current_snapshot_target().await?;
         self.snapshot_objects
             .lock()
             .unwrap()
-            .get(&format!("snapshot/{author}/{seq}_meta.json"))
+            .get(&format!("snapshot/{author}/{publish_id}_meta.json"))
             .cloned()
     }
 
@@ -1268,18 +1271,18 @@ impl SyncStorage for MockSyncStorage {
     async fn put_snapshot(
         &self,
         author: &str,
-        seq: u64,
+        publish_id: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         self.snapshot_objects
             .lock()
             .unwrap()
-            .insert(format!("snapshot/{author}/{seq}.db"), data);
+            .insert(format!("snapshot/{author}/{publish_id}.db"), data);
         Ok(())
     }
 
-    async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        let key = format!("snapshot/{author}/{seq}.db");
+    async fn get_snapshot(&self, author: &str, publish_id: u64) -> Result<Vec<u8>, StorageError> {
+        let key = format!("snapshot/{author}/{publish_id}.db");
         self.snapshot_objects
             .lock()
             .unwrap()
@@ -1491,18 +1494,22 @@ impl SyncStorage for MockSyncStorage {
     async fn put_snapshot_meta(
         &self,
         author: &str,
-        seq: u64,
+        publish_id: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         self.snapshot_objects
             .lock()
             .unwrap()
-            .insert(format!("snapshot/{author}/{seq}_meta.json"), data);
+            .insert(format!("snapshot/{author}/{publish_id}_meta.json"), data);
         Ok(())
     }
 
-    async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        let key = format!("snapshot/{author}/{seq}_meta.json");
+    async fn get_snapshot_meta(
+        &self,
+        author: &str,
+        publish_id: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        let key = format!("snapshot/{author}/{publish_id}_meta.json");
         self.snapshot_objects
             .lock()
             .unwrap()
@@ -1534,22 +1541,23 @@ impl SyncStorage for MockSyncStorage {
         // structural: a peer's generations live under a different prefix.
         let prefix = format!("snapshot/{author}/");
         let objects = self.snapshot_objects.lock().unwrap();
-        let mut seqs = Vec::new();
+        let mut publish_ids = Vec::new();
         for key in objects.keys() {
             let Some(rest) = key.strip_prefix(&prefix) else {
                 // A different author's generation or the shared pointer — not under
                 // this author's prefix, legitimately not ours; skip silently.
                 continue;
             };
-            // Mirror `CloudSyncStorage`: the `{seq}.db` sibling is expected and listed
-            // via its meta (skip silently); a meta with a non-numeric seq, or any other
-            // object under this author's prefix, is surfaced rather than dropped.
+            // Mirror `CloudSyncStorage`: the `{publish_id}.db` sibling is expected and
+            // listed via its meta (skip silently); a meta with a non-numeric publish
+            // id, or any other object under this author's prefix, is surfaced rather
+            // than dropped.
             match rest.strip_suffix("_meta.json") {
-                Some(seq_str) => match seq_str.parse::<u64>() {
-                    Ok(seq) => seqs.push(seq),
+                Some(id_str) => match id_str.parse::<u64>() {
+                    Ok(publish_id) => publish_ids.push(publish_id),
                     Err(e) => {
                         tracing::warn!(
-                            "snapshot listing: meta key {key} has a non-numeric seq: {e}"
+                            "snapshot listing: meta key {key} has a non-numeric publish id: {e}"
                         )
                     }
                 },
@@ -1559,17 +1567,21 @@ impl SyncStorage for MockSyncStorage {
                 ),
             }
         }
-        seqs.sort_unstable();
-        Ok(seqs)
+        publish_ids.sort_unstable();
+        Ok(publish_ids)
     }
 
-    async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError> {
+    async fn delete_snapshot_generation(
+        &self,
+        author: &str,
+        publish_id: u64,
+    ) -> Result<(), StorageError> {
         // Remove the db first, the meta last: the meta is what `list` keys a
         // generation by, so a crash between the two leaves it still listed (and
         // re-deletable), never a meta-less db.
         let mut objects = self.snapshot_objects.lock().unwrap();
-        objects.remove(&format!("snapshot/{author}/{seq}.db"));
-        objects.remove(&format!("snapshot/{author}/{seq}_meta.json"));
+        objects.remove(&format!("snapshot/{author}/{publish_id}.db"));
+        objects.remove(&format!("snapshot/{author}/{publish_id}_meta.json"));
         Ok(())
     }
 }

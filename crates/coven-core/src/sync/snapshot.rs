@@ -3,25 +3,32 @@
 /// Periodically, a device creates a full snapshot of the database via
 /// `VACUUM INTO`, and publishes it as a generation under its own `{author}` (its
 /// hex public key): the DB image
-/// (`snapshot/{author}/{seq}.db{suffix}`) and then the signed metadata
-/// (`snapshot/{author}/{seq}_meta.json{suffix}`) are written first, then a single
-/// signed pointer (`snapshot/current.json{suffix}`) carrying that generation's
-/// `{author_pubkey, seq}` is written last. A reader follows the pointer to a
-/// complete, self-consistent generation, so there is no window where a new DB
-/// image is paired with a stale or missing meta. This lets new devices bootstrap
-/// without replaying the entire changeset history, and enables GC of old
+/// (`snapshot/{author}/{publish_id}.db{suffix}`) and then the signed metadata
+/// (`snapshot/{author}/{publish_id}_meta.json{suffix}`) are written first, then a
+/// single signed pointer (`snapshot/current.json{suffix}`) carrying that
+/// generation's `{author_pubkey, publish_id}` is written last. A reader follows the
+/// pointer to a complete, self-consistent generation, so there is no window where a
+/// new DB image is paired with a stale or missing meta. This lets new devices
+/// bootstrap without replaying the entire changeset history, and enables GC of old
 /// changesets and superseded generations.
 ///
+/// `publish_id` is a per-author monotonic counter (kept in the author's
+/// `sync_state` and bumped before the first write of each publish attempt), *not*
+/// the covered changeset seq — that travels in the meta's cursors. Keying by a
+/// fresh publish id each attempt is what keeps a retry (after a publish flipped the
+/// pointer but failed before its `snapshot_seq` persisted) from overwriting the DB
+/// image the live pointer still commits to; the covered seq, by contrast, can
+/// repeat across attempts when no new changesets landed.
+///
 /// Each device's generations live under its own `{author}` keyspace, so they are
-/// globally unique: `seq` is the publisher's own `local_seq` (not a global id), so
-/// two devices can publish at the *same* `seq`, but their objects are distinct
-/// keys — a publisher can never overwrite a peer's generation. Reclaiming a
-/// superseded generation is therefore owned by its author by construction: a
-/// device lists and deletes only objects under its own `{author}` prefix, so it
-/// can never delete a generation a peer wrote but has not yet pointed at. Its own
-/// generations are safe to reclaim because a device never sweeps concurrently with
-/// its own publish: the sweep runs at the end of `push_snapshot`, and the sync
-/// loop runs cycles serially on one thread.
+/// globally unique: two devices can publish at the *same* `publish_id`, but their
+/// objects are distinct keys — a publisher can never overwrite a peer's generation.
+/// Reclaiming a superseded generation is therefore owned by its author by
+/// construction: a device lists and deletes only objects under its own `{author}`
+/// prefix, so it can never delete a generation a peer wrote but has not yet pointed
+/// at. Its own generations are safe to reclaim because a device never sweeps
+/// concurrently with its own publish: the sweep runs at the end of `push_snapshot`,
+/// and the sync loop runs cycles serially on one thread.
 ///
 /// Snapshot creation policy: after every N changesets (default 100) or
 /// T hours (default 24) since the last snapshot.
@@ -59,6 +66,9 @@ pub(crate) struct CreatedSnapshot {
 }
 
 pub struct SnapshotBlobPreflight<'a> {
+    /// The live database. Used to preflight `blobs`, and also — since it is the
+    /// device's own store — to read and bump the snapshot publish-id counter in its
+    /// `sync_state` before the first cloud write (see [`push_snapshot`]).
     pub db: &'a Database,
     pub blobs: &'a [BlobRef],
 }
@@ -130,7 +140,19 @@ pub enum SnapshotError {
     },
     #[error("snapshot blob preflight failed: {0}")]
     PublishBlobs(String),
+    /// Reading or persisting the per-author snapshot publish-id counter (in the
+    /// local `sync_state`) failed. The counter must be bumped and persisted before
+    /// the first cloud write of a publish, so a failure here aborts the publish
+    /// before any object is written rather than risk reusing the live generation's
+    /// key.
+    #[error("snapshot publish-id state: {0}")]
+    PublishId(String),
 }
+
+/// `sync_state` key holding this device's snapshot publish-id counter: a
+/// per-author monotonic number bumped before each publish attempt's first cloud
+/// write, so a retry never targets the key the live pointer still names.
+const SNAPSHOT_PUBLISH_ID_STATE_KEY: &str = "snapshot_publish_id";
 
 fn prepare_snapshot_path(temp_dir: &Path) -> Result<std::path::PathBuf, SnapshotError> {
     let snapshot_path = temp_dir.join("snapshot.db");
@@ -185,8 +207,8 @@ pub struct BootstrapResult {
 /// Uses `VACUUM INTO` to create a clean copy of the database at a temp path,
 /// then clears every non-synced table's data from that copy, reads the bytes,
 /// returns the DB image. The storage layer seals it at
-/// `snapshot/{author}/{seq}.db{suffix}`, where the cloud key is known and can be
-/// authenticated as AEAD associated data.
+/// `snapshot/{author}/{publish_id}.db{suffix}`, where the cloud key is known and
+/// can be authenticated as AEAD associated data.
 ///
 /// A snapshot is restored byte-for-byte as the joining device's `store.db`
 /// (no migration rebuild), so it must carry only data that is eligible to
@@ -362,44 +384,50 @@ fn list_user_tables(conn: &Connection) -> Result<Vec<String>, SnapshotError> {
 /// Publish a snapshot generation to the sync storage and update the device head.
 ///
 /// A snapshot is published as a generation under this device's own `{author}` (its
-/// hex public key), keyed by `current_seq`: the DB image
-/// (`snapshot/{author}/{seq}.db`) and then the signed metadata
-/// (`snapshot/{author}/{seq}_meta.json`) are written first, then a single signed
-/// pointer (`snapshot/current.json`) carrying this generation's `{author, seq}` is
-/// written *last*. The pointer is the commit — a reader follows it to a generation
-/// that is already whole, so there is no window in which a new DB image is visible
-/// paired with a stale or missing meta.
+/// hex public key), keyed by a fresh `publish_id`: the DB image
+/// (`snapshot/{author}/{publish_id}.db`) and then the signed metadata
+/// (`snapshot/{author}/{publish_id}_meta.json`) are written first, then a single
+/// signed pointer (`snapshot/current.json`) carrying this generation's
+/// `{author, publish_id}` is written *last*. The pointer is the commit — a reader
+/// follows it to a generation that is already whole, so there is no window in which
+/// a new DB image is visible paired with a stale or missing meta.
+///
+/// `publish_id` is a per-author monotonic counter in `sync_state`
+/// ([`SNAPSHOT_PUBLISH_ID_STATE_KEY`]), bumped and persisted (via the live
+/// database carried in `blob_preflight`) *before* the first cloud write of each
+/// attempt. This is what makes a retry safe: a previous attempt that flipped the
+/// pointer but then failed (its `snapshot_seq` never persisted, so policy re-fires)
+/// gets a *new* publish id, so `put_snapshot` writes a new object and never
+/// overwrites the DB image the live pointer still commits to. The covered changeset
+/// seq (`current_seq`) is unrelated to the key — it travels in the meta's cursors
+/// and the head's `snapshot_seq`.
 ///
 /// The publish is atomic by construction. Until the pointer flips, every reader
 /// still resolves the *previous* generation (or none), which is itself complete.
 /// A crash after the meta/db writes but before the pointer leaves new orphan
-/// objects under `snapshot/{author}/{seq}*` that nothing references; the old
+/// objects under `snapshot/{author}/{publish_id}*` that nothing references; the old
 /// pointer stays valid. A new generation with its meta written is reclaimed by a
 /// later sweep of this device (it lists its own keyspace); a generation that
-/// crashed before its meta was written has no meta, so no sweep lists it — a
-/// same-seq publish overwrites it, otherwise it lingers as unreferenced storage.
-/// No half-published state is ever observable, and nothing relies on a later pass
-/// to repair a wrong state — the only durable effect of a partial publish is
-/// unreferenced storage, never a torn read.
+/// crashed before its meta was written has no meta, so no sweep lists it — and,
+/// because publish ids never repeat, no later publish overwrites it either, so it
+/// lingers as unreferenced storage. No half-published state is ever observable, and
+/// nothing relies on a later pass to repair a wrong state — the only durable effect
+/// of a partial publish is unreferenced storage, never a torn read.
 ///
 /// The DB image is written *before* its metadata: a generation is listed (it is
 /// keyed by its meta object), and so becomes a reader/sweep candidate, only once
 /// the db it names is already whole. A crash after the db but before the meta
-/// leaves an unlisted, unreferenced db that no reader or sweep observes; a same-seq
-/// publish overwrites it, otherwise it lingers (the sweep lists generations by
-/// their meta, which this db lacks).
+/// leaves an unlisted, unreferenced db that no reader or sweep observes; it lingers
+/// (the sweep lists generations by their meta, which this db lacks).
 ///
 /// Keying each device's generations under its own `{author}` makes them globally
-/// unique: `seq` is this device's own `local_seq`, not a global order, but a peer
-/// publishing the same `seq` writes to `snapshot/{peer}/...`, a different key — so
+/// unique: a peer publishing writes to `snapshot/{peer}/...`, a different key — so
 /// a publish never touches a peer's generation. The db_hash bind the pointer and
-/// meta both carry still defends against tampering (a swapped db image), but a
-/// same-seq cross-device collision is now structurally impossible rather than
-/// merely caught.
+/// meta both carry still defends against tampering (a swapped db image).
 ///
 /// Both the metadata and the pointer are signed by `keypair` and bound to
 /// `store_id`. The metadata signs the cursors and the DB hash; the pointer signs
-/// the generation `seq` and the same DB hash. The
+/// the generation `publish_id` and the same DB hash. The
 /// bucket is untrusted and the shared at-rest cipher proves only confidentiality,
 /// so signing lets a bootstrapping/GC reader authenticate that a current member
 /// published this generation for *this* store and that the pointer was not
@@ -421,7 +449,7 @@ pub async fn push_snapshot(
 
     // This generation lives under this device's own keyspace, keyed by its public
     // key. The same value is what the signed meta/pointer carry as `author_pubkey`,
-    // so the pointer's `{author, seq}` resolves straight to these objects.
+    // so the pointer's `{author, publish_id}` resolves straight to these objects.
     let own_author = hex::encode(keypair.public_key());
 
     // Hash the exact DB image, before it moves into `put_snapshot`. Both
@@ -436,15 +464,24 @@ pub async fn push_snapshot(
             .map_err(|e| SnapshotError::PublishBlobs(e.to_string()))?;
     }
 
+    // Reserve a fresh publish id and persist it BEFORE any cloud write. If anything
+    // below fails and policy re-fires next cycle, that retry reads this persisted id
+    // and bumps past it, so `put_snapshot` writes a new object and can never
+    // overwrite the DB image the live pointer still commits to. With no local
+    // counter (a fresh or restored device), it resumes above this author's existing
+    // generations in the cloud. Done after the blob preflight so a preflight failure
+    // wastes no id.
+    let publish_id = reserve_publish_id(blob_preflight.db, storage, &own_author).await?;
+
     // Write the DB image first, before anything lists or points at this
     // generation. A generation becomes a sweep/reader candidate only once its meta
     // exists (written next), and a reader resolves it only once the pointer names it
     // (written last) — so however large and slow this upload is, no reader sees it
-    // mid-write. A crash here leaves an unlisted, unreferenced db: invisible to
-    // readers and to the sweep; a later publish reusing this seq overwrites it,
-    // otherwise it lingers (the sweep lists generations by meta, which this db lacks).
+    // mid-write. A crash here leaves an unlisted, unreferenced db under this fresh
+    // publish id: invisible to readers and to the sweep, and never overwritten (ids
+    // don't repeat), so it lingers as unreferenced storage.
     storage
-        .put_snapshot(&own_author, current_seq, snapshot_db_image)
+        .put_snapshot(&own_author, publish_id, snapshot_db_image)
         .await?;
 
     // The snapshot DB is a VACUUM of this device's live database, so its
@@ -453,7 +490,9 @@ pub async fn push_snapshot(
     // Claiming coverage we don't have lets GC delete un-snapshotted changesets
     // that no future restore can recover.
     let mut cursors: BTreeMap<String, u64> = applied_cursors.into_iter().collect();
-    // Our own current_seq is included (our head hasn't been updated yet).
+    // Our own current_seq is included (our head hasn't been updated yet). This is
+    // the covered changeset seq — the meta's content — independent of the publish id
+    // that keys the object.
     cursors.insert(device_id.to_string(), current_seq);
 
     let meta =
@@ -464,40 +503,93 @@ pub async fn push_snapshot(
     // keyspace, and its db is already whole above — so a listed generation is always
     // complete. Still nothing points at the generation.
     storage
-        .put_snapshot_meta(&own_author, current_seq, meta_json)
+        .put_snapshot_meta(&own_author, publish_id, meta_json)
         .await?;
 
-    // Commit: write the pointer last, naming this generation's `{author, seq}`. Only
-    // now does a reader resolve it — and the db+meta it names are already whole.
-    let pointer = SnapshotPointerJson::signed(store_id, current_seq, db_hash, keypair);
+    // Commit: write the pointer last, naming this generation's `{author,
+    // publish_id}`. Only now does a reader resolve it — and the db+meta it names are
+    // already whole.
+    let pointer = SnapshotPointerJson::signed(store_id, publish_id, db_hash, keypair);
     let pointer_json =
         serde_json::to_vec(&pointer).map_err(|e| SnapshotError::Parse(e.to_string()))?;
     storage.put_snapshot_pointer(pointer_json).await?;
 
-    // Update the head to record this snapshot's coverage (snapshot_seq). The head's
-    // `last_sync` stamp is the only thing here that still needs the wall clock.
+    // Update the head to record this snapshot's coverage (snapshot_seq, the covered
+    // changeset seq — not the publish id). The head's `last_sync` stamp is the only
+    // thing here that still needs the wall clock.
     let timestamp = clock.now().to_rfc3339();
     storage
         .put_head(device_id, current_seq, Some(current_seq), &timestamp)
         .await?;
 
-    // The pointer now names `current_seq`; older generations this device published
+    // The pointer now names `publish_id`; older generations this device published
     // are superseded. Reclaim them — listing only this device's own keyspace, so a
     // peer's generation is never touched. A failure here is logged, not fatal: the
     // publish already succeeded, and the leftover is unreferenced storage rather
     // than reader-visible state.
-    if let Err(e) = delete_superseded_generations(storage, current_seq, &own_author).await {
+    if let Err(e) = delete_superseded_generations(storage, publish_id, &own_author).await {
         warn!(error = %e, "failed to delete superseded snapshot generations after publish");
     }
 
     info!(
         device_id,
+        publish_id,
         snapshot_seq = current_seq,
         size,
         "published snapshot generation to sync storage"
     );
 
     Ok(())
+}
+
+/// Bump this device's snapshot publish-id counter in `sync_state` and return the
+/// new value, persisting it before the caller writes any cloud object. A retry
+/// after a failed publish reads the persisted value and bumps past it, so no two
+/// attempts ever share a generation key. A corrupt or unreadable value fails the
+/// publish rather than guessing.
+///
+/// When there is NO persisted counter — a fresh device, or one *restored* from its
+/// recovered author identity with an empty local `sync_state` — the counter is
+/// initialized from the cloud: the next id is one above the highest generation this
+/// author has ever published (`own_author`'s keyspace), or 1 if it has published
+/// none. Without this, a restored device would resume at 1 and its first publish
+/// could target `{author}/1` — which, if that generation is still the one the live
+/// pointer names, is exactly the overwrite-the-live-generation defect the publish
+/// id exists to prevent, resurrected through restore. A device that recovers its
+/// author identity must resume above every generation it ever published. This is a
+/// one-time LIST on the first publish after a reset; every later publish reads the
+/// persisted counter.
+async fn reserve_publish_id(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    own_author: &str,
+) -> Result<u64, SnapshotError> {
+    let current = match db.get_sync_state(SNAPSHOT_PUBLISH_ID_STATE_KEY).await {
+        Ok(Some(value)) => value.parse::<u64>().map_err(|e| {
+            SnapshotError::PublishId(format!(
+                "corrupt {SNAPSHOT_PUBLISH_ID_STATE_KEY} value {value:?}: {e}"
+            ))
+        })?,
+        Ok(None) => storage
+            .list_own_snapshot_generations(own_author)
+            .await
+            .map_err(SnapshotError::Bucket)?
+            .into_iter()
+            .max()
+            .unwrap_or(0),
+        Err(e) => {
+            return Err(SnapshotError::PublishId(format!(
+                "read {SNAPSHOT_PUBLISH_ID_STATE_KEY}: {e}"
+            )))
+        }
+    };
+    let next = current + 1;
+    db.set_sync_state(SNAPSHOT_PUBLISH_ID_STATE_KEY, &next.to_string())
+        .await
+        .map_err(|e| {
+            SnapshotError::PublishId(format!("persist {SNAPSHOT_PUBLISH_ID_STATE_KEY}: {e}"))
+        })?;
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -542,26 +634,28 @@ async fn push_snapshot_without_blob_refs(
 /// a cross-device sweep would risk is structurally impossible.
 ///
 /// Within this device's own generations, the just-published generation is live by
-/// construction: `push_snapshot` wrote the pointer naming `just_published_seq`
+/// construction: `push_snapshot` wrote the pointer naming `just_published_publish_id`
 /// before this sweep. Peer-authored live generations sit under a different
 /// keyspace and are never candidates. Every other own generation is superseded and
 /// safe to delete because this device wrote it, this device is the only one that
 /// reclaims it, and the sync loop does not sweep concurrently with its own publish.
 async fn delete_superseded_generations(
     storage: &dyn SyncStorage,
-    just_published_seq: u64,
+    just_published_publish_id: u64,
     own_author: &str,
 ) -> Result<(), SnapshotError> {
-    for seq in storage.list_own_snapshot_generations(own_author).await? {
-        // Authorship is already settled by the keyspace: every seq here is this
-        // device's own generation, and the published seq is the one the caller made
-        // live before sweeping.
-        if seq == just_published_seq {
+    for publish_id in storage.list_own_snapshot_generations(own_author).await? {
+        // Authorship is already settled by the keyspace: every publish id here is
+        // this device's own generation, and the just-published one is the one the
+        // caller made live before sweeping.
+        if publish_id == just_published_publish_id {
             continue;
         }
 
-        storage.delete_snapshot_generation(own_author, seq).await?;
-        debug!(seq, "deleted superseded snapshot generation");
+        storage
+            .delete_snapshot_generation(own_author, publish_id)
+            .await?;
+        debug!(publish_id, "deleted superseded snapshot generation");
     }
     Ok(())
 }
@@ -648,13 +742,13 @@ async fn load_snapshot_membership(
 
 struct ResolvedSnapshotMeta {
     author_pubkey: String,
-    seq: u64,
+    publish_id: u64,
     meta: SnapshotMetaJson,
     membership: SnapshotMembership,
 }
 
 /// Follow the snapshot pointer to the live generation and return its author and
-/// sequence plus its authenticated metadata.
+/// publish id plus its authenticated metadata.
 ///
 /// This is the single read path through the atomic-publish layout, shared by
 /// bootstrap and GC. The pointer is the commit, so it is resolved first and never
@@ -664,16 +758,15 @@ struct ResolvedSnapshotMeta {
 ///    (a forged/tampered pointer naming a fabricated generation is refused), and
 ///    authorize its author against the chain (a non-member cannot repoint).
 /// 2. Read and parse that generation's signed [`SnapshotMetaJson`] from the
-///    pointer's `{author_pubkey, seq}` keyspace; verify its signature, and
+///    pointer's `{author_pubkey, publish_id}` keyspace; verify its signature, and
 ///    authorize *its* author too (the same owner bar).
 /// 3. Cross-check that the pointer and the meta commit to the *same* `db_hash`, so
 ///    a generation assembled from mismatched objects is refused.
 ///
 /// The DB image itself is not fetched here — bootstrap downloads and hashes it
 /// against `meta.db_hash`; GC never needs the bytes. Returns the live generation's
-/// `author_pubkey` and `seq` (so bootstrap can read its db, and so GC knows which
-/// of its own generations is live) and the authenticated meta (whose cursors drive
-/// both bootstrap and GC).
+/// `author_pubkey` and `publish_id` (so bootstrap can read its db) and the
+/// authenticated meta (whose cursors drive both bootstrap and GC).
 async fn resolve_current_meta(
     storage: &dyn SyncStorage,
     store_id: &str,
@@ -701,12 +794,12 @@ async fn resolve_current_meta(
     membership.authorize_owner(&pointer.author_pubkey)?;
 
     // Follow the pointer to the named generation's metadata — under the pointer's
-    // own `{author_pubkey, seq}` keyspace — and authenticate it on its own terms
-    // (the meta and the pointer are independently signed; in a normal publish the
-    // same device authored both). Verifying under this store's id likewise
+    // own `{author_pubkey, publish_id}` keyspace — and authenticate it on its own
+    // terms (the meta and the pointer are independently signed; in a normal publish
+    // the same device authored both). Verifying under this store's id likewise
     // refuses a cross-store meta replay.
     let meta_json = storage
-        .get_snapshot_meta(&pointer.author_pubkey, pointer.seq)
+        .get_snapshot_meta(&pointer.author_pubkey, pointer.publish_id)
         .await
         .map_err(SnapshotError::Bucket)?;
     let meta: SnapshotMetaJson =
@@ -725,7 +818,7 @@ async fn resolve_current_meta(
 
     Ok(ResolvedSnapshotMeta {
         author_pubkey: pointer.author_pubkey,
-        seq: pointer.seq,
+        publish_id: pointer.publish_id,
         meta,
         membership,
     })
@@ -955,8 +1048,8 @@ pub struct GcResult {
 ///   agree on the DB hash.
 /// - The downloaded DB's hash must match what that signed meta commits to (a
 ///   substituted catalog image is refused). With each device's generations in its
-///   own keyspace, a same-seq cross-device collision is structurally impossible, so
-///   this bind now defends only against tampering with the bytes.
+///   own keyspace, a same-publish-id cross-device collision is structurally
+///   impossible, so this bind now defends only against tampering with the bytes.
 /// - Membership is anchored to `owner_pubkey` when it is pinned (`Some` on join,
 ///   where the invite pins the founder; `None` on restore, where the chain is
 ///   anchored to its own founder and the owner is adopted trust-on-first-use after
@@ -987,7 +1080,7 @@ pub async fn bootstrap_from_snapshot(
     // watermark reader.
     let ResolvedSnapshotMeta {
         author_pubkey,
-        seq,
+        publish_id,
         meta,
         membership: _,
     } = resolve_current_meta(storage, store_id, owner_pubkey, None).await?;
@@ -1007,7 +1100,7 @@ pub async fn bootstrap_from_snapshot(
     // Download the named generation's DB image from its publisher's keyspace and
     // confirm it is the exact image the (now authenticated) meta and pointer commit
     // to, before opening or writing it.
-    let plaintext = storage.get_snapshot(&author_pubkey, seq).await?;
+    let plaintext = storage.get_snapshot(&author_pubkey, publish_id).await?;
     if snapshot_db_hash(&plaintext) != meta.db_hash {
         return Err(SnapshotError::DbHashMismatch);
     }
@@ -1127,12 +1220,14 @@ pub enum SnapshotBlobReconcile {
 #[cfg(test)]
 const TEST_STORE_ID: &str = "test-store";
 
-/// Publish a full snapshot generation directly: the signed meta over `cursors`,
-/// the db image, and the signed pointer naming `{author, seq}`.
+/// Publish a full snapshot generation directly at a caller-chosen `publish_id`:
+/// the signed meta over `cursors`, the db image, and the signed pointer naming
+/// `{author, publish_id}`. The covered changeset seqs are the `cursors`, separate
+/// from the publish id that keys the objects.
 #[cfg(test)]
 async fn publish_signed_generation<I, K>(
     storage: &dyn SyncStorage,
-    seq: u64,
+    publish_id: u64,
     cursors: I,
     sealed_db: Vec<u8>,
     keypair: &UserKeypair,
@@ -1148,11 +1243,14 @@ async fn publish_signed_generation<I, K>(
         .collect();
     let meta = SnapshotMetaJson::signed(TEST_STORE_ID, cursors, db_hash.clone(), 0, keypair);
     storage
-        .put_snapshot_meta(&author, seq, serde_json::to_vec(&meta).unwrap())
+        .put_snapshot_meta(&author, publish_id, serde_json::to_vec(&meta).unwrap())
         .await
         .unwrap();
-    storage.put_snapshot(&author, seq, sealed_db).await.unwrap();
-    let pointer = SnapshotPointerJson::signed(TEST_STORE_ID, seq, db_hash, keypair);
+    storage
+        .put_snapshot(&author, publish_id, sealed_db)
+        .await
+        .unwrap();
+    let pointer = SnapshotPointerJson::signed(TEST_STORE_ID, publish_id, db_hash, keypair);
     storage
         .put_snapshot_pointer(serde_json::to_vec(&pointer).unwrap())
         .await
@@ -2248,8 +2346,8 @@ mod tests {
         .await
         .expect("publish generation A");
 
-        // A newer generation B (seq 9) whose DB contains 'new' is written, but its
-        // meta and the pointer flip never happen (a crashed/concurrent publish).
+        // A newer generation B (publish id 9) whose DB contains 'new' is written, but
+        // its meta and the pointer flip never happen (a crashed/concurrent publish).
         // This is the orphan a reader must never pair with A's meta.
         let db_b = synced_conn();
         exec(
@@ -2283,21 +2381,22 @@ mod tests {
     }
 
     /// THE strand the per-author keyspace makes impossible. The bucket has no lock,
-    /// so two devices publish concurrently — and the snapshot seq is each device's
-    /// own `local_seq`, not a global id, so they can collide on the SAME seq. Device
-    /// A is live at seq 5 (A authored it). Device B then writes its own generation at
-    /// the SAME seq 5 — its db and meta are present — but has NOT yet flipped the
-    /// pointer to it (B is mid-publish; B's seq 5 is not-yet-live). Device A's
-    /// post-publish sweep, keyed by A's own pubkey, runs in this window.
+    /// so two devices publish concurrently — and the publish id is each device's own
+    /// per-author counter, not a global id, so they can collide on the SAME publish
+    /// id. Device A is live at publish id 5 (A authored it). Device B then writes its
+    /// own generation at the SAME publish id 5 — its db and meta are present — but has
+    /// NOT yet flipped the pointer to it (B is mid-publish; B's publish id 5 is
+    /// not-yet-live). Device A's post-publish sweep, keyed by A's own pubkey, runs in
+    /// this window.
     ///
-    /// A lists only its OWN `snapshot/{author_a}/` keyspace, so B's seq 5 — under
-    /// `snapshot/{author_b}/` — is not even a candidate: it survives untouched, and
-    /// when B flips the pointer to it a joiner can still resolve it. A device never
-    /// strands a peer's generation because it can only name objects under its own
-    /// prefix, so two devices publishing the same seq hold distinct objects under
-    /// distinct keys, never a single shared one.
+    /// A lists only its OWN `snapshot/{author_a}/` keyspace, so B's publish id 5 —
+    /// under `snapshot/{author_b}/` — is not even a candidate: it survives untouched,
+    /// and when B flips the pointer to it a joiner can still resolve it. A device
+    /// never strands a peer's generation because it can only name objects under its
+    /// own prefix, so two devices publishing the same publish id hold distinct
+    /// objects under distinct keys, never a single shared one.
     #[tokio::test]
-    async fn sweep_never_deletes_a_peer_authored_same_seq_generation() {
+    async fn sweep_never_deletes_a_peer_authored_same_publish_id_generation() {
         let storage = MockSyncStorage::new();
         let kp_a = test_keypair();
         let kp_b = test_keypair();
@@ -2314,10 +2413,11 @@ mod tests {
         )
         .await;
 
-        // Device B writes its own generation at the SAME seq 5's db + meta but does
-        // NOT flip the pointer: B's seq 5 is present yet not-yet-live, under B's own
-        // keyspace. (publish_signed_generation would flip the pointer, so write the
-        // two objects directly to model the mid-publish window before the commit.)
+        // Device B writes its own generation at the SAME publish id 5's db + meta but
+        // does NOT flip the pointer: B's publish id 5 is present yet not-yet-live,
+        // under B's own keyspace. (publish_signed_generation would flip the pointer,
+        // so write the two objects directly to model the mid-publish window before
+        // the commit.)
         let db_b = vec![0xBu8];
         let db_hash_b = snapshot_db_hash(&db_b);
         let meta_b = SnapshotMetaJson::signed(
@@ -2336,16 +2436,16 @@ mod tests {
             .await
             .unwrap();
 
-        // A's seq-5 generation and B's seq-5 generation are DISTINCT objects: each
-        // device's keyspace has exactly its own, and A's db image is untouched by B's
-        // same-seq publish.
+        // A's publish-id-5 generation and B's publish-id-5 generation are DISTINCT
+        // objects: each device's keyspace has exactly its own, and A's db image is
+        // untouched by B's same-publish-id publish.
         assert_eq!(
             storage
                 .list_own_snapshot_generations(&author_a)
                 .await
                 .unwrap(),
             vec![5],
-            "A's keyspace holds A's seq 5",
+            "A's keyspace holds A's publish id 5",
         );
         assert_eq!(
             storage
@@ -2353,29 +2453,29 @@ mod tests {
                 .await
                 .unwrap(),
             vec![5],
-            "B's keyspace holds B's same-seq generation, a distinct object",
+            "B's keyspace holds B's same-publish-id generation, a distinct object",
         );
-        // Each device's db image is its own bytes — neither same-seq publish aliased
-        // the other.
+        // Each device's db image is its own bytes — neither same-publish-id publish
+        // aliased the other.
         assert_eq!(
             storage.get_snapshot(&author_a, 5).await.unwrap(),
             vec![0xAu8],
-            "A's same-seq db image is its own bytes, not overwritten by B's publish",
+            "A's db image is its own bytes, not overwritten by B's publish",
         );
         assert_eq!(
             storage.get_snapshot(&author_b, 5).await.unwrap(),
             db_b,
-            "B's same-seq db image is its own bytes, not overwritten by A's publish",
+            "B's db image is its own bytes, not overwritten by A's publish",
         );
         assert_eq!(
-            storage.current_snapshot_seq().await,
+            storage.current_snapshot_publish_id().await,
             Some(5),
             "the pointer still names A's generation; B is mid-publish",
         );
 
-        // Device A's real sweep, keyed by A's pubkey, with A's just-published seq. It
-        // lists only A's keyspace, so B's same-seq generation is never a candidate and
-        // survives.
+        // Device A's real sweep, keyed by A's pubkey, with A's just-published publish
+        // id. It lists only A's keyspace, so B's same-publish-id generation is never a
+        // candidate and survives.
         delete_superseded_generations(&storage, 5, &author_a)
             .await
             .expect("A's sweep runs");
@@ -2385,12 +2485,12 @@ mod tests {
                 .await
                 .unwrap(),
             vec![5],
-            "A's sweep must not touch B's same-seq not-yet-live generation",
+            "A's sweep must not touch B's same-publish-id not-yet-live generation",
         );
         assert_eq!(
             storage.get_snapshot(&author_b, 5).await.unwrap(),
             db_b,
-            "B's same-seq db image survives A's sweep intact",
+            "B's db image survives A's sweep intact",
         );
     }
 
@@ -2466,8 +2566,8 @@ mod tests {
         publish_signed_generation(&storage, 2, BTreeMap::<String, u64>::new(), vec![2u8], &kp)
             .await;
 
-        // Sweep after publishing seq 2: the published generation remains, and the
-        // older own generation is reclaimed.
+        // Sweep after publishing generation 2: the published generation remains, and
+        // the older own generation is reclaimed.
         delete_superseded_generations(&storage, 2, &own_author)
             .await
             .expect("sweep runs");
@@ -2482,8 +2582,9 @@ mod tests {
         );
     }
 
-    /// The just-published seq protects the live generation within this device's
-    /// own keyspace. Pointer bytes are not part of this sweep's liveness decision:
+    /// The just-published publish id protects the live generation within this
+    /// device's own keyspace. Pointer bytes are not part of this sweep's liveness
+    /// decision:
     /// after publishing generation 2, generation 1 is superseded even if the pointer
     /// object later becomes unreadable.
     #[tokio::test]
@@ -2520,14 +2621,14 @@ mod tests {
         );
     }
 
-    /// Two devices publish at the SAME seq and BOTH generations persist as
+    /// Two devices publish at the SAME publish id and BOTH generations persist as
     /// independent objects in their own keyspaces. A bootstrap resolves the
     /// generation the live pointer names and adopts its catalog; the other device's
-    /// same-seq generation is an untouched, independently-resolvable object. This is
-    /// the global uniqueness the per-author keyspace buys: a same-`local_seq`
+    /// same-publish-id generation is an untouched, independently-resolvable object.
+    /// This is the global uniqueness the per-author keyspace buys: a same-publish-id
     /// collision across devices no longer aliases one object.
     #[tokio::test]
-    async fn two_devices_same_seq_keep_both_generations() {
+    async fn two_devices_same_publish_id_keep_both_generations() {
         let temp = tempfile::tempdir().unwrap();
         let storage = MockSyncStorage::new();
         let kp_a = test_keypair();
@@ -2535,8 +2636,8 @@ mod tests {
         let author_a = hex::encode(kp_a.public_key());
         let author_b = hex::encode(kp_b.public_key());
 
-        // Device A publishes a real generation at seq 7 (its catalog has 'a-row'),
-        // and the pointer names A's generation (A is the live publisher).
+        // Device A publishes a real generation at publish id 7 (its catalog has
+        // 'a-row'), and the pointer names A's generation (A is the live publisher).
         let db_a = synced_conn();
         exec(
             &db_a,
@@ -2553,10 +2654,10 @@ mod tests {
         )
         .await;
 
-        // Device B builds its own generation at the SAME seq 7 (its catalog has
-        // 'b-row') and writes the db + meta under B's keyspace, WITHOUT flipping the
-        // pointer (A stays live). Keyed under B's own author, it is a distinct object
-        // from A's seq-7 generation.
+        // Device B builds its own generation at the SAME publish id 7 (its catalog
+        // has 'b-row') and writes the db + meta under B's keyspace, WITHOUT flipping
+        // the pointer (A stays live). Keyed under B's own author, it is a distinct
+        // object from A's publish-id-7 generation.
         let db_b = synced_conn();
         exec(
             &db_b,
@@ -2578,14 +2679,15 @@ mod tests {
             .unwrap();
         storage.put_snapshot(&author_b, 7, snap_b).await.unwrap();
 
-        // Both same-seq generations persist as independent objects, one per keyspace.
+        // Both same-publish-id generations persist as independent objects, one per
+        // keyspace.
         assert_eq!(
             storage
                 .list_own_snapshot_generations(&author_a)
                 .await
                 .unwrap(),
             vec![7],
-            "A's keyspace holds A's seq 7",
+            "A's keyspace holds A's publish id 7",
         );
         assert_eq!(
             storage
@@ -2593,11 +2695,11 @@ mod tests {
                 .await
                 .unwrap(),
             vec![7],
-            "B's keyspace holds B's same-seq generation, untouched by A's publish",
+            "B's keyspace holds B's same-publish-id generation, untouched by A's publish",
         );
 
         // The pointer names A's generation, so a joiner resolves and adopts A's
-        // catalog — A's db image was never aliased by B's same-seq publish.
+        // catalog — A's db image was never aliased by B's same-publish-id publish.
         let target = temp.path().join("boot.db");
         let boot = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
             .await
@@ -2942,6 +3044,184 @@ mod tests {
             meta.cursors.get("M"),
             Some(&4),
             "must record applied seq 4, not M's ahead head 9"
+        );
+    }
+
+    /// Publish `image` as a generation from `keypair`, threading the device's live
+    /// `db` (whose `sync_state` holds the publish-id counter) so successive publishes
+    /// increment it — the property `push_snapshot_without_blob_refs` (fresh throwaway
+    /// db per call) can't exercise.
+    async fn push_with_db(
+        storage: &MockSyncStorage,
+        db: &crate::database::Database,
+        image: Vec<u8>,
+        device_id: &str,
+        current_seq: u64,
+        keypair: &UserKeypair,
+    ) {
+        push_snapshot(
+            storage,
+            TEST_STORE_ID,
+            image,
+            device_id,
+            HashMap::new(),
+            current_seq,
+            0,
+            keypair,
+            &crate::clock::SystemClock,
+            SnapshotBlobPreflight { db, blobs: &[] },
+        )
+        .await
+        .expect("push snapshot");
+    }
+
+    /// When a publish flips the pointer but its `snapshot_seq` never persists (the
+    /// cycle's persist fails, or the trailing `put_head` errors), policy re-fires the
+    /// next cycle at the SAME covered seq. The retry must key a fresh generation, not
+    /// reuse the live pointer's key: it publishes under a new publish id, and the
+    /// previous generation is swept — never overwritten in place.
+    #[tokio::test]
+    async fn a_retry_publishes_under_a_fresh_key_not_the_live_one() {
+        let storage = MockSyncStorage::new();
+        let db = crate::sync::test_helpers::open_test_db();
+        let kp = test_keypair();
+        let author = hex::encode(kp.public_key());
+        let image_a = vec![0xAAu8; 16];
+        let image_b = vec![0xBBu8; 16];
+
+        // First publish; imagine its `snapshot_seq` never persisted, so the covered
+        // seq stays 5 for the retry.
+        push_with_db(&storage, &db, image_a.clone(), "self", 5, &kp).await;
+        let live_a = storage
+            .current_snapshot_publish_id()
+            .await
+            .expect("first pointer");
+        assert_eq!(
+            storage.get_snapshot(&author, live_a).await.unwrap(),
+            image_a
+        );
+
+        // The retry: same covered seq (5), a different image (a fresh VACUUM / newly
+        // pulled rows differ regardless).
+        push_with_db(&storage, &db, image_b.clone(), "self", 5, &kp).await;
+        let live_b = storage
+            .current_snapshot_publish_id()
+            .await
+            .expect("second pointer");
+
+        assert_ne!(
+            live_a, live_b,
+            "the retry keys a fresh generation, not the live pointer's key"
+        );
+        assert_eq!(
+            storage.get_snapshot(&author, live_b).await.unwrap(),
+            image_b,
+            "the live generation is the retry's image, under its own key",
+        );
+        assert!(
+            storage.get_snapshot(&author, live_a).await.is_err(),
+            "the superseded generation was swept, never overwritten in place",
+        );
+    }
+
+    /// A retry that crashes between its db write and its meta write leaves the prior
+    /// generation fully resolvable: the pointer still names it, its objects are
+    /// byte-identical (the retry wrote a different key), and a bootstrap in that
+    /// window adopts it intact.
+    #[tokio::test]
+    async fn a_half_written_retry_leaves_the_prior_generation_resolvable() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = MockSyncStorage::new();
+        let db = crate::sync::test_helpers::open_test_db();
+        let kp = test_keypair();
+        let author = hex::encode(kp.public_key());
+        let image_a = vec![0xAAu8; 16];
+        let image_b = vec![0xBBu8; 16];
+
+        push_with_db(&storage, &db, image_a.clone(), "self", 5, &kp).await;
+        let live = storage
+            .current_snapshot_publish_id()
+            .await
+            .expect("pointer");
+
+        // Model the retry crashing between its db write and its meta write: reserve a
+        // fresh publish id and write only the db image, so no meta and no pointer flip
+        // land.
+        let retry_id = reserve_publish_id(&db, &storage, &author)
+            .await
+            .expect("reserve publish id");
+        assert_ne!(retry_id, live, "the retry reserved a fresh publish id");
+        storage
+            .put_snapshot(&author, retry_id, image_b.clone())
+            .await
+            .unwrap();
+
+        // The prior generation's objects are untouched by the retry's write.
+        assert_eq!(
+            storage.get_snapshot(&author, live).await.unwrap(),
+            image_a,
+            "the live generation's db image is byte-identical after the half-written retry",
+        );
+
+        // The pointer still names the prior generation, and a bootstrap adopts it
+        // whole (its db image, not the retry's).
+        let target = temp.path().join("boot.db");
+        bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 0, &target)
+            .await
+            .expect("bootstrap resolves the prior generation");
+        assert_eq!(std::fs::read(&target).unwrap(), image_a);
+    }
+
+    /// A restored device recovers its author identity but starts with an empty local
+    /// `sync_state` (no publish-id counter). Its first publish must resume ABOVE the
+    /// generations it already published in the cloud — otherwise it would start at 1
+    /// and overwrite its own still-live `{author}/1` generation, the same
+    /// overwrite-the-live-generation defect the publish id exists to prevent. The
+    /// counter initializes from the cloud on that first publish, so the new
+    /// generation lands under a fresh id and the previously-live one is superseded,
+    /// never aliased.
+    #[tokio::test]
+    async fn a_restored_device_resumes_above_its_existing_generations() {
+        let storage = MockSyncStorage::new();
+        let kp = test_keypair();
+        let author = hex::encode(kp.public_key());
+        let seeded = vec![0x11u8; 16];
+        let republished = vec![0x22u8; 16];
+
+        // A generation this author already published is live in the cloud at publish
+        // id 1 (the pointer names it).
+        publish_signed_generation(
+            &storage,
+            1,
+            BTreeMap::from([("self".to_string(), 5)]),
+            seeded.clone(),
+            &kp,
+        )
+        .await;
+
+        // Restore: the recovered author identity, but a fresh db — no persisted
+        // publish-id counter.
+        let db = crate::sync::test_helpers::open_test_db();
+        push_with_db(&storage, &db, republished.clone(), "self", 5, &kp).await;
+
+        let live = storage
+            .current_snapshot_publish_id()
+            .await
+            .expect("pointer");
+        assert!(
+            live > 1,
+            "the restored device's first publish must resume above its existing \
+             generation, got {live}",
+        );
+        assert_eq!(
+            storage.get_snapshot(&author, live).await.unwrap(),
+            republished,
+            "the live generation is the republish, under its own fresh key",
+        );
+        assert!(
+            storage.get_snapshot(&author, 1).await.is_err(),
+            "the previously-live generation was superseded and swept, never \
+             overwritten in place",
         );
     }
 }

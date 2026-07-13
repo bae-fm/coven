@@ -356,23 +356,29 @@ fn snapshot_meta_signing_payload(
 /// which snapshot generation is live.
 ///
 /// A snapshot is published as a set of objects under a per-generation key in the
-/// publishing device's own keyspace (`snapshot/{author}/{seq}.db`,
-/// `snapshot/{author}/{seq}_meta.json`), all written *before* the pointer. The
-/// pointer is the commit: a reader resolves it first, then loads the db+meta pair
-/// it names from `{author_pubkey, seq}` — always a complete, self-consistent
-/// generation, never a half-written one. Writing the db+meta at fixed keys instead
-/// would let a reader observe a new db paired with a stale meta (a torn read); the
-/// pointer removes that window because nothing references a generation until it is
-/// whole.
+/// publishing device's own keyspace (`snapshot/{author}/{publish_id}.db`,
+/// `snapshot/{author}/{publish_id}_meta.json`), all written *before* the pointer.
+/// The pointer is the commit: a reader resolves it first, then loads the db+meta
+/// pair it names from `{author_pubkey, publish_id}` — always a complete,
+/// self-consistent generation, never a half-written one. Writing the db+meta at
+/// fixed keys instead would let a reader observe a new db paired with a stale meta
+/// (a torn read); the pointer removes that window because nothing references a
+/// generation until it is whole.
+///
+/// `publish_id` is a per-author monotonic publish counter (persisted in the
+/// author's `sync_state` and bumped before the first write of each attempt), not
+/// the covered changeset seq. Each publish attempt keys its generation under a
+/// fresh id, so a retry can never write to the object the live pointer still names
+/// — the covered changeset seq travels in the meta's cursors instead.
 ///
 /// The bucket is untrusted, so the pointer is signed like every other control
-/// object. It names a generation's `{author_pubkey, seq}` and repeats that
+/// object. It names a generation's `{author_pubkey, publish_id}` and repeats that
 /// generation's `db_hash`, all under one author signature, so a non-member who can
 /// write the bucket cannot repoint the live snapshot at a fabricated or stale
 /// generation: a pointer they author fails the membership check, and one they copy
-/// from an older generation no longer matches the `seq`/`db_hash` they would need
-/// to forge. `db_hash` is repeated here (not only in the meta) so the pointer
-/// commits to the *exact* generation, not merely its number — the verifier checks
+/// from an older generation no longer matches the `publish_id`/`db_hash` they would
+/// need to forge. `db_hash` is repeated here (not only in the meta) so the pointer
+/// commits to the *exact* generation, not merely its id — the verifier checks
 /// the pointer's `db_hash` equals the meta's before adopting the db image.
 ///
 /// `store_id` binds the pointer to its store: it is part of the signed
@@ -387,17 +393,18 @@ fn snapshot_meta_signing_payload(
 /// job).
 #[derive(Serialize, Deserialize)]
 pub struct SnapshotPointerJson {
-    /// The sequence of the snapshot generation this pointer publishes. With the
+    /// The publish id of the snapshot generation this pointer publishes — a
+    /// per-author monotonic counter, not the covered changeset seq. With the
     /// pointer's `author_pubkey`, names the
-    /// `snapshot/{author_pubkey}/{seq}.db` / `snapshot/{author_pubkey}/{seq}_meta.json`
-    /// objects to load.
-    pub seq: u64,
+    /// `snapshot/{author_pubkey}/{publish_id}.db` /
+    /// `snapshot/{author_pubkey}/{publish_id}_meta.json` objects to load.
+    pub publish_id: u64,
     /// Hex-encoded SHA-256 of the named generation's stored (sealed) snapshot DB
     /// bytes — the same hash that generation's [`SnapshotMetaJson`] commits to.
     pub db_hash: String,
     /// Hex-encoded Ed25519 public key of the device that published this pointer.
     /// Doubles as the live generation's keyspace segment: the named generation's
-    /// objects live under `snapshot/{author_pubkey}/{seq}`.
+    /// objects live under `snapshot/{author_pubkey}/{publish_id}`.
     pub author_pubkey: String,
     /// Hex-encoded detached signature over [`SnapshotPointerFields`].
     pub signature: String,
@@ -406,27 +413,27 @@ pub struct SnapshotPointerJson {
 /// The pointer fields the signature covers, in declaration order. Excludes
 /// `author_pubkey`/`signature` (the signature's own outputs). Includes
 /// `store_id` (so a pointer can't be replayed into a different store,
-/// mirroring [`WrappedKeyFields`]). Binding both `seq` and `db_hash` means a
-/// pointer cannot be re-stamped to a different generation number, nor have its
-/// number kept while pointed at a substituted image.
+/// mirroring [`WrappedKeyFields`]). Binding both `publish_id` and `db_hash` means a
+/// pointer cannot be re-stamped to a different generation, nor have its publish id
+/// kept while pointed at a substituted image.
 #[derive(Serialize)]
 struct SnapshotPointerFields<'a> {
     store_id: &'a str,
-    seq: u64,
+    publish_id: u64,
     db_hash: &'a str,
 }
 
 impl SnapshotPointerJson {
     /// Build a pointer for `store_id` signed by `keypair`: fills `author_pubkey`
     /// with the device's public key and `signature` with the detached signature
-    /// over the canonical payload (which binds `store_id`, the generation `seq`,
-    /// and its DB hash). `store_id` is bound but not stored — the reader passes
-    /// its own to [`Self::verify`].
-    pub fn signed(store_id: &str, seq: u64, db_hash: String, keypair: &UserKeypair) -> Self {
-        let payload = snapshot_pointer_signing_payload(store_id, seq, &db_hash);
+    /// over the canonical payload (which binds `store_id`, the generation
+    /// `publish_id`, and its DB hash). `store_id` is bound but not stored — the
+    /// reader passes its own to [`Self::verify`].
+    pub fn signed(store_id: &str, publish_id: u64, db_hash: String, keypair: &UserKeypair) -> Self {
+        let payload = snapshot_pointer_signing_payload(store_id, publish_id, &db_hash);
         let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         SnapshotPointerJson {
-            seq,
+            publish_id,
             db_hash,
             author_pubkey,
             signature,
@@ -435,19 +442,20 @@ impl SnapshotPointerJson {
 
     /// Verify the embedded signature against the embedded `author_pubkey`, bound
     /// to `store_id`. A pointer that fails this is forged, corrupt, tampered
-    /// (`seq` or `db_hash` changed after signing), or a different store's pointer
-    /// replayed here, and must not be followed. Whether the author is *authorized*
-    /// (a current write-capable member) is a separate check the caller runs.
+    /// (`publish_id` or `db_hash` changed after signing), or a different store's
+    /// pointer replayed here, and must not be followed. Whether the author is
+    /// *authorized* (a current write-capable member) is a separate check the caller
+    /// runs.
     pub fn verify(&self, store_id: &str) -> bool {
-        let payload = snapshot_pointer_signing_payload(store_id, self.seq, &self.db_hash);
+        let payload = snapshot_pointer_signing_payload(store_id, self.publish_id, &self.db_hash);
         keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
 
-fn snapshot_pointer_signing_payload(store_id: &str, seq: u64, db_hash: &str) -> Vec<u8> {
+fn snapshot_pointer_signing_payload(store_id: &str, publish_id: u64, db_hash: &str) -> Vec<u8> {
     let fields = SnapshotPointerFields {
         store_id,
-        seq,
+        publish_id,
         db_hash,
     };
     serde_json::to_vec(&fields).expect("snapshot pointer fields serialization cannot fail")
@@ -875,18 +883,18 @@ mod tests {
             "a pointer must not verify under a different store id"
         );
 
-        // The signature binds the seq: repointing to a different generation number
+        // The signature binds the publish id: repointing to a different generation
         // after signing invalidates it, so a forged pointer can't name an arbitrary
         // generation.
-        let mut tampered_seq = SnapshotPointerJson::signed("lib", 7, "abc123".to_string(), &kp);
-        tampered_seq.seq = 99;
+        let mut tampered_id = SnapshotPointerJson::signed("lib", 7, "abc123".to_string(), &kp);
+        tampered_id.publish_id = 99;
         assert!(
-            !tampered_seq.verify("lib"),
-            "a tampered seq fails verification"
+            !tampered_id.verify("lib"),
+            "a tampered publish id fails verification"
         );
 
-        // It also binds the DB hash: pointing the same seq at a substituted image
-        // (a different generation's db) fails.
+        // It also binds the DB hash: pointing the same publish id at a substituted
+        // image (a different generation's db) fails.
         let mut tampered_hash = SnapshotPointerJson::signed("lib", 7, "abc123".to_string(), &kp);
         tampered_hash.db_hash = "deadbeef".to_string();
         assert!(

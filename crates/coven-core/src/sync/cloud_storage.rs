@@ -1235,18 +1235,18 @@ impl SyncStorage for CloudSyncStorage {
     async fn put_snapshot(
         &self,
         author: &str,
-        seq: u64,
+        publish_id: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
+        let key = format!("snapshot/{author}/{publish_id}.db{}", self.suffix());
         self.write_sealed(&key, data).await
     }
 
-    async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+    async fn get_snapshot(&self, author: &str, publish_id: u64) -> Result<Vec<u8>, StorageError> {
         crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{seq}.db{}", self.suffix());
-        self.read_sealed(&key, &format!("snapshot {author}/{seq}"))
+        let key = format!("snapshot/{author}/{publish_id}.db{}", self.suffix());
+        self.read_sealed(&key, &format!("snapshot {author}/{publish_id}"))
             .await
     }
 
@@ -1413,18 +1413,22 @@ impl SyncStorage for CloudSyncStorage {
     async fn put_snapshot_meta(
         &self,
         author: &str,
-        seq: u64,
+        publish_id: u64,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
+        let key = format!("snapshot/{author}/{publish_id}_meta.json{}", self.suffix());
         self.write_sealed(&key, data).await
     }
 
-    async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
+    async fn get_snapshot_meta(
+        &self,
+        author: &str,
+        publish_id: u64,
+    ) -> Result<Vec<u8>, StorageError> {
         crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{seq}_meta.json{}", self.suffix());
-        self.read_sealed(&key, &format!("snapshot_meta {author}/{seq}"))
+        let key = format!("snapshot/{author}/{publish_id}_meta.json{}", self.suffix());
+        self.read_sealed(&key, &format!("snapshot_meta {author}/{publish_id}"))
             .await
     }
 
@@ -1443,15 +1447,15 @@ impl SyncStorage for CloudSyncStorage {
         let suffix = self.suffix();
         let prefix = format!("snapshot/{author}/");
         let keys = self.home.list(&prefix).await?;
-        let mut seqs = Vec::new();
+        let mut publish_ids = Vec::new();
         for key in &keys {
             // Under this device's own prefix, match only the metadata objects:
-            // `snapshot/{author}/{seq}_meta.json{suffix}`. A generation is keyed by
-            // its meta (written after the DB image), so listing it means the DB
-            // image is already whole. The `{seq}.db` sibling is skipped here. Only
-            // this `{author}`'s generations are listed — a peer's live under a
-            // different prefix — so ownership is structural, no per-object author
-            // check needed.
+            // `snapshot/{author}/{publish_id}_meta.json{suffix}`. A generation is
+            // keyed by its meta (written after the DB image), so listing it means the
+            // DB image is already whole. The `{publish_id}.db` sibling is skipped
+            // here. Only this `{author}`'s generations are listed — a peer's live
+            // under a different prefix — so ownership is structural, no per-object
+            // author check needed.
             let Some(rest) = key
                 .strip_prefix(&prefix)
                 .and_then(|s| s.strip_suffix(suffix))
@@ -1460,13 +1464,16 @@ impl SyncStorage for CloudSyncStorage {
                 continue;
             };
             match rest.strip_suffix("_meta.json") {
-                Some(seq_str) => match seq_str.parse::<u64>() {
-                    Ok(seq) => seqs.push(seq),
-                    Err(e) => warn!("snapshot listing: meta key {key} has a non-numeric seq: {e}"),
+                Some(id_str) => match id_str.parse::<u64>() {
+                    Ok(publish_id) => publish_ids.push(publish_id),
+                    Err(e) => {
+                        warn!("snapshot listing: meta key {key} has a non-numeric publish id: {e}")
+                    }
                 },
-                // The `{seq}.db` sibling is each generation's expected complement,
-                // listed via its meta, so skip it silently; anything else under this
-                // author prefix is unexpected and surfaced rather than dropped.
+                // The `{publish_id}.db` sibling is each generation's expected
+                // complement, listed via its meta, so skip it silently; anything else
+                // under this author prefix is unexpected and surfaced rather than
+                // dropped.
                 None if rest.ends_with(".db") => {}
                 None => {
                     warn!(
@@ -1475,11 +1482,15 @@ impl SyncStorage for CloudSyncStorage {
                 }
             }
         }
-        seqs.sort_unstable();
-        Ok(seqs)
+        publish_ids.sort_unstable();
+        Ok(publish_ids)
     }
 
-    async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError> {
+    async fn delete_snapshot_generation(
+        &self,
+        author: &str,
+        publish_id: u64,
+    ) -> Result<(), StorageError> {
         crate::store_dir::validate_path_token(author)?;
         let suffix = self.suffix();
         // Delete the db first, then the meta: the meta object is what
@@ -1487,10 +1498,10 @@ impl SyncStorage for CloudSyncStorage {
         // means a crash between the two deletes leaves the generation still listed
         // (its meta present) and re-deletable next sweep, never a meta-less db.
         self.home
-            .delete(&format!("snapshot/{author}/{seq}.db{suffix}"))
+            .delete(&format!("snapshot/{author}/{publish_id}.db{suffix}"))
             .await?;
         self.home
-            .delete(&format!("snapshot/{author}/{seq}_meta.json{suffix}"))
+            .delete(&format!("snapshot/{author}/{publish_id}_meta.json{suffix}"))
             .await?;
         Ok(())
     }
@@ -2307,8 +2318,8 @@ mod tests {
             pointer
         );
 
-        // The generation is listable by seq under its author, and a delete removes
-        // both its objects.
+        // The generation is listable by publish id under its author, and a delete
+        // removes both its objects.
         assert_eq!(
             storage
                 .list_own_snapshot_generations(author)
