@@ -491,10 +491,14 @@ pub async fn run_single_sync_cycle(
     // once, right after the refresh that is the one place this cycle could adopt
     // a rotation, and used below to skip every write that would otherwise seal
     // new data under a generation the store has already superseded: the blob
-    // upload drain, the tombstone write drain, both changeset-push paths, and the
-    // snapshot. Pull, local writes, and delete-only paths (tombstone GC and
-    // cancel-drain) are unaffected — the gate is on sealing for the cloud, not on
-    // using the store.
+    // upload drain, the host-provided make_remote completion, the inline
+    // host-provided blob upload inside `service::sync`, the tombstone write
+    // drain, both changeset-push paths, and the snapshot. Pull, local writes, and
+    // delete-only paths (tombstone GC and cancel-drain) are unaffected — the gate
+    // is on sealing for the cloud, not on using the store. An unadoptable
+    // rotation — including one whose activation entry is not yet visible — is
+    // marked pending by the refresh and pauses exactly this set; it never aborts
+    // the cycle.
     let rotation_pending = pending_rotation.check(&cipher.read().unwrap()).err();
     if let Some(pending) = &rotation_pending {
         warn!(
@@ -657,7 +661,11 @@ pub async fn run_single_sync_cycle(
 
     let timestamp = hlc.now().to_string();
 
-    if super::service::complete_host_provided_make_remotes(
+    if rotation_pending.is_some() {
+        debug!(
+            "rotation pending; leaving ready host-provided make_remote intents queued until adoption"
+        );
+    } else if super::service::complete_host_provided_make_remotes(
         db,
         tables,
         storage,
@@ -697,6 +705,7 @@ pub async fn run_single_sync_cycle(
         membership.chain.as_ref(),
         membership.pinned_owner.as_deref(),
         host_upload_cancel.as_ref(),
+        rotation_pending.is_some(),
     )
     .await
     .map_err(|e| format!("Sync cycle error: {e}"))?;
@@ -1241,11 +1250,25 @@ async fn refresh_authorization_state(
         )) => {
             debug!("refresh: no wrapped key for this device; keeping the live key");
         }
-        Err(super::invite::InviteError::InactiveWrappedKey { activation }) => {
-            return Err(format!(
-                "refresh: wrapped store key activation is not visible: {}/{}",
-                activation.author_pubkey, activation.seq
-            ));
+        Err(super::invite::InviteError::InactiveWrappedKey {
+            activation,
+            generation,
+        }) => {
+            // A rotated wrap whose activation entry is not yet visible names a
+            // committed generation this device cannot yet adopt (an owner
+            // overwrote the wrap before its Remove entry uploaded, or the reader's
+            // LIST lags the entry). This is a pending rotation, not a cycle
+            // failure: pause sealing at the wrap's committed generation and let
+            // the cycle proceed — pull and local writes run, every seal path is
+            // gated on `rotation_pending`. Adoption completes on a later cycle
+            // once the activation entry is visible.
+            pending_rotation.mark_committed(generation);
+            info!(
+                committed_generation = generation,
+                activation = %format!("{}/{}", activation.author_pubkey, activation.seq),
+                "refresh: a rotated wrapped store key's activation entry is not yet \
+                 visible; sealing is paused until it is and this device adopts"
+            );
         }
         Err(e) => return Err(format!("refresh: read this device's wrapped key: {e}")),
     }

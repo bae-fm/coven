@@ -34,8 +34,16 @@ pub enum InviteError {
     CloudHome(#[from] CloudHomeError),
     #[error("Crypto error: {0}")]
     Crypto(String),
-    #[error("wrapped store key activation is not visible: {activation:?}")]
-    InactiveWrappedKey { activation: MembershipCoord },
+    #[error(
+        "wrapped store key for generation {generation} activation is not visible: {activation:?}"
+    )]
+    InactiveWrappedKey {
+        activation: MembershipCoord,
+        /// The committed generation this inactive wrap names (from its signed
+        /// envelope), so a refresh can pause sealing at exactly this generation
+        /// without opening the sealed keyring the activation gate forbids adopting.
+        generation: u64,
+    },
     #[error(
         "stale membership head for {author}: committed through seq {committed}, \
          cannot write seq {attempted}"
@@ -161,6 +169,7 @@ fn signed_wrapped_key_with_activation(
         store_id,
         recipient_ed25519_pubkey,
         activation,
+        encryption.current_generation(),
         sealed,
         owner_keypair,
     );
@@ -720,8 +729,10 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
     let mut merged: Option<EncryptionService> = None;
     // Remember why non-adoptable wraps were rejected, so "no wrap adopted" reports
     // the real reason rather than a bare not-found (which the caller treats as
-    // "this device has no wrapped key").
-    let mut saw_inactive: Option<MembershipCoord> = None;
+    // "this device has no wrapped key"). For an inactive wrap, keep the highest
+    // generation seen: that is the committed generation a refresh must pause at,
+    // even if two owners each left an inactive rotation at different generations.
+    let mut saw_inactive: Option<(MembershipCoord, u64)> = None;
     let mut saw_unauthentic = false;
     let mut owners_tried = 0usize;
 
@@ -745,7 +756,12 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
             let visible = visible_membership_entries
                 .is_some_and(|entries| entries.iter().any(|entry| entry == activation));
             if !visible {
-                saw_inactive = Some(activation.clone());
+                if saw_inactive
+                    .as_ref()
+                    .is_none_or(|(_, gen)| wrapped.generation > *gen)
+                {
+                    saw_inactive = Some((activation.clone(), wrapped.generation));
+                }
                 continue;
             }
         }
@@ -783,8 +799,11 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
     if let Some(keyring) = merged {
         return Ok(keyring);
     }
-    if let Some(activation) = saw_inactive {
-        return Err(InviteError::InactiveWrappedKey { activation });
+    if let Some((activation, generation)) = saw_inactive {
+        return Err(InviteError::InactiveWrappedKey {
+            activation,
+            generation,
+        });
     }
     if saw_unauthentic {
         return Err(InviteError::Crypto(format!(
@@ -2079,7 +2098,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(InviteError::InactiveWrappedKey { activation: seen }) if seen == activation
+            Err(InviteError::InactiveWrappedKey { activation: seen, generation: 2 }) if seen == activation
         ));
     }
 
@@ -2253,7 +2272,7 @@ mod tests {
         assert!(
             matches!(
                 &result,
-                Err(InviteError::InactiveWrappedKey { activation: seen }) if *seen == activation
+                Err(InviteError::InactiveWrappedKey { activation: seen, .. }) if *seen == activation
             ),
             "an activation with no visible entry must be refused, got {result:?}"
         );

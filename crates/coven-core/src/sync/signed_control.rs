@@ -480,6 +480,13 @@ pub struct WrappedStoreKey {
     /// this keyring. Invitation keys have no activation coordinate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<MembershipCoord>,
+    /// The keyring's current generation — the generation this wrap would adopt
+    /// this recipient to — carried in the clear so a member can learn which
+    /// committed generation an inactive wrap (one whose activation entry is not
+    /// yet visible) names WITHOUT opening the sealed box, and pause its own
+    /// sealing at that generation. Covered by the signature, so a bucket writer
+    /// cannot forge a higher generation to wedge a member's cycle.
+    pub generation: u64,
     /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the store key.
     pub sealed: String,
     /// Hex-encoded detached signature over [`WrappedKeyFields`], produced by the owner.
@@ -496,6 +503,7 @@ struct WrappedKeyFields<'a> {
     recipient_pubkey: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     activation: Option<&'a MembershipCoord>,
+    generation: u64,
     author_pubkey: &'a str,
     sealed: &'a str,
 }
@@ -529,6 +537,7 @@ impl WrappedStoreKey {
         store_id: &str,
         recipient_pubkey: &str,
         activation: Option<MembershipCoord>,
+        generation: u64,
         sealed: Vec<u8>,
         owner: &UserKeypair,
     ) -> Self {
@@ -538,6 +547,7 @@ impl WrappedStoreKey {
             store_id,
             recipient_pubkey,
             activation.as_ref(),
+            generation,
             &author_pubkey,
             &sealed_hex,
         );
@@ -545,6 +555,7 @@ impl WrappedStoreKey {
         WrappedStoreKey {
             author_pubkey,
             activation,
+            generation,
             sealed: sealed_hex,
             signature,
         }
@@ -568,6 +579,7 @@ impl WrappedStoreKey {
             store_id,
             recipient_pubkey,
             self.activation.as_ref(),
+            self.generation,
             &self.author_pubkey,
             &self.sealed,
         );
@@ -590,6 +602,7 @@ fn wrapped_key_signing_payload(
     store_id: &str,
     recipient_pubkey: &str,
     activation: Option<&MembershipCoord>,
+    generation: u64,
     author_pubkey: &str,
     sealed_hex: &str,
 ) -> Vec<u8> {
@@ -597,6 +610,7 @@ fn wrapped_key_signing_payload(
         store_id,
         recipient_pubkey,
         activation,
+        generation,
         author_pubkey,
         sealed: sealed_hex,
     };
@@ -897,7 +911,8 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![1u8, 2, 3, 4, 5];
-        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed.clone(), &owner);
+        let wrapped =
+            WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed.clone(), &owner);
 
         // Round-trips through JSON and yields the sealed bytes back.
         let json = serde_json::to_vec(&wrapped).expect("serialize wrapped key");
@@ -920,7 +935,7 @@ mod tests {
         let pinned_owner = UserKeypair::generate();
         let pinned_owner_hex = hex::encode(pinned_owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed, &signer);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed, &signer);
 
         assert!(
             matches!(
@@ -940,7 +955,7 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed, &owner);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed, &owner);
 
         // The signature binds the store and the recipient slot: changing either
         // at verify time fails, so a key can't be replayed cross-store or
@@ -976,7 +991,7 @@ mod tests {
         let owner_hex = hex::encode(owner.public_key());
         let other_owner_hex = hex::encode(other_owner.public_key());
         let sealed = vec![9u8; 32];
-        let mut wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, sealed, &owner);
+        let mut wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed, &owner);
         assert!(
             wrapped
                 .verify_and_unwrap("lib", "recipient-pk", std::iter::once(owner_hex.as_str()))
@@ -999,11 +1014,35 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_key_rejects_generation_tamper() {
+        let owner = UserKeypair::generate();
+        let owner_hex = hex::encode(owner.public_key());
+        let mut wrapped =
+            WrappedStoreKey::signed("lib", "recipient-pk", None, 3, vec![9u8; 32], &owner);
+
+        // The generation is covered by the signature, so a bucket writer cannot
+        // raise it to wedge a member into pausing under a generation the owner
+        // never committed.
+        wrapped.generation = 99;
+        assert!(
+            matches!(
+                wrapped.verify_and_unwrap(
+                    "lib",
+                    "recipient-pk",
+                    std::iter::once(owner_hex.as_str())
+                ),
+                Err(WrappedKeyError::SignatureMismatch),
+            ),
+            "tampering with the claimed generation invalidates the signature",
+        );
+    }
+
+    #[test]
     fn wrapped_key_malformed_signature_fails_closed() {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let mut wrapped =
-            WrappedStoreKey::signed("lib", "recipient-pk", None, vec![1u8; 4], &owner);
+            WrappedStoreKey::signed("lib", "recipient-pk", None, 1, vec![1u8; 4], &owner);
 
         // A signature that isn't valid hex can't verify against the owner.
         wrapped.signature = "not-hex!!".to_string();
@@ -1025,6 +1064,7 @@ mod tests {
         let mut wrapped = WrappedStoreKey {
             author_pubkey: owner_hex.clone(),
             activation: None,
+            generation: 1,
             sealed: "not-hex!!".to_string(),
             signature: String::new(),
         };
@@ -1032,6 +1072,7 @@ mod tests {
             "lib",
             "recipient-pk",
             wrapped.activation.as_ref(),
+            wrapped.generation,
             &wrapped.author_pubkey,
             &wrapped.sealed,
         );

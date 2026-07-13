@@ -142,6 +142,7 @@ pub async fn sync(
     membership_chain: Option<&MembershipChain>,
     owner_pubkey: Option<&str>,
     cancel: Option<&HostUploadCloud<'_>>,
+    seal_paused: bool,
 ) -> Result<SyncResult, SyncCycleError> {
     // Step 2: apply row-level sync gating. Cut gated-false rows (and their
     // FK-descendants) so they stay local; re-emit a root's full subtree when
@@ -187,7 +188,13 @@ pub async fn sync(
     // local-store cleanup that runs only after the changeset is published.
     let mut deferred_local_blob_drops = Vec::new();
     let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
-    if let Some(ref cs) = outgoing_cs {
+    // A committed store-key rotation this device has not adopted pauses sealing:
+    // skip the inline host-provided blob uploads (and the publishability check) so
+    // nothing is sealed under a superseded generation. The changeset built below
+    // stays queued — the caller does not push it while a rotation is pending — and
+    // its host blobs upload on the first cycle after adoption. Same gate the blob
+    // drain, tombstone drain, and changeset-push paths use in the cycle.
+    if let Some(cs) = outgoing_cs.as_ref().filter(|_| !seal_paused) {
         let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
         let blob_decls = db.blob_decls();
         let publish_blobs = publish_blobs_from_changes(&blob_decls, &changes)?;

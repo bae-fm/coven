@@ -17,7 +17,7 @@ use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation, PENDING_ROTATION_STATE_KEY};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::invite::{
@@ -30,8 +30,8 @@ use crate::sync::membership_ops::{
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    bootstrap_chain, make_linked_entry, open_test_db, pubkey_hex, temp_store_dir, MockSyncStorage,
-    TestCustody,
+    bootstrap_chain, capture_bytes, make_linked_entry, open_test_db, pubkey_hex, temp_store_dir,
+    MockSyncStorage, TestCustody,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
@@ -255,8 +255,17 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     assert_eq!(reunwrapped, new_key.key_bytes());
 }
 
+/// The mid-removal crash state: an owner overwrote this device's wrap with a
+/// rotated keyring whose activation (the Remove entry) is not yet visible, then
+/// crashed before uploading that entry. The device cannot adopt the rotation —
+/// but it holds a working old keyring and must not be wedged. The cycle
+/// COMPLETES: the refresh marks the rotation pending (at the wrap's committed
+/// generation, read from the signed envelope without opening the sealed box),
+/// the pull still applies a peer's changeset, the live cipher is untouched, and
+/// the pause is persisted. Nothing new is sealed — the seal paths are gated on
+/// `rotation_pending`.
 #[tokio::test]
-async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
+async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let victim = UserKeypair::generate();
@@ -264,7 +273,9 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
     let old_key: [u8; 32] = [31u8; 32];
     let rotated_key: [u8; 32] = [32u8; 32];
 
-    let storage = MockSyncStorage::new();
+    // The cloud is the owner's, so a changeset it serves is authored by a member
+    // the pull will authorize against the chain.
+    let storage = MockSyncStorage::with_keypair(owner.clone());
     let mut chain = bootstrap_chain(&owner);
     add_linked_entry(
         &mut chain,
@@ -309,6 +320,20 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
     db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
+
+    // A peer changeset waiting to be pulled, so the cycle proving it "completes"
+    // also proves the pull ran and applied it while sealing was paused.
+    let peer_src = open_test_db();
+    let peer_cs = capture_bytes(
+        &peer_src,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+           VALUES ('peer1', 'FromOwner', NULL, 1, '0000000005000-0000-A', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("owner-device", 1, &peer_cs, db_b.schema_version());
+
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
@@ -324,16 +349,29 @@ async fn inactive_removal_key_aborts_refresh_until_remove_is_visible() {
         &ld_b,
         Some(&ks_b),
     )
-    .await;
+    .await
+    .expect("the cycle completes; an inactive removal key pauses sealing, it does not abort");
 
-    assert!(
-        result.is_err(),
-        "a removal key whose Remove entry is absent must abort the cycle",
+    assert_eq!(
+        result.changesets_applied, 1,
+        "the pull still applies a peer's changeset while sealing is paused",
     );
+    let pending = result
+        .rotation_pending
+        .expect("the inactive removal key marks the rotation pending");
+    assert_eq!(pending.committed_generation, 2);
+    assert_eq!(pending.live_generation, 1);
     assert_eq!(
         cipher_key(&cipher_b),
         old_key,
         "the inactive key must not replace the live cipher",
+    );
+    assert_eq!(
+        db_b.get_sync_state(PENDING_ROTATION_STATE_KEY)
+            .await
+            .unwrap(),
+        Some("2".to_string()),
+        "the pause is persisted so a restart does not forget it and seal under the old generation",
     );
 }
 

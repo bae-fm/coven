@@ -61,6 +61,7 @@ async fn sync_for_test(
         membership.chain.as_ref(),
         membership.pinned_owner.as_deref(),
         None,
+        false,
     )
     .await
 }

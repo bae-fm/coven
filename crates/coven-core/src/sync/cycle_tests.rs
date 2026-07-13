@@ -62,6 +62,13 @@ async fn run_cycle_m(
     .expect("cycle");
 }
 
+async fn make_remote_intent_present(db: &Database, root_table: &str, root_id: &str) -> bool {
+    let (rt, ri) = (root_table.to_string(), root_id.to_string());
+    db.call(move |conn| Database::make_remote_intent_exists(conn, &rt, &ri))
+        .await
+        .expect("make_remote intent lookup")
+}
+
 async fn pending_changeset_count(db: &Database) -> i64 {
     db.call(|conn| {
         conn.query_row("SELECT COUNT(*) FROM pending_changesets", [], |row| {
@@ -989,6 +996,196 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     assert!(
         storage.exists("photos/hponly").await.expect("exists check"),
         "the retried pending changeset uploads the host-provided blob"
+    );
+}
+
+/// A committed store-key rotation this device has not adopted pauses sealing
+/// without taking down the cycle: a pending changeset that references a
+/// host-provided blob stays queued (the inline host-blob upload in
+/// `service::sync` step 3 is gated on `rotation_pending`), the cycle completes,
+/// and the first cycle after adoption publishes the changeset and uploads its
+/// blob. Without the gate this cycle would abort at `cipher_for_seal` before the
+/// pull.
+#[tokio::test]
+async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_store_dir();
+    // The live cipher is generation 1; the cloud has committed generation 2.
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [8u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    host_exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('hponly', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
+        .await
+        .expect("store host-provided blob");
+
+    let pending_rotation = PendingRotation::none();
+    pending_rotation.mark_committed(2);
+
+    run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &pending_rotation,
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    .expect("the cycle completes; a pending rotation pauses sealing, it does not abort");
+
+    assert!(
+        pending_changeset_count(&db).await > 0,
+        "the host-blob changeset stays queued while sealing is paused",
+    );
+    assert!(
+        !storage.exists("photos/hponly").await.expect("exists check"),
+        "no host-provided blob is sealed to the cloud while sealing is paused",
+    );
+
+    // Adoption clears the pause (a fresh, unmarked rotation gate); the first cycle
+    // after publishes the queued changeset and uploads its blob.
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert_eq!(
+        pending_changeset_count(&db).await,
+        0,
+        "the queued changeset publishes on the first cycle after adoption",
+    );
+    assert!(
+        storage.exists("photos/hponly").await.expect("exists check"),
+        "the host-provided blob uploads on the first cycle after adoption",
+    );
+}
+
+/// The sibling of the host-blob-changeset case for the other newly-gated seal
+/// path: a ready host-provided make_remote intent. With a rotation pending,
+/// `complete_host_provided_make_remotes` is skipped — the root's gate does not
+/// flip, its blob is not sealed, and the intent stays queued — yet the cycle
+/// completes. The first cycle after adoption flips the gate, uploads the blob,
+/// and consumes the intent. Without the gate this cycle would abort at
+/// `cipher_for_seal` before the pull.
+#[tokio::test]
+async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_store_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [9u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Release', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    host_exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('hponly', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
+        .await
+        .expect("store host-provided blob");
+    crate::blob::transition::make_remote(
+        &db,
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        "self-uploader",
+        &hlc,
+        "notes",
+        "n1",
+        false,
+    )
+    .await
+    .expect("queue the host-provided make_remote intent");
+
+    let pending_rotation = PendingRotation::none();
+    pending_rotation.mark_committed(2);
+
+    run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &pending_rotation,
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    .expect("the cycle completes; a pending rotation pauses sealing, it does not abort");
+
+    assert_eq!(
+        query_text(
+            &db,
+            "SELECT CAST(shared AS TEXT) FROM notes WHERE id = 'n1'"
+        )
+        .await,
+        "0",
+        "the make_remote gate does not flip while sealing is paused",
+    );
+    assert!(
+        make_remote_intent_present(&db, "notes", "n1").await,
+        "the make_remote intent stays queued while sealing is paused",
+    );
+    assert!(
+        !storage.exists("photos/hponly").await.expect("exists check"),
+        "no host-provided blob is sealed to the cloud while sealing is paused",
+    );
+
+    // Adoption clears the pause; the first cycle after completes the intent.
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert_eq!(
+        query_text(
+            &db,
+            "SELECT CAST(shared AS TEXT) FROM notes WHERE id = 'n1'"
+        )
+        .await,
+        "1",
+        "the make_remote gate flips on the first cycle after adoption",
+    );
+    assert!(
+        !make_remote_intent_present(&db, "notes", "n1").await,
+        "completing the make_remote consumes its intent",
+    );
+    assert!(
+        storage.exists("photos/hponly").await.expect("exists check"),
+        "the host-provided blob uploads on the first cycle after adoption",
     );
 }
 
