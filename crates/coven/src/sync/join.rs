@@ -224,26 +224,38 @@ fn error_if_cancelled(cancel: &watch::Receiver<bool>) -> Result<(), BootstrapErr
     }
 }
 
+/// Both variants carry the store's signing identity, and
+/// `bootstrap_and_save_store` establishes it in the store's own custody as the
+/// last step before the config marker — so a saved config always implies a
+/// resolvable identity. What differs is where the keypair comes from and what
+/// happens to its source afterward: restore's comes from the restore code the
+/// user still holds (re-suppliable, nothing to clean up), join's comes from the
+/// pending slot its request minted — still consumable by a retry after a torn
+/// bootstrap's wipe, and discarded only once the whole join succeeds (see
+/// [`join_store`]).
 pub(crate) enum BootstrapContext<'a> {
-    /// Join pins the store owner from the invite. Its signing identity is a
-    /// *pending* identity (minted for the join request, held in a consumable
-    /// keyring slot); it is promoted into the store's own custody only after
-    /// the whole join commits — see [`join_store`] — so promoting it is not
-    /// part of `bootstrap_and_save_store`'s pre-marker sequence.
-    Join { owner_pubkey: &'a str },
-    /// Restore adopts the owner from the chain founder. Its signing identity
-    /// comes from the restore code the user still holds, so importing it is
-    /// *re-suppliable*: `bootstrap_and_save_store` imports it as the last step
-    /// before the config marker, making a saved config imply a resolvable
-    /// identity.
+    /// Join pins the store owner from the invite.
+    Join {
+        owner_pubkey: &'a str,
+        keypair: &'a UserKeypair,
+    },
+    /// Restore adopts the owner from the chain founder.
     Restore { keypair: &'a UserKeypair },
 }
 
 impl BootstrapContext<'_> {
     fn owner_pubkey(&self) -> Option<&str> {
         match self {
-            BootstrapContext::Join { owner_pubkey } => Some(*owner_pubkey),
+            BootstrapContext::Join { owner_pubkey, .. } => Some(*owner_pubkey),
             BootstrapContext::Restore { .. } => None,
+        }
+    }
+
+    fn keypair(&self) -> &UserKeypair {
+        match self {
+            BootstrapContext::Join { keypair, .. } | BootstrapContext::Restore { keypair } => {
+                keypair
+            }
         }
     }
 }
@@ -548,9 +560,9 @@ pub(crate) async fn join_store(
     let result = async {
         // Load the pending identity this join's request minted (the inviter
         // wrapped the store key for this public key, so join never mints one
-        // of its own). Not yet this store's identity — that happens only once
-        // the whole join succeeds, below — so this reads the pending slot
-        // rather than the store's own (not-yet-established) identity custody.
+        // of its own). Read without consuming: the pending slot must survive a
+        // torn bootstrap's wipe so a retry can re-establish the identity, and
+        // is discarded only once the whole join succeeds, below.
         on_status("Loading keypair...");
         let user_keypair = crate::keys::peek_pending_identity(joiner_public_key_hex)?;
 
@@ -605,6 +617,7 @@ pub(crate) async fn join_store(
             &device_id,
             BootstrapContext::Join {
                 owner_pubkey: &code.owner_pubkey,
+                keypair: &user_keypair,
             },
             &code.membership_floor,
             synced_tables,
@@ -624,28 +637,19 @@ pub(crate) async fn join_store(
 
     match result {
         Ok(config) => {
-            // Promote the pending identity into this store's own identity
-            // custody only now that the join has fully succeeded — mirrors
-            // restore, which imports its signing key only after
-            // `restore_from_cloud` returns `Ok` (see `restore_from_code`).
-            // A promotion failure rolls back everything else the join wrote,
-            // the same as any other post-bootstrap failure.
-            match crate::keys::promote_pending_identity(
-                joiner_public_key_hex,
-                identity_custody.as_ref(),
-            ) {
-                Ok(_) => {
-                    info!("Joined store {} at {}", code.store_id, store_dir.display());
-                    Ok(config)
-                }
-                Err(e) => Err(cleanup_after_bootstrap_failure(
-                    &store_dir,
-                    &store_keys,
-                    custody.as_ref(),
-                    identity_custody.as_ref(),
-                    BootstrapError::Key(e),
-                )),
+            // The store's identity was established in its own custody before
+            // the config marker (see `bootstrap_and_save_store`), so the join
+            // is complete — the pending slot is now a consumed source. Discard
+            // it best-effort: a failed delete leaves a harmless leftover
+            // pending entry (the established identity is what every reader
+            // resolves), never a store whose identity is missing.
+            if let Err(e) = crate::keys::discard_pending_identity(joiner_public_key_hex) {
+                warn!(
+                    "failed to discard the consumed pending identity {joiner_public_key_hex}: {e}"
+                );
             }
+            info!("Joined store {} at {}", code.store_id, store_dir.display());
+            Ok(config)
         }
         Err(err) => Err(cleanup_after_bootstrap_failure(
             &store_dir,
@@ -756,17 +760,16 @@ pub(crate) async fn bootstrap_and_save_store(
             key_service.set_cloud_home_credentials(&credentials)?;
         }
 
-        // Establish restore's signing identity BEFORE the config save, so the
-        // saved config — the completion marker — always implies a resolvable
-        // identity: a crash before the save is a torn bootstrap the retry
-        // clears and re-imports from the restore code the user still holds.
-        // Inside the unit, so a later failure deletes the bootstrap reader the
-        // same as any other. Join's identity is a consumable pending slot
-        // promoted only after the whole join commits (see `join_store`), so it
-        // is deliberately not established here.
-        if let BootstrapContext::Restore { keypair } = &context {
-            crate::keys::import_identity(identity_custody, &keypair.to_keypair_bytes())?;
-        }
+        // Establish the store's signing identity BEFORE the config save, so
+        // the saved config — the completion marker — always implies a
+        // resolvable identity. A crash before the save is a torn bootstrap the
+        // retry clears and re-establishes: from the restore code the user
+        // still holds, or from join's pending slot, which the torn-bootstrap
+        // wipe leaves in place (it is keyed by the request, not the store) and
+        // which is discarded only once the whole join succeeds (see
+        // `join_store`). Inside the unit, so a later failure deletes the
+        // bootstrap reader the same as any other.
+        crate::keys::import_identity(identity_custody, &context.keypair().to_keypair_bytes())?;
 
         // Step 9: Create and save config — the last durable write and the
         // store's completion marker.

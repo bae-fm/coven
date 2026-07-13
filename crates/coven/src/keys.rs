@@ -374,13 +374,14 @@ pub(crate) fn import_identity(
 /// Mint a fresh identity for a join request that has not yet named a store:
 /// the joiner sends its public key before it learns which store the invite
 /// is for (`JoinRequestCode`), so this keypair is generated now and held
-/// under a pending slot keyed by its own public key. [`promote_pending_identity`]
-/// moves it into the joined store's own identity custody once the join
-/// completes; [`discard_pending_identity`] removes it if the request is
-/// abandoned instead. Always the OS keyring: unlike an established store's
-/// identity, there is no store yet to select a custody policy for, and a
-/// pending identity's lifetime is short (a join round trip, not a store's
-/// lifetime).
+/// under a pending slot keyed by its own public key. The join establishes it
+/// in the joined store's own identity custody (via [`import_identity`],
+/// before the store's completion marker) and discards the pending slot only
+/// once the whole join succeeds; [`discard_pending_identity`] also removes it
+/// if the request is abandoned instead. Always the OS keyring: unlike an
+/// established store's identity, there is no store yet to select a custody
+/// policy for, and a pending identity's lifetime is short (a join round trip,
+/// not a store's lifetime).
 pub(crate) fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
     let keypair = UserKeypair::generate();
     write(
@@ -393,9 +394,9 @@ pub(crate) fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
 
 /// Read (without consuming) the pending identity keyed by
 /// `request_public_key_hex` — what a join in progress signs its bootstrap
-/// traffic with, before the join has succeeded and
-/// [`promote_pending_identity`] can run. [`KeyError::NoPendingIdentity`] if
-/// none is held under that key.
+/// traffic with, and what it establishes in the store's own custody before
+/// the completion marker. [`KeyError::NoPendingIdentity`] if none is held
+/// under that key.
 pub(crate) fn peek_pending_identity(request_public_key_hex: &str) -> Result<UserKeypair, KeyError> {
     read_pending_identity_slot(&KeyringSlot::PendingIdentity(
         request_public_key_hex.to_string(),
@@ -416,30 +417,10 @@ fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyErro
     UserKeypair::from_signing_key_bytes(&signing_key)
 }
 
-/// Promote the pending identity keyed by `request_public_key_hex` into
-/// `custody` — the newly-named store's own identity slot — and remove the
-/// pending entry. Persists before deleting: if the delete then fails, the
-/// promoted identity is already safely established and only a harmless
-/// leftover pending entry remains, never the reverse (a deleted pending
-/// entry with nothing established). [`KeyError::NoPendingIdentity`] if no
-/// pending identity is held under that key (already promoted, already
-/// discarded, or never minted).
-pub(crate) fn promote_pending_identity(
-    request_public_key_hex: &str,
-    custody: &dyn DeviceIdentityCustody,
-) -> Result<UserKeypair, KeyError> {
-    let slot = KeyringSlot::PendingIdentity(request_public_key_hex.to_string());
-    let keypair = read_pending_identity_slot(&slot)?;
-
-    custody.persist(&keypair)?;
-    delete(&slot)?;
-    info!("Promoted a pending identity to this store's identity");
-    Ok(keypair)
-}
-
 /// Discard the pending identity keyed by `request_public_key_hex` — a join
-/// request abandoned without ever completing. `Ok` whether or not one was
-/// pending.
+/// request abandoned without completing, or one whose identity the completed
+/// join has already established in the store's own custody. `Ok` whether or
+/// not one was pending.
 pub(crate) fn discard_pending_identity(request_public_key_hex: &str) -> Result<(), KeyError> {
     delete(&KeyringSlot::PendingIdentity(
         request_public_key_hex.to_string(),
@@ -960,19 +941,21 @@ mod tests {
         );
     }
 
-    /// A pending identity minted for a join request is promoted into a
-    /// store's identity custody, and the pending slot no longer serves it —
-    /// the same request can't be promoted twice.
+    /// A pending identity minted for a join request establishes into a store's
+    /// identity custody via `import_identity` while the pending slot still
+    /// serves it — the split the join relies on: establish before the
+    /// completion marker, discard the slot only once the whole join succeeds.
+    /// Re-establishing from the still-present slot is idempotent (the torn-
+    /// bootstrap retry), and the discard afterward empties the slot.
     #[test]
-    fn pending_identity_promotes_into_the_named_stores_custody() {
+    fn pending_identity_establishes_then_discards() {
         test_keyring::install();
         let pending = mint_pending_identity().expect("mint pending identity");
         let request_pubkey = public_key_hex(&pending);
-        let custody = test_identity_custody("pending-identity-promote-test");
+        let custody = test_identity_custody("pending-identity-establish-test");
 
-        let promoted = promote_pending_identity(&request_pubkey, custody.as_ref())
-            .expect("promote the pending identity");
-        assert_eq!(promoted.public_key(), pending.public_key());
+        import_identity(custody.as_ref(), &pending.to_keypair_bytes())
+            .expect("establish the pending identity in store custody");
         assert_eq!(
             require_identity(custody.as_ref())
                 .expect("the store now has an identity")
@@ -980,17 +963,31 @@ mod tests {
             pending.public_key(),
         );
 
-        let error = promote_pending_identity(&request_pubkey, custody.as_ref())
+        // The slot still serves the identity: a retry after a torn bootstrap
+        // (whose wipe removed the store custody) re-establishes from it.
+        let still_pending =
+            peek_pending_identity(&request_pubkey).expect("the pending slot is not yet consumed");
+        import_identity(custody.as_ref(), &still_pending.to_keypair_bytes())
+            .expect("re-establishing the same identity is idempotent");
+
+        discard_pending_identity(&request_pubkey).expect("discard the consumed slot");
+        let error = peek_pending_identity(&request_pubkey)
             .map(|_| ())
-            .expect_err("the same request cannot be promoted twice");
+            .expect_err("the discarded slot no longer serves the identity");
         assert!(
             matches!(error, KeyError::NoPendingIdentity { .. }),
             "{error:?}"
         );
+        assert_eq!(
+            require_identity(custody.as_ref())
+                .expect("the established identity outlives the slot")
+                .public_key(),
+            pending.public_key(),
+        );
     }
 
-    /// An abandoned join request's pending identity is removed and can no
-    /// longer be promoted; discarding is `Ok` even when nothing was pending.
+    /// An abandoned join request's pending identity is removed and no longer
+    /// served; discarding is `Ok` even when nothing was pending.
     #[test]
     fn discard_pending_identity_removes_it_and_is_idempotent() {
         test_keyring::install();
@@ -1001,10 +998,9 @@ mod tests {
         discard_pending_identity(&request_pubkey)
             .expect("discarding an already-absent pending identity is not an error");
 
-        let custody = test_identity_custody("discard-pending-identity-test");
-        let error = promote_pending_identity(&request_pubkey, custody.as_ref())
+        let error = peek_pending_identity(&request_pubkey)
             .map(|_| ())
-            .expect_err("a discarded pending identity cannot be promoted");
+            .expect_err("a discarded pending identity is no longer served");
         assert!(
             matches!(error, KeyError::NoPendingIdentity { .. }),
             "{error:?}"
@@ -1012,7 +1008,7 @@ mod tests {
     }
 
     /// Two concurrent join requests mint distinct pending identities, keyed by
-    /// their own public keys, and promoting one never touches the other.
+    /// their own public keys, and establishing one never touches the other.
     #[test]
     fn two_concurrent_pending_joins_do_not_cross() {
         test_keyring::install();
@@ -1022,16 +1018,15 @@ mod tests {
 
         let custody_a = test_identity_custody("two-concurrent-joins-store-a");
         let custody_b = test_identity_custody("two-concurrent-joins-store-b");
-        promote_pending_identity(&public_key_hex(&pending_a), custody_a.as_ref())
-            .expect("promote a into store a");
+        import_identity(custody_a.as_ref(), &pending_a.to_keypair_bytes())
+            .expect("establish a into store a");
 
         assert!(
             require_identity(custody_b.as_ref()).is_err(),
-            "store b must not see store a's promoted identity",
+            "store b must not see store a's established identity",
         );
-        let promoted_b = promote_pending_identity(&public_key_hex(&pending_b), custody_b.as_ref())
-            .expect("promote b into store b");
-        assert_eq!(promoted_b.public_key(), pending_b.public_key());
+        import_identity(custody_b.as_ref(), &pending_b.to_keypair_bytes())
+            .expect("establish b into store b");
         assert_ne!(
             require_identity(custody_a.as_ref())
                 .expect("store a's identity")

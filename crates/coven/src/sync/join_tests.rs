@@ -576,6 +576,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
     let custody = Arc::new(RecordingCustody::default());
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
+    let joiner_identity = UserKeypair::generate();
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     crate::sync::join::bootstrap_and_save_store(
@@ -587,6 +588,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         "device-b",
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &owner_pk,
+            keypair: &joiner_identity,
         },
         &chain.author_heads(),
         &tables,
@@ -1398,7 +1400,15 @@ struct JoinerFixture {
 async fn joiner_fixture() -> JoinerFixture {
     crate::keys::test_keyring::install();
 
-    let store_id = "join-reader-publish-test".to_string();
+    // Unique per call: the store-scoped keyring identity slot is process-global
+    // in tests, and two fixtures sharing one id would collide on the identity
+    // the bootstrap establishes (import refuses a different keypair for the
+    // same store).
+    static FIXTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let store_id = format!(
+        "join-fixture-store-{}",
+        FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let cloud = crate::InMemoryCloudHome::new();
     let owner_keypair = UserKeypair::generate();
     let master_key = crate::encryption::MasterKeyring::generate();
@@ -1504,6 +1514,7 @@ async fn bootstrap_publishes_the_joiners_head_and_ack() {
     let custody = Arc::new(RecordingCustody::default());
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
+    let joiner_identity = UserKeypair::generate();
 
     crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
@@ -1514,6 +1525,7 @@ async fn bootstrap_publishes_the_joiners_head_and_ack() {
         "device-b",
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
+            keypair: &joiner_identity,
         },
         &f.author_heads,
         &f.tables,
@@ -1554,6 +1566,61 @@ async fn bootstrap_publishes_the_joiners_head_and_ack() {
     );
 }
 
+/// A join's saved config — the completion marker — implies a resolvable signing
+/// identity: the bootstrap establishes the pending identity in the store's own
+/// custody BEFORE the config save. A crash after the save can no longer leave a
+/// completed store whose identity is stuck in the consumable pending slot, which
+/// the marker guard refuses to clear (config present) — a store nothing could
+/// open or retry.
+#[tokio::test]
+async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
+    let f = joiner_fixture().await;
+    let custody = Arc::new(RecordingCustody::default());
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
+    let joiner_identity = UserKeypair::generate();
+
+    crate::sync::join::bootstrap_and_save_store(
+        &f.joiner_storage,
+        &f.cipher,
+        Some(&f.master_key),
+        &f.store_dir,
+        &f.store_id,
+        "device-b",
+        crate::sync::join::BootstrapContext::Join {
+            owner_pubkey: &f.owner_pk,
+            keypair: &joiner_identity,
+        },
+        &f.author_heads,
+        &f.tables,
+        &test_migrations(),
+        &f.join_info,
+        "Joined Store",
+        &f.store_keys,
+        custody.as_ref(),
+        identity_custody.as_ref(),
+        &SystemClock,
+        &|_status: &str| {},
+        &never_cancelled(),
+    )
+    .await
+    .expect("bootstrap succeeds");
+
+    assert!(
+        f.store_dir.config_path().exists(),
+        "the completion marker was written"
+    );
+    let established = identity_custody
+        .unlock()
+        .expect("identity custody unlocks")
+        .expect("a saved config implies the store's identity is already established");
+    assert_eq!(
+        established.public_key(),
+        joiner_identity.public_key(),
+        "the established identity is the join request's pending keypair",
+    );
+}
+
 /// A bootstrap that fails after publishing the reader deletes both the head and
 /// the ack, so a never-completed join leaves no reader pinning a peer's
 /// reclamation. The failure is induced at the custody-persist step, which runs
@@ -1584,6 +1651,7 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
 
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
+    let joiner_identity = UserKeypair::generate();
     let result = crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
         &f.cipher,
@@ -1593,6 +1661,7 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
         "device-b",
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
+            keypair: &joiner_identity,
         },
         &f.author_heads,
         &f.tables,
