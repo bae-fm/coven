@@ -739,10 +739,29 @@ async fn read_head_watermark(db: &Database, author: &str) -> Result<Option<u64>,
     }
 }
 
+/// Persist `seq` as `author`'s head watermark, monotonically: a write at or
+/// below the stored value leaves it untouched. The regression *check* runs
+/// against a read taken earlier, so two concurrent watermark-writing loads (the
+/// cycle's membership load and a user-triggered restore-code floor computation)
+/// can both pass it and then persist out of order — a plain overwrite would let
+/// the lower value land last, and a provider replaying the pre-removal head
+/// below it would then be accepted, the exact rollback the watermark exists to
+/// refuse. The values are unpadded decimal strings, so the guard compares
+/// numerically, never lexically.
 async fn persist_head_watermark(db: &Database, author: &str, seq: u64) -> Result<(), String> {
-    db.set_sync_state(&head_watermark_key(author), &seq.to_string())
-        .await
-        .map_err(|e| format!("persist membership head watermark for {author}: {e}"))
+    let key = head_watermark_key(author);
+    db.call(move |conn| {
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value \
+             WHERE CAST(excluded.value AS INTEGER) > CAST(sync_state.value AS INTEGER)",
+            rusqlite::params![key, seq.to_string()],
+        )
+        .map(|_| ())
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .map_err(|e| format!("persist membership head watermark for {author}: {e}"))
 }
 
 /// Seed this reader's per-author membership-head watermark from `floor` — the
@@ -753,8 +772,8 @@ async fn persist_head_watermark(db: &Database, author: &str, seq: u64) -> Result
 /// refused as a regression — exactly as if this reader had already accepted it.
 ///
 /// Called once, before a join or restore's first sync cycle, on a `db` whose
-/// `sync_state` has no membership watermark yet, so there is nothing to
-/// regress: this is a plain write, not a max-with-existing merge.
+/// `sync_state` has no membership watermark yet; the persist is monotonic
+/// regardless, so a seed can never lower a watermark either.
 pub async fn seed_head_watermark(
     db: &Database,
     floor: &[super::membership::MembershipCoord],
@@ -1311,6 +1330,36 @@ mod tests {
         assert!(members
             .iter()
             .any(|(pk, r)| pk == &second_pk && *r == MemberRole::Owner));
+    }
+
+    /// The durable watermark write is monotonic. Two concurrent watermark-writing
+    /// loads can each pass the in-memory regression check against the old stored
+    /// value and then persist out of order; a plain overwrite would let the lower
+    /// seq land last, and a provider replaying the pre-removal head below it would
+    /// then be accepted. The out-of-order persist must leave the higher value.
+    /// The values are unpadded decimal strings, so this also pins the comparison
+    /// as numeric — lexically, "9" beats "10".
+    #[tokio::test]
+    async fn head_watermark_persist_never_regresses() {
+        use crate::sync::test_helpers::open_test_db;
+
+        let db = open_test_db();
+        let author = "aabbccdd";
+
+        persist_head_watermark(&db, author, 10).await.unwrap();
+        persist_head_watermark(&db, author, 9).await.unwrap();
+        assert_eq!(
+            read_head_watermark(&db, author).await.unwrap(),
+            Some(10),
+            "an out-of-order lower persist must not regress the stored watermark",
+        );
+
+        persist_head_watermark(&db, author, 11).await.unwrap();
+        assert_eq!(
+            read_head_watermark(&db, author).await.unwrap(),
+            Some(11),
+            "a higher persist still advances it",
+        );
     }
 
     /// A reader that has accepted a head at some seq refuses a later read whose seq
