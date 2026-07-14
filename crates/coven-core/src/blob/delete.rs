@@ -81,7 +81,7 @@ fn tombstone_key(cloud_key: &str, suffix: &str) -> String {
 }
 
 /// The uploader segment of the current hashed generated layout
-/// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`, used to scope
+/// `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`, used to scope
 /// reclaim to a member prefix. Plain generated keys return `None` because their
 /// uploader segment is provenance inside a browsable layout, not a member ACL
 /// prefix. The parser accepts only the current hashed layout.
@@ -294,26 +294,36 @@ pub async fn drain_tombstones(
         .await
         .map_err(|e| format!("Failed to get pending deletes: {e}"))?;
 
+    let deletes = deletes
+        .into_iter()
+        .map(|entry| {
+            let last_attempt = entry
+                .last_attempt_at
+                .as_deref()
+                .map(|last| {
+                    chrono::DateTime::parse_from_rfc3339(last)
+                        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+                        .map_err(|error| {
+                            format!(
+                                "delete outbox entry {} has invalid last_attempt_at {last:?}: {error}",
+                                entry.id
+                            )
+                        })
+                })
+                .transpose()?;
+            Ok((entry, last_attempt))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
     let now = clock.now();
     let now_rfc = now.to_rfc3339();
     let suffix = cipher.snapshot().suffix();
     let mut count = 0;
-    for entry in deletes {
-        if let Some(last) = entry.last_attempt_at.as_deref() {
-            match chrono::DateTime::parse_from_rfc3339(last) {
-                Ok(last_dt) => {
-                    let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
-                    if elapsed < crate::blob::upload::backoff_window(entry.attempt_count) {
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    // Don't strand a deletion on a corrupt timestamp; log and retry.
-                    warn!(
-                        "Delete outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
-                        entry.id
-                    );
-                }
+    for (entry, last_attempt) in deletes {
+        if let Some(last) = last_attempt {
+            let elapsed = now.signed_duration_since(last);
+            if elapsed < crate::blob::upload::backoff_window(entry.attempt_count) {
+                continue;
             }
         }
 

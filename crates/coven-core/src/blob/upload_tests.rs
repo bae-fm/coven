@@ -96,11 +96,12 @@ async fn insert_upload(
     attempt_count: i64,
     last_attempt_at: Option<String>,
 ) {
-    let expected_hash = source_path
-        .as_deref()
-        .and_then(|path| std::fs::read(path).ok())
-        .map(|bytes| crate::blob::content_hash(&bytes))
-        .unwrap_or_else(|| crate::blob::content_hash(b"missing-source"));
+    let expected_hash = match source_path.as_deref() {
+        Some(path) => {
+            crate::blob::content_hash(&std::fs::read(path).expect("read upload fixture source"))
+        }
+        None => crate::blob::content_hash(b"missing-source"),
+    };
     let (file_id, cloud_key) = (file_id.to_string(), cloud_key.to_string());
     let scope = crate::blob::BlobScope::Master.to_outbox_str();
     db.call(move |conn| {
@@ -126,6 +127,22 @@ async fn insert_upload(
     })
     .await
     .expect("insert outbox upload");
+}
+
+#[tokio::test]
+#[should_panic(expected = "read upload fixture source")]
+async fn upload_fixture_fails_when_its_declared_source_cannot_be_read() {
+    let db = open_outbox_db();
+    insert_upload(
+        &db,
+        1,
+        "fid",
+        "key",
+        Some("/path/that/does/not/exist".to_string()),
+        0,
+        None,
+    )
+    .await;
 }
 
 /// Read back `(attempt_count, last_error, last_attempt_at)` for an entry, or
@@ -389,10 +406,9 @@ fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String
 async fn bad_item_does_not_block_good_later_item() {
     let tmp = tempfile::tempdir().unwrap();
     let good_path = write_temp_file(tmp.path(), "good.bin", b"good-bytes");
-    let missing_path = tmp.path().join("missing.bin").to_string_lossy().to_string();
 
     let db = open_outbox_db();
-    insert_upload(&db, 1, "fa", "key-a", Some(missing_path), 0, None).await; // read fails
+    insert_upload(&db, 1, "fa", "key-a", None, 0, None).await; // absent source fixture
     insert_upload(&db, 2, "fb", "key-b", Some(good_path), 0, None).await; // uploads fine
     let cloud = InMemoryCloudHome::new();
     let observer = RecordingObserver::new();
@@ -1037,7 +1053,7 @@ async fn a_failed_pin_populate_keeps_the_upload_queued() {
     let cloud_key = "release_files/pi/nf/pinfail1";
 
     // Block the populate: the pinned blob path is
-    // storage/pinned/<namespace>/{ab}/{cd}/<id>; plant a regular FILE at the {ab}
+    // storage/pinned/<namespace>/{ab}/{cd}/<id>/<content_hash>; plant a regular FILE at the {ab}
     // level so creating the {ab}/{cd} shard directory fails, and with it the atomic
     // write into pinned/.
     let pinned_path = ld
@@ -1313,10 +1329,9 @@ async fn concurrent_drain_isolates_a_failed_upload() {
     let db = open_outbox_db_with_uploads(3);
     // Entry 2's source file is missing, so its read fails; 1 and 3 upload fine.
     let good_a = write_temp_file(tmp.path(), "a.bin", b"aaa");
-    let missing = tmp.path().join("missing.bin").to_string_lossy().to_string();
     let good_c = write_temp_file(tmp.path(), "c.bin", b"ccc");
     insert_upload(&db, 1, "fa", "ka", Some(good_a), 0, None).await;
-    insert_upload(&db, 2, "fb", "kb", Some(missing), 0, None).await;
+    insert_upload(&db, 2, "fb", "kb", None, 0, None).await;
     insert_upload(&db, 3, "fc", "kc", Some(good_c), 0, None).await;
     let cloud = InMemoryCloudHome::new();
 

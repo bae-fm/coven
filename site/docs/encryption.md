@@ -176,7 +176,7 @@ bucket sees the actual files instead of ciphertext.
 - An **opaque home** (`storage: opaque`, the default) seals every object under
   the store key and stores it with the `.enc` suffix, and keys each blob by its
   generated path
-  `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. Anyone with bucket access
+  `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`. Anyone with bucket access
   sees only ciphertext under opaque keys.
 - A **browsable home** (`storage: browsable`) stores every object verbatim with
   no `.enc` suffix (bare names like `snapshot/{author}/{seq}.db`,
@@ -226,7 +226,7 @@ The two kinds of home at a glance:
 | Blob-path scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
 | Object bytes at rest | sealed (XChaCha20-Poly1305) | verbatim |
 | Object-key suffix | `.enc` | none |
-| Blob key | `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}` | `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` |
+| Blob key | `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}` | `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` |
 | Sharing (invite / remove member) | available | error |
 
 ## Chunked encryption

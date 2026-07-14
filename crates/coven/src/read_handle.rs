@@ -152,9 +152,8 @@ impl CovenReadHandle {
     /// A cloud fetch writes the fetched bytes into the per-device cache
     /// (`storage/cache/`) with an atomic temp-then-rename — device scratch, no synced
     /// state touched — so a File Provider materializing remote content works through a
-    /// read-only handle. It records no db rows: the uploader-index write the writer's
-    /// read path makes to skip a later listing scan is skipped for a read-only handle,
-    /// which re-scans instead.
+    /// read-only handle. The exact immutable cloud location comes from the database
+    /// snapshot; the read performs no cloud listing.
     pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
         crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await

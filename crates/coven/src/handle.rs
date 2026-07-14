@@ -738,7 +738,7 @@ impl CovenHandle {
     }
 
     /// The exact immutable cloud object key recorded for a blob. The hashed layout is
-    /// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`;
+    /// `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`;
     /// the plain layout is
     /// `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`.
     /// Coven owns this derivation — the host passes a [`BlobRef`] and never

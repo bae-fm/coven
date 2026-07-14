@@ -266,7 +266,7 @@ choice set when the home is created:
   and stores it with the `.enc` suffix (`changes/{device}/{seq}.enc`,
   `heads/{device}.json.enc`, `snapshot/{author}/{seq}.db.enc`,
   `snapshot/current.json.enc`, ...), and keys each blob by its generated path
-  `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. A provider sees `changes/dev1/42.enc` and a
+  `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`. A provider sees `changes/dev1/42.enc` and a
   blob of ciphertext under an opaque key; it never sees a todo title or an
   attachment's bytes.
 - A **browsable** home stores every object verbatim and drops the suffix, so the

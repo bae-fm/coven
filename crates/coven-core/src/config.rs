@@ -39,7 +39,7 @@ impl CloudProvider {
 ///
 /// - `Opaque` (the default): every object is encrypted at rest under the store
 ///   key (the `.enc` suffix) and blobs use the immutable generated path
-///   `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. Anyone
+///   `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`. Anyone
 ///   with bucket access sees only ciphertext under opaque keys. Sharing a store
 ///   (inviting members) requires an opaque home, because it wraps and rotates the
 ///   store key.

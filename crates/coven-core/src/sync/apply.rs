@@ -62,8 +62,8 @@ pub(crate) struct BlobLocationAssignment {
 
 /// Apply `bytes` to `conn`, resolving conflicts (premerge + row arbitration),
 /// building the [`TableSchema`] from `tables` once. A convenience wrapper over
-/// [`resolve_and_apply_changeset_with_schema`] for callers that apply a single
-/// changeset and don't already hold a schema (tests, snapshot round-trips).
+/// Callers use this when they apply a single changeset and don't already hold a
+/// schema (tests, snapshot round-trips).
 ///
 /// `receiver_wall_ms` is the receiver's current wall-clock millis, against which
 /// a grossly-future incoming `_updated_at` is refused (see [`arbitrate_row_conflict`]).
@@ -76,31 +76,11 @@ pub fn resolve_and_apply_changeset(
 ) -> Result<ApplyResult, DbError> {
     let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
     let schema = Arc::new(TableSchema::from_db(conn, &table_refs)?);
-    resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms, &[])
+    apply_in_owned_transaction(conn, bytes, schema, receiver_wall_ms, &[])
 }
 
-/// Apply `bytes` to `conn`, resolving conflicts against a pre-built
-/// [`TableSchema`]: a column-level premerge of losing UPDATEs
-/// ([`premerge_losing_update_columns`]) followed by an apply whose conflict
-/// closure arbitrates every remaining row collision. Non-FK constraint conflicts
-/// abort and roll back the whole transaction.
-///
-/// The schema's per-table `_updated_at` column index map is derived once (from
-/// the live schema, so future migrations that add columns are safe) and reused
-/// across every changeset in a pull, rather than re-querying `PRAGMA table_info`
-/// per changeset. The conflict closure resolves each conflicting row's table from
-/// its operation and decides REPLACE/OMIT by comparing `_updated_at`;
-/// FK violations flip a shared flag for the caller to retry; non-FK constraint
-/// conflicts are collected so the caller can surface the rejected changeset.
-///
-/// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
-/// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
-/// wall-clock millis, read once by the caller and moved into the closure to bound
-/// a grossly-future incoming `_updated_at` (see [`arbitrate_row_conflict`]).
-/// `blob_uploads` binds each exact immutable location to the signed row version
-/// that references it. After conflict resolution, only a winning row version may
-/// record its location. Callers with no blobs to record pass an empty slice.
-pub(crate) fn resolve_and_apply_changeset_with_schema(
+#[cfg(any(test, feature = "test-utils"))]
+fn apply_in_owned_transaction(
     conn: &Connection,
     bytes: &[u8],
     schema: Arc<TableSchema>,
@@ -121,6 +101,17 @@ pub(crate) fn resolve_and_apply_changeset_with_schema(
         tx.commit().map_err(DbError::from)?;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_and_apply_changeset_with_schema(
+    conn: &Connection,
+    bytes: &[u8],
+    schema: Arc<TableSchema>,
+    receiver_wall_ms: u64,
+    blob_uploads: &[BlobLocationAssignment],
+) -> Result<ApplyResult, DbError> {
+    apply_in_owned_transaction(conn, bytes, schema, receiver_wall_ms, blob_uploads)
 }
 
 /// Apply one changeset on a connection whose transaction boundary belongs to the

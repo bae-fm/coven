@@ -784,10 +784,9 @@ async fn delete_write_failure_backs_off_then_retries() {
     );
 }
 
-/// Corrupt local retry metadata must not strand a delete row. The drain logs the
-/// timestamp parse failure and retries the row.
+/// Corrupt durable retry metadata aborts the drain before any cloud mutation.
 #[tokio::test]
-async fn corrupt_delete_backoff_timestamp_does_not_strand_the_row() {
+async fn corrupt_delete_backoff_timestamp_fails_without_cloud_mutation() {
     let db = open_outbox_db();
     let inner = InMemoryCloudHome::new();
     let cloud = FailCloudOpOnKey::new(&inner, FailingCloudOp::Read, "blob_tombstones/blob-key", 1);
@@ -821,7 +820,7 @@ async fn corrupt_delete_backoff_timestamp_does_not_strand_the_row() {
     .expect("corrupt last_attempt_at");
 
     let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = drain_tombstones(
+    let error = drain_tombstones(
         &db,
         &cloud,
         &cipher,
@@ -831,12 +830,19 @@ async fn corrupt_delete_backoff_timestamp_does_not_strand_the_row() {
         &inside,
     )
     .await
-    .expect("corrupt timestamp drain");
-    assert_eq!(n, 1, "the corrupt timestamp does not suppress the retry");
-    assert_eq!(cloud.matching_calls(), 2);
+    .expect_err("corrupt durable retry timestamp must fail the drain");
     assert!(
-        get_delete(&db, 1).await.is_none(),
-        "the retried delete row clears after the tombstone is present",
+        error.contains("last_attempt_at"),
+        "error names the malformed durable field: {error}",
+    );
+    assert_eq!(
+        cloud.matching_calls(),
+        1,
+        "the failed drain performs no cloud mutation",
+    );
+    assert!(
+        get_delete(&db, 1).await.is_some(),
+        "the failed drain retains the queue row",
     );
 }
 

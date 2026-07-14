@@ -1968,6 +1968,48 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
 }
 
 #[tokio::test]
+async fn cache_lazy_blob_with_inconsistent_signed_content_is_not_applied() {
+    let storage = MockSyncStorage::new();
+    let decl = BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy);
+    let source = open_test_db_with_blob(decl.clone());
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"AUDIO-PAYLOAD"),
+            ),
+        ],
+    )
+    .await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &changeset,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
+            "audio",
+            "audio1",
+            test_blob_location(&storage.own_uploader().expect("storage uploader"), 1000),
+            b"FORGED-CONTENT",
+        )],
+    );
+
+    let destination = open_test_db_with_blob(decl);
+    let (updated, result) = pull_into(&destination, &storage, "dev2", &temp_store_dir().1).await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(updated.get("dev1"), None, "cursor remains before bad data");
+    assert!(
+        !row_exists(&destination, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "the inconsistent signed blob record prevents the whole changeset apply",
+    );
+}
+
+#[tokio::test]
 async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() {
     let storage = MockSyncStorage::new();
     let db = open_test_db_with_blob(BlobDecl::new(

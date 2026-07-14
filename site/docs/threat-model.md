@@ -186,7 +186,7 @@ one store it names.
 
 ## Accepted risks
 
-Four positions are worth stating on their own, as deliberate scope decisions
+Three positions are worth stating on their own, as deliberate scope decisions
 rather than gaps to close later.
 
 **Credential revocation runs before the removal commits.** Removing a member
@@ -198,18 +198,6 @@ retries, which converges. The ordering is deliberate: locked-out-but-listed is
 the safe direction (the alternative window, removed-but-credentialed, hands a
 just-revoked member live storage access), the failure is loud to the initiator,
 and retrying the removal is idempotent.
-
-**A peer's tombstone GC can outrace a re-upload's cancel.** When a blob is
-re-uploaded to a cloud key whose deletion tombstone has already passed its grace
-(seven days), the re-uploader cancels the tombstone — but a *peer* whose database
-has seen the deletion and not yet the re-share judges the blob dead, and its GC
-can reclaim it before the cancel lands. The device-local pending-cancel gate
-cannot cover this: it lives in each device's own database. The grace period is
-the bound — the race needs a tombstone already past it at re-upload time — and
-the failure is loud, never silent: the re-uploader's push refuses to publish a
-row whose blob is missing remotely and retries every cycle. Hosts that write new
-content at new (content-addressed or versioned) blob keys never re-enter a
-tombstoned key and avoid the race entirely.
 
 **The member list display is not anchored.**
 [`get_members`](rustdoc:fn:coven::CovenHandle::get_members) loads the chain

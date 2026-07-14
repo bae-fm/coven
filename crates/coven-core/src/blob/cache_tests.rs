@@ -1694,7 +1694,7 @@ fn set_cache_mtime(
         .expect("set cache file mtime");
 }
 
-/// Stage `bytes` into `cache/<namespace>/<id>` with a fixed modification time, with
+/// Stage `bytes` into `cache/<namespace>/{ab}/{cd}/<id>/<content_hash>` with a fixed modification time, with
 /// NO budget set so the stage itself never evicts. Builds the over-budget cache a
 /// later eviction test then trims.
 async fn stage_with_mtime(

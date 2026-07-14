@@ -21,7 +21,8 @@ use tracing::error;
 
 use crate::blob::decl::BlobDecls;
 use crate::db::{
-    apply_coven_schema, is_reserved_table_name, ExternalBlob, OutboxEntry, OutboxOperation,
+    apply_coven_schema, has_coven_schema, is_reserved_table_name, validate_coven_schema,
+    ExternalBlob, OutboxEntry, OutboxOperation,
 };
 use crate::migration::{run_migrations, Migration, MigrationError};
 use crate::sync::gate::{self, Gates};
@@ -215,8 +216,11 @@ impl DatabaseCore {
         // The two are kept separate by sync-visibility: coven's bookkeeping rows
         // are stripped on snapshot, so a versioned ledger can't track them; the
         // host's synced ladder version rides inside the snapshot's DB header.
+        if has_coven_schema(&conn).map_err(DbError)? {
+            validate_coven_schema(&conn).map_err(DbError)?;
+        }
         apply_coven_schema(&conn).map_err(DbError::from)?;
-        validate_published_blob_drop_intents_schema(&conn)?;
+        validate_coven_schema(&conn).map_err(DbError)?;
         let schema_version = run_migrations(&conn, migrations)?;
 
         // Enforce the synced-table contract against the live host schema: each
@@ -291,6 +295,8 @@ impl DatabaseCore {
         // writer's relational view. A read never inserts, so it enforces nothing new.
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
+
+        validate_coven_schema(&conn).map_err(DbError)?;
 
         // Open against the on-disk schema exactly as the writer left it: run no
         // migration ladder (that writes), but refuse a schema newer than this binary
@@ -2047,37 +2053,6 @@ fn open_connection(path: &Path) -> Result<Connection, DbError> {
     )
 }
 
-fn validate_published_blob_drop_intents_schema(conn: &Connection) -> Result<(), DbError> {
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(published_blob_drop_intents)")
-        .map_err(DbError::from)?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)? != 0,
-                row.get::<_, i64>(5)?,
-            ))
-        })
-        .map_err(DbError::from)?;
-    let actual = rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)?;
-    let expected = vec![
-        ("seq".to_string(), "INTEGER".to_string(), true, 1),
-        ("namespace".to_string(), "TEXT".to_string(), true, 2),
-        ("blob_id".to_string(), "TEXT".to_string(), true, 3),
-        ("size".to_string(), "INTEGER".to_string(), true, 0),
-        ("content_hash".to_string(), "TEXT".to_string(), true, 4),
-        ("disposition".to_string(), "TEXT".to_string(), true, 0),
-    ];
-    if actual != expected {
-        return Err(DbError(format!(
-            "published_blob_drop_intents has a non-current schema; expected required size and content_hash columns, found {actual:?}"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2272,6 +2247,178 @@ mod tests {
         assert!(
             !columns.iter().any(|column| column == "size"),
             "a rejected open must not rewrite the non-current schema",
+        );
+    }
+
+    fn open_bookkeeping_fixture(path: &Path) -> Connection {
+        let conn = Connection::open(path).expect("open bookkeeping fixture");
+        apply_coven_schema(&conn).expect("create current bookkeeping schema");
+        conn
+    }
+
+    fn writer_open_error(path: &Path) -> String {
+        match Database::open(
+            path,
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "bookkeeping-schema-test".to_string(),
+            &[],
+        ) {
+            Ok(_) => panic!("writer open accepted a non-current bookkeeping schema"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn database_open_rejects_an_obsolete_column_on_every_bookkeeping_table() {
+        for table in crate::db::table_names() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join(format!("{table}.sqlite"));
+            let conn = open_bookkeeping_fixture(&path);
+            conn.execute_batch(&format!(
+                "ALTER TABLE {} ADD COLUMN obsolete TEXT",
+                crate::sync::session::quote_ident(table),
+            ))
+            .expect("add obsolete bookkeeping column");
+            drop(conn);
+
+            let error = writer_open_error(&path);
+            assert!(
+                error.contains(table) && error.contains("obsolete"),
+                "writer open names {table}'s obsolete column: {error}",
+            );
+
+            let conn = Connection::open(&path).expect("reopen rejected fixture");
+            let obsolete_columns = conn
+                .prepare(&format!(
+                    "PRAGMA table_info({})",
+                    crate::sync::session::quote_ident(table),
+                ))
+                .expect("prepare table info")
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("query table info")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect table columns");
+            assert!(
+                obsolete_columns.iter().any(|column| column == "obsolete"),
+                "rejected open must not rewrite {table}",
+            );
+        }
+    }
+
+    #[test]
+    fn database_open_rejects_an_unexpected_index_on_every_bookkeeping_table() {
+        for table in crate::db::table_names() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join(format!("{table}.sqlite"));
+            let conn = open_bookkeeping_fixture(&path);
+            let first_column: String = conn
+                .query_row(
+                    &format!(
+                        "PRAGMA table_info({})",
+                        crate::sync::session::quote_ident(table),
+                    ),
+                    [],
+                    |row| row.get(1),
+                )
+                .expect("read first bookkeeping column");
+            let index = format!("obsolete_{table}_index");
+            conn.execute_batch(&format!(
+                "CREATE INDEX {} ON {} ({})",
+                crate::sync::session::quote_ident(&index),
+                crate::sync::session::quote_ident(table),
+                crate::sync::session::quote_ident(&first_column),
+            ))
+            .expect("create unexpected bookkeeping index");
+            drop(conn);
+
+            let error = writer_open_error(&path);
+            assert!(
+                error.contains(table) && error.contains(&index),
+                "writer open names {table}'s unexpected index: {error}",
+            );
+        }
+    }
+
+    #[test]
+    fn database_open_rejects_changed_bookkeeping_shapes() {
+        let cases = [
+            (
+                "local_cleanup_intents",
+                "CREATE TABLE local_cleanup_intents (
+                    namespace TEXT NOT NULL,
+                    blob_id TEXT NOT NULL,
+                    PRIMARY KEY (namespace, blob_id)
+                ) STRICT;",
+            ),
+            (
+                "blob_uploaders",
+                "CREATE TABLE blob_uploaders (
+                    namespace TEXT NOT NULL,
+                    blob_id TEXT NOT NULL,
+                    uploader TEXT,
+                    PRIMARY KEY (namespace, blob_id)
+                ) STRICT;",
+            ),
+            (
+                "cloud_outbox",
+                "CREATE TABLE cloud_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete', 'cancel')),
+                    file_id TEXT,
+                    cloud_key TEXT NOT NULL,
+                    source_path TEXT,
+                    scope TEXT,
+                    retain_pinned INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    attempt_count INTEGER DEFAULT 0,
+                    last_error TEXT,
+                    last_attempt_at TEXT,
+                    UNIQUE(operation, cloud_key)
+                ) STRICT;",
+            ),
+        ];
+
+        for (table, sql) in cases {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join(format!("{table}.sqlite"));
+            let conn = Connection::open(&path).expect("open stale fixture");
+            conn.execute_batch(sql).expect("create stale table shape");
+            drop(conn);
+
+            let error = writer_open_error(&path);
+            assert!(
+                error.contains(table),
+                "writer open names changed {table} schema: {error}",
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn read_only_open_rejects_non_current_bookkeeping_schema() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("read-only-stale.sqlite");
+        let conn = open_bookkeeping_fixture(&path);
+        conn.execute_batch("ALTER TABLE sync_state ADD COLUMN obsolete TEXT")
+            .expect("add obsolete column");
+        drop(conn);
+
+        let error = match Database::open_read_only(
+            &path,
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "read-only-bookkeeping-schema-test".to_string(),
+            &[],
+        ) {
+            Ok(_) => panic!("read-only open accepted a non-current bookkeeping schema"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("sync_state") && error.contains("obsolete"),
+            "read-only open names the obsolete bookkeeping shape: {error}",
         );
     }
 

@@ -150,6 +150,142 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     Ok(())
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct SchemaObject {
+    kind: String,
+    name: String,
+    table: String,
+    sql: Option<String>,
+}
+
+/// Whether the database already contains any part of coven's bookkeeping
+/// schema. A database with none is a fresh store; a database with any must have
+/// the complete current schema before open is allowed to touch it.
+pub(crate) fn has_coven_schema(conn: &rusqlite::Connection) -> Result<bool, String> {
+    for table in table_names() {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("inspect bookkeeping schema for {table}: {error}"))?;
+        if exists {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Require every coven-owned table and index to match the schema produced by
+/// [`apply_coven_schema`]. This deliberately has no migration path: a partly old,
+/// partly new bookkeeping schema cannot be interpreted without guessing which
+/// invariants its rows satisfy.
+pub(crate) fn validate_coven_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+    let expected_conn = rusqlite::Connection::open_in_memory()
+        .map_err(|error| format!("open current bookkeeping schema fixture: {error}"))?;
+    apply_coven_schema(&expected_conn)
+        .map_err(|error| format!("create current bookkeeping schema fixture: {error}"))?;
+
+    let expected = schema_objects(&expected_conn)?;
+    let actual = schema_objects(conn)?;
+    if expected == actual {
+        return Ok(());
+    }
+
+    for found in &actual {
+        match expected
+            .iter()
+            .find(|candidate| candidate.kind == found.kind && candidate.name == found.name)
+        {
+            None => {
+                return Err(format!(
+                    "bookkeeping schema is non-current: unexpected {} {} for table {}: {found:?}",
+                    found.kind, found.name, found.table
+                ));
+            }
+            Some(object) if found != object => {
+                return Err(format!(
+                    "bookkeeping schema is non-current at {} {} for table {}; expected {object:?}, found {found:?}",
+                    object.kind, object.name, object.table
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let missing = expected
+        .iter()
+        .find(|object| {
+            !actual
+                .iter()
+                .any(|candidate| candidate.kind == object.kind && candidate.name == object.name)
+        })
+        .expect("unequal schemas contain a missing object");
+    Err(format!(
+        "bookkeeping schema is non-current: missing {} {} for table {}; expected {missing:?}",
+        missing.kind, missing.name, missing.table
+    ))
+}
+
+fn schema_objects(conn: &rusqlite::Connection) -> Result<Vec<SchemaObject>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_schema
+             WHERE type IN ('table', 'index')
+             ORDER BY type, name",
+        )
+        .map_err(|error| format!("prepare bookkeeping schema inspection: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SchemaObject {
+                kind: row.get(0)?,
+                name: row.get(1)?,
+                table: row.get(2)?,
+                sql: row
+                    .get::<_, Option<String>>(3)?
+                    .map(|sql| canonical_sql(&sql)),
+            })
+        })
+        .map_err(|error| format!("inspect bookkeeping schema: {error}"))?;
+
+    let mut objects = Vec::new();
+    for row in rows {
+        let object = row.map_err(|error| format!("read bookkeeping schema: {error}"))?;
+        if is_reserved_table_name(&object.table) {
+            objects.push(object);
+        }
+    }
+    Ok(objects)
+}
+
+fn canonical_sql(sql: &str) -> String {
+    let mut canonical = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        if !quoted && ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            for comment in chars.by_ref() {
+                if comment == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '\'' {
+            quoted = !quoted;
+            canonical.push(ch);
+        } else if quoted {
+            canonical.push(ch);
+        } else if !ch.is_whitespace() {
+            canonical.extend(ch.to_lowercase());
+        }
+    }
+    canonical
+}
+
 /// Whether `name` is a table coven owns for sync bookkeeping. Hosts may not
 /// declare these as synced tables.
 pub(crate) fn is_reserved_table_name(name: &str) -> bool {
@@ -168,7 +304,6 @@ pub(crate) fn is_reserved_table_name(name: &str) -> bool {
 /// The name of every table [`apply_coven_schema`] creates, for a test to assert a
 /// schema property (STRICT) holds across all of them without re-listing the set
 /// by hand.
-#[cfg(test)]
 pub(crate) fn table_names() -> Vec<&'static str> {
     let mut names = Vec::new();
     macro_rules! collect_name {

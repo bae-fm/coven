@@ -9,7 +9,7 @@
 /// ```text
 /// changes/{device_id}/{seq}{suffix}              -- changeset envelopes
 /// heads/{device_id}.json{suffix}                 -- head pointers
-/// {namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation} -- generated hashed blob
+/// {namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation} -- generated hashed blob
 /// {namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path} -- generated plain blob
 /// snapshot/{author}/{publish_id}.db{suffix}      -- a generation's full DB snapshot
 /// snapshot/{author}/{publish_id}_meta.json{suffix} -- a generation's per-device cursors
@@ -194,7 +194,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
 
     /// Upload a blob at its immutable [`CloudBlobLocation`](crate::blob::CloudBlobLocation).
     /// The hashed scheme uses
-    /// `{namespace}/{uploader}/.coven-generations/{id[0..2]}/{id[2..4]}/{id}/{generation}`
+    /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}/generations/{generation}`
     /// (`cloud_path` ignored). The plain scheme uses
     /// `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` so the
     /// consumer-supplied suffix remains browsable; a missing `cloud_path` is an

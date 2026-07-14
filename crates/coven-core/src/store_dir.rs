@@ -269,11 +269,11 @@ impl StoreDir {
     }
 
     /// The cloud object key for a Hashed-scheme blob under the device that
-    /// uploaded it: `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. The `{uploader}`
+    /// uploaded it: `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`. The `{uploader}`
     /// segment is what aligns the blob keyspace to the storage-access rule (a
     /// member writes only under its own public key), so a bucket ACL can scope each
     /// member to `{namespace}/{self}/`. Only the *cloud* key carries it; the local
-    /// cache keeps the un-prefixed `{namespace}/{ab}/{cd}/{id}` layout because it is
+    /// cache keeps the un-prefixed `{namespace}/{ab}/{cd}/{id}/{content_hash}` layout because it is
     /// per-device. `namespace` and `uploader` are validated as single path tokens;
     /// the id must be indexable (see [`Self::id_shard`]).
     pub fn generated_blob_key(
@@ -292,13 +292,13 @@ impl StoreDir {
             return Err(PathTokenError::InvalidGeneration);
         }
         Ok(format!(
-            "{namespace}/{uploader}/.coven-generations/{}/{generation}",
+            "{namespace}/{uploader}/{}/generations/{generation}",
             Self::id_shard(id)?
         ))
     }
 
     /// Parse a hashed blob cloud key
-    /// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`
+    /// `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`
     /// back into `(namespace, uploader, id, generation)`, or `None` when it is not
     /// one — a wrong
     /// segment count, or a shard that does not rebuild (including a plain generated
@@ -308,7 +308,7 @@ impl StoreDir {
     pub fn parse_generated_blob_key(cloud_key: &str) -> Option<(String, String, String, String)> {
         let parts: Vec<_> = cloud_key.split('/').collect();
         let (namespace, uploader, _ab, _cd, id, generation) = match parts.as_slice() {
-            [namespace, uploader, ".coven-generations", ab, cd, id, generation]
+            [namespace, uploader, ab, cd, id, "generations", generation]
                 if generation.len() == 64
                     && generation
                         .bytes()
@@ -400,7 +400,7 @@ impl StoreDir {
     }
 
     /// coven's own copy of a **host-provided Local** blob version:
-    /// `storage/local/<namespace>/<id>/<content_hash>`. This is NOT a cache copy — it is the blob's
+    /// `storage/local/<namespace>/{ab}/{cd}/<id>/<content_hash>`. This is NOT a cache copy — it is the blob's
     /// home while its release is Local (a host-provided blob has no user path). It
     /// is never evicted: the budget sweep walks only [`Self::cache_dir`], never
     /// `storage/local`. `namespace` and `id` are validated as single path tokens;
@@ -574,10 +574,16 @@ mod tests {
             )),
         );
         assert_eq!(
-            StoreDir::parse_generated_blob_key(
-                "photos/aa11/.coven-generations/aa/bb/aabbccdd/not-hex"
-            ),
+            StoreDir::parse_generated_blob_key("photos/aa11/aa/bb/aabbccdd/generations/not-hex"),
             None,
+        );
+        assert_eq!(
+            StoreDir::parse_generated_blob_key(&format!(
+                "photos/aa11/.coven-generations/aa/bb/aabbccdd/{}",
+                "a".repeat(64),
+            )),
+            None,
+            "the previous generated layout is not a compatibility input",
         );
     }
 

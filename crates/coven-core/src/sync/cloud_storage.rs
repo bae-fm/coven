@@ -315,7 +315,7 @@ pub async fn persist_pending_rotation(
 #[derive(Clone, Copy)]
 pub enum BlobPathScheme {
     /// Generated hashed path
-    /// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`.
+    /// `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`.
     Hashed,
     /// Generated plain path
     /// `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`.
@@ -676,7 +676,7 @@ impl CloudSyncStorage {
     /// reuses its key, while a later publication uses another generation.
     ///
     /// `Hashed` ignores `cloud_path` and shards by the id under the uploading
-    /// device: `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`.
+    /// device: `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}`.
     /// `uploader` aligns the keyspace to the storage-access rule and `generation`
     /// identifies the exact publication.
     ///
@@ -2709,7 +2709,7 @@ mod tests {
             )
             .unwrap(),
             format!(
-                "photos/aa11/.coven-generations/aa/bb/aabbccdd/{}",
+                "photos/aa11/aa/bb/aabbccdd/generations/{}",
                 generated.generation
             ),
         );

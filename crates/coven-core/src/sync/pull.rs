@@ -740,6 +740,27 @@ pub async fn pull_changes(
                 }
             };
 
+            let blob_uploads = match blob_location_assignments(
+                db,
+                &blob_decls,
+                &changes,
+                &schema,
+                &env.blob_locations,
+            )
+            .await
+            {
+                Ok(uploads) => uploads,
+                Err(e) => {
+                    warn!(
+                        device_id = %head.device_id,
+                        seq,
+                        "failed to validate introduced blobs, skipping without applying: {e}"
+                    );
+                    result.asset_downloads_failed = true;
+                    break;
+                }
+            };
+
             // Download + fsync every CacheEager blob BEFORE applying any row. If
             // any fails, skip the whole changeset -- nothing applied, cursor not
             // advanced -- and stop this device's pull so a later seq's success
@@ -775,25 +796,6 @@ pub async fn pull_changes(
             // A plain `call` — applied rows are never journaled (only a
             // `run_pending_journaled_transaction_on` host write is), so they can't
             // echo as this device's own outgoing changes.
-            // The blobs this changeset introduces are keyed under its author (who
-            // uploaded them); record that atomically with the applied rows.
-            let blob_uploads = match blob_location_assignments(
-                &blob_decls,
-                &changes,
-                &schema,
-                &env.blob_locations,
-            ) {
-                Ok(uploads) => uploads,
-                Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        "failed to enumerate introduced blobs, skipping without applying: {e}"
-                    );
-                    result.asset_downloads_failed = true;
-                    break;
-                }
-            };
             let cleanup_candidates =
                 match local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
                     Ok(intents) => intents,
@@ -1248,7 +1250,7 @@ pub(crate) struct BlobDownload {
 /// check. Recovering an omitted column from local state cannot cover that; only reading the
 /// blob's length from its own cloud object would, and the object is reachable precisely
 /// because its key names the blob.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PreApplyRow {
     table: String,
     pk: String,
@@ -1275,14 +1277,12 @@ enum BlobDownloadSize {
     Declared(u64),
     ExistingRow(PreApplyRow),
     InstalledRow,
-    Missing,
 }
 
 enum BlobDownloadHash {
     Declared(String),
     ExistingRow(PreApplyRow),
     InstalledRow,
-    Missing,
 }
 
 /// Where the download reads a blob's readable cloud path from — the key a browsable
@@ -1293,7 +1293,7 @@ enum BlobDownloadHash {
 /// missing from the change and the pre-apply row holds the (unchanged) value.
 enum BlobDownloadCloudPath {
     Declared(String),
-    ExistingRow(crate::blob::BlobRef),
+    ExistingRow(PreApplyRow),
     Absent,
 }
 
@@ -1304,28 +1304,38 @@ impl BlobDownload {
         source_hash: Option<String>,
         lookup_blob: Option<crate::blob::BlobRef>,
         pre_apply: Option<PreApplyRow>,
-    ) -> Self {
+    ) -> Result<Self, crate::blob::decl::BlobDeclError> {
         let size = match (source_size, pre_apply.clone()) {
             (Some(size), _) => BlobDownloadSize::Declared(size),
             (None, Some(row)) => BlobDownloadSize::ExistingRow(row),
-            (None, None) => BlobDownloadSize::Missing,
+            (None, None) => {
+                return Err(crate::blob::decl::BlobDeclError::Gate(format!(
+                    "incoming blob {}/{} has no declared size or pre-apply row",
+                    blob.namespace, blob.id
+                )));
+            }
         };
-        let hash = match (source_hash, pre_apply) {
+        let hash = match (source_hash, pre_apply.clone()) {
             (Some(hash), _) => BlobDownloadHash::Declared(hash),
             (None, Some(row)) => BlobDownloadHash::ExistingRow(row),
-            (None, None) => BlobDownloadHash::Missing,
+            (None, None) => {
+                return Err(crate::blob::decl::BlobDeclError::Gate(format!(
+                    "incoming blob {}/{} has no declared content hash or pre-apply row",
+                    blob.namespace, blob.id
+                )));
+            }
         };
-        let cloud_path = match (blob.cloud_path.clone(), lookup_blob) {
-            (Some(path), _) => BlobDownloadCloudPath::Declared(path),
-            (None, Some(blob)) => BlobDownloadCloudPath::ExistingRow(blob),
-            (None, None) => BlobDownloadCloudPath::Absent,
+        let cloud_path = match (blob.cloud_path.clone(), lookup_blob, pre_apply) {
+            (Some(path), _, _) => BlobDownloadCloudPath::Declared(path),
+            (None, Some(_), Some(row)) => BlobDownloadCloudPath::ExistingRow(row),
+            (None, _, _) => BlobDownloadCloudPath::Absent,
         };
-        Self {
+        Ok(Self {
             blob,
             size,
             hash,
             cloud_path,
-        }
+        })
     }
 
     pub(crate) fn from_installed_db(blob: crate::blob::BlobRef) -> Self {
@@ -1342,8 +1352,7 @@ impl BlobDownload {
         }
     }
 
-    async fn resolve_source_size(
-        db: &Database,
+    fn resolve_source_size(
         blob: &crate::blob::BlobRef,
         size: BlobDownloadSize,
         record: Option<&super::envelope::BlobLocationRecord>,
@@ -1362,24 +1371,18 @@ impl BlobDownload {
         }
         match size {
             BlobDownloadSize::Declared(size) => Ok(size),
-            BlobDownloadSize::ExistingRow(row) => {
-                crate::blob::cache::row_blob_size(db, &row.table, &row.pk)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            BlobDownloadSize::InstalledRow => Err(format!(
-                "installed blob {}/{} size was not resolved from its live row",
+            BlobDownloadSize::ExistingRow(_) => Err(format!(
+                "incoming blob {}/{} size was not resolved from its pre-apply row",
                 blob.namespace, blob.id
             )),
-            BlobDownloadSize::Missing => Err(format!(
-                "incoming blob {}/{} has no declared size",
+            BlobDownloadSize::InstalledRow => Err(format!(
+                "installed blob {}/{} size was not resolved from its live row",
                 blob.namespace, blob.id
             )),
         }
     }
 
-    async fn resolve_source_hash(
-        db: &Database,
+    fn resolve_source_hash(
         blob: &crate::blob::BlobRef,
         hash: BlobDownloadHash,
         record: Option<&super::envelope::BlobLocationRecord>,
@@ -1398,32 +1401,22 @@ impl BlobDownload {
         }
         match hash {
             BlobDownloadHash::Declared(hash) => Ok(hash),
-            BlobDownloadHash::ExistingRow(row) => {
-                crate::blob::cache::row_blob_hash(db, &row.table, &row.pk)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            BlobDownloadHash::InstalledRow => Err(format!(
-                "installed blob {}/{} content hash was not resolved from its live row",
+            BlobDownloadHash::ExistingRow(_) => Err(format!(
+                "incoming blob {}/{} content hash was not resolved from its pre-apply row",
                 blob.namespace, blob.id
             )),
-            BlobDownloadHash::Missing => Err(format!(
-                "incoming blob {}/{} has no declared content hash",
+            BlobDownloadHash::InstalledRow => Err(format!(
+                "installed blob {}/{} content hash was not resolved from its live row",
                 blob.namespace, blob.id
             )),
         }
     }
 
-    async fn resolve_cloud_path(
-        db: &Database,
-        cloud_path: BlobDownloadCloudPath,
-    ) -> Result<Option<String>, String> {
+    fn resolve_cloud_path(cloud_path: BlobDownloadCloudPath) -> Result<Option<String>, String> {
         match cloud_path {
             BlobDownloadCloudPath::Declared(path) => Ok(Some(path)),
-            BlobDownloadCloudPath::ExistingRow(lookup) => {
-                crate::blob::cache::row_cloud_path(db, &lookup)
-                    .await
-                    .map_err(|e| e.to_string())
+            BlobDownloadCloudPath::ExistingRow(_) => {
+                Err("partial blob cloud path was not resolved from its pre-apply row".to_string())
             }
             BlobDownloadCloudPath::Absent => Ok(None),
         }
@@ -1457,14 +1450,18 @@ pub(crate) fn cache_eager_blobs(
                 Ok(Some((blob, size, hash))) if blob.fill == CacheFill::CacheEager => {
                     // The row this change is about: every change carries its primary key,
                     // in its old values as well as its new ones.
-                    let pre_apply = change.pk().map(|pk| PreApplyRow {
-                        table: change.table.clone(),
-                        pk: pk.to_string(),
-                    });
+                    let pre_apply = (change.op == crate::changeset::ChangeOp::Update)
+                        .then(|| {
+                            change.pk().map(|pk| PreApplyRow {
+                                table: change.table.clone(),
+                                pk: pk.to_string(),
+                            })
+                        })
+                        .flatten();
                     match blob_decls.ref_from_change(old) {
-                        Ok(old_blob) => Some(Ok(BlobDownload::from_change(
+                        Ok(old_blob) => Some(BlobDownload::from_change(
                             blob, size, hash, old_blob, pre_apply,
-                        ))),
+                        )),
                         Err(e) => Some(Err(e)),
                     }
                 }
@@ -1477,7 +1474,8 @@ pub(crate) fn cache_eager_blobs(
 
 /// Bind each referenced blob location to the signed row version that carries it.
 /// The apply records the location only when that exact row version wins.
-fn blob_location_assignments(
+async fn blob_location_assignments(
+    db: &Database,
     blob_decls: &BlobDecls,
     changes: &[RowChange],
     schema: &TableSchema,
@@ -1485,7 +1483,9 @@ fn blob_location_assignments(
 ) -> Result<Vec<BlobLocationAssignment>, crate::blob::decl::BlobDeclError> {
     let mut referenced = Vec::new();
     for new in changes {
-        let Some(new_blob) = blob_decls.ref_from_change(new)? else {
+        let Some((new_blob, declared_size, declared_hash)) =
+            blob_decls.ref_size_hash_from_change(new)?
+        else {
             continue;
         };
         if matches!(new.op, crate::changeset::ChangeOp::Delete) {
@@ -1515,6 +1515,9 @@ fn blob_location_assignments(
             row_version.to_string(),
             new_blob.namespace,
             new_blob.id,
+            new.op,
+            declared_size,
+            declared_hash,
         ));
     }
     let mut by_blob = HashMap::new();
@@ -1533,7 +1536,7 @@ fn blob_location_assignments(
         if by_blob
             .insert(
                 (record.namespace.clone(), record.blob_id.clone()),
-                record.location.clone(),
+                record.clone(),
             )
             .is_some()
         {
@@ -1545,29 +1548,73 @@ fn blob_location_assignments(
     }
     let referenced_keys = referenced
         .iter()
-        .map(|(_, _, _, namespace, id)| (namespace.clone(), id.clone()))
+        .map(|(_, _, _, namespace, id, _, _, _)| (namespace.clone(), id.clone()))
         .collect::<HashSet<_>>();
-    let resolved = referenced
-        .into_iter()
-        .map(|(table, pk, row_version, namespace, id)| {
-            let location = by_blob
-                .get(&(namespace.clone(), id.clone()))
-                .cloned()
-                .ok_or_else(|| {
-                    crate::blob::decl::BlobDeclError::Gate(format!(
-                        "changeset omits cloud location for {namespace}/{id}"
-                    ))
-                })?;
-            Ok(BlobLocationAssignment {
-                table,
-                pk,
-                row_version,
-                namespace,
-                blob_id: id,
-                location,
-            })
-        })
-        .collect::<Result<Vec<_>, crate::blob::decl::BlobDeclError>>()?;
+    let mut resolved = Vec::with_capacity(referenced.len());
+    for (table, pk, row_version, namespace, id, op, declared_size, declared_hash) in referenced {
+        let record = by_blob
+            .get(&(namespace.clone(), id.clone()))
+            .ok_or_else(|| {
+                crate::blob::decl::BlobDeclError::Gate(format!(
+                    "changeset omits cloud location for {namespace}/{id}"
+                ))
+            })?;
+        let (effective_size, effective_hash) = match (declared_size, declared_hash) {
+            (Some(size), Some(hash)) => (size, hash),
+            (partial_size, partial_hash) => {
+                if op != crate::changeset::ChangeOp::Update {
+                    return Err(crate::blob::decl::BlobDeclError::Gate(format!(
+                        "incoming blob {namespace}/{id} omits required size or content hash"
+                    )));
+                }
+                let decls = db.blob_decls();
+                let lookup_table = table.clone();
+                let lookup_pk = pk.clone();
+                let content = db
+                    .call(move |conn| {
+                        decls
+                            .live_content_for_row(conn, &lookup_table, &lookup_pk)
+                            .map_err(|error| crate::database::DbError(error.to_string()))?
+                            .ok_or_else(|| {
+                                crate::database::DbError(format!(
+                                    "pre-apply blob row {lookup_table}/{lookup_pk} does not exist"
+                                ))
+                            })
+                    })
+                    .await
+                    .map_err(|error| crate::blob::decl::BlobDeclError::Gate(error.to_string()))?;
+                let size = match partial_size {
+                    Some(size) => size,
+                    None => content.plaintext_size,
+                };
+                let hash = match partial_hash {
+                    Some(hash) => hash,
+                    None => content.content_hash,
+                };
+                (size, hash)
+            }
+        };
+        if effective_size != record.plaintext_size {
+            return Err(crate::blob::decl::BlobDeclError::Gate(format!(
+                "incoming blob {namespace}/{id} declares size {effective_size}, but its signed location record declares {}",
+                record.plaintext_size
+            )));
+        }
+        if effective_hash != record.content_hash {
+            return Err(crate::blob::decl::BlobDeclError::Gate(format!(
+                "incoming blob {namespace}/{id} declares content hash {effective_hash}, but its signed location record declares {}",
+                record.content_hash
+            )));
+        }
+        resolved.push(BlobLocationAssignment {
+            table,
+            pk,
+            row_version,
+            namespace,
+            blob_id: id,
+            location: record.location.clone(),
+        });
+    }
     if let Some((namespace, id)) = by_blob
         .keys()
         .find(|key| !referenced_keys.contains(*key))
@@ -1761,6 +1808,75 @@ pub(crate) async fn download_blobs(
                 None => BlobDownloadCloudPath::Absent,
             };
         }
+        let mut pre_apply = None;
+        for candidate in [
+            match &size {
+                BlobDownloadSize::ExistingRow(row) => Some(row),
+                _ => None,
+            },
+            match &hash {
+                BlobDownloadHash::ExistingRow(row) => Some(row),
+                _ => None,
+            },
+            match &cloud_path {
+                BlobDownloadCloudPath::ExistingRow(row) => Some(row),
+                _ => None,
+            },
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if pre_apply.is_some_and(|row| row != candidate) {
+                error!(id = %blob.id, namespace = %blob.namespace, "partial blob metadata names different pre-apply rows; refusing");
+                all_ok = false;
+                pre_apply = None;
+                break;
+            }
+            pre_apply = Some(candidate);
+        }
+        if matches!(size, BlobDownloadSize::ExistingRow(_))
+            || matches!(hash, BlobDownloadHash::ExistingRow(_))
+            || matches!(cloud_path, BlobDownloadCloudPath::ExistingRow(_))
+        {
+            let Some(pre_apply) = pre_apply.cloned() else {
+                continue;
+            };
+            let decls = db.blob_decls();
+            let table = pre_apply.table.clone();
+            let pk = pre_apply.pk.clone();
+            let content = match db
+                .call(move |conn| {
+                    decls
+                        .live_content_for_row(conn, &table, &pk)
+                        .map_err(|error| crate::database::DbError(error.to_string()))?
+                        .ok_or_else(|| {
+                            crate::database::DbError(format!(
+                                "pre-apply blob row {table}/{pk} does not exist"
+                            ))
+                        })
+                })
+                .await
+            {
+                Ok(content) => content,
+                Err(error) => {
+                    warn!(id = %blob.id, namespace = %blob.namespace, %error, "cannot read exact pre-apply blob content, skipping download");
+                    all_ok = false;
+                    continue;
+                }
+            };
+            if matches!(size, BlobDownloadSize::ExistingRow(_)) {
+                size = BlobDownloadSize::Declared(content.plaintext_size);
+            }
+            if matches!(hash, BlobDownloadHash::ExistingRow(_)) {
+                hash = BlobDownloadHash::Declared(content.content_hash);
+            }
+            if matches!(cloud_path, BlobDownloadCloudPath::ExistingRow(_)) {
+                cloud_path = match content.blob.cloud_path {
+                    Some(path) => BlobDownloadCloudPath::Declared(path),
+                    None => BlobDownloadCloudPath::Absent,
+                };
+            }
+        }
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
         // changeset authored by any write-capable member. An id or namespace that is
         // not a single safe path token, or a cloud_path that escapes its prefix,
@@ -1786,9 +1902,7 @@ pub(crate) async fn download_blobs(
             .iter()
             .find(|record| record.namespace == blob.namespace && record.blob_id == blob.id);
 
-        let source_size = match BlobDownload::resolve_source_size(db, &blob, size, location_record)
-            .await
-        {
+        let source_size = match BlobDownload::resolve_source_size(&blob, size, location_record) {
             Ok(size) => size,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob size, skipping download");
@@ -1801,14 +1915,7 @@ pub(crate) async fn download_blobs(
         // blob whose row does not carry one is refused rather than downloaded
         // unverified — the hash is the authority that pins the bytes to the row's
         // author, so a missing one is bad data, not a case to skip past.
-        let expected_hash = match BlobDownload::resolve_source_hash(
-            db,
-            &blob,
-            hash,
-            location_record,
-        )
-        .await
-        {
+        let expected_hash = match BlobDownload::resolve_source_hash(&blob, hash, location_record) {
             Ok(hash) => hash,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob content hash, skipping download");
@@ -1848,7 +1955,7 @@ pub(crate) async fn download_blobs(
         // new blob leaves its cloud path alone, so the change omits the column and the
         // path comes from the pre-apply row instead — which is the same value, that
         // being what "the change did not touch it" means.
-        let cloud_path = match BlobDownload::resolve_cloud_path(db, cloud_path).await {
+        let cloud_path = match BlobDownload::resolve_cloud_path(cloud_path) {
             Ok(path) => path,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob cloud path, skipping download");

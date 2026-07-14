@@ -28,9 +28,9 @@ neither. Both are segmented by the blob's namespace, so each namespace's cache
 evicts against its own budget without touching another's:
 
 ```
-storage/pinned/<namespace>/{ab}/{cd}/<id>   protected, never evicted
-storage/cache/<namespace>/{ab}/{cd}/<id>    opportunistic, evictable
-neither                                     remote-only: no file, fetched on next read
+storage/pinned/<namespace>/{ab}/{cd}/<id>/<content_hash>   protected, never evicted
+storage/cache/<namespace>/{ab}/{cd}/<id>/<content_hash>    opportunistic, evictable
+neither                                                    remote-only: no file, fetched on next read
 ```
 
 `{ab}` and `{cd}` are the first two byte-pairs of the dash-stripped id (the same
@@ -114,10 +114,12 @@ let bytes = handle.read_blob(&blob).await?;
 It resolves by where the bytes are, in order: a **user-provided Local** blob is
 read from the user's own file (an external ref), a **host-provided Local** blob
 from the local store, both with no cloud fallback. Otherwise the **cache**:
-`pinned/<namespace>/<id>` then `cache/<namespace>/<id>`, a file in either folder a
+`pinned/<namespace>/{ab}/{cd}/<id>/<content_hash>` then
+`cache/<namespace>/{ab}/{cd}/<id>/<content_hash>`, a file in either folder a
 hit read straight off disk. On a cache miss it resolves the blob's
 [scope](/docs/blobs#encryption-scope) to a key, downloads and decrypts the object
-from the cloud, writes the plaintext to `cache/<namespace>/<id>` (the evictable
+from the cloud, writes the plaintext to
+`cache/<namespace>/{ab}/{cd}/<id>/<content_hash>` (the evictable
 folder, never the protected one), and returns the bytes it just fetched. A plain
 read populates the cache; it never pins.
 
@@ -139,7 +141,8 @@ short read. A cache hit reads the slice straight off the local plaintext file at
 `offset`, with no decryption. A miss range-reads and decrypts only the covering
 chunks from the cloud (see [`BlobRangeReader`](/docs/storage#ranged-reads)).
 
-A ranged miss writes **no** cache file. A partial file under `cache/<namespace>/<id>`
+A ranged miss writes **no** cache file. A partial file under
+`cache/<namespace>/{ab}/{cd}/<id>/<content_hash>`
 would be read as the whole blob by `read_blob`, since presence is the only truth,
 so only the whole-file `read_blob` ever populates the cache.
 
@@ -160,7 +163,8 @@ fill**, declared per blob in the table's
   pinned, so if it later falls out of its namespace's budget it shows a placeholder
   until the next read re-fetches it.
 - `CacheLazy`: skipped on pull. A pulling device does not fetch it up front; the
-  first `read_blob` does, populating `cache/<namespace>/<id>`. This is for large
+  first `read_blob` does, populating
+  `cache/<namespace>/{ab}/{cd}/<id>/<content_hash>`. This is for large
   blobs a device may never open, audio being the motivating case.
 
 Both fills cache evictably; the difference is only *when* the bytes arrive (on pull
@@ -187,7 +191,8 @@ bare ids because the from-absent case needs the blob's cloud coordinates
 (namespace, scope, cloud_path), which an id alone lacks. It is idempotent.
 
 [`CovenHandle::unpin`](rustdoc:method:coven::CovenHandle::unpin) drops the
-protection: it moves `pinned/<namespace>/<id>` back to `cache/<namespace>/<id>`,
+protection: it moves `pinned/<namespace>/{ab}/{cd}/<id>/<content_hash>` back to
+`cache/<namespace>/{ab}/{cd}/<id>/<content_hash>`,
 so the file stays readable but becomes evictable again. It is not a delete.
 Unpin works on any blob regardless of its `CacheFill`; a `CacheEager` blob that
 was never pinned is already evictable, so unpinning it is a no-op.

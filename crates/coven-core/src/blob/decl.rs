@@ -129,14 +129,10 @@ struct TableBlob {
     /// keys a lookup the other way ([`BlobDecls::row_for_blob_in_namespace`]: which row
     /// carries a given blob id), so both directions resolve off the same declaration.
     id_col_name: String,
-    /// Name of the plaintext-size column.
-    size_col_name: String,
     /// Name of the content-hash column.
     hash_col_name: String,
     /// Index of the readable cloud-path column, if declared.
     cloud_path_col: Option<usize>,
-    /// Name of the readable cloud-path column, if declared.
-    cloud_path_col_name: Option<String>,
     /// The encryption scope, fixed per table by the declaration.
     scope: BlobScope,
 }
@@ -289,10 +285,8 @@ impl BlobDecls {
                     size_col,
                     hash_col,
                     id_col_name: decl.id_column.clone(),
-                    size_col_name: decl.size_column.clone(),
                     hash_col_name: decl.hash_column.clone(),
                     cloud_path_col,
-                    cloud_path_col_name: decl.cloud_path_column.clone(),
                     scope: decl.scope.clone(),
                 },
             );
@@ -471,23 +465,53 @@ impl BlobDecls {
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
+        Self::live_content_from_row(table, tb, row).map(Some)
+    }
+
+    /// The exact pre-apply content of the row named by a changeset's primary key.
+    /// A partial UPDATE can omit size, hash, and cloud path together; reading the
+    /// complete row once keeps those values from different row versions from
+    /// being combined.
+    pub(crate) fn live_content_for_row(
+        &self,
+        conn: &Connection,
+        table: &str,
+        pk: &str,
+    ) -> Result<Option<LiveBlobContent>, BlobDeclError> {
+        let Some(tb) = self.tables.get(table) else {
+            return Ok(None);
+        };
+        let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(table));
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([pk])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        Self::live_content_from_row(table, tb, row).map(Some)
+    }
+
+    fn live_content_from_row(
+        table: &str,
+        tb: &TableBlob,
+        row: &rusqlite::Row<'_>,
+    ) -> Result<LiveBlobContent, BlobDeclError> {
         let blob = tb
             .ref_from_row(row)?
             .ok_or_else(|| BlobDeclError::MissingBlobId {
-                table: table.clone(),
+                table: table.to_string(),
             })?;
         let size = row.get::<_, Option<i64>>(tb.size_col)?.ok_or_else(|| {
             BlobDeclError::MissingPlaintextSize {
-                table: table.clone(),
+                table: table.to_string(),
             }
         })?;
         let plaintext_size = u64::try_from(size).map_err(|_| BlobDeclError::InvalidSize {
-            table: table.clone(),
+            table: table.to_string(),
             value: size,
         })?;
         let content_hash = row.get::<_, Option<String>>(tb.hash_col)?.ok_or_else(|| {
             BlobDeclError::MissingContentHash {
-                table: table.clone(),
+                table: table.to_string(),
             }
         })?;
         if content_hash.len() != 64
@@ -496,67 +520,19 @@ impl BlobDecls {
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(BlobDeclError::InvalidContentHash {
-                table: table.clone(),
+                table: table.to_string(),
                 value: content_hash,
             });
         }
-        Ok(Some(LiveBlobContent {
+        Ok(LiveBlobContent {
             blob,
             plaintext_size,
             content_hash,
-        }))
-    }
-
-    /// The readable cloud path from the row carrying `blob_id` in `namespace` — the key
-    /// a browsable home stores the blob at. `None` when no declared table owns
-    /// `namespace`, that table declares no cloud-path column (an opaque home's blob is
-    /// keyed by id), that table has no row with the id, or the row's value is NULL.
-    pub fn cloud_path_for_blob_in_namespace(
-        &self,
-        conn: &Connection,
-        namespace: &str,
-        blob_id: &str,
-    ) -> Result<Option<String>, BlobDeclError> {
-        let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
-            return Ok(None);
-        };
-        let Some(cloud_path_col_name) = &tb.cloud_path_col_name else {
-            return Ok(None);
-        };
-        pk_carrying_blob_cloud_path(conn, table, tb, cloud_path_col_name, blob_id)
-    }
-
-    /// The plaintext byte length and content hash on row `pk` of `table` — the values a
-    /// changeset UPDATE omitted because they did not change.
-    ///
-    /// Keyed by the row's primary key, which is the only handle a change always carries and
-    /// a device can always resolve. The blob id would seem the natural key — it is how the
-    /// size and hash are read everywhere else — but "the row carrying blob X" has no answer
-    /// on a device that already applied a concurrent repointing of that very row: no row
-    /// carries X any more, though the row itself is sitting right there under its `pk`.
-    ///
-    /// `None` when `table` carries no blob, has no such row, or the column is NULL.
-    pub fn size_for_row(
-        &self,
-        conn: &Connection,
-        table: &str,
-        pk: &str,
-    ) -> Result<Option<u64>, BlobDeclError> {
-        let Some(tb) = self.tables.get(table) else {
-            return Ok(None);
-        };
-        let size = column_on_row::<i64>(conn, table, &tb.size_col_name, pk)?;
-        size.map(|value| {
-            u64::try_from(value).map_err(|_| BlobDeclError::InvalidSize {
-                table: table.to_string(),
-                value,
-            })
         })
-        .transpose()
     }
 
-    /// The content hash on row `pk` of `table`. The sibling of [`Self::size_for_row`], and
-    /// keyed the same way and for the same reason.
+    /// The content hash on row `pk` of `table`, keyed by the primary key every
+    /// changeset operation carries.
     pub fn hash_for_row(
         &self,
         conn: &Connection,
@@ -629,25 +605,6 @@ fn pk_carrying_blob(
     );
     conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
         .optional()
-        .map_err(BlobDeclError::from)
-}
-
-fn pk_carrying_blob_cloud_path(
-    conn: &Connection,
-    table: &str,
-    tb: &TableBlob,
-    cloud_path_col_name: &str,
-    blob_id: &str,
-) -> Result<Option<String>, BlobDeclError> {
-    let sql = format!(
-        "SELECT {} FROM {} WHERE {} = ?1",
-        quote_ident(cloud_path_col_name),
-        quote_ident(table),
-        quote_ident(&tb.id_col_name),
-    );
-    conn.query_row(&sql, [blob_id], |row| row.get::<_, Option<String>>(0))
-        .optional()
-        .map(Option::flatten)
         .map_err(BlobDeclError::from)
 }
 

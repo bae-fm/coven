@@ -192,16 +192,16 @@ handle.make_remote("todos", todo_id, pin).await?;
 `make_remote` enqueues one upload per user-provided blob of the gated root.
 Coven persists each blob's final cloud key and [`BlobScope`](#encryption-scope),
 then resolves the scope to a key when the upload drains, long after the enqueue
-site is gone. Enqueuing an upload also cancels any pending delete of the same key
-(latest intent wins), so a re-upload is never tombstoned in the same cycle.
+site is gone. Each upload uses a new immutable generation, so a pending delete
+names only the earlier object and cannot condemn the replacement.
 
 The outbox is coven's `cloud_outbox` table, created by the handle open path. The
 host does not mutate it by hand; user-provided transitions and sync enqueue rows
 through coven, and host-provided row+blob writes go through `handle.write(...)`.
 Each row is an
 [`OutboxEntry`](rustdoc:struct:coven::db::OutboxEntry) whose
-[`OutboxOperation`](rustdoc:enum:coven::db::OutboxOperation) is an `Upload`,
-`Delete`, or `Cancel`.
+[`OutboxOperation`](rustdoc:enum:coven::db::OutboxOperation) is an `Upload` or
+`Delete`.
 
 Nothing uploads at enqueue time. The next sync cycle's
 [`drain_uploads`](rustdoc:fn:coven::blob::upload::drain_uploads) works through
@@ -243,7 +243,7 @@ natural cycle.
 <line class="arr" x1="159" y1="59" x2="176" y2="59" marker-end="url(#fa)"/>
 <rect class="chipo" x="180" y="44" width="140" height="30" rx="7"/>
 <text class="lbl s11" x="250" y="63" text-anchor="middle">cloud_outbox row</text>
-<text class="sub" x="250" y="92" text-anchor="middle">upload · delete · cancel</text>
+<text class="sub" x="250" y="92" text-anchor="middle">upload · delete</text>
 <line class="arr" x1="324" y1="59" x2="341" y2="59" marker-end="url(#fa)"/>
 <rect class="chip" x="345" y="44" width="140" height="30" rx="7"/>
 <text class="lbl s11" x="415" y="63" text-anchor="middle">drain: seal + write</text>
@@ -333,7 +333,7 @@ earlier generated key, so collecting it cannot delete the later upload.
 Under an opaque home (the default) a blob is stored at an immutable generated key:
 
 ```
-{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}
+{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}
 ```
 
 `ab` and `cd` are the first two byte-pairs of the dash-stripped `id`, built by
@@ -372,7 +372,7 @@ The two schemes at a glance:
 | Config `cloud_home.storage` | `opaque` | `browsable` |
 | Runtime scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
 | `cloud_path_column` | ignored (leave unset) | required |
-| Cloud key | `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}` | `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` |
+| Cloud key | `{namespace}/{uploader}/{ab}/{cd}/{id}/generations/{generation}` | `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` |
 | Blob with no `cloud_path` | keyed by id | surfaced error |
 | Key names its blob | by the `{id}` in the key | by the `{id}` before the readable suffix |
 
