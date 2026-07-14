@@ -1906,6 +1906,7 @@ mod tests {
             std::path::Path::new(":memory:"),
             Vec::new(),
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "test-device".to_string(),
             &[],
         )

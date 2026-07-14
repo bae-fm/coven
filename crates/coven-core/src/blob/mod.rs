@@ -148,6 +148,36 @@ impl Default for ContentHasher {
     }
 }
 
+/// How many blob transfers coven runs at once in each of its two transfer loops:
+/// the upload drain ([`upload::drain_uploads`]) and the pin/download loop
+/// ([`cache::pin`]). An open-time blob-engine tunable the host sets on the builder,
+/// carried on [`Database`](crate::database::Database) alongside the other open-time
+/// blob config and read back by each loop, which holds `&Database`.
+///
+/// Each bound is a [`NonZeroUsize`], so a zero — which would leave a loop admitting
+/// nothing and never completing — is unrepresentable rather than clamped or rejected
+/// at open. `serial()` (both `1`) is the default and reproduces the fully-serial
+/// loops: one transfer at a time, in queue order.
+///
+/// [`NonZeroUsize`]: std::num::NonZeroUsize
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferLimits {
+    /// Maximum concurrent blob uploads in one upload-drain pass.
+    pub uploads: std::num::NonZeroUsize,
+    /// Maximum concurrent blob downloads (fetches) in one pin call.
+    pub downloads: std::num::NonZeroUsize,
+}
+
+impl TransferLimits {
+    /// One at a time in each loop — the fully-serial default.
+    pub fn serial() -> Self {
+        Self {
+            uploads: std::num::NonZeroUsize::MIN,
+            downloads: std::num::NonZeroUsize::MIN,
+        }
+    }
+}
+
 // The cache's own tests: real `Database` + `MockSyncStorage` over a temp store
 // dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
 // Native-only because they drive a real temp directory on the filesystem; the

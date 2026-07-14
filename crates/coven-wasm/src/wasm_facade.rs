@@ -329,6 +329,7 @@ impl CovenStore {
             // The browser facade does not yet expose a grace knob; it takes the
             // default convergence window.
             crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             device_id.clone(),
             &migrations,
         )

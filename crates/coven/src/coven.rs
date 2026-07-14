@@ -1,6 +1,7 @@
 //! Native top-level API: open one handle and drive rows, blobs, sync, and
 //! membership through it.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -113,6 +114,8 @@ impl Coven {
             synced_tables: None,
             migrations: None,
             blob_tombstone_grace: crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            max_concurrent_uploads: NonZeroUsize::MIN,
+            max_concurrent_downloads: NonZeroUsize::MIN,
             clock: Arc::new(SystemClock),
             key_service: StoreKeys::new(current.store_id),
             key_custody: KeyCustody::Keyring,
@@ -128,6 +131,8 @@ pub struct CovenBuilder {
     synced_tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
     blob_tombstone_grace: chrono::Duration,
+    max_concurrent_uploads: NonZeroUsize,
+    max_concurrent_downloads: NonZeroUsize,
     clock: ClockRef,
     key_service: StoreKeys,
     key_custody: KeyCustody,
@@ -204,6 +209,22 @@ impl CovenBuilder {
     /// let the GC erase a blob a lagging peer still references.
     pub fn blob_tombstone_grace(mut self, grace: chrono::Duration) -> Self {
         self.blob_tombstone_grace = grace;
+        self
+    }
+
+    /// How many blob uploads the sync cycle's upload drain runs at once. Defaults
+    /// to one (fully serial). A [`NonZeroUsize`] so a zero — which would leave the
+    /// drain admitting nothing and never completing — cannot be set.
+    pub fn max_concurrent_uploads(mut self, n: NonZeroUsize) -> Self {
+        self.max_concurrent_uploads = n;
+        self
+    }
+
+    /// How many blob downloads a [`pin`](CovenHandle::pin) call fetches at once.
+    /// Defaults to one (fully serial). A [`NonZeroUsize`] so a zero — which would
+    /// leave the pin loop admitting nothing and never completing — cannot be set.
+    pub fn max_concurrent_downloads(mut self, n: NonZeroUsize) -> Self {
+        self.max_concurrent_downloads = n;
         self
     }
 
@@ -289,12 +310,17 @@ impl CovenBuilder {
         let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
         let store_dir = config.store_dir.clone();
+        let transfer_limits = crate::blob::TransferLimits {
+            uploads: self.max_concurrent_uploads,
+            downloads: self.max_concurrent_downloads,
+        };
         let open_guard = Arc::new(StoreOpenGuard::acquire(&store_dir)?);
         remove_orphaned_local_blob_temps(&store_dir, std::time::SystemTime::now())?;
         let (db, stamper) = Database::open(
             &db_path,
             tables.clone(),
             self.blob_tombstone_grace,
+            transfer_limits,
             config.device_id.clone(),
             &migrations,
         )?;
@@ -308,6 +334,7 @@ impl CovenBuilder {
             &db_path,
             tables,
             self.blob_tombstone_grace,
+            transfer_limits,
             config.device_id.clone(),
             &migrations,
         )?;
@@ -363,6 +390,10 @@ impl CovenBuilder {
             &db_path,
             tables,
             self.blob_tombstone_grace,
+            crate::blob::TransferLimits {
+                uploads: self.max_concurrent_uploads,
+                downloads: self.max_concurrent_downloads,
+            },
             config.device_id.clone(),
             &migrations,
         )?;

@@ -50,6 +50,7 @@ fn open_device(device_id: &str) -> Database {
             CacheFill::CacheEager,
         )),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         device_id.to_string(),
         &test_migrations(),
     )

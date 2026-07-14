@@ -64,6 +64,10 @@ struct DatabaseState {
     /// `synced_tables` so the sync layer reads it from the one owner rather than
     /// threading a separately-passed copy that could diverge.
     blob_tombstone_grace: chrono::Duration,
+    /// How many blob transfers each transfer loop runs at once, read by the upload
+    /// drain and the pin loop (both hold `&Database`). Open-time host config carried
+    /// here for the same single-owner reason as `blob_tombstone_grace`.
+    transfer_limits: crate::blob::TransferLimits,
 }
 
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
@@ -85,6 +89,7 @@ struct DatabaseCore {
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
+    transfer_limits: crate::blob::TransferLimits,
 }
 
 impl DatabaseCore {
@@ -92,6 +97,7 @@ impl DatabaseCore {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState, UpdatedAtStamper), OpenError> {
@@ -149,6 +155,7 @@ impl DatabaseCore {
             gates,
             blob_decls,
             blob_tombstone_grace,
+            transfer_limits,
         };
         let state = core.state();
 
@@ -166,6 +173,7 @@ impl DatabaseCore {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState), OpenError> {
@@ -205,6 +213,7 @@ impl DatabaseCore {
             gates,
             blob_decls,
             blob_tombstone_grace,
+            transfer_limits,
         };
         let state = core.state();
         Ok((core, state))
@@ -218,6 +227,7 @@ impl DatabaseCore {
             gates: self.gates.clone(),
             blob_decls: self.blob_decls.clone(),
             blob_tombstone_grace: self.blob_tombstone_grace,
+            transfer_limits: self.transfer_limits,
         }
     }
 
@@ -538,6 +548,7 @@ impl Database {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
@@ -546,6 +557,7 @@ impl Database {
             path,
             synced_tables,
             blob_tombstone_grace,
+            transfer_limits,
             Arc::new(hlc),
             migrations,
         )
@@ -561,11 +573,18 @@ impl Database {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
-        let (core, state, stamper) =
-            DatabaseCore::open(path, synced_tables, blob_tombstone_grace, hlc, migrations)?;
+        let (core, state, stamper) = DatabaseCore::open(
+            path,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            hlc,
+            migrations,
+        )?;
 
         #[cfg(not(target_arch = "wasm32"))]
         let database = {
@@ -612,6 +631,7 @@ impl Database {
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
@@ -620,6 +640,7 @@ impl Database {
             path,
             synced_tables,
             blob_tombstone_grace,
+            transfer_limits,
             Arc::new(hlc),
             migrations,
         )?;
@@ -651,6 +672,13 @@ impl Database {
     /// erased. Fixed for this handle's life.
     pub fn blob_tombstone_grace(&self) -> chrono::Duration {
         self.state.blob_tombstone_grace
+    }
+
+    /// How many blob transfers each transfer loop may run at once. Read by the
+    /// upload drain ([`crate::blob::upload::drain_uploads`]) and the pin loop
+    /// ([`crate::blob::cache::pin`]). Fixed for this handle's life.
+    pub fn transfer_limits(&self) -> crate::blob::TransferLimits {
+        self.state.transfer_limits
     }
 
     /// The gate model resolved from the final synced table set and live schema at
@@ -1801,6 +1829,7 @@ mod tests {
             Path::new(":memory:"),
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "liveness".to_string(),
             &[],
         )
@@ -1850,6 +1879,7 @@ mod tests {
             &db_path,
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "drop-async".to_string(),
             &[],
         )
@@ -1901,6 +1931,7 @@ mod tests {
             Path::new(":memory:"),
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             String::new(),
             &[],
         );
@@ -1922,6 +1953,7 @@ mod tests {
                 Path::new(":memory:"),
                 vec![SyncedTable::new(table_name)],
                 BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
                 format!("reserved-{table_name}"),
                 &[notes_migration()],
             );
@@ -1943,6 +1975,7 @@ mod tests {
             Path::new(":memory:"),
             vec![SyncedTable::new("")],
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "empty-synced-table".to_string(),
             &[notes_migration()],
         );
@@ -1963,6 +1996,7 @@ mod tests {
             Path::new(":memory:"),
             vec![SyncedTable::new("notes")],
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "normal-synced-table".to_string(),
             &[notes_migration()],
         )
@@ -1981,6 +2015,7 @@ mod tests {
             Path::new(":memory:"),
             tables,
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             device_id.to_string(),
             &[Migration::sql(1, "contract", migration_sql)],
         );
@@ -2089,6 +2124,7 @@ mod tests {
             Path::new(":memory:"),
             vec![SyncedTable::new("things")],
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "strict-synced-table".to_string(),
             &[Migration::sql(
                 1,
@@ -2108,6 +2144,7 @@ mod tests {
             Path::new(":memory:"),
             vec![SyncedTable::new("things")],
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "undeclared-local-table".to_string(),
             &[Migration::sql(
                 1,
@@ -2151,6 +2188,7 @@ mod tests {
             Path::new(":memory:"),
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
             "test-device".to_string(),
             &[],
         )

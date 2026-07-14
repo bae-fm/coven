@@ -53,6 +53,7 @@ fn open_outbox_db() -> Database {
         std::path::Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "test-device".to_string(),
         &[],
     )

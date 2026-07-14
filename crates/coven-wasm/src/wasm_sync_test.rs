@@ -43,6 +43,7 @@ fn open_device(device_id: &str) -> Database {
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         device_id.to_string(),
         &test_migrations(),
     )

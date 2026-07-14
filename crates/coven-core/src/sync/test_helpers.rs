@@ -154,6 +154,30 @@ pub fn read_test_db(namespace: &str) -> Database {
     ))
 }
 
+/// Like [`read_test_db`] but with a chosen `max_concurrent_downloads`, so a pin test
+/// can drive the download loop concurrently. Uploads stay serial (not exercised here).
+pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Database {
+    let tables = test_synced_tables_with_blob(BlobDecl::new(
+        namespace,
+        crate::blob::Provenance::UserProvided,
+        crate::blob::CacheFill::CacheLazy,
+    ));
+    let limits = crate::blob::TransferLimits {
+        uploads: std::num::NonZeroUsize::MIN,
+        downloads: std::num::NonZeroUsize::new(downloads).expect("downloads limit is nonzero"),
+    };
+    let (db, _stamper) = Database::open(
+        std::path::Path::new(":memory:"),
+        tables,
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        limits,
+        "test-device".to_string(),
+        &test_migrations(),
+    )
+    .expect("open test database");
+    db
+}
+
 /// Plant the backing row [`crate::blob::cache::read_blob`] resolves a blob's locality
 /// from: a gated `notes` root with `shared = remote` and a `note_photos` child whose
 /// id is `blob_id`, carrying `bytes`'s length and content hash so a download of those
@@ -316,6 +340,7 @@ pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>)
         std::path::Path::new(":memory:"),
         tables,
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "test-device".to_string(),
         &migrations,
     )
@@ -346,6 +371,7 @@ pub fn open_test_db_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         hlc,
         &migrations,
     )
@@ -645,6 +671,13 @@ pub struct MockSyncStorage {
     fail_membership_head_put_on: std::sync::atomic::AtomicUsize,
     membership_entry_put_count: std::sync::atomic::AtomicUsize,
     fail_membership_entry_put_on: std::sync::atomic::AtomicUsize,
+    /// When armed, every `read_blob_to_file` gathers on this barrier before serving,
+    /// so a test can prove the pin loop runs fetches concurrently and bounds them:
+    /// with a barrier of size N, N fetches must arrive together to release it, and
+    /// `read_to_file_max_inflight` records the observed peak.
+    read_to_file_barrier: Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>,
+    read_to_file_inflight: std::sync::atomic::AtomicUsize,
+    read_to_file_max_inflight: std::sync::atomic::AtomicUsize,
 }
 
 /// Arm the `call_number`-th put (1-based) tracked by the `(count, fail_on)` atomic
@@ -711,7 +744,25 @@ impl MockSyncStorage {
             fail_membership_head_put_on: std::sync::atomic::AtomicUsize::new(0),
             membership_entry_put_count: std::sync::atomic::AtomicUsize::new(0),
             fail_membership_entry_put_on: std::sync::atomic::AtomicUsize::new(0),
+            read_to_file_barrier: Mutex::new(None),
+            read_to_file_inflight: std::sync::atomic::AtomicUsize::new(0),
+            read_to_file_max_inflight: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Arm `read_blob_to_file` to gather `n` calls on a barrier before each serves,
+    /// so a pin test can prove the download loop runs `n` fetches at once. Use with a
+    /// blob count that is a multiple of `n` so every wave fills the barrier.
+    pub fn arm_read_to_file_concurrency_probe(&self, n: usize) {
+        *self.read_to_file_barrier.lock().unwrap() =
+            Some(std::sync::Arc::new(tokio::sync::Barrier::new(n)));
+    }
+
+    /// The peak number of `read_blob_to_file` calls observed in flight at once while
+    /// the concurrency probe was armed.
+    pub fn read_to_file_max_inflight(&self) -> usize {
+        self.read_to_file_max_inflight
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Make `list_membership_entries` fail, so a test can assert the cycle fails
@@ -1216,6 +1267,21 @@ impl SyncStorage for MockSyncStorage {
     ) -> Result<(), StorageError> {
         self.blob_read_to_file_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Concurrency probe: when armed, record the peak in-flight count and gather on
+        // the barrier so a fixed number of fetches must run at once to proceed. Clone
+        // the Arc out of the lock first so the guard isn't held across the await.
+        let barrier = self.read_to_file_barrier.lock().unwrap().clone();
+        if let Some(barrier) = barrier {
+            let inflight = self
+                .read_to_file_inflight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.read_to_file_max_inflight
+                .fetch_max(inflight, std::sync::atomic::Ordering::SeqCst);
+            barrier.wait().await;
+            self.read_to_file_inflight
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let bytes = self
             .read_blob_range(
                 namespace,

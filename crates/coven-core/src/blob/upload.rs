@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use rusqlite::Connection;
 use tracing::warn;
 
@@ -244,221 +245,71 @@ pub async fn drain_uploads(
     } else {
         build_transition_models(db).await?
     };
-    for entry in uploads {
-        // Host-driven pause: short-circuit before pulling the next entry so a
-        // freshly paused queue stops draining without aborting an in-flight
-        // upload. Checked per entry so resume mid-cycle picks back up.
-        if let Some(obs) = observer {
-            if obs.should_skip_uploads() {
+
+    // Run up to `max_concurrent_uploads` uploads at once, admitting in queue order
+    // and refilling as each completes. At limit 1 this is the serial drain: admit
+    // one, await it fully, then the next — same order-observable effects and error
+    // semantics. Each upload's durable bookkeeping is its own atomic `db.call`, all
+    // serialized on the one connection thread, so out-of-order completion never
+    // tears state and the make_remote completion flip (which reads outbox-row
+    // presence) fires exactly once, on whichever of a root's uploads commits last.
+    let limit = db.transfer_limits().uploads.get();
+    let mut pending = uploads.into_iter();
+    let mut inflight = FuturesUnordered::new();
+    // Set once a pause is seen or a make_remote completes: stop admitting new
+    // uploads while letting those already in flight finish (never aborting them).
+    let mut stop_admitting = false;
+
+    loop {
+        while !stop_admitting && inflight.len() < limit {
+            // Host-driven pause: checked before admitting each entry so a freshly
+            // paused queue stops admitting without aborting in-flight uploads, and a
+            // resume mid-cycle picks back up.
+            if let Some(obs) = observer {
+                if obs.should_skip_uploads() {
+                    stop_admitting = true;
+                    break;
+                }
+            }
+            // Pull the next entry outside its retry backoff window; entries still
+            // inside it are skipped this pass (a poisoned entry isn't re-attempted
+            // every cycle).
+            let Some(entry) = next_ready_entry(&mut pending, now) else {
                 break;
-            }
-        }
-        // Per-entry backoff: skip an entry still inside its retry window so a
-        // poisoned entry isn't re-attempted every cycle.
-        if let Some(last) = entry.last_attempt_at.as_deref() {
-            match chrono::DateTime::parse_from_rfc3339(last) {
-                Ok(last_dt) => {
-                    let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
-                    if elapsed < backoff_window(entry.attempt_count) {
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    // Don't strand an entry on a corrupt timestamp — log and retry.
-                    warn!(
-                        "Outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
-                        entry.id
-                    );
-                }
-            }
+            };
+            inflight.push(upload_entry(
+                db,
+                cloud_home,
+                cipher,
+                pending_rotation,
+                store_id,
+                store_dir,
+                now,
+                &now_rfc,
+                hlc,
+                observer,
+                gates.clone(),
+                blob_decls.clone(),
+                gate_columns.clone(),
+                entry,
+            ));
         }
 
-        // Every row from `get_pending_cloud_uploads` is an `Upload` (the query
-        // filters `operation = 'upload'`); destructure the upload-only fields. A
-        // `Delete` here would be a broken query invariant, not a skippable row.
-        let OutboxOperation::Upload {
-            file_id,
-            source_path,
-            scope,
-            retain_pinned,
-        } = &entry.operation
-        else {
-            unreachable!("get_pending_cloud_uploads returns only Upload rows");
-        };
-
-        // The cache namespace this blob's copy lives under is the first component of
-        // its durable cloud key (see [`namespace_from_cloud_key`]); the outbox stores
-        // the key, not a second copy of the namespace. Used by the pinned-cache
-        // populate and the cancelled-make_remote orphan drop below.
-        let namespace = crate::sync::cloud_storage::namespace_from_cloud_key(&entry.cloud_key);
-
-        if let Some(obs) = observer {
-            obs.on_blob_upload_started(file_id).await;
-        }
-
-        let file_path = match source_path {
-            Some(p) => std::path::PathBuf::from(p),
-            None => match crate::storage::local::storage_path(file_id) {
-                Ok(rel) => store_dir.join(rel),
-                Err(e) => {
-                    // A locally-enqueued upload id that can't form a storage path is
-                    // a host bug, not attacker data; record it as this entry's
-                    // failure and keep draining the rest rather than aborting.
-                    let msg = format!("invalid upload file id: {e}");
-                    warn!(
-                        "Upload failed for {} (file_id {file_id}): {msg}",
-                        entry.cloud_key
-                    );
-                    record_failure(db, &entry, file_id, &msg, now, observer).await;
-                    continue;
-                }
-            },
-        };
-
-        // Open a streaming body over the local plaintext — the body seals each
-        // chunk under the scope's key as it uploads, never holding the whole blob.
-        let body = match open_scoped_body(
-            cipher,
-            pending_rotation,
-            &file_path,
-            store_id,
-            &entry.cloud_key,
-            scope.clone(),
-        )
-        .await
-        {
-            Ok(body) => body,
-            Err(msg) => {
-                warn!("Upload failed for {}: {msg}", entry.cloud_key);
-                record_failure(db, &entry, file_id, &msg, now, observer).await;
-                continue;
-            }
-        };
-
-        match upload_with_progress(cloud_home, &entry.cloud_key, file_id, body, observer).await {
-            Ok(()) => {
+        match inflight.next().await {
+            Some(EntryOutcome::Uploaded { made_remote }) => {
                 count += 1;
-
-                // A pinned upload keeps its blob local: stream-copy the source
-                // plaintext file into the protected cache folder
-                // (`storage/pinned/<id>`), so the blob is budget-exempt and serves
-                // from disk with no later cloud round-trip — and a large pinned blob
-                // is never materialized in RAM. Best-effort, like the cache's own
-                // post-populate eviction: the upload has already succeeded and the
-                // bytes are in the cloud, so a populate failure is logged and
-                // swallowed (a later read re-fetches into the cache) rather than
-                // failing a completed upload.
-                if *retain_pinned {
-                    if let Err(e) = crate::blob::cache::populate_pinned(
-                        store_dir, namespace, file_id, &file_path,
-                    )
-                    .await
-                    {
-                        warn!(
-                            "Upload of {} succeeded but pinning it into the local cache (namespace {namespace}) failed (a later read will re-fetch): {e}",
-                            entry.cloud_key
-                        );
-                    }
-                }
-
-                if let Some(obs) = observer {
-                    obs.on_blob_uploaded(file_id).await;
-                }
-
-                // A successful write wins over any pending deletion: remove the
-                // tombstone a prior cycle (possibly another device) wrote for this
-                // key, so the GC won't reclaim the blob we just re-uploaded — the
-                // round-trip re-make_remote case (a prior make_local tombstoned this
-                // key). The enqueue layer already drops a same-device pending delete
-                // row; this covers a tombstone already committed to the cloud. On an
-                // inline-cancel failure a durable `cancel` row is enqueued (before the
-                // outbox row is removed below), so the tombstone-cancel drain retries
-                // until the tombstone is gone. If even that enqueue fails, leave the
-                // outbox row so next cycle's idempotent re-upload retries — never remove
-                // the row and strand the tombstone.
-                let suffix = cipher.read().unwrap().suffix();
-                if let Err(e) = crate::blob::delete::cancel_tombstone_or_enqueue(
-                    db,
-                    cloud_home,
-                    suffix,
-                    &entry.cloud_key,
-                    &now_rfc,
-                )
-                .await
-                {
-                    warn!(
-                        "recording a durable tombstone cancel for {} failed ({e}); leaving the upload queued for retry",
-                        entry.cloud_key
-                    );
-                    continue;
-                }
-
-                // The post-upload commit: mint the gate-flip stamp off coven's HLC
-                // (the same register the host stamps rows from, so the flip sorts
-                // causally and is captured into this cycle's changeset), then in one
-                // DB call complete a make_remote (flip), continue, or tombstone an orphan.
-                let stamp = hlc.now().to_string();
-                let outcome = commit_after_upload(
-                    db,
-                    gates.clone(),
-                    blob_decls.clone(),
-                    gate_columns.clone(),
-                    file_id.to_string(),
-                    entry.cloud_key.clone(),
-                    entry.id,
-                    stamp,
-                    now_rfc.clone(),
-                )
-                .await;
-
-                match outcome {
-                    Ok(PostUpload::Continued) => {}
-                    Ok(PostUpload::Orphan) => {
-                        // A cancelled make_remote left this blob uploaded with no intent;
-                        // it is tombstoned in the commit above. Drop its local cache
-                        // copy too (a `retain_pinned` upload populated `pinned/`,
-                        // which is budget-exempt and would otherwise leak).
-                        if let Err(e) =
-                            crate::blob::cache::drop_cached_blob(store_dir, namespace, file_id)
-                                .await
-                        {
-                            warn!("failed to drop the cache copy of orphaned blob {namespace}/{file_id}: {e}");
-                        }
-                    }
-                    Ok(PostUpload::MadeRemote {
-                        root_table,
-                        root_id,
-                    }) => {
-                        // The gate is flipped, the bytes are in the cloud (and pinned
-                        // cache), and the external ref is dropped in the commit above.
-                        // A user-provided blob is the user's own file, referenced in
-                        // place — coven never deletes the user's original on disk.
-                        if let Some(obs) = observer {
-                            obs.on_root_made_remote(&root_table, &root_id).await;
-                        }
-                        // Break so this cycle publishes the now-shareable subtree;
-                        // any other root's blobs drain on the promptly-run next cycle.
-                        yielded_for_publish = true;
-                        break;
-                    }
-                    Err(e) => {
-                        // The upload landed but the bookkeeping commit failed. The
-                        // outbox row is still present (the commit is all-or-nothing),
-                        // so the next cycle re-runs the idempotent upload and retries
-                        // the commit — no half-state. Log and keep draining.
-                        warn!(
-                            "post-upload commit for {} failed; will retry next cycle: {e}",
-                            entry.cloud_key
-                        );
-                    }
+                if made_remote {
+                    // This upload completed a make_remote: the gate is flipped and the
+                    // subtree is shareable. Yield so this cycle publishes it, and stop
+                    // admitting new uploads — any other root's blobs drain on the
+                    // promptly-run next cycle, and the in-flight uploads finish here.
+                    yielded_for_publish = true;
+                    stop_admitting = true;
                 }
             }
-            Err(e) => {
-                let msg = format!("cloud write failed: {e}");
-                warn!("Upload failed for {}: {msg}", entry.cloud_key);
-                record_failure(db, &entry, file_id, &msg, now, observer).await;
-                continue;
-            }
+            Some(EntryOutcome::NotUploaded) => {}
+            // Nothing left in flight and none admitted this pass: the drain is done.
+            None => break,
         }
     }
 
@@ -466,6 +317,247 @@ pub async fn drain_uploads(
         uploaded: count,
         yielded_for_publish,
     })
+}
+
+/// What one entry's upload attempt did, for [`drain_uploads`] to aggregate.
+enum EntryOutcome {
+    /// The cloud write failed; the failure was recorded and the entry left queued.
+    /// Not counted toward [`DrainOutcome::uploaded`].
+    NotUploaded,
+    /// The cloud write succeeded (counts toward [`DrainOutcome::uploaded`]).
+    /// `made_remote` is true iff the post-upload commit completed a make_remote, so
+    /// the drain yields to publish and stops admitting new uploads.
+    Uploaded { made_remote: bool },
+}
+
+/// Whether `entry` is still inside its retry backoff window and must be skipped this
+/// pass. A corrupt `last_attempt_at` is logged and treated as ready — an entry is
+/// never stranded on an unparseable timestamp.
+fn entry_in_backoff(entry: &OutboxEntry, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some(last) = entry.last_attempt_at.as_deref() else {
+        return false;
+    };
+    match chrono::DateTime::parse_from_rfc3339(last) {
+        Ok(last_dt) => {
+            let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
+            elapsed < backoff_window(entry.attempt_count)
+        }
+        Err(e) => {
+            warn!(
+                "Outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
+                entry.id
+            );
+            false
+        }
+    }
+}
+
+/// The next queued entry ready to attempt now — skipping any still inside its
+/// backoff window — or `None` when the queue is exhausted.
+fn next_ready_entry(
+    pending: &mut std::vec::IntoIter<OutboxEntry>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<OutboxEntry> {
+    pending.by_ref().find(|entry| !entry_in_backoff(entry, now))
+}
+
+/// Upload one queued entry: seal its local plaintext, write it to the cloud, and run
+/// the post-upload bookkeeping (pin populate, tombstone cancel, and the atomic
+/// completion commit). Returns what the drain must aggregate — whether the cloud
+/// write landed and whether it completed a make_remote. A single blob's failure is
+/// recorded and isolated here; it never affects another blob's result.
+#[allow(clippy::too_many_arguments)]
+async fn upload_entry(
+    db: &Database,
+    cloud_home: &dyn CloudHome,
+    cipher: &std::sync::RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
+    store_id: &str,
+    store_dir: &StoreDir,
+    now: chrono::DateTime<chrono::Utc>,
+    now_rfc: &str,
+    hlc: &Hlc,
+    observer: Option<&dyn BlobTransitionObserver>,
+    gates: Arc<Gates>,
+    blob_decls: Arc<BlobDecls>,
+    gate_columns: Arc<HashMap<String, String>>,
+    entry: OutboxEntry,
+) -> EntryOutcome {
+    // Every row from `get_pending_cloud_uploads` is an `Upload` (the query filters
+    // `operation = 'upload'`); destructure the upload-only fields. A `Delete` here
+    // would be a broken query invariant, not a skippable row.
+    let OutboxOperation::Upload {
+        file_id,
+        source_path,
+        scope,
+        retain_pinned,
+    } = &entry.operation
+    else {
+        unreachable!("get_pending_cloud_uploads returns only Upload rows");
+    };
+
+    // The cache namespace this blob's copy lives under is the first component of its
+    // durable cloud key (see [`namespace_from_cloud_key`]); the outbox stores the
+    // key, not a second copy of the namespace. Used by the pinned-cache populate and
+    // the cancelled-make_remote orphan drop below.
+    let namespace = crate::sync::cloud_storage::namespace_from_cloud_key(&entry.cloud_key);
+
+    if let Some(obs) = observer {
+        obs.on_blob_upload_started(file_id).await;
+    }
+
+    let file_path = match source_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match crate::storage::local::storage_path(file_id) {
+            Ok(rel) => store_dir.join(rel),
+            Err(e) => {
+                // A locally-enqueued upload id that can't form a storage path is a
+                // host bug, not attacker data; record it as this entry's failure and
+                // keep draining the rest rather than aborting.
+                let msg = format!("invalid upload file id: {e}");
+                warn!(
+                    "Upload failed for {} (file_id {file_id}): {msg}",
+                    entry.cloud_key
+                );
+                record_failure(db, &entry, file_id, &msg, now, observer).await;
+                return EntryOutcome::NotUploaded;
+            }
+        },
+    };
+
+    // Open a streaming body over the local plaintext — the body seals each chunk
+    // under the scope's key as it uploads, never holding the whole blob.
+    let body = match open_scoped_body(
+        cipher,
+        pending_rotation,
+        &file_path,
+        store_id,
+        &entry.cloud_key,
+        scope.clone(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(msg) => {
+            warn!("Upload failed for {}: {msg}", entry.cloud_key);
+            record_failure(db, &entry, file_id, &msg, now, observer).await;
+            return EntryOutcome::NotUploaded;
+        }
+    };
+
+    if let Err(e) =
+        upload_with_progress(cloud_home, &entry.cloud_key, file_id, body, observer).await
+    {
+        let msg = format!("cloud write failed: {e}");
+        warn!("Upload failed for {}: {msg}", entry.cloud_key);
+        record_failure(db, &entry, file_id, &msg, now, observer).await;
+        return EntryOutcome::NotUploaded;
+    }
+
+    // A pinned upload keeps its blob local: stream-copy the source plaintext file
+    // into the protected cache folder (`storage/pinned/<id>`), so the blob is
+    // budget-exempt and serves from disk with no later cloud round-trip — and a large
+    // pinned blob is never materialized in RAM. Best-effort, like the cache's own
+    // post-populate eviction: the upload has already succeeded and the bytes are in
+    // the cloud, so a populate failure is logged and swallowed (a later read
+    // re-fetches into the cache) rather than failing a completed upload.
+    if *retain_pinned {
+        if let Err(e) =
+            crate::blob::cache::populate_pinned(store_dir, namespace, file_id, &file_path).await
+        {
+            warn!(
+                "Upload of {} succeeded but pinning it into the local cache (namespace {namespace}) failed (a later read will re-fetch): {e}",
+                entry.cloud_key
+            );
+        }
+    }
+
+    if let Some(obs) = observer {
+        obs.on_blob_uploaded(file_id).await;
+    }
+
+    // A successful write wins over any pending deletion: remove the tombstone a prior
+    // cycle (possibly another device) wrote for this key, so the GC won't reclaim the
+    // blob we just re-uploaded — the round-trip re-make_remote case (a prior
+    // make_local tombstoned this key). The enqueue layer already drops a same-device
+    // pending delete row; this covers a tombstone already committed to the cloud. On
+    // an inline-cancel failure a durable `cancel` row is enqueued (before the outbox
+    // row is removed below), so the tombstone-cancel drain retries until the tombstone
+    // is gone. If even that enqueue fails, leave the outbox row so next cycle's
+    // idempotent re-upload retries — never remove the row and strand the tombstone.
+    let suffix = cipher.read().unwrap().suffix();
+    if let Err(e) = crate::blob::delete::cancel_tombstone_or_enqueue(
+        db,
+        cloud_home,
+        suffix,
+        &entry.cloud_key,
+        now_rfc,
+    )
+    .await
+    {
+        warn!(
+            "recording a durable tombstone cancel for {} failed ({e}); leaving the upload queued for retry",
+            entry.cloud_key
+        );
+        return EntryOutcome::Uploaded { made_remote: false };
+    }
+
+    // The post-upload commit: mint the gate-flip stamp off coven's HLC (the same
+    // register the host stamps rows from, so the flip sorts causally and is captured
+    // into this cycle's changeset), then in one DB call complete a make_remote
+    // (flip), continue, or tombstone an orphan.
+    let stamp = hlc.now().to_string();
+    match commit_after_upload(
+        db,
+        gates,
+        blob_decls,
+        gate_columns,
+        file_id.to_string(),
+        entry.cloud_key.clone(),
+        entry.id,
+        stamp,
+        now_rfc.to_string(),
+    )
+    .await
+    {
+        Ok(PostUpload::Continued) => EntryOutcome::Uploaded { made_remote: false },
+        Ok(PostUpload::Orphan) => {
+            // A cancelled make_remote left this blob uploaded with no intent; it is
+            // tombstoned in the commit above. Drop its local cache copy too (a
+            // `retain_pinned` upload populated `pinned/`, which is budget-exempt and
+            // would otherwise leak).
+            if let Err(e) =
+                crate::blob::cache::drop_cached_blob(store_dir, namespace, file_id).await
+            {
+                warn!("failed to drop the cache copy of orphaned blob {namespace}/{file_id}: {e}");
+            }
+            EntryOutcome::Uploaded { made_remote: false }
+        }
+        Ok(PostUpload::MadeRemote {
+            root_table,
+            root_id,
+        }) => {
+            // The gate is flipped, the bytes are in the cloud (and pinned cache), and
+            // the external ref is dropped in the commit above. A user-provided blob is
+            // the user's own file, referenced in place — coven never deletes the user's
+            // original on disk.
+            if let Some(obs) = observer {
+                obs.on_root_made_remote(&root_table, &root_id).await;
+            }
+            EntryOutcome::Uploaded { made_remote: true }
+        }
+        Err(e) => {
+            // The upload landed but the bookkeeping commit failed. The outbox row is
+            // still present (the commit is all-or-nothing), so the next cycle re-runs
+            // the idempotent upload and retries the commit — no half-state. Log and
+            // keep the count.
+            warn!(
+                "post-upload commit for {} failed; will retry next cycle: {e}",
+                entry.cloud_key
+            );
+            EntryOutcome::Uploaded { made_remote: false }
+        }
+    }
 }
 
 /// What the post-upload commit did, so the drain can run the cloud-/filesystem-side

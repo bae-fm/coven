@@ -55,6 +55,7 @@ fn open(name: &str) -> Database {
         std::path::Path::new(name),
         synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "wasm-test-device".to_string(),
         &migrations,
     )

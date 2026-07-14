@@ -483,6 +483,7 @@ async fn returned_stamper_shares_seeded_clock() {
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000_000_000_000)),
         &migrations,
     )
@@ -669,6 +670,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "dev-self".to_string(),
         &migrations,
     )

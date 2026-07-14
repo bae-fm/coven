@@ -71,6 +71,8 @@
 //! cache grows without bound. Tests can reset all of `cache/` in one sweep; a pinned
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
+use futures_util::stream::TryStreamExt;
+
 use crate::blob::{BlobRef, Provenance};
 use crate::database::{Database, DbError};
 use crate::store_dir::{PathTokenError, StoreDir};
@@ -829,37 +831,57 @@ pub async fn pin(
     storage: Option<&dyn SyncStorage>,
     blobs: &[BlobRef],
 ) -> Result<(), BlobCacheError> {
-    for blob in blobs {
-        let pinned = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+    // Fetch up to `max_concurrent_downloads` blobs at once, admitting in the given
+    // order and refilling as each completes. At limit 1 this is the serial loop:
+    // pin one blob fully, then the next, returning the first error. Each blob is
+    // independent — its own `pinned/<ns>/<id>` destination and its own metadata reads
+    // (serialized on the connection thread) — so concurrent pins touch no shared
+    // mutable state (there is no cache-budget or write-batch interaction: `pinned/`
+    // is budget-exempt and materialize runs no eviction). A single blob's failure
+    // stops the pin and is returned, dropping the in-flight fetches.
+    let limit = db.transfer_limits().downloads.get();
+    futures_util::stream::iter(blobs.iter().map(Ok::<&BlobRef, BlobCacheError>))
+        .try_for_each_concurrent(limit, |blob| pin_one(db, store_dir, storage, blob))
+        .await
+}
 
-        // Already protected — idempotent no-op. A failure to even check existence
-        // (broken filesystem) is surfaced, not collapsed into "absent": fetching and
-        // overwriting a present pinned blob would be wasteful and could mask a real
-        // fault, the same posture `read_blob` takes on its hit check.
-        match crate::local_blob::exists(&pinned).await {
-            Ok(true) => continue,
-            Ok(false) => {}
-            Err(e) => return Err(BlobCacheError::Io(e)),
-        }
+/// Pin one Remote blob into `storage/pinned/`: a no-op if already pinned, a rename
+/// from the evictable cache if staged there, else a cloud fetch straight into
+/// `pinned/`. The per-blob body [`pin`] runs, concurrently or serially.
+async fn pin_one(
+    db: &Database,
+    store_dir: &StoreDir,
+    storage: Option<&dyn SyncStorage>,
+    blob: &BlobRef,
+) -> Result<(), BlobCacheError> {
+    let pinned = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
 
-        // Staged or read-populated in the evictable cache — promote it with a rename
-        // (no cloud fetch). `rename` within `storage/` is atomic on one filesystem,
-        // so the blob is never in both folders or neither mid-move. An `exists`
-        // failure here is surfaced too, never read as "not cached" (which would
-        // re-fetch over a present file).
-        match cached_blob_path(store_dir, &blob.namespace, &blob.id).await? {
-            Some(CachedBlobPath::Pinned(_)) => continue,
-            Some(CachedBlobPath::Cache(path)) => {
-                rename_within_storage(&path, &pinned).await?;
-                continue;
-            }
-            None => {}
-        }
-
-        // In neither folder — fetch from the cloud straight into `pinned/`. A
-        // home-less store has no storage to fetch a Remote blob from; surface it.
-        materialize_remote_blob_to_file(db, store_dir, storage, blob, &pinned).await?;
+    // Already protected — idempotent no-op. A failure to even check existence
+    // (broken filesystem) is surfaced, not collapsed into "absent": fetching and
+    // overwriting a present pinned blob would be wasteful and could mask a real
+    // fault, the same posture `read_blob` takes on its hit check.
+    match crate::local_blob::exists(&pinned).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => return Err(BlobCacheError::Io(e)),
     }
+
+    // Staged or read-populated in the evictable cache — promote it with a rename
+    // (no cloud fetch). `rename` within `storage/` is atomic on one filesystem,
+    // so the blob is never in both folders or neither mid-move. An `exists`
+    // failure here is surfaced too, never read as "not cached" (which would
+    // re-fetch over a present file).
+    match cached_blob_path(store_dir, &blob.namespace, &blob.id).await? {
+        Some(CachedBlobPath::Pinned(_)) => return Ok(()),
+        Some(CachedBlobPath::Cache(path)) => {
+            return rename_within_storage(&path, &pinned).await;
+        }
+        None => {}
+    }
+
+    // In neither folder — fetch from the cloud straight into `pinned/`. A
+    // home-less store has no storage to fetch a Remote blob from; surface it.
+    materialize_remote_blob_to_file(db, store_dir, storage, blob, &pinned).await?;
     Ok(())
 }
 

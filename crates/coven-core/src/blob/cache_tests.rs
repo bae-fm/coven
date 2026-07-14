@@ -21,7 +21,8 @@ use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     capture_bytes, open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, plant_blob_row, plant_blob_row_with_size_hash,
-    pull_into, read_test_db, set_blob_remote, temp_store_dir, test_migrations, MockSyncStorage,
+    pull_into, read_test_db, read_test_db_with_download_limit, set_blob_remote, temp_store_dir,
+    test_migrations, MockSyncStorage,
 };
 
 /// The synthetic test db opens with a single migration, so its
@@ -460,6 +461,115 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
         std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
         bytes,
         "pin writes the remote bytes into the pinned file",
+    );
+}
+
+// --- pin: bounded concurrency ------------------------------------------------
+
+/// Plant `n` distinct Remote blobs in namespace `audio` (a gated root + child row
+/// each) and put their bytes in the mock cloud, returning the refs and the bytes so a
+/// pin test can drive the download loop and verify what landed. None are cached, so a
+/// pin fetches each through `read_blob_to_file`.
+async fn setup_remote_blobs(
+    db: &Database,
+    storage: &MockSyncStorage,
+    n: usize,
+) -> (Vec<BlobRef>, Vec<Vec<u8>>) {
+    let mut blobs = Vec::new();
+    let mut all_bytes = Vec::new();
+    for i in 0..n {
+        let blob = blob_ref(&format!("pinc{i:04}"), "audio", CacheFill::CacheLazy);
+        let bytes: Vec<u8> = (0..1000u32).map(|x| ((x + i as u32) % 251) as u8).collect();
+        plant_blob_row(db, &blob.id, true, &bytes).await;
+        put_cloud_blob(db, storage, &blob.id, &blob.namespace, &bytes).await;
+        blobs.push(blob);
+        all_bytes.push(bytes);
+    }
+    (blobs, all_bytes)
+}
+
+/// At limit 1 the pin loop is serial: every blob is fetched (one at a time) and
+/// lands in `pinned/` with its bytes.
+#[tokio::test]
+async fn pin_at_limit_one_pins_every_blob() {
+    let db = read_test_db_with_download_limit("audio", 1);
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_store_dir();
+
+    let (blobs, bytes) = setup_remote_blobs(&db, &storage, 4).await;
+    pin(&db, &ld, Some(&storage), &blobs)
+        .await
+        .expect("pin every blob serially");
+
+    assert_eq!(
+        storage.blob_read_to_file_count(),
+        4,
+        "every blob is fetched"
+    );
+    for (blob, want) in blobs.iter().zip(&bytes) {
+        assert_eq!(
+            std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+            *want,
+            "the blob landed pinned with its bytes",
+        );
+    }
+}
+
+/// At limit 2 the pin loop runs two downloads at once and no more: a barrier that
+/// only releases when two `read_blob_to_file` calls gather proves both the
+/// concurrency and the bound (a limit of 1 would deadlock it), and every blob lands
+/// pinned with its bytes.
+#[tokio::test]
+async fn pin_runs_downloads_concurrently_up_to_the_limit() {
+    let db = read_test_db_with_download_limit("audio", 2);
+    let storage = MockSyncStorage::new();
+    storage.arm_read_to_file_concurrency_probe(2);
+    let (_tmp, ld) = temp_store_dir();
+
+    // Four blobs over a barrier of two: waves of two must gather to proceed.
+    let (blobs, bytes) = setup_remote_blobs(&db, &storage, 4).await;
+    pin(&db, &ld, Some(&storage), &blobs)
+        .await
+        .expect("pin runs downloads concurrently");
+
+    assert_eq!(
+        storage.read_to_file_max_inflight(),
+        2,
+        "exactly two downloads ran at once",
+    );
+    for (blob, want) in blobs.iter().zip(&bytes) {
+        assert_eq!(
+            std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+            *want,
+            "every concurrently-fetched blob landed pinned with its bytes",
+        );
+    }
+}
+
+/// A blob whose bytes are missing from the cloud fails the whole pin (the serial
+/// abort semantics: `pin` returns on the first error), even under concurrency.
+#[tokio::test]
+async fn pin_mid_batch_failure_surfaces_the_error() {
+    let db = read_test_db_with_download_limit("audio", 2);
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_store_dir();
+
+    let (mut blobs, _bytes) = setup_remote_blobs(&db, &storage, 3).await;
+    // A blob whose row resolves Remote but whose bytes were never uploaded: no
+    // uploader is recorded and no cloud object exists, so its fetch fails.
+    let missing = blob_ref("miss0aaa", "audio", CacheFill::CacheLazy);
+    plant_blob_row(&db, &missing.id, true, b"never-uploaded").await;
+    blobs.push(missing);
+
+    let err = pin(&db, &ld, Some(&storage), &blobs)
+        .await
+        .expect_err("a missing blob fails the pin");
+    assert!(
+        matches!(
+            err,
+            BlobCacheError::Storage(_) | BlobCacheError::UploaderUnresolved { .. }
+        ),
+        "the failure surfaces rather than being pinned around, got {err:?}",
     );
 }
 

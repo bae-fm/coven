@@ -740,6 +740,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "B".to_string(),
         &test_migrations(),
     )

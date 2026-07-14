@@ -60,6 +60,25 @@ fn open_outbox_db() -> Database {
         std::path::Path::new(":memory:"),
         Vec::new(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        "test-device".to_string(),
+        &[],
+    )
+    .expect("open outbox database");
+    db
+}
+
+/// An outbox-only `Database` whose upload drain runs up to `uploads` writes at once
+/// (downloads stay serial — not exercised by the drain).
+fn open_outbox_db_with_uploads(uploads: usize) -> Database {
+    let (db, _stamper) = Database::open(
+        std::path::Path::new(":memory:"),
+        Vec::new(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits {
+            uploads: std::num::NonZeroUsize::new(uploads).expect("uploads limit is nonzero"),
+            downloads: std::num::NonZeroUsize::MIN,
+        },
         "test-device".to_string(),
         &[],
     )
@@ -887,5 +906,349 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     assert!(
         !pinned_path.exists(),
         "the blocked populate left no storage/pinned/<id> file",
+    );
+}
+
+// --- bounded concurrency ----------------------------------------------------
+
+/// A cloud backend that gathers writes on a barrier before serving, so a test can
+/// prove the drain runs uploads concurrently and bounds them: with a barrier of size
+/// N, N writes must arrive together to release it, and `max_inflight` records the
+/// observed peak. Records each written key so the test can assert what landed. Its
+/// `delete` is a no-op (the drain's post-upload tombstone cancel deletes an absent
+/// object).
+struct BarrierCloudHome {
+    keys: Mutex<Vec<String>>,
+    inflight: AtomicUsize,
+    max_inflight: AtomicUsize,
+    barrier: tokio::sync::Barrier,
+}
+
+impl BarrierCloudHome {
+    fn new(gather: usize) -> Self {
+        Self {
+            keys: Mutex::new(Vec::new()),
+            inflight: AtomicUsize::new(0),
+            max_inflight: AtomicUsize::new(0),
+            barrier: tokio::sync::Barrier::new(gather),
+        }
+    }
+    fn max_inflight(&self) -> usize {
+        self.max_inflight.load(Ordering::SeqCst)
+    }
+    fn keys(&self) -> Vec<String> {
+        let mut k = self.keys.lock().unwrap().clone();
+        k.sort();
+        k
+    }
+    async fn gather(&self, key: &str) {
+        let n = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_inflight.fetch_max(n, Ordering::SeqCst);
+        self.barrier.wait().await;
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+        self.keys.lock().unwrap().push(key.to_string());
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl CloudHome for BarrierCloudHome {
+    async fn put_object(&self, key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
+        self.gather(key).await;
+        Ok(())
+    }
+    async fn open_multipart<'a>(
+        &'a self,
+        _key: &str,
+        _total_len: u64,
+    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
+        unimplemented!("the probe keeps blobs under the multipart threshold")
+    }
+    fn multipart_threshold(&self) -> u64 {
+        8 * 1024 * 1024
+    }
+    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        unimplemented!("not exercised by drain_uploads")
+    }
+    async fn read_range(
+        &self,
+        _key: &str,
+        _start: u64,
+        _end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError> {
+        unimplemented!("not exercised by drain_uploads")
+    }
+    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        unimplemented!("not exercised by drain_uploads")
+    }
+    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
+    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
+        unimplemented!("not exercised by drain_uploads")
+    }
+    async fn grant_access(
+        &self,
+        _grant: crate::storage::cloud::CloudAccessGrant,
+    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+        unimplemented!("not exercised by drain_uploads")
+    }
+    async fn revoke_access(
+        &self,
+        _revoke: crate::storage::cloud::CloudAccessRevoke,
+    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
+        unimplemented!("not exercised by drain_uploads")
+    }
+}
+
+/// An observer that pauses the drain after its first `admit_before` admission checks:
+/// `should_skip_uploads` returns false for the first `admit_before` calls, then true.
+/// Records the started blob ids so a test can assert which entries were admitted.
+struct PausingObserver {
+    admit_before: usize,
+    checks: AtomicUsize,
+    started: Mutex<Vec<String>>,
+}
+
+impl PausingObserver {
+    fn new(admit_before: usize) -> Self {
+        Self {
+            admit_before,
+            checks: AtomicUsize::new(0),
+            started: Mutex::new(Vec::new()),
+        }
+    }
+    fn started(&self) -> Vec<String> {
+        self.started.lock().unwrap().clone()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl BlobTransitionObserver for PausingObserver {
+    async fn on_blob_upload_started(&self, file_id: &str) {
+        self.started.lock().unwrap().push(file_id.to_string());
+    }
+    async fn on_blob_uploaded(&self, _file_id: &str) {}
+    async fn on_blob_upload_failed(&self, _file_id: &str, _error: &str) {}
+    fn should_skip_uploads(&self) -> bool {
+        self.checks.fetch_add(1, Ordering::SeqCst) >= self.admit_before
+    }
+}
+
+/// Enqueue `n` ready uploads with distinct ids/keys over real temp files, returning
+/// the (file_id, cloud_key) pairs in order.
+async fn seed_uploads(db: &Database, dir: &std::path::Path, n: usize) -> Vec<(String, String)> {
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let file_id = format!("f{i}");
+        let cloud_key = format!("k{i}");
+        let path = write_temp_file(
+            dir,
+            &format!("blob-{i}.bin"),
+            format!("bytes-{i}").as_bytes(),
+        );
+        insert_upload(db, i as i64 + 1, &file_id, &cloud_key, Some(path), 0, None).await;
+        ids.push((file_id, cloud_key));
+    }
+    ids
+}
+
+/// At limit 1 the drain is serial: it uploads every entry in queue order, one at a
+/// time — each entry's `Started` is immediately followed by its `Uploaded` before the
+/// next entry starts — and clears each row.
+#[tokio::test]
+async fn limit_one_drains_every_entry_in_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_outbox_db_with_uploads(1);
+    let ids = seed_uploads(&db, tmp.path(), 3).await;
+    let cloud = InMemoryCloudHome::new();
+    let observer = RecordingObserver::new();
+
+    let n = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        Some(&observer),
+    )
+    .await
+    .unwrap()
+    .uploaded;
+    assert_eq!(n, 3, "every entry uploads");
+
+    for (i, (_file_id, key)) in ids.iter().enumerate() {
+        assert!(cloud.get(key).is_some(), "{key} landed in the cloud");
+        assert!(
+            get_upload(&db, i as i64 + 1).await.is_none(),
+            "the uploaded entry's row was removed",
+        );
+    }
+
+    // Serial order: Sf0,Uf0,Sf1,Uf1,Sf2,Uf2 — no entry starts before the previous
+    // one's upload completes.
+    let seq: Vec<String> = observer
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            ObsEvent::Started(f) => Some(format!("S{f}")),
+            ObsEvent::Uploaded(f) => Some(format!("U{f}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        seq,
+        vec!["Sf0", "Uf0", "Sf1", "Uf1", "Sf2", "Uf2"],
+        "limit 1 uploads strictly one entry at a time in queue order",
+    );
+}
+
+/// At limit 2 the drain runs two uploads at once and no more: a barrier that only
+/// releases when two writes gather proves both the concurrency and the bound (a limit
+/// of 1 would deadlock it). Every entry lands and its row is cleared.
+#[tokio::test]
+async fn concurrent_drain_overlaps_up_to_the_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_outbox_db_with_uploads(2);
+    let ids = seed_uploads(&db, tmp.path(), 4).await;
+    let cloud = BarrierCloudHome::new(2);
+
+    let n = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        None,
+    )
+    .await
+    .unwrap()
+    .uploaded;
+
+    assert_eq!(n, 4, "every entry uploads");
+    assert_eq!(cloud.max_inflight(), 2, "exactly two uploads ran at once");
+    let want: Vec<String> = ids.iter().map(|(_, k)| k.clone()).collect();
+    assert_eq!(cloud.keys(), want, "every blob reached the cloud");
+    for i in 0..ids.len() {
+        assert!(
+            get_upload(&db, i as i64 + 1).await.is_none(),
+            "every uploaded entry's row was removed after the concurrent batch",
+        );
+    }
+}
+
+/// A single blob's failure is isolated under concurrency: the drain records it and
+/// keeps the failed entry queued, while every other blob uploads and clears.
+#[tokio::test]
+async fn concurrent_drain_isolates_a_failed_upload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_outbox_db_with_uploads(3);
+    // Entry 2's source file is missing, so its read fails; 1 and 3 upload fine.
+    let good_a = write_temp_file(tmp.path(), "a.bin", b"aaa");
+    let missing = tmp.path().join("missing.bin").to_string_lossy().to_string();
+    let good_c = write_temp_file(tmp.path(), "c.bin", b"ccc");
+    insert_upload(&db, 1, "fa", "ka", Some(good_a), 0, None).await;
+    insert_upload(&db, 2, "fb", "kb", Some(missing), 0, None).await;
+    insert_upload(&db, 3, "fc", "kc", Some(good_c), 0, None).await;
+    let cloud = InMemoryCloudHome::new();
+
+    let n = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        None,
+    )
+    .await
+    .unwrap()
+    .uploaded;
+
+    assert_eq!(n, 2, "the two good blobs upload despite the failure");
+    assert!(cloud.get("ka").is_some());
+    assert!(cloud.get("kc").is_some());
+    assert!(cloud.get("kb").is_none(), "the failed blob did not land");
+    assert!(get_upload(&db, 1).await.is_none(), "good entry cleared");
+    assert!(get_upload(&db, 3).await.is_none(), "good entry cleared");
+    let (attempt, err, _) = get_upload(&db, 2).await.expect("failed entry stays queued");
+    assert_eq!(attempt, 1);
+    assert!(err.is_some());
+}
+
+/// A queue paused up front admits nothing under concurrency: no write, no started
+/// event, every row left queued.
+#[tokio::test]
+async fn paused_queue_admits_nothing_under_concurrency() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_outbox_db_with_uploads(3);
+    seed_uploads(&db, tmp.path(), 3).await;
+    let cloud = InMemoryCloudHome::new();
+    let observer = PausingObserver::new(0); // pause before the first admission
+
+    let n = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        Some(&observer),
+    )
+    .await
+    .unwrap()
+    .uploaded;
+
+    assert_eq!(n, 0, "a paused queue uploads nothing");
+    assert!(cloud.is_empty(), "no object reached the cloud");
+    assert!(observer.started().is_empty(), "no upload started");
+    for i in 1..=3 {
+        assert!(get_upload(&db, i).await.is_some(), "every row stays queued");
+    }
+}
+
+/// A pause that trips after the first admission (limit 1) lets the in-flight upload
+/// finish and stops admitting the rest: the first entry uploads and clears, the
+/// second is untouched.
+#[tokio::test]
+async fn pause_after_first_finishes_inflight_and_stops_admitting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_outbox_db_with_uploads(1);
+    seed_uploads(&db, tmp.path(), 2).await;
+    let cloud = InMemoryCloudHome::new();
+    let observer = PausingObserver::new(1); // admit one, then pause
+
+    let n = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        Some(&observer),
+    )
+    .await
+    .unwrap()
+    .uploaded;
+
+    assert_eq!(
+        n, 1,
+        "the first entry uploads before the pause takes effect"
+    );
+    assert_eq!(
+        observer.started(),
+        vec!["f0".to_string()],
+        "only one started"
+    );
+    assert!(cloud.get("k0").is_some(), "the admitted blob landed");
+    assert!(
+        cloud.get("k1").is_none(),
+        "the paused-out blob did not land"
+    );
+    assert!(
+        get_upload(&db, 1).await.is_none(),
+        "the uploaded entry cleared"
+    );
+    assert!(
+        get_upload(&db, 2).await.is_some(),
+        "the paused-out entry stays queued",
     );
 }

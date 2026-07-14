@@ -118,6 +118,7 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "B".to_string(),
         &test_migrations(),
     )
@@ -508,6 +509,7 @@ async fn plaintext_home_snapshot_and_changeset_round_trip_through_the_cycle() {
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "B".to_string(),
         &test_migrations(),
     )

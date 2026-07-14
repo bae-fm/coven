@@ -700,6 +700,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "device-b".to_string(),
         &test_migrations(),
     )
@@ -810,6 +811,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "B".to_string(),
         &test_migrations(),
     )
@@ -947,6 +949,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_from_its_next_sy
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         "B".to_string(),
         &test_migrations(),
     )

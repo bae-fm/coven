@@ -815,6 +815,7 @@ pub(crate) async fn open_db_and_pull(
         // This bootstrap database only applies changesets during join; it never runs
         // the tombstone GC, so the grace is immaterial and takes the default.
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
         device_id.to_string(),
         migrations,
     )
