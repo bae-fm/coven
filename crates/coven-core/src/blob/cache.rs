@@ -847,7 +847,7 @@ pub async fn pin(
 
 /// Pin one Remote blob into `storage/pinned/`: a no-op if already pinned, a rename
 /// from the evictable cache if staged there, else a cloud fetch straight into
-/// `pinned/`. The per-blob body [`pin`] runs, concurrently or serially.
+/// `pinned/`. [`pin`] dispatches this per blob, up to its concurrency limit.
 async fn pin_one(
     db: &Database,
     store_dir: &StoreDir,
