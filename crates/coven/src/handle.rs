@@ -898,9 +898,8 @@ impl CovenHandle {
     }
 
     /// Generate a restore code, seeded with the store's current membership-head
-    /// floor read from the cloud. Requires a connected provider: unlike the old,
-    /// storage-free version of this call, minting a trustworthy floor is a
-    /// network read, not a pure function of local config and keyring state — a
+    /// floor read from the cloud. Requires a connected provider because minting a
+    /// trustworthy floor is a network read, not a pure function of local config and keyring state — a
     /// restore code minted without one would carry no protection against a
     /// storage provider replaying an older, otherwise validly signed membership
     /// state to the device that redeems it.

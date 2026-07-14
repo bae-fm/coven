@@ -39,9 +39,23 @@ use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::run_test_cycle;
 use crate::sync::test_helpers::{
     append_membership_entry, exec, founder_entry, open_test_db, open_test_db_with_blob, pubkey_hex,
-    publish_membership_chain_head, record_test_blob_location, temp_store_dir, test_blob_location,
-    test_migrations, test_synced_tables, test_synced_tables_with_blob, MockSyncStorage,
+    publish_membership_chain_head, publish_test_founder, record_test_blob_location, temp_store_dir,
+    test_blob_location, test_migrations, test_synced_tables, test_synced_tables_with_blob,
+    MockSyncStorage,
 };
+
+async fn publish_founder(
+    storage: &dyn SyncStorage,
+    owner: &UserKeypair,
+) -> Vec<crate::sync::membership::MembershipCoord> {
+    publish_test_founder(storage, owner, "0000000001000-0000-owner")
+        .await
+        .expect("publish founder membership");
+    vec![crate::sync::membership::MembershipCoord {
+        author_pubkey: hex::encode(owner.public_key()),
+        seq: 1,
+    }]
+}
 
 /// A restore code carrying the given `sid`. The provider points at a loopback
 /// endpoint nothing listens on, so if execution ever reached the network it would
@@ -387,18 +401,13 @@ async fn failed_restore_does_not_block_a_retry_with_store_exists() {
 /// A failure at the very last step of bootstrap — saving `config.yaml`, after
 /// the encryption key and the cloud-home credentials are already written to the
 /// keyring (steps 7 and 8) and restore's identity is imported (the step right
-/// before the save) — must roll back all of them, not just whichever the OLD
-/// code happened to reach. The public entry points (`join_store`,
+/// before the save) — must roll back all of them. The public entry points (`join_store`,
 /// `restore_from_cloud`) refuse a store whose config marker already exists, and
 /// otherwise clear the directory, so there is no way to pre-seed a conflicting
 /// path inside a completed store before calling them; this drives
 /// `bootstrap_and_save_store` directly — the same function those entry points
 /// call — and blocks its final write by seeding a directory at the exact path
 /// `config.yaml` needs.
-///
-/// The membership listing is empty, so `open_db_and_pull` exercises its
-/// pre-initialization, no-owner-to-pin path. This test needs only a snapshot the
-/// owner published, mirroring the bootstrap tests in `join_tests.rs`.
 #[tokio::test]
 async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     crate::keys::test_keyring::install();
@@ -424,6 +433,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         store_id.to_string(),
         owner_keypair.clone(),
     );
+    let membership_floor = publish_founder(&owner_storage, &owner_keypair).await;
 
     let tables = test_synced_tables();
     let db = open_test_db();
@@ -486,7 +496,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         BootstrapContext::Restore {
             keypair: &joiner_keypair,
         },
-        &[],
+        &membership_floor,
         &tables,
         &test_migrations(),
         &join_info,
@@ -603,6 +613,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         store_id.to_string(),
         owner_keypair.clone(),
     );
+    let membership_floor = publish_founder(&owner_storage, &owner_keypair).await;
 
     // Owner: a store with one shared note, captured straight into the published
     // snapshot — the shape a device sees the first time it opens a shared store.
@@ -672,7 +683,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         BootstrapContext::Restore {
             keypair: &joiner_keypair,
         },
-        &[],
+        &membership_floor,
         &tables,
         &test_migrations(),
         &join_info,
@@ -739,15 +750,70 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
     );
 }
 
-/// The restore-only branch in `open_db_and_pull` (join.rs, around the
-/// `owner_pubkey.is_none()` block): restore carries no owner from an invite, so
-/// it adopts the chain founder as the pinned owner itself, after the pull, from
-/// membership entries loaded straight from the bootstrapped storage. No existing
-/// test publishes a founder chain and checks this — join_tests.rs's
-/// `open_db_and_pull` calls also pass `owner_pubkey: None`, but never publish any
-/// membership entries, so that branch's `if !entries.is_empty()` body never runs
-/// there. This seeds a real founder entry (and its head) before bootstrapping,
-/// then asserts the joiner's `sync_state` pins that founder's pubkey.
+/// Production publishes the committed founder before it can publish a snapshot.
+/// A bucket holding snapshot bytes without that owner anchor is incomplete or
+/// tampered state, so restore refuses it instead of creating an unowned store.
+#[tokio::test]
+async fn restore_refuses_a_snapshot_without_a_committed_membership_chain() {
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+    let owner = UserKeypair::generate();
+    let db_owner = open_test_db();
+    let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
+    let snap_dir = snap_tmp.path().to_path_buf();
+    let tables_c = tables.clone();
+    let snapshot = db_owner
+        .call(move |conn| {
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+        })
+        .await
+        .expect("owner snapshot");
+    push_snapshot(
+        &storage,
+        "test-lib",
+        snapshot,
+        "owner-device",
+        HashMap::new(),
+        0,
+        db_owner.schema_version(),
+        &owner,
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_owner,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("push snapshot without membership");
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
+        .await
+        .expect("bootstrap snapshot bytes");
+    let error = open_db_and_pull(
+        "test-lib",
+        &lib_b.db_path(),
+        &tables,
+        &test_migrations(),
+        "B",
+        None,
+        &[],
+        &storage,
+        boot,
+        &lib_b,
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await
+    .expect_err("restore requires a committed membership chain");
+
+    assert!(
+        matches!(error, BootstrapError::Membership(_)),
+        "missing membership must be a membership failure: {error:?}"
+    );
+}
+
+/// Restore carries no owner assertion from an invite, so it adopts the committed
+/// chain founder as the pinned owner before pulling any changesets.
 #[tokio::test]
 async fn restore_pins_the_chain_founder_as_owner() {
     let storage = MockSyncStorage::new();
@@ -835,7 +901,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
 /// a restore code seeds the same per-author watermark from its own floor. Owner
 /// pinning follows this call in the restore flow, but the accepted floor is
 /// already authoritative: the bootstrap pull must reject a lower signed head
-/// instead of treating a failed unpinned chain load as pre-initialization.
+/// instead of accepting an unanchored membership state.
 #[tokio::test]
 async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap() {
     use crate::sync::membership::{entry_hash, AuthorHead, MemberRole, MembershipAction};
@@ -979,6 +1045,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         store_id.to_string(),
         owner_keypair.clone(),
     );
+    let membership_floor = publish_founder(&owner_storage, &owner_keypair).await;
 
     // Owner: a shared note with a cover photo, both captured into the snapshot.
     let db_owner = open_test_db_with_blob(BlobDecl::new(
@@ -1078,7 +1145,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         BootstrapContext::Restore {
             keypair: &joiner_keypair,
         },
-        &[],
+        &membership_floor,
         &tables,
         &test_migrations(),
         &join_info,

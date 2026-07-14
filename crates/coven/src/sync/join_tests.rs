@@ -42,6 +42,40 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
     tokio::sync::watch::channel(false).1
 }
 
+async fn publish_founder(
+    storage: &dyn SyncStorage,
+    owner: &UserKeypair,
+) -> Vec<crate::sync::membership::MembershipCoord> {
+    publish_test_founder(storage, owner, "0000000001000-0000-owner")
+        .await
+        .expect("publish founder membership");
+    vec![crate::sync::membership::MembershipCoord {
+        author_pubkey: hex::encode(owner.public_key()),
+        seq: 1,
+    }]
+}
+
+fn store_founder_changeset(
+    storage: &MockSyncStorage,
+    owner: &UserKeypair,
+    membership_floor: &[crate::sync::membership::MembershipCoord],
+    device_id: &str,
+    seq: u64,
+    changeset: &[u8],
+) {
+    let packed = crate::sync::envelope::pack_signed(
+        device_id,
+        seq,
+        SCHEMA_VERSION,
+        "",
+        "2026-02-10T00:00:00Z",
+        owner,
+        Some(membership_floor[0].clone()),
+        changeset,
+    );
+    storage.put_changeset_packed(device_id, seq, packed);
+}
+
 /// An invite code carrying an attacker-chosen `store_id` is the path-traversal
 /// vector: the code is unsigned, and the id becomes a directory the joiner creates
 /// and — on a bootstrap failure — recursively deletes. The id is refused the moment
@@ -662,7 +696,9 @@ async fn join_failure_calls_forget_on_the_selected_custody() {
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let enc = CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32]));
-    let storage = MockSyncStorage::new();
+    let owner = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let membership_floor = publish_founder(&storage, &owner).await;
     let tables = test_synced_tables();
 
     // Owner A leaves the cloud in the shape "empty store, then import" produces:
@@ -688,7 +724,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         HashMap::new(),
         0,
         db_a.schema_version(),
-        &UserKeypair::generate(),
+        &owner,
         &SystemClock,
         SnapshotBlobPreflight {
             db: &db_a,
@@ -706,7 +742,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         ],
     )
     .await;
-    storage.store_changeset("A", 1, &cs1, SCHEMA_VERSION);
+    store_founder_changeset(&storage, &owner, &membership_floor, "A", 1, &cs1);
 
     // The shared snapshot pointer before B joins. B must not republish (which
     // would flip the pointer to a new generation).
@@ -728,7 +764,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &test_migrations(),
         "B",
         None,
-        &[],
+        &membership_floor,
         &storage,
         boot,
         &lib_b,
@@ -789,7 +825,9 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 
 #[tokio::test]
 async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
-    let storage = MockSyncStorage::new();
+    let owner = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let membership_floor = publish_founder(&storage, &owner).await;
     let tables = test_synced_tables();
     let db_a = open_test_db();
 
@@ -819,7 +857,7 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
         HashMap::from([("A".to_string(), 1)]),
         1,
         db_a.schema_version(),
-        &UserKeypair::generate(),
+        &owner,
         &SystemClock,
         SnapshotBlobPreflight {
             db: &db_a,
@@ -835,7 +873,7 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
              _updated_at = '0000000002000-0000-A' WHERE id = 'n1'"],
     )
     .await;
-    storage.store_changeset("A", 2, &second, SCHEMA_VERSION);
+    store_founder_changeset(&storage, &owner, &membership_floor, "A", 2, &second);
 
     let (_tmp_b, lib_b) = temp_store_dir();
     let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
@@ -848,7 +886,7 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
         &test_migrations(),
         "B",
         None,
-        &[],
+        &membership_floor,
         &storage,
         boot,
         &lib_b,
@@ -1156,7 +1194,9 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
 /// album renders a placeholder cover. Asserts the file lands.
 #[tokio::test]
 async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
-    let storage = MockSyncStorage::new();
+    let owner = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let membership_floor = publish_founder(&storage, &owner).await;
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1203,7 +1243,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         HashMap::new(),
         1,
         db_a.schema_version(),
-        &UserKeypair::generate(),
+        &owner,
         &SystemClock,
         SnapshotBlobPreflight {
             db: &db_a,
@@ -1247,7 +1287,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         &test_migrations(),
         "B",
         None,
-        &[],
+        &membership_floor,
         &storage,
         boot,
         &lib_b,

@@ -837,8 +837,7 @@ pub(crate) async fn open_db_and_pull(
     // Pin the store owner from the invite BEFORE the pull below loads and anchors
     // the membership chain (issue #102). The pull then refuses a chain whose founder
     // isn't this owner, so a tampered chain can't be adopted during join. `None`
-    // means restore or a pre-initialization test; restore pins the chain founder
-    // below after loading membership entries from the bootstrapped storage.
+    // means restore; restore requires and pins the committed chain founder below.
     if let Some(owner) = owner_pubkey {
         db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner)
             .await
@@ -878,13 +877,28 @@ pub(crate) async fn open_db_and_pull(
     error_if_cancelled(cancel)?;
 
     // Pull over the synced set coven owns, not the raw host list — one source of
-    // truth. Load and anchor the
-    // membership chain first (join is a standalone, non-cycle pull), against the
-    // owner just pinned above; restore hasn't pinned yet, so it loads the chain
-    // best-effort and pins from the founder below.
+    // truth. Load and anchor the membership chain first (join is a standalone,
+    // non-cycle pull), against the owner just pinned above. Restore carries no
+    // inviter assertion, so it requires a committed chain and pins its founder
+    // before the pull authorizes any changeset.
     let membership = crate::sync::pull::load_cycle_membership(storage, &db)
         .await
         .map_err(BootstrapError::Pull)?;
+    if owner_pubkey.is_none() {
+        let chain = membership.chain.as_ref().ok_or_else(|| {
+            BootstrapError::Membership(
+                "restore: storage has no committed membership chain".to_string(),
+            )
+        })?;
+        let founder = chain.founder_pubkey().ok_or_else(|| {
+            BootstrapError::Membership(
+                "restore: committed membership chain has no founder".to_string(),
+            )
+        })?;
+        db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
+            .await
+            .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
+    }
     let (_, pull_result) = pull_changes(
         &db,
         db.synced_tables(),
@@ -896,44 +910,6 @@ pub(crate) async fn open_db_and_pull(
     )
     .await
     .map_err(BootstrapError::Pull)?;
-
-    // Restore passes no owner (it recovers an existing store this device may not
-    // have founded): adopt the owner from the chain's founder now, before the first
-    // sync connect anchors the chain. Without this the connect would find a chain
-    // founded by another key with no owner pinned and refuse it as foreign. This is
-    // trust-on-first-use, acceptable for restore because the restore code carries
-    // the bucket's own credentials — whoever holds it already controls the bucket.
-    // Join already pinned its owner from the invite, so it skips this.
-    if owner_pubkey.is_none() {
-        let entries = storage.list_membership_entries().await.map_err(|e| {
-            BootstrapError::Membership(format!(
-                "restore: failed to list membership to pin owner: {e}"
-            ))
-        })?;
-        // An empty listing represents a pre-initialization or legacy bootstrap —
-        // there is nothing to pin. A non-empty one must load and pin, or fail the
-        // restore loudly so it can be retried as a unit; leaving the owner unpinned
-        // and deferring to the first sync connect would be a silent self-heal.
-        if !entries.is_empty() {
-            let chain = crate::sync::membership_ops::download_chain(storage, &entries)
-                .await
-                .map_err(|e| {
-                    BootstrapError::Membership(format!(
-                        "restore: failed to load chain to pin owner: {e}"
-                    ))
-                })?;
-            // A validated chain always has a founder (validation rejects an empty
-            // chain), so this is defensive — but fail loud rather than skip the pin.
-            let founder = chain.founder_pubkey().ok_or_else(|| {
-                BootstrapError::Membership(
-                    "restore: loaded chain has no founder to pin".to_string(),
-                )
-            })?;
-            db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
-                .await
-                .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
-        }
-    }
 
     // Bootstrap installed the snapshot's cursor vector before pulling anything
     // above it, and each higher cursor committed with its rows. Record the remaining
